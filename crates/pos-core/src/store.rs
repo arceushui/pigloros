@@ -324,6 +324,17 @@ pub struct TimelineExport {
 /// Export/import helpers live as free functions alongside the trait so callers can
 /// hold `Box<dyn EventStore>` and swap backends without changing call sites.
 pub trait EventStore: Send {
+    /// Bind this adapter to the Gateway consent authority that owns protected
+    /// appends for its lifetime.
+    ///
+    /// Concrete adapters should reject a second, different binding and reject
+    /// consent appends until one is installed.  The default keeps third-party
+    /// adapters source-compatible; such adapters must still enforce their own
+    /// host boundary before overriding [`Self::append_consent_bounded`].
+    fn bind_consent_authority(&mut self, _permit: ConsentAppendPermit) -> Result<(), CoreError> {
+        Ok(())
+    }
+
     /// Create a new root timeline with the given name.
     ///
     /// # Errors

@@ -93,6 +93,7 @@ pub struct SqliteStore {
     conn: Connection,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
+    consent_authority_permit: Option<ConsentAppendPermit>,
 }
 
 impl SqliteStore {
@@ -297,6 +298,7 @@ impl SqliteStore {
             conn,
             hasher,
             clock: Box::new(SystemAdmissionClock),
+            consent_authority_permit: None,
         };
         store.init_schema()?;
         store.validate_event_sequence_invariant()?;
@@ -1634,8 +1636,21 @@ impl SqliteStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
         gateway_consent: bool,
-        _permit: Option<ConsentAppendPermit>,
+        permit: Option<ConsentAppendPermit>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
+        if gateway_consent {
+            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent authority is not bound".to_owned())
+            })?;
+            let permit = permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent append permit is missing".to_owned())
+            })?;
+            if permit != bound_permit {
+                return Err(CoreError::Storage(
+                    "Gateway consent append permit does not match the bound authority".to_owned(),
+                ));
+            }
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2731,6 +2746,19 @@ impl SqliteStore {
 }
 
 impl EventStore for SqliteStore {
+    fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
+        match self.consent_authority_permit {
+            Some(existing) if existing != permit => Err(CoreError::Storage(
+                "Gateway consent authority is already bound".to_owned(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.consent_authority_permit = Some(permit);
+                Ok(())
+            }
+        }
+    }
+
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
@@ -3238,28 +3266,32 @@ impl EventStore for SqliteStore {
             None => (None, None),
         };
         let timeline = Timeline::new(meta);
-        self.conn
-            .execute(
-                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-                params![
-                    timeline.id().to_string(),
-                    timeline.meta.name.as_deref(),
-                    mode_str(timeline.mode()),
-                    parent_id,
-                    fork_seq,
-                    chain_head.as_bytes().as_slice(),
-                ],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            params![
+                timeline.id().to_string(),
+                timeline.meta.name.as_deref(),
+                mode_str(timeline.mode()),
+                parent_id,
+                fork_seq,
+                chain_head.as_bytes().as_slice(),
+            ],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
         if let Some(owner) = timeline.meta.owner {
-            self.conn
-                .execute(
-                    "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
-                    params![timeline.id().to_string(), owner.to_string()],
-                )
-                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+                params![timeline.id().to_string(), owner.to_string()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(timeline)
     }
 

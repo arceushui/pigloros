@@ -144,6 +144,8 @@ pub struct MemoryStore {
     geographic_cell_snapshots: HashMap<AdmissionSnapshotId, AdmissionEntitlementSnapshotV1>,
     /// Immutable `geo.cell` Event-to-snapshot links.
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
+    /// Trusted Gateway authority bound to this adapter's protected append port.
+    consent_authority_permit: Option<ConsentAppendPermit>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -434,6 +436,7 @@ impl MemoryStore {
             geographic_cell_dedup: HashMap::new(),
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
+            consent_authority_permit: None,
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -869,8 +872,21 @@ impl MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
         gateway_consent: bool,
-        _permit: Option<ConsentAppendPermit>,
+        permit: Option<ConsentAppendPermit>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
+        if gateway_consent {
+            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent authority is not bound".to_owned())
+            })?;
+            let permit = permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent append permit is missing".to_owned())
+            })?;
+            if permit != bound_permit {
+                return Err(CoreError::Storage(
+                    "Gateway consent append permit does not match the bound authority".to_owned(),
+                ));
+            }
+        }
         let validate = if gateway_consent {
             crate::ensure_gateway_consent_types
         } else {
@@ -1570,6 +1586,19 @@ impl MemoryStore {
 }
 
 impl EventStore for MemoryStore {
+    fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
+        match self.consent_authority_permit {
+            Some(existing) if existing != permit => Err(CoreError::Storage(
+                "Gateway consent authority is already bound".to_owned(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.consent_authority_permit = Some(permit);
+                Ok(())
+            }
+        }
+    }
+
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);

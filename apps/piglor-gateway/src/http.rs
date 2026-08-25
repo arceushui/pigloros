@@ -1281,6 +1281,7 @@ osf_link = \"https://osf.io/example\"\n";
                     owntracks_enabled: false,
                     consent_authority: pos_core::ConsentAuthority::new(),
                     consent_history_locks: crate::new_consent_history_locks(),
+                    pending_consent_cleanup: crate::new_pending_consent_cleanup(),
                     action_registry: crate::gateway_action_registry(),
                     action_principal: None,
                 },

@@ -187,6 +187,11 @@ fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmis
     let timeline = store
         .create_timeline("consent-coordinate-mismatch")
         .test_ok();
+    let authority = ConsentAuthority::new();
+    store
+        .bind_consent_authority(authority.append_permit())
+        .test_ok();
+    let permit = authority.append_permit();
     assert_eq!(
         store.protected_logical_head(timeline.id()).test_ok(),
         Seq::from_u64(0)
@@ -209,13 +214,19 @@ fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmis
         Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
         grant.encode().test_ok(),
     );
+    let foreign_permit = ConsentAuthority::new().append_permit();
     assert!(store
         .append_consent_bounded(
             timeline.id(),
-            &[grant_draft],
-            ConsentAuthority::new().append_permit(),
+            std::slice::from_ref(&grant_draft),
+            foreign_permit,
             10,
         )
+        .test_err()
+        .to_string()
+        .contains("does not match the bound authority"));
+    assert!(store
+        .append_consent_bounded(timeline.id(), &[grant_draft], permit, 10,)
         .test_err()
         .to_string()
         .contains("coordinate mismatch"));
@@ -232,12 +243,7 @@ fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmis
         revocation.encode().test_ok(),
     );
     assert!(store
-        .append_consent_bounded(
-            timeline.id(),
-            &[revocation_draft],
-            ConsentAuthority::new().append_permit(),
-            10,
-        )
+        .append_consent_bounded(timeline.id(), &[revocation_draft], permit, 10,)
         .test_err()
         .to_string()
         .contains("coordinate mismatch"));

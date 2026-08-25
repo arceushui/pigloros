@@ -523,6 +523,10 @@ fn new_consent_history_locks() -> Arc<ConsentHistoryLocks> {
     )
 }
 
+fn new_pending_consent_cleanup() -> Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>> {
+    Arc::new(tokio::sync::Mutex::new(Vec::new()))
+}
+
 /// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
 ///
 /// The supported local-first write boundary permits Gateway and experiment-host
@@ -537,6 +541,7 @@ pub struct Gateway {
     owntracks_enabled: bool,
     consent_authority: ConsentAuthority,
     consent_history_locks: Arc<ConsentHistoryLocks>,
+    pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     action_principal: Option<ActionPrincipal>,
 }
@@ -908,6 +913,47 @@ fn checked_event_coordinates(
 }
 
 impl Gateway {
+    async fn enqueue_consent_cleanup(&self, scope: AppendDedupScope) {
+        let mut pending = self.pending_consent_cleanup.lock().await;
+        if !pending.contains(&scope) {
+            pending.push(scope);
+        }
+    }
+
+    /// Run one bounded consent-revocation cleanup pass.
+    ///
+    /// Hosts should call this from their maintenance scheduler until it returns
+    /// `Ok(None)`.  Each invocation removes at most the adapter batch limit;
+    /// protected revocation never performs an unbounded synchronous scan.
+    ///
+    /// # Errors
+    /// Returns the underlying bounded store error.  A failed scope remains
+    /// queued for a later retry.
+    pub async fn process_pending_consent_cleanup(
+        &self,
+    ) -> Result<Option<PurgeOutcome>, GatewayError> {
+        let scope = self.pending_consent_cleanup.lock().await.pop();
+        let Some(scope) = scope else {
+            return Ok(None);
+        };
+        match self
+            .store
+            .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
+            .await
+        {
+            Ok(outcome) => {
+                if outcome.more_may_remain {
+                    self.enqueue_consent_cleanup(scope).await;
+                }
+                Ok(Some(outcome))
+            }
+            Err(error) => {
+                self.enqueue_consent_cleanup(scope).await;
+                Err(error.into())
+            }
+        }
+    }
+
     async fn lock_consent_timeline(
         &self,
         timeline: TimelineId,
@@ -951,7 +997,10 @@ impl Gateway {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
@@ -961,6 +1010,7 @@ impl Gateway {
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
     }
@@ -974,7 +1024,10 @@ impl Gateway {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
@@ -984,6 +1037,7 @@ impl Gateway {
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
     }
@@ -998,7 +1052,10 @@ impl Gateway {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
@@ -1008,6 +1065,7 @@ impl Gateway {
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: Some(principal),
         }
     }
@@ -1024,7 +1082,10 @@ impl Gateway {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new_with_geo_location_admission(store),
+            store: executor::StoreExecutor::new_with_geo_location_admission(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
@@ -1034,6 +1095,7 @@ impl Gateway {
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
     }
@@ -1050,7 +1112,11 @@ impl Gateway {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key.0),
+            store: executor::StoreExecutor::new_with_owntracks_ingress(
+                store,
+                owner_key.0,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
@@ -1060,6 +1126,7 @@ impl Gateway {
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
     }
@@ -1072,7 +1139,11 @@ impl Gateway {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key),
+            store: executor::StoreExecutor::new_with_owntracks_ingress(
+                store,
+                owner_key,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
@@ -1082,6 +1153,7 @@ impl Gateway {
             ),
             consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
     }
@@ -1350,17 +1422,13 @@ impl Gateway {
             }
         };
         let scope = ingress_dedup_scope(revocation.subject_id);
-        let mut cleanup = self
+        let cleanup = self
             .store
             .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
             .await
             .map_err(GatewayError::from)?;
-        while cleanup.more_may_remain {
-            cleanup = self
-                .store
-                .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
-                .await
-                .map_err(GatewayError::from)?;
+        if cleanup.more_may_remain {
+            self.enqueue_consent_cleanup(scope).await;
         }
         Ok(event)
     }
@@ -1817,13 +1885,18 @@ impl Gateway {
 
     #[cfg(test)]
     fn with_bus_capacity(store: Box<dyn EventStore>, capacity: usize) -> Self {
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus: broadcast::channel(capacity).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
+            consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1838,6 +1911,7 @@ impl Gateway {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1845,13 +1919,18 @@ impl Gateway {
 
     #[cfg(test)]
     fn with_limits(store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits,
             owntracks_enabled: false,
-            consent_authority: ConsentAuthority::new(),
+            consent_authority,
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -2374,6 +2453,7 @@ mod tests {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry_with_bodies([body]),
             action_principal: Some(ActionPrincipal::new(
                 actor,
@@ -2945,6 +3025,20 @@ mod tests {
             .test_ok();
         assert!(!first.duplicate);
 
+        for index in 0..CONSENT_DEDUP_CLEANUP_BATCH.get() {
+            let result = gateway
+                .append_identified_action(
+                    &timeline.id().to_string(),
+                    &subject_text,
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({"dx": index}),
+                    &format!("bulk-device:{index}"),
+                )
+                .await
+                .test_ok();
+            assert!(!result.duplicate);
+        }
+
         gateway
             .issue_consent_revocation(
                 &timeline.id().to_string(),
@@ -2957,6 +3051,17 @@ mod tests {
             )
             .await
             .test_ok();
+
+        assert!(gateway
+            .process_pending_consent_cleanup()
+            .await
+            .test_ok()
+            .is_some());
+        assert!(gateway
+            .process_pending_consent_cleanup()
+            .await
+            .test_ok()
+            .is_none());
 
         let retried = gateway
             .append_identified_action(
@@ -4379,6 +4484,7 @@ mod tests {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4396,6 +4502,7 @@ mod tests {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4419,6 +4526,7 @@ mod tests {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4443,6 +4551,7 @@ mod tests {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4466,6 +4575,7 @@ mod tests {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -4490,6 +4600,7 @@ mod tests {
             owntracks_enabled: false,
             consent_authority: ConsentAuthority::new(),
             consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };

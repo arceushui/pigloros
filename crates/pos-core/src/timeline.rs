@@ -22,8 +22,9 @@ pub struct TimelineMeta {
     pub id: TimelineId,
     pub mode: TimelineMode,
     pub name: Option<String>,
-    /// Durable owner of a subject-owned Timeline. `None` means the Timeline
-    /// is a general-purpose Timeline and cannot host consent Events.
+    /// Durable owner of a subject-owned Timeline. `None` means the Timeline is
+    /// unassigned: generic callers cannot append consent Events, while the
+    /// Gateway may claim it on the first canonical consent grant.
     pub owner: Option<EntityId>,
     /// If this is a forked timeline, the parent id and the seq at which the fork happened.
     pub fork_point: Option<(TimelineId, Seq)>,

@@ -605,17 +605,34 @@ impl StoreExecutor {
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
-    pub(crate) fn new_with_geo_location_admission<S>(store: S) -> Self
+    pub(crate) fn new_with_consent_authority(
+        mut store: Box<dyn EventStore>,
+        permit: ConsentAppendPermit,
+    ) -> Self {
+        let _ = store.bind_consent_authority(permit);
+        Self::spawn(ExecutorStore::Generic(store), None)
+    }
+
+    pub(crate) fn new_with_geo_location_admission<S>(
+        mut store: S,
+        permit: ConsentAppendPermit,
+    ) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
+        let _ = store.bind_consent_authority(permit);
         Self::spawn(ExecutorStore::GeoLocation(Box::new(store)), None)
     }
 
-    pub(crate) fn new_with_owntracks_ingress<S>(store: S, owner_key: [u8; 32]) -> Self
+    pub(crate) fn new_with_owntracks_ingress<S>(
+        mut store: S,
+        owner_key: [u8; 32],
+        permit: ConsentAppendPermit,
+    ) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
+        let _ = store.bind_consent_authority(permit);
         Self::spawn(ExecutorStore::OwnTracks(Box::new(store)), Some(owner_key))
     }
 
@@ -2128,6 +2145,7 @@ mod tests {
             .test_ok()
             .test_value();
         let _token = authority.record_grant_on_timeline(timeline, &grant);
+        store.bind_consent_authority(authority.append_permit())?;
         let mut state = ExecutorState {
             store: ExecutorStore::Generic(Box::new(store)),
             owntracks_owner_key: None,
@@ -2789,11 +2807,14 @@ mod tests {
             .test_ok()
             .test_value()
             .id();
+        let authority = ConsentAuthority::new();
+        store
+            .bind_consent_authority(authority.append_permit())
+            .test_ok();
         let executor = super::StoreExecutor::spawn_with_observer_for_test(
             super::ExecutorStore::Generic(Box::new(store)),
             Arc::clone(&observer),
         );
-        let authority = ConsentAuthority::new();
         let grant = ConsentGrantedV1 {
             subject_id: EntityId::new(),
             grantee_id: EntityId::new(),
@@ -5116,8 +5137,11 @@ mod tests {
 
     async fn owntracks_executor_dispatches_geo_admission_commands_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let executor =
-            super::StoreExecutor::new_with_owntracks_ingress(MemoryStore::new(), [0; 32]);
+        let executor = super::StoreExecutor::new_with_owntracks_ingress(
+            MemoryStore::new(),
+            [0; 32],
+            ConsentAuthority::new().append_permit(),
+        );
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             TimelineId::new(),
             EntityId::new(),
