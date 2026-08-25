@@ -51,6 +51,21 @@ const PROFILE_RECORDS: [(&[u8], ClaimLayerV1); 7] = [
     ),
 ];
 
+#[derive(Clone, Copy)]
+struct FixtureContext {
+    claim_layer: ClaimLayerV1,
+    execution_profile_digest: [u8; 32],
+    profile_record_digest: [u8; 32],
+    schema_digest: [u8; 32],
+    provenance_digest: [u8; 32],
+    notice_digest: [u8; 32],
+    sbom_digest: [u8; 32],
+    limitations_digest: [u8; 32],
+    normative_spec_digest: [u8; 32],
+}
+
+type CanonicalFixtureBytes = (&'static [u8], &'static [u8]);
+
 fn main() -> Result<(), Box<dyn Error>> {
     run(
         std::env::args_os(),
@@ -62,11 +77,12 @@ fn run(
     mut arguments: impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
 ) -> Result<(), Box<dyn Error>> {
+    let authority_root = std::env::var_os(AUTHORITY_ROOT_ENV).map(PathBuf::from);
     run_with_inventory_and_authority(
         &mut arguments,
         encoded_signing_key,
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
-        std::env::var_os(AUTHORITY_ROOT_ENV).map(PathBuf::from),
+        authority_root.as_deref(),
     )
 }
 
@@ -83,7 +99,7 @@ fn run_with_inventory_and_authority(
     arguments: &mut impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
     inventory_bytes: &[u8],
-    authority_root: Option<PathBuf>,
+    authority_root: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let output_root = arguments
@@ -282,9 +298,9 @@ fn profile_record_bytes(claim_layer: ClaimLayerV1) -> Result<&'static [u8], Box<
         .ok_or_else(|| "canonical profile record is missing".into())
 }
 
-fn profile_for_claim_layer(
+fn validated_profile_record(
     claim_layer: ClaimLayerV1,
-) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+) -> Result<(&'static [u8], JsonValue), Box<dyn Error>> {
     let profile_record_bytes = profile_record_bytes(claim_layer)?;
     let profile_record: JsonValue = serde_json::from_slice(profile_record_bytes)?;
     if json_text(&profile_record, "profile_id")? != profile_id(claim_layer)
@@ -312,6 +328,13 @@ fn profile_for_claim_layer(
     {
         return Err("canonical profile record digest binding is invalid".into());
     }
+    Ok((profile_record_bytes, profile_record))
+}
+
+fn fixture_context(
+    profile_record_bytes: &'static [u8],
+    claim_layer: ClaimLayerV1,
+) -> FixtureContext {
     let profile_record_digest =
         labeled_digest("PiglorOS.CPF1ProfileRecord.v1", profile_record_bytes);
     let normative =
@@ -328,6 +351,23 @@ fn profile_for_claim_layer(
     let limitations_digest = *blake3::hash(limitations).as_bytes();
     let execution_profile_digest =
         labeled_digest("PiglorOS.ExecutionProfile.v1", b"deterministic-local-v1");
+    FixtureContext {
+        claim_layer,
+        execution_profile_digest,
+        profile_record_digest,
+        schema_digest,
+        provenance_digest,
+        notice_digest,
+        sbom_digest,
+        limitations_digest,
+        normative_spec_digest: *blake3::hash(normative).as_bytes(),
+    }
+}
+
+fn fixtures_from_profile_record(
+    profile_record: &JsonValue,
+    context: FixtureContext,
+) -> Result<Vec<FixtureDescriptorV1>, Box<dyn Error>> {
     let fixture_records = profile_record
         .get("fixtures")
         .and_then(JsonValue::as_array)
@@ -337,19 +377,7 @@ fn profile_for_claim_layer(
     }
     let mut fixtures = fixture_records
         .iter()
-        .map(|fixture_record| {
-            fixture(
-                fixture_record,
-                claim_layer,
-                execution_profile_digest,
-                profile_record_digest,
-                schema_digest,
-                provenance_digest,
-                notice_digest,
-                sbom_digest,
-                limitations_digest,
-            )
-        })
+        .map(|fixture_record| fixture(fixture_record, context))
         .collect::<Result<Vec<_>, _>>()?;
     fixtures.sort_by_key(|fixture| {
         (
@@ -358,6 +386,15 @@ fn profile_for_claim_layer(
             fixture.execution_profile_digest,
         )
     });
+    Ok(fixtures)
+}
+
+fn profile_for_claim_layer(
+    claim_layer: ClaimLayerV1,
+) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+    let (profile_record_bytes, profile_record) = validated_profile_record(claim_layer)?;
+    let context = fixture_context(profile_record_bytes, claim_layer);
+    let fixtures = fixtures_from_profile_record(&profile_record, context)?;
     let air_gapped_execution_profile_digest = labeled_digest(
         "PiglorOS.ExecutionProfile.v1",
         b"deterministic-air-gapped-v1",
@@ -371,12 +408,12 @@ fn profile_for_claim_layer(
         profile_id: json_text(&profile_record, "profile_id")?.to_owned(),
         semantic_version: "1.0.0".to_owned(),
         lifecycle: ProfileLifecycleV1::Draft,
-        normative_spec_digest: *blake3::hash(normative).as_bytes(),
+        normative_spec_digest: context.normative_spec_digest,
         execution_profile_digests,
-        public_schema_digests: vec![schema_digest],
+        public_schema_digests: vec![context.schema_digest],
         fixtures,
         allowed_divergences: Vec::new(),
-        evaluator_protocol: evaluator_protocol(profile_record_digest),
+        evaluator_protocol: evaluator_protocol(context.profile_record_digest),
         independence_requirements: IndependenceRequirementsV1 {
             technical_independence_required: true,
             authorship_independence_required: true,
@@ -391,8 +428,8 @@ fn profile_for_claim_layer(
             ),
         },
         compatibility_digest: labeled_digest("PiglorOS.Compatibility.v1", profile_record_bytes),
-        limitations_digest,
-        provenance_digest,
+        limitations_digest: context.limitations_digest,
+        provenance_digest: context.provenance_digest,
         previous_profile_digest: None,
         stable_evidence: Vec::new(),
         profile_digest: [0; 32],
@@ -401,7 +438,7 @@ fn profile_for_claim_layer(
     Ok(profile)
 }
 
-fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
+const fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
     match claim_layer {
         ClaimLayerV1::ArtifactIntegrity => "pigloros.w8.artifact-integrity.1.0.0",
         ClaimLayerV1::ReplayConformance => "pigloros.w8.replay-conformance.1.0.0",
@@ -427,14 +464,7 @@ const fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
 
 fn fixture(
     record: &JsonValue,
-    claim_layer: ClaimLayerV1,
-    execution_profile_digest: [u8; 32],
-    profile_record_digest: [u8; 32],
-    schema_digest: [u8; 32],
-    provenance_digest: [u8; 32],
-    notice_digest: [u8; 32],
-    sbom_digest: [u8; 32],
-    limitations_digest: [u8; 32],
+    context: FixtureContext,
 ) -> Result<FixtureDescriptorV1, Box<dyn Error>> {
     let case_id = json_text(record, "case_id")?;
     let family = json_text(record, "family")?;
@@ -451,9 +481,9 @@ fn fixture(
     Ok(FixtureDescriptorV1 {
         case_id: case_id.to_owned(),
         mandatory: true,
-        claim_layer,
-        execution_profile_digest,
-        public_schema_digest: schema_digest,
+        claim_layer: context.claim_layer,
+        execution_profile_digest: context.execution_profile_digest,
+        public_schema_digest: context.schema_digest,
         modes: vec![
             pos_conformance::ExecutionModeV1::Local,
             pos_conformance::ExecutionModeV1::AirGapped,
@@ -463,7 +493,7 @@ fn fixture(
             member_id: input_path.to_owned(),
             size_bytes: input.len() as u64,
             digest: *blake3::hash(input).as_bytes(),
-            provenance_digest,
+            provenance_digest: context.provenance_digest,
         }],
         expected: ExpectedResultV1::CanonicalBytes {
             bytes: expected.to_vec(),
@@ -489,17 +519,17 @@ fn fixture(
         },
         provenance: FixtureProvenanceV1 {
             licence_id: "MIT".to_owned(),
-            notices_digest: notice_digest,
-            sbom_digest,
-            source_digest: provenance_digest,
-            build_digest: provenance_digest,
-            publication_review_digest: provenance_digest,
-            limitations_digest,
+            notices_digest: context.notice_digest,
+            sbom_digest: context.sbom_digest,
+            source_digest: context.provenance_digest,
+            build_digest: context.provenance_digest,
+            publication_review_digest: context.provenance_digest,
+            limitations_digest: context.limitations_digest,
         },
         compatibility_digest: labeled_digest(
             "PiglorOS.FixtureCompatibility.v1",
             &[
-                profile_record_digest.as_slice(),
+                context.profile_record_digest.as_slice(),
                 fixture_record_digest.as_slice(),
             ]
             .concat(),
@@ -529,7 +559,7 @@ fn family_for_path(input_path: &str, expected_path: &str) -> Option<&'static str
 fn canonical_fixture_bytes(
     input_path: &str,
     expected_path: &str,
-) -> Result<(&'static [u8], &'static [u8]), Box<dyn Error>> {
+) -> Result<CanonicalFixtureBytes, Box<dyn Error>> {
     let bytes = match (input_path, expected_path) {
         ("inputs/artifact-positive.json", "expected/artifact-positive.json") => (
             include_bytes!("../../../../fixtures/conformance/inputs/artifact-positive.json")
@@ -985,11 +1015,8 @@ mod tests {
         digest.unwrap_or_default()
     }
 
-    fn test_profile(claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
-        match profile_for_claim_layer(claim_layer) {
-            Ok(profile) => profile,
-            Err(error) => panic!("canonical profile record must be valid: {error}"),
-        }
+    fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+        profile_for_claim_layer(claim_layer)
     }
 
     #[test]
@@ -1048,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn helper_validation_seams_cover_alternate_records() {
+    fn helper_validation_seams_cover_alternate_records() -> Result<(), Box<dyn Error>> {
         assert_eq!(decode_hex("00"), None);
         assert_eq!(decode_hex(&"gg".repeat(32)), None);
         assert_eq!(decode_hex(&"0g".repeat(32)), None);
@@ -1075,7 +1102,7 @@ mod tests {
         .into_iter();
         assert!(run_with_inventory(&mut invalid_inventory, Ok(signing_key_hex()), b"{}").is_err());
 
-        let mut invalid_expected = test_profile(ClaimLayerV1::ArtifactIntegrity);
+        let mut invalid_expected = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         invalid_expected.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
         assert!(bundle_inputs(&invalid_expected, BundleModeV1::Local).is_err());
@@ -1091,7 +1118,7 @@ mod tests {
         .is_err());
         drop(std::fs::remove_dir_all(output));
 
-        let mut invalid_profile = test_profile(ClaimLayerV1::ArtifactIntegrity);
+        let mut invalid_profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         invalid_profile.fixtures.clear();
         let output = output_root("invalid-profile");
         assert!(materialize_profile_from_profile(
@@ -1105,7 +1132,7 @@ mod tests {
         .is_err());
         drop(std::fs::remove_dir_all(output));
 
-        let mut unsupported_mode = test_profile(ClaimLayerV1::ArtifactIntegrity);
+        let mut unsupported_mode = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         for fixture in &mut unsupported_mode.fixtures {
             fixture.modes = vec![ExecutionModeV1::AirGapped];
         }
@@ -1130,13 +1157,14 @@ mod tests {
         assert!(std::fs::write(&blocker, b"not a directory").is_ok());
         assert!(write_materialized_file(&blocker, "nested/file", b"bytes").is_err());
         assert!(std::fs::remove_file(blocker).is_ok());
+        Ok(())
     }
 
     #[test]
     fn canonical_records_bind_fixture_families_and_candidate_authority(
     ) -> Result<(), Box<dyn Error>> {
         for (_, claim_layer) in PROFILE_RECORDS {
-            let profile = test_profile(claim_layer);
+            let profile = test_profile(claim_layer)?;
             assert_eq!(profile.fixtures.len(), 7);
             assert!(profile.fixtures.iter().all(|fixture| {
                 fixture
@@ -1198,7 +1226,7 @@ mod tests {
             entry["materialization_status"] = JsonValue::String("materialized".to_owned());
         }
         let inventory_bytes = serde_json::to_vec(&inventory)?;
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity);
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         assert!(bundle_inputs_with_authority(
             &profile,
             BundleModeV1::Local,
@@ -1232,9 +1260,9 @@ mod tests {
     }
 
     #[test]
-    fn materializer_manifest_and_bundle_write_errors_are_explicit() {
+    fn materializer_manifest_and_bundle_write_errors_are_explicit() -> Result<(), Box<dyn Error>> {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity);
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let digest = local_bundle_digest(&profile, &signing_key);
         let prefix = "artifact-integrity/draft";
 
@@ -1256,7 +1284,7 @@ mod tests {
         assert!(std::fs::remove_dir_all(manifest_root).is_ok());
 
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity);
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let digest = local_bundle_digest(&profile, &signing_key);
         let bundle_root = output_root("bundle-error");
         assert!(std::fs::create_dir_all(bundle_root.join(prefix)).is_ok());
@@ -1279,5 +1307,6 @@ mod tests {
         )
         .is_err());
         assert!(std::fs::remove_dir_all(bundle_root).is_ok());
+        Ok(())
     }
 }
