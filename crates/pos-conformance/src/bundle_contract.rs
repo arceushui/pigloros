@@ -466,7 +466,7 @@ impl ConformanceBundleV1 {
         {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
-        validate_fixture_inputs_for_mode(&profile, self.manifest.mode, &self.members)?;
+        validate_fixture_inputs_for_mode(&profile, Some(self.manifest.mode), &self.members)?;
         if self.manifest.members.len() != self.members.len()
             || !strictly_ordered(&self.manifest.members)
             || !members_strictly_ordered(&self.members)
