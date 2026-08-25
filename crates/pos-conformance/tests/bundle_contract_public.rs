@@ -361,6 +361,90 @@ pub mod fixtures {
             vec![expected_result],
         ))
     }
+
+    /// Construct a valid Draft bundle for public archive-path coverage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checked-in fixture data cannot be transformed
+    /// into the Draft authority shape.
+    pub fn draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+        let (mut authority_members, mut provenance_bytes) = candidate_authority_data()?;
+        authority_members.retain(|member| {
+            !matches!(
+                member.role,
+                BundleMemberRoleV1::AuthorityFixture | BundleMemberRoleV1::AuthorityExpectedResult
+            )
+        });
+
+        let inventory_index = authority_members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
+            .ok_or("missing authority inventory")?;
+        let mut inventory: JsonValue =
+            serde_json::from_slice(&authority_members[inventory_index].bytes)?;
+        inventory["lifecycle"] = JsonValue::String("Draft".to_owned());
+        for entry in inventory["entries"]
+            .as_array_mut()
+            .ok_or("missing inventory entries")?
+        {
+            entry["materialization_status"] = JsonValue::String("pending".to_owned());
+            for field in [
+                "fixture_bytes_path",
+                "fixture_bytes_digest",
+                "expected_result_path",
+                "expected_result_digest",
+            ] {
+                entry[field] = JsonValue::Null;
+            }
+        }
+        let inventory_bytes = serde_json::to_vec(&inventory)?;
+        authority_members[inventory_index].bytes = inventory_bytes.clone();
+        authority_members[inventory_index].digest = digest(&inventory_bytes);
+
+        let matrix_index = authority_members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing execution matrix")?;
+        let mut matrix: JsonValue = serde_json::from_slice(&authority_members[matrix_index].bytes)?;
+        matrix["lifecycle"] = JsonValue::String("Draft".to_owned());
+        for row in matrix["rows"].as_array_mut().ok_or("missing matrix rows")? {
+            row["executed_case_count"] = JsonValue::Number(0_u64.into());
+        }
+        for case in matrix["cases"]
+            .as_array_mut()
+            .ok_or("missing matrix cases")?
+        {
+            case["executed"] = JsonValue::Bool(false);
+            case["expected_result_digest"] = JsonValue::Null;
+        }
+        let matrix_bytes = serde_json::to_vec(&matrix)?;
+        authority_members[matrix_index].bytes = matrix_bytes.clone();
+        authority_members[matrix_index].digest = digest(&matrix_bytes);
+
+        let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
+        provenance["authority_inventory"]["status"] = JsonValue::String("Draft".to_owned());
+        provenance["authority_inventory"]["sha256_digest"] =
+            JsonValue::String(hex(&Sha256::digest(&inventory_bytes)));
+        provenance["adr_059_execution_matrix"]["status"] = JsonValue::String("Draft".to_owned());
+        provenance["adr_059_execution_matrix"]["sha256_digest"] =
+            JsonValue::String(hex(&Sha256::digest(&matrix_bytes)));
+        provenance["adr_059_execution_matrix"]["executed_case_count"] =
+            JsonValue::Number(0_u64.into());
+        provenance_bytes = serde_json::to_vec(&provenance)?;
+
+        let mut profile = profile(digest(&provenance_bytes));
+        profile.lifecycle = ProfileLifecycleV1::Draft;
+        profile.profile_digest = profile.digest();
+        let (members, expected_result) =
+            candidate_members(&profile, provenance_bytes, authority_members);
+        Ok(ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            vec![expected_result],
+        )?)
+    }
 }
 
 #[test]
@@ -369,6 +453,66 @@ fn public_candidate_materialization_reaches_fail_closed_authority_gate(
     assert_eq!(
         fixtures::candidate_bundle()?,
         Err(pos_conformance::BundleContractErrorV1::CandidateEvidenceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_draft_archive_round_trip_and_independent_verification(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    let manifest = bundle.manifest_bytes()?;
+    assert_eq!(manifest, bundle.manifest_bytes()?);
+    assert!(bundle.bundle_digest()?.iter().any(|byte| *byte != 0));
+
+    let archive = bundle.to_canonical_cbor()?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&archive),
+        Ok(())
+    );
+    assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
+    Ok(())
+}
+
+#[test]
+fn public_bundle_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+
+    let mut invalid_magic = bundle.clone();
+    invalid_magic.manifest.magic = "invalid".to_owned();
+    assert_eq!(
+        invalid_magic.validate(),
+        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
+    );
+
+    let mut invalid_signature = bundle.clone();
+    invalid_signature.signature = pos_core::Signature::from_bytes([1; 64]);
+    assert_eq!(
+        invalid_signature.validate(),
+        Err(pos_conformance::BundleContractErrorV1::SignatureInvalid)
+    );
+
+    let mut missing_profile = bundle.clone();
+    missing_profile
+        .members
+        .retain(|member| member.role != BundleMemberRoleV1::Profile);
+    assert_eq!(
+        missing_profile.validate(),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    let archive = bundle.to_canonical_cbor()?;
+    let mut trailing = archive.clone();
+    trailing.push(0);
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&trailing),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+    );
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&trailing),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
     );
     Ok(())
 }
