@@ -39,7 +39,7 @@ fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn read_bounded(
-    mut reader: impl Read,
+    reader: impl Read,
     declared_len: u64,
     limit: u64,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
