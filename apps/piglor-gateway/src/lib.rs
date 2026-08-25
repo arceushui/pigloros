@@ -3083,7 +3083,7 @@ mod tests {
             .test_ok();
         let subject = EntityId::new();
         let subject_text = subject.to_string();
-        let (grant_event, token) = gateway
+        let (_grant_event, token) = gateway
             .issue_consent_grant(&timeline.id().to_string(), consent_grant(subject, 1))
             .await
             .test_ok();
@@ -3114,6 +3114,13 @@ mod tests {
             assert!(!result.duplicate);
         }
 
+        let fence_seq = gateway
+            .store
+            .protected_logical_head(timeline.id())
+            .await
+            .test_ok()
+            .as_u64()
+            .saturating_add(1);
         gateway
             .issue_consent_revocation(
                 &timeline.id().to_string(),
@@ -3121,7 +3128,7 @@ mod tests {
                     subject_id: token.subject_id(),
                     grantee_id: token.grantee_id(),
                     grant_seq: token.grant_seq(),
-                    fence_seq: grant_event.seq.as_u64().saturating_add(2),
+                    fence_seq,
                 },
             )
             .await
