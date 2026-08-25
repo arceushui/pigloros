@@ -10,7 +10,7 @@ use pos_core::{
     ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
 };
 
-fn reference(value: u8) -> ErasureReferenceV1 {
+const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
@@ -179,7 +179,7 @@ fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(
         },
         reference(2),
     );
-    coordinator.submit(request.clone(), reference(3))?;
+    coordinator.submit(request, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(reference(1), transition(ErasureLifecycleV1::AccessFrozen))?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
