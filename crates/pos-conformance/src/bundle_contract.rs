@@ -1974,7 +1974,7 @@ fn validate_execution_matrix_for_lifecycle(
                         .get("expected_result_digest")
                         .and_then(JsonValue::as_str)
                         .and_then(decode_blake3_hex)
-                        .is_some()
+                        .is_none()
             } else {
                 case.get("executed").and_then(JsonValue::as_bool) != Some(false)
                     || !case
@@ -3909,7 +3909,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             ),
-            Err(BundleContractErrorV1::MemberOutOfBounds)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
         let mut invalid_magic = bundle.clone();
@@ -6256,7 +6256,7 @@ mod coverage_entrypoints {
         let bundle = signed_bundle()?;
         assert_eq!(
             validate_member_count(MAX_MEMBERS + 1),
-            Err(BundleContractErrorV1::LifecycleInvalid)
+            Err(BundleContractErrorV1::MemberOutOfBounds)
         );
         assert_eq!(
             validate_member_size(MAX_MEMBER_BYTES + 1),
