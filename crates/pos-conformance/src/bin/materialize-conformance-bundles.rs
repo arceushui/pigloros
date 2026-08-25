@@ -126,7 +126,7 @@ fn materialize_profile(
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let mut profile = profile_for_claim_layer(claim_layer)?;
+    let mut profile = profile_for_claim_layer(claim_layer);
     profile.lifecycle = lifecycle;
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
@@ -158,9 +158,7 @@ fn materialize_profile(
     Ok(())
 }
 
-fn profile_for_claim_layer(
-    claim_layer: ClaimLayerV1,
-) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+fn profile_for_claim_layer(claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
     let normative =
         include_bytes!("../../../../fixtures/conformance/support/normative-requirements.md");
     let schema = include_bytes!("../../../../fixtures/conformance/support/schema-cpf1-v1.cddl");
@@ -211,7 +209,7 @@ fn profile_for_claim_layer(
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();
-    Ok(profile)
+    profile
 }
 
 const fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
