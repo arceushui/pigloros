@@ -1,9 +1,11 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use pos_conformance::verify_archive_independently;
+use pos_conformance::{verify_archive_independently, MAX_CONFORMANCE_BUNDLE_BYTES_V1};
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -30,7 +32,25 @@ fn run_with_verifier(
 }
 
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    let bytes = std::fs::read(path)?;
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "conformance bundle archive exceeds the public size limit",
+        )
+        .into());
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.take(MAX_CONFORMANCE_BUNDLE_BYTES_V1 + 1)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "conformance bundle archive exceeds the public size limit",
+        )
+        .into());
+    }
     verify_archive_independently(&bytes).map_err(Into::into)
 }
 

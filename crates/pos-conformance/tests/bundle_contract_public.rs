@@ -799,6 +799,11 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
     assert!(pos_conformance::verify_archive_independently(&[0x01, 0x00]).is_err());
+    assert!(pos_conformance::verify_archive_independently(&[0x9a, 0, 1, 0, 1]).is_err());
+    assert!(pos_conformance::verify_archive_independently(&[0x5a, 0x04, 0, 0, 1]).is_err());
+    let mut deeply_nested = vec![0x81; 34];
+    deeply_nested.push(0xf6);
+    assert!(pos_conformance::verify_archive_independently(&deeply_nested).is_err());
     assert_archive_shape_rejections(&bundle, &signing_key)?;
     assert_archive_member_rejections(&bundle, &signing_key)?;
     assert_archive_expected_rejections(&bundle, &signing_key)?;

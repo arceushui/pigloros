@@ -21,10 +21,12 @@ use crate::{
 
 /// Magic for a materialized conformance bundle manifest.
 pub const CONFORMANCE_BUNDLE_MAGIC_V1: &str = "CFB1";
+/// Maximum encoded CFB1 archive size accepted by public verifiers.
+pub const MAX_CONFORMANCE_BUNDLE_BYTES_V1: u64 = 1024 * 1024 * 1024;
 const MAX_MEMBER_PATH_BYTES: usize = 256;
 const MAX_MEMBERS: usize = 65_536;
 const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_TOTAL_BUNDLE_BYTES: u64 = MAX_CONFORMANCE_BUNDLE_BYTES_V1;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
 const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
@@ -647,6 +649,14 @@ impl ConformanceBundleV1 {
 /// internally inconsistent, or signed by a key that does not authenticate its
 /// manifest.
 pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+    validate_archive_length(bytes.len())?;
+    let preflight = preflight_archive_caps(bytes)?;
+    let profile_bytes = preflight
+        .profile_bytes
+        .ok_or(BundleContractErrorV1::MemberMissing)?;
+    let profile = ConformanceProfileV1::from_canonical_cbor(profile_bytes)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    validate_preflight_archive_caps(&profile, &preflight, bytes.len())?;
     let value: Value = ciborium::from_reader(Cursor::new(bytes))
         .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
     if encode_archive_value(&value)?.as_slice() != bytes {
