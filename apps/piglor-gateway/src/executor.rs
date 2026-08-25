@@ -16,7 +16,7 @@ use pos_core::{
     timeline::Timeline,
     ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
     OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
-    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    PreparedOwnTracksIngressV1, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use std::{
     collections::HashMap,
@@ -157,6 +157,12 @@ enum Command {
         payload: pos_core::CanonicalBytes,
         reply: oneshot::Sender<Result<OwnTracksIngressOutcome, StoreExecutorError>>,
     },
+    PrepareOwnTracksIngress {
+        basic_handle: [u8; 32],
+        basic_secret: [u8; 32],
+        payload: pos_core::CanonicalBytes,
+        reply: oneshot::Sender<Result<PreparedOwnTracksIngressOutcome, StoreExecutorError>>,
+    },
     AdmitGeoLocation {
         request: GeoLocationAdmissionRequestV1,
         reply: oneshot::Sender<Result<GeoLocationAdmissionOutcome, StoreExecutorError>>,
@@ -223,6 +229,10 @@ enum Command {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Option<Timeline>, StoreExecutorError>>,
     },
+    LogicalHead {
+        timeline: TimelineId,
+        reply: oneshot::Sender<Result<Seq, StoreExecutorError>>,
+    },
     #[cfg(test)]
     Panic {
         reply: oneshot::Sender<Result<(), StoreExecutorError>>,
@@ -245,8 +255,10 @@ impl Command {
             Self::RootCount { .. }
             | Self::Read { .. }
             | Self::ReadOne { .. }
-            | Self::GetTimeline { .. } => CommandClass::Read,
+            | Self::GetTimeline { .. }
+            | Self::LogicalHead { .. } => CommandClass::Read,
             Self::AdmitOwnTracksIngress { .. }
+            | Self::PrepareOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
             | Self::RemoveAppendIdentities { .. }
@@ -382,6 +394,12 @@ pub(crate) enum OwnTracksIngressOutcome {
         timeline: TimelineId,
         entity: EntityId,
     },
+    RateLimited,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedOwnTracksIngressOutcome {
+    Prepared(PreparedOwnTracksIngressV1),
     RateLimited,
 }
 
@@ -1045,6 +1063,19 @@ impl StoreExecutor {
             reply
         })
     }
+    pub(crate) async fn prepare_owntracks_ingress(
+        &self,
+        basic_handle: [u8; 32],
+        basic_secret: [u8; 32],
+        payload: pos_core::CanonicalBytes,
+    ) -> Result<PreparedOwnTracksIngressOutcome, StoreExecutorError> {
+        submit!(self, |reply| Command::PrepareOwnTracksIngress {
+            basic_handle,
+            basic_secret,
+            payload,
+            reply
+        })
+    }
     pub(crate) async fn root_count(&self, maximum: usize) -> Result<usize, StoreExecutorError> {
         submit!(self, |reply| Command::RootCount { maximum, reply })
     }
@@ -1136,6 +1167,12 @@ impl StoreExecutor {
         timeline: TimelineId,
     ) -> Result<Option<Timeline>, StoreExecutorError> {
         submit!(self, |reply| Command::GetTimeline { timeline, reply })
+    }
+    pub(crate) async fn logical_head(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Seq, StoreExecutorError> {
+        submit!(self, |reply| Command::LogicalHead { timeline, reply })
     }
 }
 
@@ -1432,6 +1469,9 @@ fn expire_command(command: Command) {
         Command::AdmitOwnTracksIngress { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::PrepareOwnTracksIngress { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         Command::AdmitGeoLocation { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1474,6 +1514,9 @@ fn expire_command(command: Command) {
         Command::GetTimeline { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::LogicalHead { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         #[cfg(test)]
         Command::Panic { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
@@ -1502,6 +1545,30 @@ fn execute_owntracks_ingress(
     basic_secret: [u8; 32],
     payload: pos_core::CanonicalBytes,
 ) -> Result<OwnTracksIngressOutcome, CoreError> {
+    let prepared = prepare_owntracks_ingress(state, basic_handle, basic_secret, payload)?;
+    let PreparedOwnTracksIngressOutcome::Prepared(prepared) = prepared else {
+        return Ok(OwnTracksIngressOutcome::RateLimited);
+    };
+    let request = prepared.into_admission_request();
+    let timeline = request.timeline();
+    let entity = request.entity();
+    let ExecutorStore::OwnTracks(store) = &mut state.store else {
+        return Err(CoreError::GeographicAdmissionUnavailable);
+    };
+    let outcome = store.admit_geo_location(request)?;
+    Ok(OwnTracksIngressOutcome::Admitted {
+        outcome,
+        timeline,
+        entity,
+    })
+}
+
+fn prepare_owntracks_ingress(
+    state: &mut ExecutorState,
+    basic_handle: [u8; 32],
+    basic_secret: [u8; 32],
+    payload: pos_core::CanonicalBytes,
+) -> Result<PreparedOwnTracksIngressOutcome, CoreError> {
     let ExecutorStore::OwnTracks(store) = &mut state.store else {
         return Err(CoreError::GeographicAdmissionUnavailable);
     };
@@ -1511,17 +1578,9 @@ fn execute_owntracks_ingress(
     let input = owntracks_input(owner_key, basic_handle, basic_secret, payload);
     let prepared = store.prepare_owntracks_ingress(input)?;
     if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
-        return Ok(OwnTracksIngressOutcome::RateLimited);
+        return Ok(PreparedOwnTracksIngressOutcome::RateLimited);
     }
-    let request = prepared.into_admission_request();
-    let timeline = request.timeline();
-    let entity = request.entity();
-    let outcome = store.admit_geo_location(request)?;
-    Ok(OwnTracksIngressOutcome::Admitted {
-        outcome,
-        timeline,
-        entity,
-    })
+    Ok(PreparedOwnTracksIngressOutcome::Prepared(prepared))
 }
 
 fn owntracks_input(
@@ -1592,6 +1651,17 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             payload,
             reply,
         } => execute_owntracks_command(state, basic_handle, basic_secret, payload, reply),
+        Command::PrepareOwnTracksIngress {
+            basic_handle,
+            basic_secret,
+            payload,
+            reply,
+        } => {
+            send_store_result(
+                reply,
+                prepare_owntracks_ingress(state, basic_handle, basic_secret, payload),
+            );
+        }
         Command::AdmitGeoLocation { request, reply } => {
             execute_geo_location_command(state, request, reply);
         }
@@ -1665,6 +1735,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         } => execute_append_identified_command(state, timeline, identity, intent, maximum, reply),
         Command::GetTimeline { timeline, reply } => {
             execute_get_timeline_command(state, timeline, reply);
+        }
+        Command::LogicalHead { timeline, reply } => {
+            send_store_result(reply, state.store.event_store().logical_head(timeline));
         }
         #[cfg(test)]
         Command::Panic { reply } => {

@@ -327,7 +327,7 @@ mod coverage_tests {
             .test_ok();
         let gateway = Gateway::new_with_geo_location_admission(store);
         let mut notices = gateway.subscribe();
-        let (grant_event, token) = gateway
+        let (_, token) = gateway
             .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity, 1))
             .await
             .test_ok();
@@ -344,13 +344,13 @@ mod coverage_tests {
         };
 
         assert!(gateway
-            .admit_geo_location_with_consent(request(), &token, grant_event.seq.as_u64(), 0, 1,)
+            .admit_geo_location_with_consent(request(), &token, 0, 1)
             .await
             .test_ok()
             .is_accepted());
         assert_eq!(notices.recv().await.test_ok().event_type, "geo.location");
         assert!(gateway
-            .admit_geo_location_with_consent(request(), &token, grant_event.seq.as_u64(), 0, 1,)
+            .admit_geo_location_with_consent(request(), &token, 0, 1)
             .await
             .test_ok()
             .is_duplicate());
@@ -359,7 +359,7 @@ mod coverage_tests {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
         let resolution_error = gateway
-            .admit_geo_location_with_consent(request(), &token, grant_event.seq.as_u64(), 0, 0)
+            .admit_geo_location_with_consent(request(), &token, 0, 0)
             .await
             .test_err();
         assert!(matches!(
@@ -392,6 +392,10 @@ mod coverage_tests {
             ))
             .test_ok();
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity, 1))
+            .await
+            .test_ok();
         gateway
             .create_timeline("owntracks-generic-event-store")
             .await
@@ -1098,7 +1102,7 @@ impl Gateway {
     /// # Errors
     /// Returns a bounded executor or store error when admission cannot run.
     ///
-    pub async fn admit_geo_location_from_core(
+    async fn admit_geo_location_from_core(
         &self,
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
@@ -1114,10 +1118,10 @@ impl Gateway {
 
     /// Admit one geographic request after applying the host consent fence.
     ///
-    /// The caller supplies the effective minimized resolution captured by the
-    /// request. The token is checked both against the operation head and
-    /// against the grant's ADR-026 geographic floor before the dedicated
-    /// geographic store capability is invoked.
+    /// The host reads the authoritative logical head while holding the same
+    /// per-Timeline lock used by grant and revocation writes. The token is
+    /// checked against that head and the grant's ADR-026 geographic floor
+    /// before the dedicated geographic store capability is invoked.
     ///
     /// # Errors
     /// Returns [`GatewayError::Consent`] when the capability is stale,
@@ -1126,14 +1130,15 @@ impl Gateway {
         &self,
         request: GeoLocationAdmissionRequestV1,
         token: &ConsentCapabilityToken,
-        timeline_head: u64,
         now_secs: u64,
         effective_resolution: u8,
     ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
+        let _consent_timeline_guard = self.lock_consent_timeline(request.timeline()).await;
+        let timeline_head = self.store.logical_head(request.timeline()).await?;
         self.consent_authority.validate_on_timeline(
             request.timeline(),
             token,
-            timeline_head,
+            timeline_head.as_u64(),
             now_secs,
         )?;
         token.authorize_event_type(&Kind::new("geo.location"))?;
@@ -1155,10 +1160,26 @@ impl Gateway {
         basic_secret: [u8; 32],
         payload: CanonicalBytes,
     ) -> Result<OwnTracksIngressResult, GatewayError> {
-        let outcome = self
+        let prepared = self
             .store
-            .admit_owntracks_ingress(basic_handle, basic_secret, payload)
+            .prepare_owntracks_ingress(basic_handle, basic_secret, payload)
             .await?;
+        let executor::PreparedOwnTracksIngressOutcome::Prepared(prepared) = prepared else {
+            return Ok(OwnTracksIngressResult::RateLimited);
+        };
+        let request = prepared.into_admission_request();
+        let timeline = request.timeline();
+        let entity = request.entity();
+        let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
+        let timeline_head = self.store.logical_head(timeline).await?;
+        self.consent_authority
+            .validate_location_subject_on_timeline(timeline, entity, timeline_head.as_u64(), 0)?;
+        let admission = self.store.admit_geo_location(request).await?;
+        let outcome = executor::OwnTracksIngressOutcome::Admitted {
+            outcome: admission,
+            timeline,
+            entity,
+        };
         match outcome {
             executor::OwnTracksIngressOutcome::RateLimited => {
                 Ok(OwnTracksIngressResult::RateLimited)

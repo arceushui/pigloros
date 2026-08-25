@@ -984,6 +984,39 @@ impl ConsentAuthority {
         self.validate_with_timeline(timeline_id, token, timeline_head, now_secs)
     }
 
+    /// Validate the active location authority for a subject when an ingress
+    /// adapter cannot carry a caller-issued capability token.
+    ///
+    /// The host still binds the operation to the authoritative Timeline head;
+    /// this seam is used only after the private adapter has authenticated the
+    /// subject and before it is allowed to admit geographic evidence.
+    ///
+    /// # Errors
+    /// Returns [`ConsentError::NoConsent`], [`ConsentError::Revoked`],
+    /// [`ConsentError::Expired`], or [`ConsentError::ModalityNotGranted`]
+    /// when no current location authority covers the subject.
+    pub fn validate_location_subject_on_timeline(
+        &self,
+        timeline_id: TimelineId,
+        subject_id: EntityId,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        let sessions = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((key, active)) = sessions.iter().find(|((timeline, subject, _, _), _)| {
+            *timeline == timeline_id && *subject == subject_id
+        }) else {
+            return Err(ConsentError::NoConsent);
+        };
+        Self::validate_from_sessions(&sessions, key, &active.token, timeline_head, now_secs)?;
+        active
+            .token
+            .authorize_event_type(&Kind::new("geo.location"))
+    }
+
     fn validate_with_timeline(
         &self,
         timeline_id: TimelineId,
