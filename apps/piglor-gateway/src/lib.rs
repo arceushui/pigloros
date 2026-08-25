@@ -4094,13 +4094,16 @@ mod tests {
                 .read_events_page(&timeline.id().to_string(), 0, 1)
                 .await
                 .test_err();
-            assert!(matches!(
-                error,
-                GatewayError::EventMetadataTooLarge {
-                    field: "event_type",
-                    maximum: MAX_EVENT_TYPE_BYTES
-                }
-            ));
+            assert!(
+                matches!(
+                    error,
+                    GatewayError::EventMetadataTooLarge {
+                        field: "event_type",
+                        maximum: MAX_EVENT_TYPE_BYTES
+                    }
+                ),
+                "unexpected imported oversized-event error: {error:?}"
+            );
         }
     }
 

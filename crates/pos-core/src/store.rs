@@ -331,6 +331,9 @@ pub trait EventStore: Send {
     /// consent appends until one is installed.  The default keeps third-party
     /// adapters source-compatible; such adapters must still enforce their own
     /// host boundary before overriding [`Self::append_consent_bounded`].
+    ///
+    /// # Errors
+    /// Returns a binding error when the adapter rejects the supplied authority.
     fn bind_consent_authority(&mut self, _permit: ConsentAppendPermit) -> Result<(), CoreError> {
         Ok(())
     }
@@ -559,6 +562,9 @@ pub trait EventStore: Send {
     /// Adapters may persist this marker when a bounded scope cleanup reports
     /// remaining identities. Returning the marker without consuming it keeps
     /// retries safe across process restarts and transient store failures.
+    ///
+    /// # Errors
+    /// Returns a storage error when the adapter cannot inspect its pending cleanup marker.
     fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
         Ok(None)
     }
