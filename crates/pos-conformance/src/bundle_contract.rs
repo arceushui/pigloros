@@ -3998,6 +3998,104 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_rejection_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let (mut members, _) = bundle_inputs(&profile, BundleModeV1::Local)?;
+        let provenance_index = members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance member")?;
+        members[provenance_index].bytes = b"not-json".to_vec();
+        members[provenance_index].digest = profile.provenance_digest;
+        assert_eq!(
+            validate_authority_members(&profile, &members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut provenance: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))?;
+        provenance["authority_inventory"] = JsonValue::Null;
+        assert_eq!(
+            validate_provenance_authority_binding(&provenance),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let inventory_bytes =
+            include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
+        let mut invalid_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        invalid_inventory["magic"] = JsonValue::String("wrong".to_owned());
+        assert_eq!(
+            validate_authority_inventory(&invalid_inventory, &authority_artifact_members()),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        invalid_inventory["magic"] = JsonValue::String("W8H1".to_owned());
+        invalid_inventory["entries"] = JsonValue::Array(Vec::new());
+        assert_eq!(
+            validate_authority_inventory(&invalid_inventory, &authority_artifact_members()),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut pending_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        pending_inventory["entries"][0]["materialization_status"] =
+            JsonValue::String("pending".to_owned());
+        assert_eq!(
+            validate_authority_inventory(&pending_inventory, &authority_artifact_members()),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let authority_members = authority_artifact_members();
+        let mut missing_artifact_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        missing_artifact_inventory["entries"][0]["fixture_bytes_path"] =
+            JsonValue::String("expected-authority/fixtures/missing.json".to_owned());
+        assert_eq!(
+            validate_authority_inventory(&missing_artifact_inventory, &authority_members),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut wrong_id_members = authority_members.clone();
+        let wrong_id_index = wrong_id_members
+            .iter()
+            .position(|member| member.path.ends_with("fixtures/DIV-001.json"))
+            .ok_or("missing DIV-001 fixture")?;
+        wrong_id_members[wrong_id_index].bytes = br#"{"fixture_id":"WRONG"}"#.to_vec();
+        wrong_id_members[wrong_id_index].digest =
+            *blake3::hash(&wrong_id_members[wrong_id_index].bytes).as_bytes();
+        let mut wrong_id_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        wrong_id_inventory["entries"][0]["fixture_bytes_digest"] =
+            JsonValue::String(materialized_hex(&wrong_id_members[wrong_id_index].digest));
+        assert_eq!(
+            validate_authority_inventory(&wrong_id_inventory, &wrong_id_members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut short_digest_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        short_digest_inventory["entries"][0]["fixture_bytes_digest"] =
+            JsonValue::String("00".to_owned());
+        assert_eq!(
+            validate_authority_inventory(&short_digest_inventory, &authority_members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        short_digest_inventory["entries"][0]["fixture_bytes_digest"] =
+            JsonValue::String("g".repeat(64));
+        assert_eq!(
+            validate_authority_inventory(&short_digest_inventory, &authority_members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut invalid_matrix: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/matrix/adr-059-complete.json"
+        ))?;
+        invalid_matrix["cases"] = JsonValue::Array(Vec::new());
+        assert_eq!(
+            validate_execution_matrix(&invalid_matrix),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validation_binds_each_profile_input_to_public_member_bytes(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
