@@ -83,6 +83,7 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         &self,
         _request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
+        targets: &[ErasureRequiredTargetV1],
     ) -> Result<ErasureFreezeAdmissionV1, ErasureErrorV1> {
         if let Some(error) = self.freeze_error {
             return Err(error);
@@ -94,6 +95,7 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
             provenance: self
                 .admitted_freeze_provenance
                 .unwrap_or(requested.provenance),
+            target_closure: freeze_closure_digest(targets),
         })
     }
     fn dispatch_destruction(
@@ -1074,11 +1076,17 @@ fn freeze_retry_reuses_the_reserved_v1_admission_after_commit_failure() -> Resul
         Err(ErasureErrorV1::ReceiptCommitFailed)
     );
 
+    let later_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     coordinator.port.commit_error = None;
+    coordinator.port.targets = vec![later_target];
+    coordinator.port.admitted_freeze_position = Some(99);
+    coordinator.port.admitted_freeze_provenance = Some(reference(99));
     let retry = coordinator.freeze_inventory(reference(1), requested)?;
     assert_eq!(retry.lifecycle(), ErasureLifecycleV1::AccessFrozen);
     assert_eq!(retry.freeze_position(), Some(10));
     assert_eq!(retry.provenance(), reference(9));
+    let records = coordinator.port.records.borrow();
+    assert_eq!(records[0].targets, vec![target]);
     Ok(())
 }
 

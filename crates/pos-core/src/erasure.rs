@@ -1074,6 +1074,20 @@ fn derived_outcome_owners(
     (pending, failed)
 }
 
+fn freeze_closure_digest(targets: &[ErasureRequiredTargetV1]) -> ErasureReferenceV1 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"pigloros/erasure-freeze-closure/v1");
+    for target in targets {
+        hasher.update(&target.artifact_class.code().to_be_bytes());
+        hasher.update(&target.artifact_digest.digest());
+        hasher.update(&target.key_role.code().to_be_bytes());
+        hasher.update(&target.key_digest.digest());
+        hasher.update(&target.replica_set.digest());
+        hasher.update(&target.replica_id.digest());
+    }
+    ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+}
+
 /// Host-owned ERS1 lookup used to validate a receipt's predecessor chain.
 pub trait ErasureStateResolverV1 {
     /// Resolve one digest without inventing a missing state.
@@ -1206,7 +1220,7 @@ pub trait ErasureCoordinatorPortV1 {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1>;
-    /// Authenticate and perform the freeze-boundary operation.
+    /// Authenticate and perform the freeze-boundary operation for `targets`.
     ///
     /// The returned position and provenance are host-owned evidence.  The
     /// caller's transition values are treated as a request, never as proof.
@@ -1217,8 +1231,9 @@ pub trait ErasureCoordinatorPortV1 {
     /// freeze boundary.
     ///
     /// A successful admission is a durable V1 reservation keyed by
-    /// `request`. The host must retain the exact target closure, Tick Boundary
-    /// position, and provenance returned for that request before returning.
+    /// `request` and the exact `targets` value. The returned closure digest,
+    /// Tick Boundary position, and provenance are the host-authenticated
+    /// evidence for that reservation.
     /// If the following `commit_record` fails, an exact retry must return the
     /// same admission rather than observe a later Tick Boundary or rediscover
     /// a different closure. This reservation is operational metadata; it does
@@ -1227,6 +1242,7 @@ pub trait ErasureCoordinatorPortV1 {
         &self,
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
+        targets: &[ErasureRequiredTargetV1],
     ) -> Result<ErasureFreezeAdmissionV1, ErasureErrorV1>;
     /// Dispatch idempotent destruction commands for a frozen closure.
     ///
@@ -1301,6 +1317,9 @@ pub struct ErasureFreezeAdmissionV1 {
     pub freeze_position: u64,
     /// Host-authenticated provenance for the freeze transition.
     pub provenance: ErasureReferenceV1,
+    /// Digest of the exact sorted target closure reserved by the host. The
+    /// state machine compares this with its own canonical closure digest.
+    pub target_closure: ErasureReferenceV1,
 }
 
 /// Public durable fields for reconstructing an ERQ1/ERS1/ERC1 coordinator record.
@@ -1541,6 +1560,14 @@ pub struct ErasureCoordinatorStateMachineV1<P> {
     port: P,
     coordinator: ErasureReferenceV1,
     records: Vec<ErasureCoordinatorRecordV1>,
+    freeze_admissions: Vec<ErasureFreezeReservationV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ErasureFreezeReservationV1 {
+    request: ErasureReferenceV1,
+    targets: Vec<ErasureRequiredTargetV1>,
+    admission: ErasureFreezeAdmissionV1,
 }
 
 impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
@@ -1551,6 +1578,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             port,
             coordinator,
             records: Vec::new(),
+            freeze_admissions: Vec::new(),
         }
     }
     fn cache(&mut self, record: ErasureCoordinatorRecordV1) {
@@ -1706,40 +1734,63 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if !freeze_is_authorized {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
-            self.port.required_targets(request).and_then(|mut targets| {
-                if targets.is_empty() || targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
-                    return Err(ErasureErrorV1::ScopeInvalid);
+            let reservation = self
+                .freeze_admissions
+                .iter()
+                .find(|reservation| reservation.request == request)
+                .cloned();
+            let reservation = match reservation {
+                Some(reservation) => reservation,
+                None => {
+                    let mut targets = self.port.required_targets(request)?;
+                    if targets.is_empty() || targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
+                        return Err(ErasureErrorV1::ScopeInvalid);
+                    }
+                    targets.sort_unstable();
+                    if has_duplicate(&targets) {
+                        return Err(ErasureErrorV1::ScopeInvalid);
+                    }
+                    let target_closure = freeze_closure_digest(&targets);
+                    let admission =
+                        self.port
+                            .admit_freeze(request, &requested_transition, &targets)?;
+                    if admission.target_closure != target_closure {
+                        return Err(ErasureErrorV1::ScopeInvalid);
+                    }
+                    let reservation = ErasureFreezeReservationV1 {
+                        request,
+                        targets,
+                        admission,
+                    };
+                    self.freeze_admissions.push(reservation.clone());
+                    reservation
                 }
-                targets.sort_unstable();
-                if has_duplicate(&targets) {
-                    return Err(ErasureErrorV1::ScopeInvalid);
-                }
-                self.port
-                    .admit_freeze(request, &requested_transition)
-                    .and_then(|admission| {
-                        let provenance = admission.provenance;
-                        let replay_claim = record.state.replay_claim();
-                        record
-                            .state
-                            .transition(ErasureStateTransitionV1 {
-                                lifecycle: ErasureLifecycleV1::AccessFrozen,
-                                freeze_position: Some(admission.freeze_position),
-                                pending_owners: Vec::new(),
-                                failed_owners: Vec::new(),
-                                acknowledged_targets: Vec::new(),
-                                replay_claim,
-                                provenance,
-                            })
-                            .map(|state| (state, provenance))
-                    })
-                    .and_then(|(state, provenance)| {
-                        record.state = state;
-                        record.freeze_provenance = Some(provenance);
-                        record.targets = targets;
-                        let state = record.state.clone();
-                        self.commit(record).map(|()| state)
-                    })
-            })
+            };
+            let provenance = reservation.admission.provenance;
+            let replay_claim = record.state.replay_claim();
+            record
+                .state
+                .transition(ErasureStateTransitionV1 {
+                    lifecycle: ErasureLifecycleV1::AccessFrozen,
+                    freeze_position: Some(reservation.admission.freeze_position),
+                    pending_owners: Vec::new(),
+                    failed_owners: Vec::new(),
+                    acknowledged_targets: Vec::new(),
+                    replay_claim,
+                    provenance,
+                })
+                .and_then(|state| {
+                    record.state = state;
+                    record.freeze_provenance = Some(provenance);
+                    record.targets = reservation.targets;
+                    let state = record.state.clone();
+                    let result = self.commit(record).map(|()| state);
+                    if result.is_ok() {
+                        self.freeze_admissions
+                            .retain(|candidate| candidate.request != request);
+                    }
+                    result
+                })
         })
     }
     /// Dispatch the frozen closure through the host-owned idempotent port.
