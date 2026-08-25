@@ -2828,6 +2828,31 @@ impl SqliteStore {
             })
             .map(Seq::from_u64)
     }
+
+    fn save_key_registry_in_transaction(
+        &self,
+        registry: &KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        registry
+            .validate()
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        if let Some(previous) = self.load_key_registry()? {
+            previous
+                .validate_replacement(registry)
+                .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        }
+        let mut state_cbor = Vec::new();
+        ciborium::into_writer(registry, &mut state_cbor)
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        self.conn
+            .execute(
+                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
+                params![state_cbor],
+            )
+            .map(|_| ())
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    }
 }
 
 impl EventStore for SqliteStore {
@@ -2892,31 +2917,6 @@ impl EventStore for SqliteStore {
                     .map_err(|error| CoreError::Serialization(error.to_string()))
             })
             .map(Some)
-    }
-
-    fn save_key_registry_in_transaction(
-        &self,
-        registry: &KeyRegistryStateV1,
-    ) -> Result<(), CoreError> {
-        registry
-            .validate()
-            .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        if let Some(previous) = self.load_key_registry()? {
-            previous
-                .validate_replacement(registry)
-                .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        }
-        let mut state_cbor = Vec::new();
-        ciborium::into_writer(registry, &mut state_cbor)
-            .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        self.conn
-            .execute(
-                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, ?1)
-                 ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
-                params![state_cbor],
-            )
-            .map(|_| ())
-            .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
