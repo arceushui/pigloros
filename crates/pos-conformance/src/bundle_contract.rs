@@ -4178,14 +4178,14 @@ mod tests {
         let mut missing_fixture = members.to_vec();
         missing_fixture.retain(|member| member.role != BundleMemberRoleV1::AuthorityFixture);
         assert_eq!(
-            validate_authority_inventory(&candidate_inventory, &missing_fixture),
+            validate_authority_inventory(candidate_inventory, &missing_fixture),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
         let mut missing_result = members.to_vec();
         missing_result.retain(|member| member.role != BundleMemberRoleV1::AuthorityExpectedResult);
         assert_eq!(
-            validate_authority_inventory(&candidate_inventory, &missing_result),
+            validate_authority_inventory(candidate_inventory, &missing_result),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
@@ -4196,7 +4196,7 @@ mod tests {
             .ok_or("missing fixture member")?
             .digest = [0; 32];
         assert_eq!(
-            validate_authority_inventory(&candidate_inventory, &invalid_fixture_digest),
+            validate_authority_inventory(candidate_inventory, &invalid_fixture_digest),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
