@@ -4158,7 +4158,15 @@ mod tests {
             validate_authority_inventory(&candidate_inventory, &members),
             Ok(())
         );
+        authority_inventory_materialized_rejections(&candidate_inventory, &members)?;
+        Ok((candidate_inventory, members))
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_inventory_materialized_rejections(
+        candidate_inventory: &JsonValue,
+        members: &[BundleMemberV1],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut invalid_status = candidate_inventory.clone();
         invalid_status["entries"][0]["materialization_status"] =
             JsonValue::String("pending".to_owned());
@@ -4243,8 +4251,7 @@ mod tests {
             validate_authority_inventory(&invalid_digest_nibble, &members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
-
-        Ok((candidate_inventory, members))
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
