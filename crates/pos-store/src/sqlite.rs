@@ -76,6 +76,17 @@ thread_local! {
 }
 
 #[cfg(test)]
+static SIGNING_TRANSACTION_BUSY_FOR_TEST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn signing_transaction_busy_for_test(_: i32) -> bool {
+    SIGNING_TRANSACTION_BUSY_FOR_TEST.store(true, std::sync::atomic::Ordering::Release);
+    true
+}
+
+#[cfg(test)]
 fn bounded_materialization_delay_for_test() {
     let delay_millis = BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(std::cell::Cell::get);
     if delay_millis != 0 {
@@ -2965,7 +2976,11 @@ impl EventStore for SqliteStore {
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         #[cfg(test)]
-        self.destruction_transaction_started_for_test();
+        if let Some((started, release)) = self.destruction_transaction_hook.take() {
+            if started.send(()).is_ok() {
+                assert!(release.recv().is_ok());
+            }
+        }
         let result = (|| {
             let mut registry = self.load_key_registry()?.ok_or_else(|| {
                 CoreError::Storage("durable key registry is unavailable".to_owned())
@@ -2977,16 +2992,6 @@ impl EventStore for SqliteStore {
             Ok((outcome, registry))
         })();
         finish_immediate_transaction(&self.conn, result)
-    }
-
-    #[cfg(test)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn destruction_transaction_started_for_test(&mut self) {
-        if let Some((started, release)) = self.destruction_transaction_hook.take() {
-            if started.send(()).is_ok() {
-                assert!(release.recv().is_ok());
-            }
-        }
     }
 
     fn append_bounded(
@@ -9265,10 +9270,10 @@ mod tests {
 
         let mut destruction_store = SqliteStore::open(path).test_ok();
         let mut signing_store = SqliteStore::open(path).test_ok();
-        let (signing_contended_tx, signing_contended_rx) = std::sync::mpsc::channel();
+        SIGNING_TRANSACTION_BUSY_FOR_TEST.store(false, std::sync::atomic::Ordering::Relaxed);
         signing_store
             .conn
-            .busy_handler(Some(move |_| signing_contended_tx.send(()).is_ok()))
+            .busy_handler(Some(signing_transaction_busy_for_test))
             .test_ok();
         let request =
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
@@ -9294,16 +9299,25 @@ mod tests {
                 };
                 signing_store.append_signed_authorized(timeline_id, &registry, &mut callback)
             });
-            signing_contended_rx.recv().test_ok();
+            let wait_deadline = Instant::now() + Duration::from_secs(1);
+            while !SIGNING_TRANSACTION_BUSY_FOR_TEST.load(std::sync::atomic::Ordering::Acquire)
+                && Instant::now() < wait_deadline
+            {
+                std::thread::yield_now();
+            }
+            let signing_contended =
+                SIGNING_TRANSACTION_BUSY_FOR_TEST.load(std::sync::atomic::Ordering::Acquire);
             release_destruction_tx.send(()).test_ok();
 
             (
                 destruction_handle.join().test_ok(),
-                signing_handle.join().test_ok(),
+                (signing_contended, signing_handle.join().test_ok()),
             )
         });
 
         assert!(destruction_result.is_ok());
+        let (signing_contended, signing_result) = signing_result;
+        assert!(signing_contended);
         assert!(signing_result.is_err());
         assert!(callback_called_rx.try_recv().is_err());
 
