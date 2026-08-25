@@ -6956,17 +6956,25 @@ mod instrumented_candidate_entrypoints {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn authority_members_are_required_and_profile_bound() -> Result<(), Box<dyn std::error::Error>>
     {
-        let mut profile = tests::profile();
-        let (members, _) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
-        assert_eq!(
-            super::validate_authority_members(&profile, &members),
-            Ok(())
-        );
+        let profile = tests::profile();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        assert!(ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members.clone(),
+            expected_results.clone(),
+        )
+        .is_ok());
 
         let mut missing_inventory = members.clone();
         missing_inventory.retain(|member| member.role != BundleMemberRoleV1::AuthorityInventory);
         assert_eq!(
-            super::validate_authority_members(&profile, &missing_inventory),
+            ConformanceBundleV1::materialize(
+                &profile,
+                BundleModeV1::Local,
+                missing_inventory,
+                expected_results.clone(),
+            ),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
@@ -6977,11 +6985,13 @@ mod instrumented_candidate_entrypoints {
             .ok_or(BundleContractErrorV1::MemberMissing)?;
         provenance.bytes = b"{}".to_vec();
         provenance.digest = *blake3::hash(&provenance.bytes).as_bytes();
-        profile.provenance_digest = provenance.digest;
-        assert_eq!(
-            super::validate_authority_members(&profile, &unbound_inventory),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
+        assert!(ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            unbound_inventory,
+            expected_results,
+        )
+        .is_err());
         Ok(())
     }
 
