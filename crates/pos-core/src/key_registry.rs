@@ -539,11 +539,10 @@ impl KeyRegistryStateV1 {
                         return Err(KeyRegistryErrorV1::InvalidState);
                     }
                 }
-                (None, None) => {
-                    if next.tombstones.get(identity) != self.tombstones.get(identity) {
-                        return Err(KeyRegistryErrorV1::InvalidState);
-                    }
+                (None, None) if next.tombstones.get(identity) != self.tombstones.get(identity) => {
+                    return Err(KeyRegistryErrorV1::InvalidState);
                 }
+                (None, None) => {}
             }
         }
         Ok(())
