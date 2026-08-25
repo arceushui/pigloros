@@ -31,6 +31,13 @@ jq -e '
     "NI-ARCHIVE-009", "NI-NET-010", "NI-SERVICE-011", "NI-CRASH-012"
   ]) and
   ([$root.rows[].fixture_id] | unique | length == 12) and
+  ($root.equality_predicates | length == 12) and
+  ([$root.equality_predicates[].fixture_id] == [$root.rows[].fixture_id]) and
+  all($root.equality_predicates[];
+    (.AuthEq | type == "string") and
+    (.PublicEq | type == "string") and
+    (.OpEq | type == "string")
+  ) and
   ($root.cases | length == 192) and
   ([$root.cases[].case_id] | unique | length == 192) and
   all($root.rows[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and

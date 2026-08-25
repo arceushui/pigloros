@@ -32,7 +32,8 @@ manifest must declare.
 
 The Draft `matrix/adr-059-complete.json` records all twelve accepted
 non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork
-variant cases. `expected-authority/inventory.json` records the eleven #172
+variant cases, with the row-specific AuthEq/PublicEq/OpEq predicates from
+ADR-059. `expected-authority/inventory.json` records the eleven #172
 handoff vectors as pending Draft slots with no asserted fixture or
 expected-result digest. The matrix and authority inventory remain Draft until
 the downstream authority/non-interference work supplies concrete bytes,
@@ -44,3 +45,9 @@ fixture/result members. Candidate bundles are enabled only after the inventory
 becomes Candidate and all concrete authority members are independently
 verified. Materialized bytes are retained below `published/<git-sha>/`; that
 directory is immutable per source revision and includes its own `SHA256SUMS`.
+
+Candidate materialization reads the eleven inventory fixture/result paths from
+`PIGLOROS_CONFORMANCE_AUTHORITY_ROOT`, rejects traversal or digest mismatches,
+and binds each loaded JSON record back to its inventory `fixture_id`. CI keeps
+the checked-in Draft inventory, so it cannot silently synthesize Candidate
+authority evidence.
