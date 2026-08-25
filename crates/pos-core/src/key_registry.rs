@@ -488,10 +488,10 @@ impl KeyRegistryStateV1 {
 
     /// Validate a durable replacement without permitting history rollback.
     ///
-    /// A backend may append a new epoch or transition one live record into its
-    /// tombstoned form, but it may not drop records, restore private-material
-    /// fingerprints, rewrite public verification material, or lower a role's
-    /// epoch high-water mark.
+    /// A backend may append an epoch above the prior role high-water mark or
+    /// transition one live record into its tombstoned form, but it may not drop
+    /// records, backfill stale identities, restore private-material fingerprints,
+    /// rewrite public verification material, or lower a role's high-water mark.
     ///
     /// # Errors
     ///
@@ -501,6 +501,18 @@ impl KeyRegistryStateV1 {
         self.validate()?;
         next.validate()?;
 
+        for identity in next.records.keys() {
+            if self.records.contains_key(identity) {
+                continue;
+            }
+            if self
+                .highest_epoch
+                .get(&identity.role)
+                .is_some_and(|highest| identity.epoch <= *highest)
+            {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
         for (identity, previous) in &self.records {
             let Some(current) = next.records.get(identity) else {
                 return Err(KeyRegistryErrorV1::InvalidState);
@@ -1452,6 +1464,15 @@ mod tests {
         })?;
         assert_eq!(reused.validate(), Err(KeyRegistryErrorV1::InvalidState));
 
+        let mut wrong_active_role = both.clone();
+        wrong_active_role
+            .active
+            .insert(KeyRoleV1::SubjectDataEncryption, second);
+        assert_eq!(
+            wrong_active_role.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
         let mut destroyed = first_state;
         destroyed.destroy_key(KeyDestructionRequestV1::new(first, digest(30), digest(32)))?;
         destroyed.register_key(signing_registration(second, 33))?;
@@ -1468,6 +1489,29 @@ mod tests {
         })?;
         assert_eq!(
             tombstone_reuse.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_replacement_rejects_backfilled_stale_epoch() -> Result<(), KeyRegistryErrorV1> {
+        let latest = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
+        let stale = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let mut previous = KeyRegistryStateV1::new();
+        previous.register_key(signing_registration(latest, 40))?;
+
+        let mut next = previous.clone();
+        next.records.insert(
+            stale,
+            KeyRecordV1 {
+                identity: stale,
+                private_material_digest: Some(digest(41)),
+                public_verification_key: Some(PublicKey::from_bytes([41; 32])),
+            },
+        );
+        assert_eq!(
+            previous.validate_replacement(&next),
             Err(KeyRegistryErrorV1::InvalidState)
         );
         Ok(())

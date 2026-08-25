@@ -1123,6 +1123,7 @@ mod tests {
             timeline::{Timeline, TimelineMeta},
             PublicKey,
         };
+        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
 
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("x")),
@@ -1130,6 +1131,9 @@ mod tests {
             parent_fork_hash: None,
         };
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        let (_, verifying_key) = generate_keypair();
+        let valid = public_key_from_verifying_key(&verifying_key);
+        import_timeline_with_verified_signatures(store.as_mut(), export.clone(), &valid).test_ok();
         let mut bytes = [0u8; 32];
         bytes[31] = 0xff;
         let bad = PublicKey::from_bytes(bytes);
