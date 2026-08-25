@@ -378,8 +378,8 @@ impl KeyRegistryStateV1 {
     ///
     /// # Errors
     ///
-    /// Returns [`KeyRegistryErrorV1::InvalidState`] when a tombstone and its
-    /// retained record disagree about whether private material still exists.
+    /// Returns [`KeyRegistryErrorV1::InvalidState`] when a durable snapshot
+    /// violates tombstone, active/high-water, or material-uniqueness rules.
     pub fn validate(&self) -> Result<(), KeyRegistryErrorV1> {
         let mut reserved_material = HashSet::new();
         for (identity, record) in &self.records {
@@ -998,6 +998,30 @@ mod tests {
             .insert(second.role, second.epoch);
         assert_eq!(
             reused_material.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut live_tombstone_reuse = KeyRegistryStateV1::new();
+        live_tombstone_reuse.register_key(signing_registration(first, 34))?;
+        live_tombstone_reuse.destroy_key(KeyDestructionRequestV1::new(
+            first,
+            digest(34),
+            digest(35),
+        ))?;
+        live_tombstone_reuse.records.insert(
+            second,
+            KeyRecordV1 {
+                identity: second,
+                private_material_digest: Some(digest(34)),
+                public_verification_key: Some(PublicKey::from_bytes([35; 32])),
+            },
+        );
+        live_tombstone_reuse.active.insert(second.role, second);
+        live_tombstone_reuse
+            .highest_epoch
+            .insert(second.role, second.epoch);
+        assert_eq!(
+            live_tombstone_reuse.validate(),
             Err(KeyRegistryErrorV1::InvalidState)
         );
         Ok(())
