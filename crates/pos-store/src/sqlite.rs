@@ -1628,6 +1628,7 @@ impl SqliteStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
         max_owned_events: u64,
+        gateway_consent: bool,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         let tx = self
             .conn
@@ -1638,6 +1639,13 @@ impl SqliteStore {
             .last()
             .and_then(|(_, fork)| *fork)
             .map_or(0, Seq::as_u64);
+        if gateway_consent {
+            crate::ensure_gateway_consent_drafts(
+                drafts,
+                timeline,
+                logical_prefix.saturating_add(owned_head).saturating_add(1),
+            )?;
+        }
         let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
         let next_head = owned_head.saturating_add(batch_len);
         if next_head > max_owned_events {
@@ -2687,7 +2695,7 @@ impl EventStore for SqliteStore {
     ) -> Result<Option<Vec<Event>>, CoreError> {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events))
+            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events, false))
     }
 
     fn append_consent_bounded(
@@ -2696,9 +2704,9 @@ impl EventStore for SqliteStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_gateway_consent_drafts(drafts, timeline)
+        crate::ensure_gateway_consent_types(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events))
+            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events, true))
     }
 
     fn append_or_duplicate(

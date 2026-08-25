@@ -871,7 +871,7 @@ impl MemoryStore {
         gateway_consent: bool,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         let validate = if gateway_consent {
-            crate::ensure_gateway_consent_drafts
+            crate::ensure_gateway_consent_types
         } else {
             crate::ensure_non_geographic_drafts
         };
@@ -891,6 +891,13 @@ impl MemoryStore {
                     crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
                 {
                     crate::checked_logical_head(logical_prefix, next_head)?;
+                    if gateway_consent {
+                        crate::ensure_gateway_consent_drafts(
+                            drafts,
+                            timeline,
+                            logical_prefix.saturating_add(owned_head).saturating_add(1),
+                        )?;
+                    }
                     self.append_visible_with_prefix(timeline, drafts, logical_prefix)
                         .map(Some)
                 } else {

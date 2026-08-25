@@ -117,8 +117,8 @@ pub(crate) fn ensure_non_geographic_drafts(
     }
 }
 
-/// Validate the dedicated Gateway-owned V1 consent append seam.
-pub(crate) fn ensure_gateway_consent_drafts(
+/// Validate that a batch is restricted to the dedicated V1 consent types.
+pub(crate) fn ensure_gateway_consent_types(
     drafts: &[EventDraft],
     timeline: TimelineId,
 ) -> Result<(), CoreError> {
@@ -134,6 +134,42 @@ pub(crate) fn ensure_gateway_consent_drafts(
     } else {
         Ok(())
     }
+}
+
+/// Validate the dedicated Gateway-owned V1 consent append seam, including the
+/// canonical payload and logical Timeline coordinates.
+pub(crate) fn ensure_gateway_consent_drafts(
+    drafts: &[EventDraft],
+    timeline: TimelineId,
+    expected_first_seq: u64,
+) -> Result<(), CoreError> {
+    ensure_gateway_consent_types(drafts, timeline)?;
+    for (index, draft) in drafts.iter().enumerate() {
+        let expected_seq =
+            expected_first_seq.saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
+        match draft.event_type.as_str() {
+            pos_core::EVENT_TYPE_CONSENT_GRANTED_V1 => {
+                let grant = pos_core::ConsentGrantedV1::decode(&draft.payload)
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                if draft.entity != grant.subject_id || grant.grant_seq != expected_seq {
+                    return Err(CoreError::Storage(
+                        "consent grant coordinate mismatch".to_owned(),
+                    ));
+                }
+            }
+            pos_core::EVENT_TYPE_CONSENT_REVOKED_V1 => {
+                let revocation = pos_core::ConsentRevokedV1::decode(&draft.payload)
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                if draft.entity != revocation.subject_id || revocation.fence_seq != expected_seq {
+                    return Err(CoreError::Storage(
+                        "consent revocation coordinate mismatch".to_owned(),
+                    ));
+                }
+            }
+            _ => return Err(CoreError::TimelineNotFound(timeline)),
+        }
+    }
+    Ok(())
 }
 
 /// Refuse committed sensitive Events before a generic import or append path can

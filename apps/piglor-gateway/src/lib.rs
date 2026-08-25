@@ -516,8 +516,10 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 
 const CONSENT_LOCK_STRIPES: usize = 64;
 const CONSENT_LOCK_STRIPES_U64: u64 = 64;
-const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize =
-    NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
+const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize = match NonZeroUsize::new(256) {
+    Some(value) => value,
+    None => NonZeroUsize::MIN,
+};
 
 type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
 
