@@ -1114,6 +1114,7 @@ mod tests {
         let mut ok_store = open_store(StoreConfig::Memory).test_ok();
         ok_store.save_key_registry(&registry).test_ok();
         import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).test_ok();
+        assert_verified_import_rejections(&export, &registry, &pk);
 
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
@@ -1122,6 +1123,101 @@ mod tests {
         let err = import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
             .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
+    }
+
+    fn assert_verified_import_rejections(
+        export: &pos_core::store::TimelineExport,
+        registry: &pos_core::KeyRegistryStateV1,
+        public_key: &pos_core::PublicKey,
+    ) {
+        let mut missing_registry_store = open_store(StoreConfig::Memory).test_ok();
+        let missing_registry = import_timeline_with_verified_signatures(
+            missing_registry_store.as_mut(),
+            export.clone(),
+            public_key,
+        )
+        .test_err();
+        assert!(missing_registry
+            .to_string()
+            .contains("persisted key registry"));
+
+        let mut missing_identity = export.clone();
+        missing_identity.events[0].signature_identity = None;
+        let mut missing_identity_store = open_store(StoreConfig::Memory).test_ok();
+        missing_identity_store.save_key_registry(registry).test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                missing_identity_store.as_mut(),
+                missing_identity,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut wrong_role = export.clone();
+        wrong_role.events[0].signature_identity =
+            Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1));
+        let mut wrong_role_store = open_store(StoreConfig::Memory).test_ok();
+        wrong_role_store.save_key_registry(registry).test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                wrong_role_store.as_mut(),
+                wrong_role,
+                public_key
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut mismatched_identity = export.clone();
+        mismatched_identity.events[1].signature_identity =
+            Some(KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2));
+        let mut mismatched_identity_store = open_store(StoreConfig::Memory).test_ok();
+        mismatched_identity_store
+            .save_key_registry(registry)
+            .test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                mismatched_identity_store.as_mut(),
+                mismatched_identity,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut missing_record = export.clone();
+        missing_record.events.truncate(1);
+        missing_record.events[0].signature_identity =
+            Some(KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2));
+        let mut missing_record_store = open_store(StoreConfig::Memory).test_ok();
+        missing_record_store.save_key_registry(registry).test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                missing_record_store.as_mut(),
+                missing_record,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut invalid_signature = export.clone();
+        invalid_signature.events[0].signature = Some(pos_core::Signature::from_bytes([0; 64]));
+        let mut invalid_signature_store = open_store(StoreConfig::Memory).test_ok();
+        invalid_signature_store
+            .save_key_registry(registry)
+            .test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                invalid_signature_store.as_mut(),
+                invalid_signature,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
     }
 
     #[test]
