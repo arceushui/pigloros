@@ -9081,10 +9081,8 @@ mod tests {
                 params![timeline.id().to_string()],
             )
             .test_ok();
-        assert!(matches!(
-            store.read(timeline.id(), SeqRange::all()),
-            Err(CoreError::Storage(message)) if message.contains("role/epoch identity")
-        ));
+        let legacy = store.read(timeline.id(), SeqRange::all()).test_ok();
+        assert_eq!(legacy[0].signature_identity, None);
         store
             .conn
             .execute(

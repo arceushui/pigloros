@@ -1146,6 +1146,7 @@ mod tests {
             ids::EventId,
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
+            KeyRegistryStateV1,
         };
         use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
 
@@ -1171,6 +1172,9 @@ mod tests {
             parent_fork_hash: None,
         };
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .save_key_registry(&KeyRegistryStateV1::new())
+            .test_ok();
         let err = import_timeline_with_verified_signatures(store.as_mut(), export, &pk).test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
