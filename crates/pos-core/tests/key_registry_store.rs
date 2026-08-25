@@ -392,7 +392,7 @@ fn public_registry_traits_and_role_boundaries_are_exercised(
 }
 
 #[test]
-fn public_registry_error_contracts_are_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+fn public_registry_registration_errors_are_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
     let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     let signing_material = Hash::from_bytes([41; 32]);
     let signing_public_key = PublicKey::from_bytes([42; 32]);
@@ -472,15 +472,37 @@ fn public_registry_error_contracts_are_fail_closed() -> Result<(), Box<dyn std::
         Err(pos_core::KeyRegistryErrorV1::MaterialReuse)
     );
 
+    Ok(())
+}
+
+#[test]
+fn public_registry_authorization_errors_are_fail_closed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let signing_public_key = PublicKey::from_bytes([42; 32]);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        signing_identity,
+        Hash::from_bytes([41; 32]),
+        Some(signing_public_key),
+    ))?;
+    registry.register_key(KeyRegistrationV1::new(
+        KeyIdentityV1::new(signing_identity.role, 2),
+        Hash::from_bytes([45; 32]),
+        Some(signing_public_key),
+    ))?;
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_material = Hash::from_bytes([43; 32]);
     registry.register_key(KeyRegistrationV1::new(
         encryption_identity,
         encryption_material,
         None,
     ))?;
+
     assert_eq!(
         registry.with_signing_authorization(
             signing_identity,
-            signing_material,
+            Hash::from_bytes([41; 32]),
             signing_public_key,
             || "not called",
         ),
@@ -489,7 +511,7 @@ fn public_registry_error_contracts_are_fail_closed() -> Result<(), Box<dyn std::
     assert_eq!(
         registry.with_signing_authorization(
             KeyIdentityV1::new(KeyRoleV1::PluginReleaseSigning, 1),
-            signing_material,
+            Hash::from_bytes([41; 32]),
             signing_public_key,
             || "not called",
         ),
@@ -521,6 +543,19 @@ fn public_registry_error_contracts_are_fail_closed() -> Result<(), Box<dyn std::
         Err(pos_core::KeyRegistryErrorV1::NotFound)
     );
 
+    Ok(())
+}
+
+#[test]
+fn public_registry_destruction_errors_are_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_material = Hash::from_bytes([43; 32]);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        encryption_material,
+        None,
+    ))?;
     let missing = KeyDestructionRequestV1::new(
         KeyIdentityV1::new(KeyRoleV1::ExportRecipientEncryption, 1),
         encryption_material,
