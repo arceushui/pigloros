@@ -841,7 +841,7 @@ impl SqliteStore {
                 .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
             let signature = decode_signature(sig_bytes)?;
             let signature_identity = decode_signature_identity(signature_role, signature_epoch)?;
-            events.push(Event {
+            let event = Event {
                 id: parse_event_id(&event_id)?,
                 entity: parse_entity_id(&entity_id)?,
                 event_type: Kind::new(event_type),
@@ -857,7 +857,9 @@ impl SqliteStore {
                 signature,
                 signature_identity,
                 payload_hash: pos_core::Hash::from_bytes(ph_arr),
-            });
+            };
+            pos_core::store::validate_event_signature(&event)?;
+            events.push(event);
         }
 
         #[cfg(test)]
@@ -2849,11 +2851,20 @@ impl EventStore for SqliteStore {
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
         ciborium::from_reader(state_cbor.as_slice())
-            .map(Some)
             .map_err(|error| CoreError::Serialization(error.to_string()))
+            .and_then(|registry: KeyRegistryStateV1| {
+                registry
+                    .validate()
+                    .map(|()| registry)
+                    .map_err(|error| CoreError::Serialization(error.to_string()))
+            })
+            .map(Some)
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        registry
+            .validate()
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
         let mut state_cbor = Vec::new();
         ciborium::into_writer(registry, &mut state_cbor)
             .map_err(|error| CoreError::Serialization(error.to_string()))?;
@@ -3753,7 +3764,14 @@ impl SqliteStore {
                 .map(|identity| i64::from(identity.role.code()));
             let signature_epoch = event
                 .signature_identity
-                .map(|identity| u64_as_i64(identity.epoch));
+                .map(|identity| {
+                    i64::try_from(identity.epoch).map_err(|_| {
+                        CoreError::Storage(
+                            "signature key epoch exceeds SQLite INTEGER range".to_owned(),
+                        )
+                    })
+                })
+                .transpose()?;
             self.conn
                 .execute(
                     "INSERT INTO events
@@ -8934,6 +8952,18 @@ mod tests {
         let read = store.read(other.id(), SeqRange::all()).test_ok();
         assert_eq!(read[0].signature, ev.signature);
         assert_eq!(read[0].signature_identity, ev.signature_identity);
+
+        let mut too_large = ev;
+        too_large.id = EventId::new();
+        too_large.signature_identity = Some(KeyIdentityV1::new(
+            KeyRoleV1::TimelineIntegritySigning,
+            u64::try_from(i64::MAX).unwrap_or_default() + 1,
+        ));
+        too_large.seq = Seq::from_u64(2);
+        assert!(matches!(
+            store.append_committed(other.id(), &[too_large]),
+            Err(CoreError::Storage(message)) if message.contains("SQLite INTEGER range")
+        ));
     }
 
     #[test]
@@ -8954,6 +8984,18 @@ mod tests {
         assert!(matches!(
             store.read(timeline.id(), SeqRange::all()),
             Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature = zeroblob(64), signature_role = NULL,
+                 signature_epoch = NULL WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Storage(message)) if message.contains("role/epoch identity")
         ));
         store
             .conn

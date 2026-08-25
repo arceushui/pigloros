@@ -274,6 +274,9 @@ pub enum KeyRegistryErrorV1 {
     /// The registry adapter could not provide its atomic signing boundary.
     #[error("key registry is unavailable for authorized signing")]
     RegistryUnavailable,
+    /// A decoded durable snapshot violates the registry invariants.
+    #[error("key registry state is invalid")]
+    InvalidState,
     /// The destruction request does not match the live record.
     #[error("destruction request has the wrong material fingerprint")]
     MaterialDigestMismatch,
@@ -366,6 +369,44 @@ impl KeyRegistryStateV1 {
         }
     }
 
+    /// Validate a decoded or adapter-provided registry snapshot.
+    ///
+    /// This is a public load-boundary contract because `Deserialize` can
+    /// construct states that the mutation methods would never produce. A
+    /// caller must reject an invalid snapshot before using it for signing or
+    /// destruction authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyRegistryErrorV1::InvalidState`] when a tombstone and its
+    /// retained record disagree about whether private material still exists.
+    pub fn validate(&self) -> Result<(), KeyRegistryErrorV1> {
+        for (identity, record) in &self.records {
+            if record.identity != *identity {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if record.private_material_digest.is_none() && !self.tombstones.contains_key(identity) {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
+        for (identity, tombstone) in &self.tombstones {
+            let Some(record) = self.records.get(identity) else {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            };
+            if tombstone.identity != *identity || record.private_material_digest.is_some() {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
+        if self
+            .active
+            .values()
+            .any(|identity| self.tombstones.contains_key(identity))
+        {
+            return Err(KeyRegistryErrorV1::InvalidState);
+        }
+        Ok(())
+    }
+
     /// Register one role/epoch record.
     ///
     /// # Errors
@@ -376,6 +417,7 @@ impl KeyRegistryStateV1 {
         &mut self,
         registration: KeyRegistrationV1,
     ) -> Result<KeyRegistrationOutcomeV1, KeyRegistryErrorV1> {
+        self.validate()?;
         validate_registration(registration)?;
         let identity = registration.identity;
         if self.tombstones.contains_key(&identity) {
@@ -456,6 +498,7 @@ impl KeyRegistryStateV1 {
     where
         F: FnOnce() -> T,
     {
+        self.validate()?;
         if identity.epoch == 0 {
             return Err(KeyRegistryErrorV1::InvalidEpoch);
         }
@@ -467,6 +510,9 @@ impl KeyRegistryStateV1 {
             .get(&identity)
             .copied()
             .ok_or(KeyRegistryErrorV1::NotFound)?;
+        if self.tombstones.contains_key(&identity) {
+            return Err(KeyRegistryErrorV1::Destroyed);
+        }
         if record.private_material_digest.is_none() {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
@@ -495,6 +541,7 @@ impl KeyRegistryStateV1 {
         &mut self,
         request: KeyDestructionRequestV1,
     ) -> Result<KeyDestructionOutcomeV1, KeyRegistryErrorV1> {
+        self.validate()?;
         if let Some(tombstone) = self.tombstones.get(&request.identity).copied() {
             if tombstone.destroyed_material_digest != request.expected_material_digest {
                 return Err(KeyRegistryErrorV1::MaterialDigestMismatch);
@@ -819,6 +866,63 @@ mod tests {
         assert_eq!(
             registry.register_key(signing_registration(ATTRIBUTION, 2)),
             Err(KeyRegistryErrorV1::Destroyed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_tombstone_state_cannot_authorize_signing() -> Result<(), KeyRegistryErrorV1> {
+        let mut missing_tombstone = KeyRegistryStateV1::new();
+        missing_tombstone.register_key(signing_registration(ATTRIBUTION, 19))?;
+        missing_tombstone
+            .records
+            .get_mut(&ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .private_material_digest = None;
+        assert_eq!(
+            missing_tombstone.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut missing_record = KeyRegistryStateV1::new();
+        missing_record.tombstones.insert(
+            ATTRIBUTION,
+            KeyTombstoneV1 {
+                identity: ATTRIBUTION,
+                destroyed_material_digest: digest(18),
+                destruction_digest: digest(17),
+            },
+        );
+        assert_eq!(
+            missing_record.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(signing_registration(ATTRIBUTION, 20))?;
+        registry.destroy_key(KeyDestructionRequestV1::new(
+            ATTRIBUTION,
+            digest(20),
+            digest(21),
+        ))?;
+        registry.active.insert(ATTRIBUTION.role, ATTRIBUTION);
+        assert_eq!(registry.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        registry.active.remove(&ATTRIBUTION.role);
+        registry
+            .records
+            .get_mut(&ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .private_material_digest = Some(digest(20));
+
+        assert_eq!(registry.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        assert_eq!(
+            registry.with_signing_authorization(
+                ATTRIBUTION,
+                digest(20),
+                PublicKey::from_bytes([20; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::InvalidState)
         );
         Ok(())
     }

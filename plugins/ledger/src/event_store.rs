@@ -661,6 +661,56 @@ mod tests {
     }
 
     #[test]
+    fn retained_public_key_verifies_event_after_sqlite_reopen_and_destruction(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let db = temp.path().join("ledger.db");
+        let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let mut raw_store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })?;
+        let timeline = raw_store.create_timeline("ledger")?;
+        let mut store = EventLedgerStore::new(
+            raw_store,
+            timeline.id(),
+            EntityId::new(),
+            signing_key.clone(),
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+        store.register(contract::sample_new_prediction("2026-08-01"))?;
+        store.destroy_signing_key(pos_core::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            pos_core::Hash::from_bytes([10; 32]),
+        ))?;
+        drop(store);
+
+        let reopened = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })?;
+        let persisted = reopened
+            .load_key_registry()?
+            .ok_or("expected persisted registry")?;
+        assert!(persisted.tombstone(identity).is_some());
+        let events = reopened.read(timeline.id(), SeqRange::all())?;
+        let event = events.first().ok_or("expected signed prediction event")?;
+        let signature = event.signature.as_ref().ok_or("expected signature")?;
+        assert_eq!(event.signature_identity, Some(identity));
+        verify_for_role(
+            &verifying_key,
+            identity.role,
+            identity.epoch,
+            &event.payload,
+            signature,
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn stale_sqlite_adapter_cannot_append_after_registry_destruction(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;

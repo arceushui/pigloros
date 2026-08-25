@@ -1121,6 +1121,7 @@ pub fn validate_committed_batch(
     let mut expected = head.next();
     let mut seen = std::collections::HashSet::new();
     for event in &ordered {
+        validate_event_signature(event)?;
         if event.seq.as_u64() == 0 {
             return Err(CoreError::Storage(
                 "committed event seq must be >= 1".to_owned(),
@@ -1147,6 +1148,27 @@ pub fn validate_committed_batch(
         expected = expected.next();
     }
     Ok(ordered)
+}
+
+/// Validate the role/epoch binding of a committed event signature.
+///
+/// An unsigned event has neither field. A signed event must carry both a
+/// signature and a non-zero identity for one of the signing roles; accepting
+/// either half independently would let a durable store retain an event whose
+/// signer cannot be identified.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Storage`] when the two fields are inconsistent or the
+/// identity is not eligible to sign.
+pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
+    match (event.signature.as_ref(), event.signature_identity) {
+        (None, None) => Ok(()),
+        (Some(_), Some(identity)) if identity.epoch != 0 && identity.role.is_signing() => Ok(()),
+        _ => Err(CoreError::Storage(
+            "signed event must carry a signing role/epoch identity".to_owned(),
+        )),
+    }
 }
 
 fn export_timeline_using(
@@ -2256,6 +2278,31 @@ mod tests {
         )
         .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains(">= 1")));
+
+        let mut signature_without_identity = mk(1, crate::ids::EventId::new());
+        signature_without_identity.signature = Some(crate::Signature::from_bytes([1; 64]));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[signature_without_identity],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+
+        let mut identity_without_signature = mk(1, crate::ids::EventId::new());
+        identity_without_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            crate::KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[identity_without_signature],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
 
         let ok =
             validate_committed_batch(Seq::ZERO, &[], &mut |_| false, &match_hasher).test_ok()?;
