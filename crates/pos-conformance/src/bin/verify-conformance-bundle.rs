@@ -11,13 +11,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
+    run_with_verifier(&mut arguments, verify_path)
+}
+
+fn run_with_verifier(
+    arguments: &mut impl Iterator<Item = OsString>,
+    verify: impl Fn(&Path) -> Result<(), Box<dyn Error>>,
+) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let paths = arguments.collect::<Vec<_>>();
     if paths.is_empty() {
         return Err("usage: verify-conformance-bundle <archive>...".into());
     }
     for path in paths {
-        verify_path(Path::new(&path))?;
+        verify(Path::new(&path))?;
     }
     Ok(())
 }
@@ -30,7 +37,7 @@ fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{main, run, verify_path};
+    use super::{main, run, run_with_verifier, verify_path};
     use std::ffi::OsString;
     use std::fs;
 
@@ -45,6 +52,12 @@ mod tests {
     #[test]
     fn verifier_main_wires_the_process_arguments() {
         assert!(main().is_err());
+    }
+
+    #[test]
+    fn verifier_accepts_each_path_when_the_independent_verifier_accepts() {
+        let mut arguments = [OsString::from("verify"), OsString::from("archive.cbor")].into_iter();
+        assert!(run_with_verifier(&mut arguments, |_| Ok(())).is_ok());
     }
 
     #[test]

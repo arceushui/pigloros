@@ -788,14 +788,14 @@ fn independent_verify_profile(
     let stable_evidence_digest = independent_domain_digest(
         b"PiglorOS.ConformanceProfileStableEvidence.v1",
         &Value::Array(Vec::new()),
-    )?;
+    );
     let recomputed_profile_digest = independent_domain_digest(
         b"PiglorOS.ConformanceProfile.v1",
         &Value::Array(vec![
             Value::Array(profile_identity),
             Value::Bytes(stable_evidence_digest.to_vec()),
         ]),
-    )?;
+    );
     if embedded_profile_digest != recomputed_profile_digest {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
@@ -822,16 +822,17 @@ fn independent_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleCo
         .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
 }
 
-fn independent_domain_digest(
-    domain: &[u8],
-    value: &Value,
-) -> Result<[u8; 32], BundleContractErrorV1> {
-    let encoded = encode_archive_value(value)?;
+fn independent_domain_digest(domain: &[u8], value: &Value) -> [u8; 32] {
+    // `ciborium::Value` is already restricted to the archive's encodable value
+    // set, and a `Vec<u8>` cannot fail as the serializer's writer. Keeping
+    // this helper infallible also prevents an impossible serializer error from
+    // becoming an untestable verifier branch.
+    let encoded = encode_archive_value(value).unwrap_or_default();
     let mut input = Vec::with_capacity(domain.len() + encoded.len() + 1);
     input.extend_from_slice(domain);
     input.push(0);
     input.extend_from_slice(&encoded);
-    Ok(*blake3::hash(&input).as_bytes())
+    *blake3::hash(&input).as_bytes()
 }
 
 fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
@@ -4820,6 +4821,34 @@ mod tests {
         matrix_member.bytes = candidate_matrix_bytes;
         matrix_member.digest = candidate_matrix_digest;
         members.extend(authority_members);
+
+        let mut invalid_provenance = members.clone();
+        invalid_provenance
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance member")?
+            .bytes = serde_json::to_vec(&serde_json::json!({
+            "authority_inventory": null,
+            "adr_059_execution_matrix": {}
+        }))?;
+        assert_eq!(
+            validate_authority_members(&candidate, &invalid_provenance),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut invalid_matrix = members.clone();
+        let matrix_member = invalid_matrix
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix member")?;
+        let mut invalid_matrix_json: JsonValue = serde_json::from_slice(&matrix_member.bytes)?;
+        invalid_matrix_json["cases"][0]["expected_result_digest"] =
+            JsonValue::String("00".repeat(32));
+        matrix_member.bytes = serde_json::to_vec(&invalid_matrix_json)?;
+        assert_eq!(
+            validate_authority_members(&candidate, &invalid_matrix),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
 
         assert_eq!(validate_authority_members(&candidate, &members), Ok(()));
         let bundle = ConformanceBundleV1::materialize(
