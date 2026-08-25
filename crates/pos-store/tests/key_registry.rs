@@ -102,3 +102,93 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
     assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
 }
+
+#[test]
+fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (registry, identity, material_digest) = registry()?;
+    let mut setup = SqliteStore::open(path)?;
+    setup.save_key_registry(&registry)?;
+    let timeline = setup.create_timeline("registry-ordering")?;
+    let mut event = seed_event(&mut setup, timeline.id())?;
+    event.id = EventId::new();
+    drop(setup);
+
+    let mut signing_store = SqliteStore::open(path)?;
+    let mut destruction_store = SqliteStore::open(path)?;
+    let destruction_request =
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
+    let (callback_entered_tx, callback_entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (destruction_done_tx, destruction_done_rx) = std::sync::mpsc::channel();
+    let live_registry = registry.clone();
+
+    let (sign_result, destroy_result, destruction_waited) = std::thread::scope(|scope| {
+        let sign_handle = scope.spawn(move || {
+            let mut callback_event = event;
+            let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
+                callback_entered_tx
+                    .send(())
+                    .map_err(|_| CoreError::Storage("signing callback signal failed".to_owned()))?;
+                release_rx.recv().map_err(|_| {
+                    CoreError::Storage("signing callback release failed".to_owned())
+                })?;
+                callback_event.seq = seq;
+                Ok::<Event, CoreError>(callback_event.clone())
+            };
+            signing_store.append_signed_authorized(timeline.id(), &live_registry, &mut callback)
+        });
+        callback_entered_rx.recv()?;
+
+        let destroy_handle = scope.spawn(move || {
+            let result = destruction_store.destroy_key_registry(destruction_request);
+            let _ = destruction_done_tx.send(());
+            result
+        });
+        let destruction_waited = matches!(
+            destruction_done_rx.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        release_tx.send(())?;
+        let sign_result = sign_handle
+            .join()
+            .map_err(|_| std::io::Error::other("signing thread panicked"))?;
+        let destroy_result = destroy_handle
+            .join()
+            .map_err(|_| std::io::Error::other("destruction thread panicked"))?;
+        Ok::<_, Box<dyn std::error::Error>>((sign_result, destroy_result, destruction_waited))
+    })?;
+
+    assert!(destruction_waited);
+    assert!(sign_result.is_ok());
+    assert!(destroy_result.is_ok());
+
+    let mut late_signing_store = SqliteStore::open(path)?;
+    let mut callback_called = false;
+    let mut late_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        callback_called = true;
+        Err::<Event, _>(CoreError::Storage(
+            "destroyed signing key callback must not run".to_owned(),
+        ))
+    };
+    assert!(late_signing_store
+        .append_signed_authorized(timeline.id(), &registry, &mut late_callback)
+        .is_err());
+    assert!(!callback_called);
+    assert_eq!(
+        late_signing_store
+            .read(timeline.id(), pos_core::SeqRange::all())?
+            .len(),
+        2
+    );
+    assert!(late_signing_store
+        .load_key_registry()?
+        .and_then(|value| value.tombstone(identity))
+        .is_some());
+    Ok(())
+}
