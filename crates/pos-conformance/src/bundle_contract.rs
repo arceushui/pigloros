@@ -987,12 +987,12 @@ struct ScannedArchiveItem<'a> {
 }
 
 struct IndependentArchiveCaps {
-    max_profile_bytes: u64,
-    max_bundle_members: u64,
-    max_member_path_bytes: u64,
-    max_member_bytes: u64,
-    max_total_bundle_bytes: u64,
-    max_structural_nesting: u64,
+    profile_bytes: u64,
+    bundle_members: u64,
+    member_path_bytes: u64,
+    member_bytes: u64,
+    total_bundle_bytes: u64,
+    structural_nesting: u64,
 }
 
 mod archive_preflight {
@@ -1254,12 +1254,12 @@ fn independent_archive_caps(
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
     Ok(IndependentArchiveCaps {
-        max_profile_bytes: *max_profile_bytes,
-        max_bundle_members: *max_bundle_members,
-        max_member_path_bytes: *max_member_path_bytes,
-        max_member_bytes: *max_member_bytes,
-        max_total_bundle_bytes: *max_total_bundle_bytes,
-        max_structural_nesting: *max_structural_nesting,
+        profile_bytes: *max_profile_bytes,
+        bundle_members: *max_bundle_members,
+        member_path_bytes: *max_member_path_bytes,
+        member_bytes: *max_member_bytes,
+        total_bundle_bytes: *max_total_bundle_bytes,
+        structural_nesting: *max_structural_nesting,
     })
 }
 
@@ -1269,15 +1269,15 @@ fn validate_independent_preflight_caps(
     encoded_len: usize,
 ) -> Result<(), BundleContractErrorV1> {
     let encoded_len = u64::try_from(encoded_len).unwrap_or(u64::MAX);
-    if encoded_len > caps.max_total_bundle_bytes
+    if encoded_len > caps.total_bundle_bytes
         || u64::try_from(preflight.profile_bytes.map_or(0, <[u8]>::len)).unwrap_or(u64::MAX)
-            > caps.max_profile_bytes
-        || u64::try_from(preflight.maximum_depth).unwrap_or(u64::MAX) > caps.max_structural_nesting
-        || u64::try_from(preflight.member_count).unwrap_or(u64::MAX) > caps.max_bundle_members
+            > caps.profile_bytes
+        || u64::try_from(preflight.maximum_depth).unwrap_or(u64::MAX) > caps.structural_nesting
+        || u64::try_from(preflight.member_count).unwrap_or(u64::MAX) > caps.bundle_members
         || u64::try_from(preflight.largest_member_path_bytes).unwrap_or(u64::MAX)
-            > caps.max_member_path_bytes
-        || preflight.largest_member_bytes > caps.max_member_bytes
-        || preflight.total_member_bytes > caps.max_total_bundle_bytes
+            > caps.member_path_bytes
+        || preflight.largest_member_bytes > caps.member_bytes
+        || preflight.total_member_bytes > caps.total_bundle_bytes
     {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
