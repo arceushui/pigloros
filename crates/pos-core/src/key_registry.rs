@@ -415,7 +415,7 @@ impl KeyRegistryStateV1 {
         for (role, identity) in &self.active {
             if identity.role != *role
                 || self.tombstones.contains_key(identity)
-                || self.records.get(identity).is_none()
+                || !self.records.contains_key(identity)
                 || self.highest_epoch.get(role) != Some(&identity.epoch)
             {
                 return Err(KeyRegistryErrorV1::InvalidState);

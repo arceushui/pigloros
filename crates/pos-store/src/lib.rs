@@ -1018,6 +1018,7 @@ mod tests {
             ids::EventId,
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
+            KeyIdentityV1, KeyRoleV1,
         };
         use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
 
@@ -1037,7 +1038,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(sig),
-            signature_identity: None,
+            signature_identity: Some(KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1)),
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let export = TimelineExport {
