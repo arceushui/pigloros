@@ -400,7 +400,7 @@ fn profile_for_claim_layer(
         b"deterministic-air-gapped-v1",
     );
     let mut execution_profile_digests = vec![
-        execution_profile_digest,
+        context.execution_profile_digest,
         air_gapped_execution_profile_digest,
     ];
     execution_profile_digests.sort_unstable();
