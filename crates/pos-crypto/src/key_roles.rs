@@ -79,7 +79,10 @@ pub fn verify_for_role(
     payload: &CanonicalBytes,
     signature: &Signature,
 ) -> Result<(), pos_core::CoreError> {
-    if epoch == 0 || !role.is_signing() {
+    if epoch == 0 {
+        return Err(pos_core::CoreError::SignatureVerificationFailed);
+    }
+    if !role.is_signing() {
         return Err(pos_core::CoreError::SignatureVerificationFailed);
     }
     let message = role_bound_message(role, epoch, payload);
@@ -148,6 +151,14 @@ mod tests {
             3,
             &value,
             &signature
+        )
+        .is_err());
+        assert!(verify_for_role(
+            &verifying_key,
+            KeyRoleV1::SubjectDataEncryption,
+            3,
+            &value,
+            &signature,
         )
         .is_err());
         assert!(verify_for_role(

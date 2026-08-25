@@ -383,10 +383,13 @@ impl KeyRegistryStateV1 {
     pub fn validate(&self) -> Result<(), KeyRegistryErrorV1> {
         let mut reserved_material = HashSet::new();
         for (identity, record) in &self.records {
-            if record.identity != *identity
-                || identity.epoch == 0
-                || identity.role.is_signing() != record.public_verification_key.is_some()
-            {
+            if record.identity != *identity {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if identity.epoch == 0 {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if identity.role.is_signing() != record.public_verification_key.is_some() {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
             if !self.highest_epoch.contains_key(&identity.role) {
@@ -416,11 +419,16 @@ impl KeyRegistryStateV1 {
             }
         }
         for (role, identity) in &self.active {
-            if identity.role != *role
-                || self.tombstones.contains_key(identity)
-                || !self.records.contains_key(identity)
-                || self.highest_epoch.get(role) != Some(&identity.epoch)
-            {
+            if identity.role != *role {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if self.tombstones.contains_key(identity) {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if !self.records.contains_key(identity) {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if self.highest_epoch.get(role) != Some(&identity.epoch) {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
         }
@@ -435,10 +443,76 @@ impl KeyRegistryStateV1 {
             let Some(record) = self.records.get(identity) else {
                 return Err(KeyRegistryErrorV1::InvalidState);
             };
-            if tombstone.identity != *identity || record.private_material_digest.is_some() {
+            if tombstone.identity != *identity {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            if record.private_material_digest.is_some() {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
             if !reserved_material.insert(tombstone.destroyed_material_digest) {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate a durable replacement without permitting history rollback.
+    ///
+    /// A backend may append a new epoch or transition one live record into its
+    /// tombstoned form, but it may not drop records, restore private-material
+    /// fingerprints, rewrite public verification material, or lower a role's
+    /// epoch high-water mark.
+    ///
+    /// # Errors
+    ///
+    /// Returns InvalidState when next would erase durable destruction or alter
+    /// an already accepted identity.
+    pub fn validate_replacement(&self, next: &Self) -> Result<(), KeyRegistryErrorV1> {
+        self.validate()?;
+        next.validate()?;
+
+        for (identity, previous) in &self.records {
+            let Some(current) = next.records.get(identity) else {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            };
+            if current.identity != previous.identity
+                || current.public_verification_key != previous.public_verification_key
+            {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+            match (
+                previous.private_material_digest,
+                current.private_material_digest,
+            ) {
+                (Some(previous_digest), Some(current_digest))
+                    if previous_digest != current_digest =>
+                {
+                    return Err(KeyRegistryErrorV1::InvalidState);
+                }
+                (Some(previous_digest), None) => {
+                    let Some(tombstone) = next.tombstones.get(identity) else {
+                        return Err(KeyRegistryErrorV1::InvalidState);
+                    };
+                    if tombstone.destroyed_material_digest != previous_digest {
+                        return Err(KeyRegistryErrorV1::InvalidState);
+                    }
+                }
+                (None, None) => {
+                    if next.tombstones.get(identity) != self.tombstones.get(identity) {
+                        return Err(KeyRegistryErrorV1::InvalidState);
+                    }
+                }
+                (None, Some(_)) => return Err(KeyRegistryErrorV1::InvalidState),
+            }
+        }
+
+        for (role, previous_epoch) in &self.highest_epoch {
+            if next.highest_epoch.get(role).copied().unwrap_or(0) < *previous_epoch {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
+        for (identity, tombstone) in &self.tombstones {
+            if next.tombstones.get(identity) != Some(tombstone) {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
         }
@@ -1055,6 +1129,96 @@ mod tests {
             }
         })?;
         assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_state_rejects_each_snapshot_cross_reference(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut mismatched_record = KeyRegistryStateV1::new();
+        mismatched_record.register_key(signing_registration(ATTRIBUTION, 32))?;
+        mismatched_record
+            .records
+            .get_mut(&ATTRIBUTION)
+            .ok_or("missing record")?
+            .identity = KeyIdentityV1::new(ATTRIBUTION.role, 2);
+        assert_eq!(
+            mismatched_record.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut zero_epoch = KeyRegistryStateV1::new();
+        let zero = KeyIdentityV1::new(ATTRIBUTION.role, 0);
+        zero_epoch.records.insert(
+            zero,
+            KeyRecordV1 {
+                identity: zero,
+                private_material_digest: Some(digest(33)),
+                public_verification_key: Some(PublicKey::from_bytes([33; 32])),
+            },
+        );
+        zero_epoch.active.insert(zero.role, zero);
+        zero_epoch.highest_epoch.insert(zero.role, 0);
+        assert_eq!(zero_epoch.validate(), Err(KeyRegistryErrorV1::InvalidState));
+
+        let mut high_water_mismatch = KeyRegistryStateV1::new();
+        high_water_mismatch.register_key(signing_registration(ATTRIBUTION, 34))?;
+        high_water_mismatch
+            .highest_epoch
+            .insert(ATTRIBUTION.role, 2);
+        assert_eq!(
+            high_water_mismatch.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut orphaned_tombstone = KeyRegistryStateV1::new();
+        orphaned_tombstone.register_key(signing_registration(ATTRIBUTION, 35))?;
+        orphaned_tombstone.destroy_key(KeyDestructionRequestV1::new(
+            ATTRIBUTION,
+            digest(35),
+            digest(36),
+        ))?;
+        orphaned_tombstone.records.remove(&ATTRIBUTION);
+        orphaned_tombstone.active.remove(&ATTRIBUTION.role);
+        orphaned_tombstone.highest_epoch.remove(&ATTRIBUTION.role);
+        assert_eq!(
+            orphaned_tombstone.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut mismatched_tombstone = KeyRegistryStateV1::new();
+        mismatched_tombstone.register_key(signing_registration(ATTRIBUTION, 37))?;
+        mismatched_tombstone.destroy_key(KeyDestructionRequestV1::new(
+            ATTRIBUTION,
+            digest(37),
+            digest(38),
+        ))?;
+        mismatched_tombstone
+            .tombstones
+            .get_mut(&ATTRIBUTION)
+            .ok_or("missing tombstone")?
+            .identity = KeyIdentityV1::new(ATTRIBUTION.role, 2);
+        assert_eq!(
+            mismatched_tombstone.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut restored_material = KeyRegistryStateV1::new();
+        restored_material.register_key(signing_registration(ATTRIBUTION, 39))?;
+        restored_material.destroy_key(KeyDestructionRequestV1::new(
+            ATTRIBUTION,
+            digest(39),
+            digest(40),
+        ))?;
+        restored_material
+            .records
+            .get_mut(&ATTRIBUTION)
+            .ok_or("missing destroyed record")?
+            .private_material_digest = Some(digest(39));
+        assert_eq!(
+            restored_material.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
         Ok(())
     }
 

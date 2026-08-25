@@ -36,7 +36,7 @@ pub struct EventLedgerStore {
     store: Box<dyn EventStore>,
     timeline_id: pos_core::ids::TimelineId,
     entity: EntityId,
-    signing_key: SigningKey,
+    signing_key: Option<SigningKey>,
     key_registry: Arc<Mutex<KeyRegistryStateV1>>,
     signing_identity: KeyIdentityV1,
     hasher: Box<dyn Hasher>,
@@ -90,7 +90,7 @@ impl EventLedgerStore {
             store,
             timeline_id,
             entity,
-            signing_key,
+            signing_key: Some(signing_key),
             key_registry,
             signing_identity,
             hasher,
@@ -115,11 +115,18 @@ impl EventLedgerStore {
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
+        let destroys_owned_key = self.signing_key.as_ref().is_some_and(|signing_key| {
+            request.identity == self.signing_identity
+                && key_material_digest(&signing_key.to_bytes()) == request.expected_material_digest
+        });
         let (outcome, next) = self
             .store
             .destroy_key_registry(request)
             .map_err(LedgerError::from)?;
         *registry = next;
+        if destroys_owned_key {
+            self.signing_key = None;
+        }
         drop(registry);
         Ok(outcome)
     }
@@ -145,7 +152,9 @@ impl EventLedgerStore {
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
-        let signing_key = &self.signing_key;
+        let signing_key = self.signing_key.as_ref().ok_or_else(|| {
+            LedgerError::Store("ledger signing key has been irreversibly destroyed".to_owned())
+        })?;
         let signing_identity = self.signing_identity;
         let entity = self.entity;
         let mut create_event = move |registry: &KeyRegistryStateV1, seq: Seq| {
@@ -448,7 +457,7 @@ mod tests {
             Box::new(memory),
             pos_core::ids::TimelineId::new(),
             EntityId::new(),
-            signing_key.clone(),
+            signing_key,
             poisoned_registry(),
             identity,
             Box::new(Blake3Hasher),
@@ -540,6 +549,7 @@ mod tests {
             material_digest,
             pos_core::Hash::from_bytes([8; 32]),
         ))?;
+        assert!(store.signing_key.is_none());
         let error = store
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
@@ -813,8 +823,13 @@ mod tests {
         assert_eq!(ledger.entries()[0].prediction.prediction_id, id);
         let events = store.store.read(store.timeline_id, SeqRange::all())?;
         let signature = events[0].signature.as_ref().ok_or("missing signature")?;
+        let verifying_key = store
+            .signing_key
+            .as_ref()
+            .ok_or("signing key unexpectedly destroyed")?
+            .verifying_key();
         verify_for_role(
-            &store.signing_key.verifying_key(),
+            &verifying_key,
             KeyRoleV1::TimelineIntegritySigning,
             1,
             &events[0].payload,

@@ -1164,7 +1164,14 @@ pub fn validate_committed_batch(
 pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
     match (event.signature.as_ref(), event.signature_identity) {
         (None, None) => Ok(()),
-        (Some(_), Some(identity)) if identity.epoch != 0 && identity.role.is_signing() => Ok(()),
+        (Some(_), Some(identity)) => {
+            if identity.epoch == 0 || !identity.role.is_signing() {
+                return Err(CoreError::Storage(
+                    "signed event must carry a signing role/epoch identity".to_owned(),
+                ));
+            }
+            Ok(())
+        }
         _ => Err(CoreError::Storage(
             "signed event must carry a signing role/epoch identity".to_owned(),
         )),
@@ -2313,6 +2320,36 @@ mod tests {
         let err = validate_committed_batch(
             Seq::ZERO,
             &[identity_without_signature],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+
+        let mut zero_epoch_signature = validation_test_event(1, crate::ids::EventId::new());
+        zero_epoch_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
+        zero_epoch_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            crate::KeyRoleV1::TimelineIntegritySigning,
+            0,
+        ));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[zero_epoch_signature],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+
+        let mut encryption_signature = validation_test_event(1, crate::ids::EventId::new());
+        encryption_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
+        encryption_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            crate::KeyRoleV1::SubjectDataEncryption,
+            1,
+        ));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[encryption_signature],
             &mut |_| false,
             &match_hasher,
         )

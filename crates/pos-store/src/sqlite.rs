@@ -2865,6 +2865,11 @@ impl EventStore for SqliteStore {
         registry
             .validate()
             .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        if let Some(previous) = self.load_key_registry()? {
+            previous
+                .validate_replacement(registry)
+                .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        }
         let mut state_cbor = Vec::new();
         ciborium::into_writer(registry, &mut state_cbor)
             .map_err(|error| CoreError::Serialization(error.to_string()))?;

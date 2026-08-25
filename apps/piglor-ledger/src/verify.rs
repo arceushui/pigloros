@@ -292,7 +292,7 @@ mod tests {
 
     fn run_store_event(
         event: pos_core::event::Event,
-        registry: pos_core::KeyRegistryStateV1,
+        registry: &pos_core::KeyRegistryStateV1,
         supplied_public_key: Option<pos_core::PublicKey>,
         signature_identity: Option<pos_core::KeyIdentityV1>,
         signed: bool,
@@ -305,7 +305,7 @@ mod tests {
         .test_ok()?;
         let timeline = store.create_timeline("ledger").test_ok()?;
         store.append_committed(timeline.id(), &[event]).test_ok()?;
-        store.save_key_registry(&registry).test_ok()?;
+        store.save_key_registry(registry).test_ok()?;
         drop(store);
         if signed {
             let connection = rusqlite::Connection::open(&db)?;
@@ -1127,12 +1127,12 @@ mod tests {
         };
 
         let missing_identity =
-            run_store_event(event(), KeyRegistryStateV1::new(), None, None, true)?.test_err()?;
+            run_store_event(event(), &KeyRegistryStateV1::new(), None, None, true)?.test_err()?;
         assert!(missing_identity.to_string().contains("signed event"));
 
         let wrong_role = run_store_event(
             event(),
-            KeyRegistryStateV1::new(),
+            &KeyRegistryStateV1::new(),
             None,
             Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1)),
             true,
@@ -1154,7 +1154,7 @@ mod tests {
 
         let supplied_mismatch = run_store_event(
             event(),
-            registry.clone(),
+            &registry,
             Some(PublicKey::from_bytes([7; 32])),
             Some(identity),
             true,
@@ -1165,7 +1165,7 @@ mod tests {
 
         let no_public_key = run_store_event(
             event(),
-            KeyRegistryStateV1::new(),
+            &KeyRegistryStateV1::new(),
             None,
             Some(identity),
             true,
@@ -1174,7 +1174,7 @@ mod tests {
         assert!(no_public_key.to_string().contains("no public key"));
 
         let invalid_signature =
-            run_store_event(event(), registry, None, Some(identity), true)?.test_ok()?;
+            run_store_event(event(), &registry, None, Some(identity), true)?.test_ok()?;
         let (_, reason) = expect_mismatch(invalid_signature.outcome)?;
         assert!(!reason.is_empty());
         Ok(())

@@ -98,6 +98,7 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
     let (_, destroyed) = store.destroy_key_registry(valid_request)?;
     assert!(destroyed.key_record(identity).is_some());
+    assert!(store.save_key_registry(&KeyRegistryStateV1::new()).is_err());
     assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
 }
