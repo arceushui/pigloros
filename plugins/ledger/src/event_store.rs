@@ -406,6 +406,14 @@ mod tests {
         ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
             Err(CoreError::Storage("registry destroy failed".to_owned()))
         }
+
+        fn append_committed(
+            &mut self,
+            _timeline: pos_core::ids::TimelineId,
+            _events: &[Event],
+        ) -> Result<(), CoreError> {
+            Ok(())
+        }
     }
 
     fn poisoned_registry() -> Arc<Mutex<KeyRegistryStateV1>> {
