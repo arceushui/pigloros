@@ -1,3 +1,4 @@
+# This file is read from the pull request's trusted base revision by the scope jobs.
 # The Rust gate is skipped only when every changed path is documentation-only.
 # Keep this list conservative: an unknown path must run the full gate set.
 rust:

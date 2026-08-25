@@ -63,16 +63,19 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
       - name: Detect Rust-affecting changes
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: scope
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && hashFiles('.github/rust-scope.yml') != ''
         with:
           filters: .github/rust-scope.yml
           predicate-quantifier: some-with-excludes
       - name: Use full scope for non-pull-request events
         id: full
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || hashFiles('.github/rust-scope.yml') == ''
         run: printf 'rust=true\n' >> "$GITHUB_OUTPUT"
 
   fmt:
@@ -709,6 +712,8 @@ jobs:
         run: bash scripts/check-pinned-dependencies.sh
       - name: Test pinned dependency checker
         run: bash scripts/test-check-pinned-dependencies.sh
+      - name: Test Rust scope filter policy
+        run: python scripts/test_rust_scope_policy.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker
