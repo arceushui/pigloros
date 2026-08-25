@@ -303,14 +303,22 @@ fn validated_profile_record(
 ) -> Result<(&'static [u8], JsonValue), Box<dyn Error>> {
     let profile_record_bytes = profile_record_bytes(claim_layer)?;
     let profile_record: JsonValue = serde_json::from_slice(profile_record_bytes)?;
-    if json_text(&profile_record, "profile_id")? != profile_id(claim_layer)
-        || json_text(&profile_record, "claim_layer")? != claim_layer_name(claim_layer)
-        || json_text(&profile_record, "authority_inventory")? != "expected-authority/inventory.json"
-        || json_text(&profile_record, "adr_059_execution_matrix")? != "matrix/adr-059-complete.json"
-        || json_text(&profile_record, "adr_059_execution_matrix_status")? != "Draft"
-        || json_string_array(&profile_record, "execution_profiles")?
+    validate_profile_record_bindings(claim_layer, &profile_record)?;
+    Ok((profile_record_bytes, profile_record))
+}
+
+fn validate_profile_record_bindings(
+    claim_layer: ClaimLayerV1,
+    profile_record: &JsonValue,
+) -> Result<(), Box<dyn Error>> {
+    if json_text(profile_record, "profile_id")? != profile_id(claim_layer)
+        || json_text(profile_record, "claim_layer")? != claim_layer_name(claim_layer)
+        || json_text(profile_record, "authority_inventory")? != "expected-authority/inventory.json"
+        || json_text(profile_record, "adr_059_execution_matrix")? != "matrix/adr-059-complete.json"
+        || json_text(profile_record, "adr_059_execution_matrix_status")? != "Draft"
+        || json_string_array(profile_record, "execution_profiles")?
             != vec!["deterministic-local-v1", "deterministic-air-gapped-v1"]
-        || json_string_array(&profile_record, "bundle_modes")? != vec!["local", "air-gapped"]
+        || json_string_array(profile_record, "bundle_modes")? != vec!["local", "air-gapped"]
     {
         return Err("canonical profile record has invalid binding metadata".into());
     }
@@ -318,17 +326,17 @@ fn validated_profile_record(
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
     let matrix = include_bytes!("../../../../fixtures/conformance/matrix/adr-059-complete.json");
     if decode_hex(json_text(
-        &profile_record,
+        profile_record,
         "authority_inventory_sha256_digest",
     )?) != Some(Sha256::digest(inventory).into())
         || decode_hex(json_text(
-            &profile_record,
+            profile_record,
             "adr_059_execution_matrix_blake3_digest",
         )?) != Some(*blake3::hash(matrix).as_bytes())
     {
         return Err("canonical profile record digest binding is invalid".into());
     }
-    Ok((profile_record_bytes, profile_record))
+    Ok(())
 }
 
 fn fixture_context(
@@ -1015,6 +1023,24 @@ mod tests {
         digest.unwrap_or_default()
     }
 
+    fn local_bundle_artifacts(
+        profile: &ConformanceProfileV1,
+        signing_key: &SigningKey,
+    ) -> Result<(Vec<u8>, [u8; 32], Vec<u8>), Box<dyn Error>> {
+        let (members, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
+        let bundle = ConformanceBundleV1::materialize(
+            profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?
+        .sign(signing_key)?;
+        let digest = bundle.bundle_digest()?;
+        let manifest = bundle.manifest_bytes()?;
+        let bytes = bundle.to_canonical_cbor()?;
+        Ok((bytes, digest, manifest))
+    }
+
     fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV1, Box<dyn Error>> {
         profile_for_claim_layer(claim_layer)
     }
@@ -1082,6 +1108,82 @@ mod tests {
         assert_eq!(decode_hex(&"ab".repeat(32)), Some([0xab; 32]));
         assert_eq!(decode_hex(&"AB".repeat(32)), Some([0xab; 32]));
         assert_eq!(hex(&[0xabu8; 32]), "ab".repeat(32));
+        assert!(json_text(&JsonValue::Null, "missing").is_err());
+        assert!(json_string_array(&JsonValue::Null, "missing").is_err());
+        assert!(json_string_array(&serde_json::json!({"values": ["ok", 7]}), "values").is_err());
+
+        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity)?;
+        let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
+        let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
+        assert!(validate_profile_record_bindings(
+            ClaimLayerV1::ArtifactIntegrity,
+            &canonical_record
+        )
+        .is_ok());
+        let mut invalid_metadata = canonical_record.clone();
+        invalid_metadata["profile_id"] = JsonValue::String("invalid".to_owned());
+        assert!(validate_profile_record_bindings(
+            ClaimLayerV1::ArtifactIntegrity,
+            &invalid_metadata
+        )
+        .is_err());
+        let mut invalid_digest = canonical_record.clone();
+        invalid_digest["authority_inventory_sha256_digest"] = JsonValue::String("00".repeat(32));
+        assert!(
+            validate_profile_record_bindings(ClaimLayerV1::ArtifactIntegrity, &invalid_digest)
+                .is_err()
+        );
+        let mut invalid_fixtures = canonical_record.clone();
+        invalid_fixtures["fixtures"] = JsonValue::Array(Vec::new());
+        assert!(fixtures_from_profile_record(&invalid_fixtures, &context).is_err());
+        invalid_fixtures["fixtures"] = JsonValue::Null;
+        assert!(fixtures_from_profile_record(&invalid_fixtures, &context).is_err());
+        let invalid_fixture = serde_json::json!({
+            "case_id": "artifact-positive",
+            "family": "positive",
+            "input": "inputs/replay-negative.json",
+            "expected": "expected/replay-negative.json"
+        });
+        assert!(fixture(&invalid_fixture, &context).is_err());
+        assert!(canonical_fixture_bytes("unknown", "unknown").is_err());
+        assert!(canonical_fixture_input("unknown", "unknown").is_err());
+
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let (bundle_bytes, bundle_digest, manifest) =
+            local_bundle_artifacts(&profile, &signing_key)?;
+        let mut wrong_digest = bundle_digest;
+        wrong_digest[0] ^= 1;
+        assert!(verify_public_archive(&bundle_bytes, &wrong_digest, &manifest).is_err());
+        assert!(verify_public_archive(&bundle_bytes, &bundle_digest, b"invalid").is_err());
+        assert!(verify_public_archive(b"invalid", &bundle_digest, &manifest).is_err());
+
+        let authority_root = output_root("invalid-authority");
+        let authority_path = authority_root.join("fixtures/INV-001.json");
+        assert!(
+            std::fs::create_dir_all(authority_path.parent().ok_or("authority parent")?).is_ok()
+        );
+        assert!(std::fs::write(&authority_path, br#"{"fixture_id":"INV-001"}"#).is_ok());
+        let invalid_authority_entry = serde_json::json!({
+            "fixture_id": "INV-001",
+            "fixture_bytes_path": "fixtures/INV-001.json",
+            "fixture_bytes_digest": "00".repeat(32)
+        });
+        let mut members = Vec::new();
+        assert!(
+            append_authority_artifacts(&mut members, &serde_json::json!({}), &authority_root)
+                .is_err()
+        );
+        assert!(append_authority_artifact(
+            &mut members,
+            &invalid_authority_entry,
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            BundleMemberRoleV1::AuthorityFixture,
+            &authority_root
+        )
+        .is_err());
+        assert!(std::fs::remove_dir_all(authority_root).is_ok());
 
         let candidate = br#"{"lifecycle":"Candidate"}"#;
         let lifecycles = publication_lifecycles_from_bytes(candidate);
