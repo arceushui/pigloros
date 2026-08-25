@@ -8,6 +8,7 @@ use pos_conformance::{
 };
 use serde_json::Value as JsonValue;
 use std::error::Error;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 const INPUTS: [&[u8]; 7] = [
@@ -30,7 +31,16 @@ const EXPECTED: [&[u8]; 7] = [
 ];
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut arguments = std::env::args_os();
+    run(
+        std::env::args_os(),
+        std::env::var("PIGLOROS_CONFORMANCE_SIGNING_KEY"),
+    )
+}
+
+fn run(
+    mut arguments: impl Iterator<Item = OsString>,
+    encoded_signing_key: Result<String, std::env::VarError>,
+) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let output_root = arguments
         .next()
@@ -42,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if output_root.exists() {
         return Err("materialization output directory already exists".into());
     }
-    let signing_key = signing_key_from_environment()?;
+    let signing_key = signing_key_from_encoded(encoded_signing_key)?;
     let lifecycles = publication_lifecycles()?;
     let layers = [
         (ClaimLayerV1::ArtifactIntegrity, "artifact-integrity"),
@@ -74,8 +84,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn signing_key_from_environment() -> Result<SigningKey, Box<dyn Error>> {
-    let encoded = std::env::var("PIGLOROS_CONFORMANCE_SIGNING_KEY")?;
+fn signing_key_from_encoded(
+    encoded: Result<String, std::env::VarError>,
+) -> Result<SigningKey, Box<dyn Error>> {
+    let encoded = encoded?;
     let bytes = decode_hex(&encoded).ok_or("invalid conformance signing key")?;
     Ok(SigningKey::from_bytes(&bytes))
 }
@@ -101,9 +113,15 @@ const fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 fn publication_lifecycles() -> Result<Vec<(ProfileLifecycleV1, &'static str)>, Box<dyn Error>> {
-    let inventory: JsonValue = serde_json::from_slice(include_bytes!(
+    publication_lifecycles_from_bytes(include_bytes!(
         "../../../../fixtures/conformance/expected-authority/inventory.json"
-    ))?;
+    ))
+}
+
+fn publication_lifecycles_from_bytes(
+    bytes: &[u8],
+) -> Result<Vec<(ProfileLifecycleV1, &'static str)>, Box<dyn Error>> {
+    let inventory: JsonValue = serde_json::from_slice(bytes)?;
     match inventory
         .get("lifecycle")
         .and_then(JsonValue::as_str)
@@ -486,4 +504,93 @@ fn hex(bytes: &[u8; 32]) -> String {
         value.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pos_conformance::SafeErrorCodeV1;
+
+    fn signing_key_hex() -> String {
+        "07".repeat(32)
+    }
+
+    fn output_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "pigloros-conformance-{name}-{}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn materializer_run_covers_all_profile_layers() -> Result<(), Box<dyn Error>> {
+        let output = output_root("run");
+        let arguments = [
+            OsString::from("materialize"),
+            output.clone().into_os_string(),
+        ];
+        run(arguments.into_iter(), Ok(signing_key_hex()))?;
+        assert!(output.join("artifact-integrity/draft").is_dir());
+        assert!(output.join("empirical-evaluation/draft").is_dir());
+        std::fs::remove_dir_all(output)?;
+        Ok(())
+    }
+
+    #[test]
+    fn materializer_argument_and_key_errors_are_explicit() -> Result<(), Box<dyn Error>> {
+        assert!(run(
+            [OsString::from("materialize")].into_iter(),
+            Ok(signing_key_hex())
+        )
+        .is_err());
+        let output = output_root("extra");
+        let arguments = [
+            OsString::from("materialize"),
+            output.clone().into_os_string(),
+            OsString::from("extra"),
+        ];
+        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
+        std::fs::create_dir_all(&output)?;
+        let arguments = [
+            OsString::from("materialize"),
+            output.clone().into_os_string(),
+        ];
+        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
+        std::fs::remove_dir_all(output)?;
+        assert!(signing_key_from_encoded(std::env::var(
+            "PIGLOROS_CONFORMANCE_MISSING_SIGNING_KEY"
+        ))
+        .is_err());
+        assert!(signing_key_from_encoded(Ok("not-a-key".to_owned())).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn helper_validation_seams_cover_alternate_records() -> Result<(), Box<dyn Error>> {
+        assert_eq!(decode_hex("00"), None);
+        assert_eq!(decode_hex(&"gg".repeat(32)), None);
+        assert_eq!(hex(&[0xabu8; 32]), "ab".repeat(32));
+
+        let candidate = br#"{"lifecycle":"Candidate"}"#;
+        assert_eq!(
+            publication_lifecycles_from_bytes(candidate)?,
+            vec![
+                (ProfileLifecycleV1::Draft, "draft"),
+                (ProfileLifecycleV1::Candidate, "candidate")
+            ]
+        );
+        assert!(publication_lifecycles_from_bytes(br#"{}"#).is_err());
+        assert!(publication_lifecycles_from_bytes(br#"{"lifecycle":"Retired"}"#).is_err());
+        assert!(publication_lifecycles_from_bytes(b"{").is_err());
+
+        let mut invalid_expected = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
+        invalid_expected.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
+        assert!(bundle_inputs(&invalid_expected, BundleModeV1::Local).is_err());
+
+        let mut unsupported_mode = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
+        unsupported_mode.fixtures[0].modes.clear();
+        assert!(bundle_inputs(&unsupported_mode, BundleModeV1::Local).is_err());
+        Ok(())
+    }
 }
