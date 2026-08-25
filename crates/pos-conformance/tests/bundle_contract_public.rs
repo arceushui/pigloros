@@ -12,6 +12,8 @@ use pos_conformance::{
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/adr-059-execution-matrix.json";
@@ -683,6 +685,94 @@ fn public_candidate_materialization_reaches_fail_closed_authority_gate(
         fixtures::candidate_bundle()?,
         Err(pos_conformance::BundleContractErrorV1::CandidateEvidenceMissing)
     );
+    Ok(())
+}
+
+#[test]
+fn public_member_constructors_derive_typed_content_addresses() {
+    let supporting_bytes = b"public supporting bytes".to_vec();
+    let supporting = BundleMemberV1::supporting(
+        "support/public.txt",
+        supporting_bytes.clone(),
+        BundleMemberRoleV1::NormativeSpecification,
+    );
+    assert_eq!(supporting.path, "support/public.txt");
+    assert_eq!(supporting.bytes, supporting_bytes);
+    assert_eq!(
+        supporting.digest,
+        *blake3::hash(&supporting.bytes).as_bytes()
+    );
+    assert_eq!(supporting.role, BundleMemberRoleV1::NormativeSpecification);
+    assert!(!supporting.expected_result);
+
+    let authority_bytes = b"public authority bytes".to_vec();
+    let authority = BundleMemberV1::authority(
+        "authority/public.json",
+        authority_bytes.clone(),
+        BundleMemberRoleV1::AuthorityInventory,
+    );
+    assert_eq!(authority.path, "authority/public.json");
+    assert_eq!(authority.bytes, authority_bytes);
+    assert_eq!(authority.digest, *blake3::hash(&authority.bytes).as_bytes());
+    assert_eq!(authority.role, BundleMemberRoleV1::AuthorityInventory);
+    assert!(!authority.expected_result);
+}
+
+fn archive_paths(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut directories = vec![root.to_owned()];
+    let mut archives = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "cfb1")
+            {
+                archives.push(path);
+            }
+        }
+    }
+    archives.sort();
+    Ok(archives)
+}
+
+#[test]
+fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn std::error::Error>>
+{
+    let output_root = std::env::temp_dir().join(format!(
+        "pigloros-conformance-public-cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    struct TemporaryOutput(PathBuf);
+    impl Drop for TemporaryOutput {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _temporary_output = TemporaryOutput(output_root.clone());
+
+    let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    let materialized = Command::new(materializer)
+        .env(
+            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
+            "0707070707070707070707070707070707070707070707070707070707070707",
+        )
+        .arg(&output_root)
+        .status()?;
+    assert!(materialized.success());
+
+    let archives = archive_paths(&output_root)?;
+    assert_eq!(archives.len(), 7);
+    let verifier = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
+        .ok_or("verifier binary path is unavailable")?;
+    let verified = Command::new(verifier).args(&archives).status()?;
+    assert!(verified.success());
     Ok(())
 }
 
