@@ -4742,6 +4742,7 @@ mod tests {
                 owntracks_enabled: false,
                 consent_authority: ConsentAuthority::new(),
                 consent_history_locks: new_consent_history_locks(),
+                pending_consent_cleanup: new_pending_consent_cleanup(),
                 action_registry: gateway_action_registry(),
                 action_principal: None,
             };
