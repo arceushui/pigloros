@@ -11661,6 +11661,7 @@ mod key_registry_coverage {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sqlite_public_save_rejects_tombstone_rewrite() -> Result<(), Box<dyn std::error::Error>> {
         let (registry, identity, material_digest) = registered_state()?;
         let mut store = SqliteStore::open_in_memory()?;
