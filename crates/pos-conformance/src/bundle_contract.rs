@@ -4436,8 +4436,9 @@ mod tests {
     #[test]
     fn authority_member_pipeline_error_seams_are_counted() -> Result<(), Box<dyn std::error::Error>>
     {
-        let mut profile = profile();
-        let (mut missing_lifecycle, _) = bundle_inputs(&profile, BundleModeV1::Local)?;
+        let mut missing_lifecycle_profile = profile();
+        let (mut missing_lifecycle, _) =
+            bundle_inputs(&missing_lifecycle_profile, BundleModeV1::Local)?;
         let inventory = missing_lifecycle
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
@@ -4446,9 +4447,12 @@ mod tests {
         invalid_inventory["lifecycle"] = JsonValue::Null;
         inventory.bytes = serde_json::to_vec(&invalid_inventory)?;
         inventory.digest = *blake3::hash(&inventory.bytes).as_bytes();
-        bind_inventory_digest_to_provenance(&mut profile, &mut missing_lifecycle)?;
+        bind_inventory_digest_to_provenance(
+            &mut missing_lifecycle_profile,
+            &mut missing_lifecycle,
+        )?;
         assert_eq!(
-            validate_authority_members(&profile, &missing_lifecycle),
+            validate_authority_members(&missing_lifecycle_profile, &missing_lifecycle),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
