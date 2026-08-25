@@ -598,3 +598,82 @@ fn public_registry_destruction_errors_are_fail_closed() -> Result<(), Box<dyn st
 
     Ok(())
 }
+
+#[test]
+fn public_registry_success_and_role_gate_paths_are_exercised(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let signing_material = Hash::from_bytes([61; 32]);
+    let signing_public_key = PublicKey::from_bytes([62; 32]);
+    let registration =
+        KeyRegistrationV1::new(signing_identity, signing_material, Some(signing_public_key));
+    let mut registry = KeyRegistryStateV1::new();
+    assert_eq!(registry.validate(), Ok(()));
+    assert_eq!(
+        registry.register_key(registration),
+        Ok(pos_core::KeyRegistrationOutcomeV1::Registered)
+    );
+    assert_eq!(
+        registry.register_key(registration),
+        Ok(pos_core::KeyRegistrationOutcomeV1::AlreadyRegistered)
+    );
+    assert_eq!(
+        registry.active_key(KeyRoleV1::ExportRecipientEncryption),
+        None
+    );
+    assert_eq!(
+        registry.key_record(KeyIdentityV1::new(KeyRoleV1::PluginReleaseSigning, 1)),
+        None
+    );
+    assert_eq!(
+        registry.tombstone(KeyIdentityV1::new(KeyRoleV1::PluginReleaseSigning, 1)),
+        None
+    );
+
+    assert_eq!(
+        registry.with_signing_authorization(
+            KeyIdentityV1::new(signing_identity.role, 0),
+            signing_material,
+            signing_public_key,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::InvalidEpoch)
+    );
+    assert_eq!(
+        registry.with_signing_authorization(
+            KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1),
+            signing_material,
+            signing_public_key,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
+    );
+    assert_eq!(
+        registry.with_encryption_authorization(
+            KeyIdentityV1::new(signing_identity.role, 1),
+            signing_material,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::EncryptionRoleRequired)
+    );
+
+    let next_identity = KeyIdentityV1::new(signing_identity.role, 2);
+    let next_registration = KeyRegistrationV1::new(
+        next_identity,
+        Hash::from_bytes([63; 32]),
+        Some(signing_public_key),
+    );
+    let previous = registry.clone();
+    registry.register_key(next_registration)?;
+    assert_eq!(previous.validate_replacement(&registry), Ok(()));
+    registry.destroy_key(KeyDestructionRequestV1::new(
+        next_identity,
+        Hash::from_bytes([63; 32]),
+        Hash::from_bytes([64; 32]),
+    ))?;
+    assert_eq!(
+        registry.register_key(next_registration),
+        Err(pos_core::KeyRegistryErrorV1::Destroyed)
+    );
+    Ok(())
+}

@@ -5,7 +5,7 @@ use pos_core::{
     CoreError, EntityId, Event, EventDraft, EventId, EventStore, Hash, KeyDestructionRequestV1,
     KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Seq, TimelineId,
 };
-use pos_store::sqlite::SqliteStore;
+use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use rusqlite::params;
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -389,5 +389,98 @@ fn sqlite_key_registry_requires_a_persisted_snapshot_for_authorization(
         )),
         Err(CoreError::Storage(message)) if message.contains("durable key registry")
     ));
+    Ok(())
+}
+
+#[test]
+fn sqlite_public_read_rejects_a_fork_without_a_fork_sequence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let mut store = SqliteStore::open(path)?;
+    let parent = store.create_timeline("fork-parent")?;
+    let child = store.fork(parent.id(), Seq::ZERO, "fork-child")?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    let updated = connection.execute(
+        "UPDATE timelines SET fork_seq = NULL WHERE id = ?1",
+        params![child.id().to_string()],
+    )?;
+    assert_eq!(updated, 1);
+    drop(connection);
+
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.read(child.id(), pos_core::SeqRange::all()),
+        Err(CoreError::Storage(message)) if message.contains("missing its fork sequence")
+    ));
+    Ok(())
+}
+
+#[test]
+fn memory_key_registry_public_contract_covers_persistence_and_authorization(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (registry, identity, material_digest) = registry()?;
+    let mut store = MemoryStore::new();
+    assert_eq!(store.load_key_registry()?, None);
+    store.save_key_registry(&registry)?;
+    assert_eq!(store.load_key_registry()?, Some(registry.clone()));
+
+    let timeline = store.create_timeline("memory-registry")?;
+    let mut event = store
+        .append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                pos_core::Kind::new("registry.memory-seed"),
+                pos_core::CanonicalBytes::from_static(b"seed"),
+            )],
+        )?
+        .into_iter()
+        .next()
+        .ok_or("memory seed append returned no event")?;
+    event.id = EventId::new();
+    let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
+        event.seq = seq;
+        Ok::<Event, CoreError>(event.clone())
+    };
+    store.append_signed_authorized(timeline.id(), &registry, &mut callback)?;
+
+    let mut mismatch_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    };
+    assert!(matches!(
+        store.append_signed_authorized(
+            timeline.id(),
+            &KeyRegistryStateV1::new(),
+            &mut mismatch_callback,
+        ),
+        Err(CoreError::Storage(message)) if message.contains("changed during signing")
+    ));
+
+    let mut missing_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    };
+    assert!(matches!(
+        store.append_signed_authorized(TimelineId::new(), &registry, &mut missing_callback),
+        Err(CoreError::TimelineNotFound(_))
+    ));
+
+    let (_, destroyed) = store.destroy_key_registry(KeyDestructionRequestV1::new(
+        identity,
+        material_digest,
+        Hash::from_bytes([8; 32]),
+    ))?;
+    assert_eq!(
+        destroyed
+            .key_record(identity)
+            .and_then(|record| record.private_material_digest),
+        None
+    );
+    assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
 }
