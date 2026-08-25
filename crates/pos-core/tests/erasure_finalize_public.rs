@@ -81,6 +81,7 @@ struct PublicPort {
     states: Vec<pos_core::ErasureStateV1>,
     target: ErasureRequiredTargetV1,
     last_record: Rc<RefCell<Option<ErasureCoordinatorRecordV1>>>,
+    reject_admission_error: bool,
 }
 
 impl ErasureStateResolverV1 for PublicPort {
@@ -105,8 +106,11 @@ impl ErasureCoordinatorPortV1 for PublicPort {
         &self,
         _request: ErasureReferenceV1,
         _provenance: ErasureReferenceV1,
-        _decision: ErasureAuthorizationDecisionV1,
+        decision: ErasureAuthorizationDecisionV1,
     ) -> Result<(), ErasureErrorV1> {
+        if self.reject_admission_error && decision == ErasureAuthorizationDecisionV1::Rejected {
+            return Err(ErasureErrorV1::Unauthorized);
+        }
         Ok(())
     }
 
@@ -250,6 +254,7 @@ fn committed_partial_record(
             states: Vec::new(),
             target,
             last_record: history.clone(),
+            reject_admission_error: false,
         },
         reference(2),
     );
@@ -274,6 +279,7 @@ fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(
             states: Vec::new(),
             target,
             last_record: Rc::new(RefCell::new(None)),
+            reject_admission_error: false,
         },
         reference(2),
     );
@@ -405,6 +411,7 @@ fn public_submit_rejects_same_reference_with_conflicting_request_fields(
             states: Vec::new(),
             target: target(),
             last_record: Rc::new(RefCell::new(None)),
+            reject_admission_error: false,
         },
         reference(2),
     );
@@ -424,12 +431,33 @@ fn public_coordinator_trait_rejects_a_submitted_request() -> Result<(), ErasureE
             states: Vec::new(),
             target: target(),
             last_record: Rc::new(RefCell::new(None)),
+            reject_admission_error: false,
         },
         reference(2),
     );
     coordinator.submit(request()?, reference(3))?;
     let rejected = ErasureCoordinator::reject(&mut coordinator, reference(1), reference(8))?;
     assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
+    Ok(())
+}
+
+#[test]
+fn public_coordinator_reject_propagates_host_admission_failure() -> Result<(), ErasureErrorV1> {
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        PublicPort {
+            records: Vec::new(),
+            states: Vec::new(),
+            target: target(),
+            last_record: Rc::new(RefCell::new(None)),
+            reject_admission_error: true,
+        },
+        reference(2),
+    );
+    coordinator.submit(request()?, reference(3))?;
+    assert_eq!(
+        ErasureCoordinator::reject(&mut coordinator, reference(1), reference(8)),
+        Err(ErasureErrorV1::Unauthorized)
+    );
     Ok(())
 }
 
