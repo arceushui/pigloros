@@ -1251,15 +1251,15 @@ mod tests {
             ))
             .test_ok()?;
 
-        let event = |event_type: &str, seq: u64| {
-            let payload = CanonicalBytes::from_vec(vec![seq as u8]);
+        let event = |event_type: &str, seq: u8| {
+            let payload = CanonicalBytes::from_vec(vec![seq]);
             Event {
                 id: EventId::new(),
                 entity: EntityId::new(),
                 event_type: Kind::new(event_type),
                 payload: payload.clone(),
-                wall_time: WallTime::from_micros(seq),
-                seq: Seq::from_u64(seq),
+                wall_time: WallTime::from_micros(u64::from(seq)),
+                seq: Seq::from_u64(u64::from(seq)),
                 causation_id: None,
                 correlation_id: None,
                 schema_version: SchemaVersion::V1,
