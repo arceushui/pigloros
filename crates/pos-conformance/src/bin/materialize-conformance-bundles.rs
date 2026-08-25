@@ -1,12 +1,14 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use ed25519_dalek::SigningKey;
+#[cfg(test)]
+use pos_conformance::ConformanceBundlePairV1;
 use pos_conformance::{
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
-    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
-    EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
-    FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
-    RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1, EvaluatorProtocolV1,
+    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
+    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1, RedactionStateV1,
+    ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
