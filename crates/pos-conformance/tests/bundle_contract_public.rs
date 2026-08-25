@@ -1204,6 +1204,22 @@ fn public_independent_verifier_rejects_unknown_matching_member_role(
 }
 
 #[test]
+fn public_independent_verifier_classifies_role_mismatch_as_undeclared(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+        archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(0_u64.into());
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&archive),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>>
 {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
