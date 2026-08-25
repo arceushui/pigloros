@@ -726,9 +726,12 @@ fn independent_member_paths_and_profile<'a>(
         let descriptor_role = decode_member_role(archive_u64(&descriptor[3])?)?;
         if !member_paths.insert(member_path.to_owned())
             || archive_text(&descriptor[0])? != member_path
-            || archive_u64(&descriptor[1])? != u64::try_from(member_bytes.len()).unwrap_or(u64::MAX)
-            || independent_digest::<32>(&descriptor[2])? != *blake3::hash(member_bytes).as_bytes()
             || descriptor_role != member_role
+        {
+            return Err(BundleContractErrorV1::UndeclaredMember);
+        }
+        if archive_u64(&descriptor[1])? != u64::try_from(member_bytes.len()).unwrap_or(u64::MAX)
+            || independent_digest::<32>(&descriptor[2])? != *blake3::hash(member_bytes).as_bytes()
         {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
