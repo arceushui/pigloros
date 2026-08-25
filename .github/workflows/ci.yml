@@ -157,7 +157,7 @@ jobs:
         env:
           # Public, non-trusted key used only to exercise deterministic Draft
           # materialization when pull-request secrets are unavailable.
-          PIGLOROS_CONFORMANCE_SIGNING_KEY: 0707070707070707070707070707070707070707070707070707070707070707
+          PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
           PIGLOROS_CONFORMANCE_PUBLICATION_ID: ci-draft-${{ github.run_id }}-${{ github.run_attempt }}
         run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
       - name: Upload materialized conformance bundles
