@@ -241,7 +241,7 @@ fn expect_terminal_binding_conflict(
 }
 
 fn committed_partial_record(
-    history: Rc<RefCell<Option<ErasureCoordinatorRecordV1>>>,
+    history: &Rc<RefCell<Option<ErasureCoordinatorRecordV1>>>,
 ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let target = target();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
@@ -358,7 +358,8 @@ fn public_record_validation_rejects_wrong_acknowledgement_owner() -> Result<(), 
 #[test]
 fn public_record_validation_rejects_each_terminal_receipt_binding_mismatch(
 ) -> Result<(), ErasureErrorV1> {
-    let record = committed_partial_record(Rc::new(RefCell::new(None)))?;
+    let history = Rc::new(RefCell::new(None));
+    let record = committed_partial_record(&history)?;
     expect_terminal_binding_conflict(&record, |input| input.terminal_state = reference(98))?;
     expect_terminal_binding_conflict(&record, |input| input.coordinator = reference(97))?;
     expect_terminal_binding_conflict(&record, |input| input.request = reference(96))?;
