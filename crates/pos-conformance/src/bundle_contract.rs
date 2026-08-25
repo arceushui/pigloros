@@ -7,7 +7,7 @@
 
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
-use pos_crypto::{canonical, signing};
+use pos_crypto::signing;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use thiserror::Error;
