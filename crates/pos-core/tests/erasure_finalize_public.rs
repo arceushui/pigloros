@@ -1,13 +1,15 @@
 use pos_core::erasure::{
-    target_closure_digest, ErasureAuthorizationDecisionV1, ErasureFreezeAdmissionV1,
+    target_closure_digest, ErasureAuthorizationDecisionV1, ErasureCoordinator,
+    ErasureFreezeAdmissionV1,
 };
 use pos_core::{
-    ErasureAcknowledgementV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
+    ErasureArtifactTransitionV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1,
+    ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
+    ErasureStateResolverV1, ErasureStateTransitionV1,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -26,9 +28,13 @@ const fn target() -> ErasureRequiredTargetV1 {
 }
 
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+    request_with_subject(reference(2))
+}
+
+fn request_with_subject(subject: ErasureReferenceV1) -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(ErasureRequestInputV1 {
         request: reference(1),
-        subject: reference(2),
+        subject,
         scope: ErasureScopeV1::PrivateSubjectData,
         selectors: vec![reference(7)],
         requester: reference(3),
@@ -212,5 +218,102 @@ fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(
         },
     )?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    Ok(())
+}
+
+#[test]
+fn public_receipt_rejects_acknowledgement_outside_required_closure() {
+    let required = target();
+    let mut outside = required;
+    outside.replica_id = reference(99);
+    assert_eq!(
+        ErasureReceiptV1::new(ErasureReceiptInputV1 {
+            request: reference(1),
+            terminal_state: reference(2),
+            coordinator: reference(3),
+            lifecycle: ErasureLifecycleV1::PartialFailure,
+            freeze_position: 10,
+            acknowledgements: vec![ErasureAcknowledgementV1 {
+                target: outside,
+                owner: outside.replica_id,
+                evidence: reference(30),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            }],
+            required_targets: vec![required],
+            pending_owners: vec![required.replica_id],
+            failed_owners: Vec::new(),
+            inventories: ErasureReceiptInventoriesV1 {
+                artifacts: Vec::new(),
+                keys: Vec::new(),
+                replicas: Vec::new(),
+                backups: Vec::new(),
+            },
+            replay_claim: ErasureReplayClaimV1::Exact,
+            policy: reference(4),
+            trust: reference(5),
+            provenance: reference(6),
+            issue_position: 11,
+            signature: reference(7),
+            receipt_digest: reference(8),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+}
+
+#[test]
+fn public_submit_rejects_same_reference_with_conflicting_request_fields(
+) -> Result<(), ErasureErrorV1> {
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        PublicPort {
+            records: Vec::new(),
+            states: Vec::new(),
+            target: target(),
+        },
+        reference(2),
+    );
+    coordinator.submit(request()?, reference(3))?;
+    assert_eq!(
+        coordinator.submit(request_with_subject(reference(77))?, reference(3)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_coordinator_trait_rejects_a_submitted_request() -> Result<(), ErasureErrorV1> {
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        PublicPort {
+            records: Vec::new(),
+            states: Vec::new(),
+            target: target(),
+        },
+        reference(2),
+    );
+    coordinator.submit(request()?, reference(3))?;
+    let rejected = ErasureCoordinator::reject(&mut coordinator, reference(1), reference(8))?;
+    assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
+    Ok(())
+}
+
+#[test]
+fn public_request_decoder_rejects_trailing_and_noncanonical_cbor() -> Result<(), ErasureErrorV1> {
+    let encoded = request()?.to_canonical_cbor()?;
+    let mut trailing = encoded.clone();
+    trailing.push(0);
+    assert_eq!(
+        ErasureRequestV1::from_canonical_cbor(&trailing),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let position = encoded
+        .windows(2)
+        .rposition(|pair| pair == [9, 10])
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let mut noncanonical = encoded;
+    noncanonical.splice(position..position + 2, [0x18, 9, 10]);
+    assert_eq!(
+        ErasureRequestV1::from_canonical_cbor(&noncanonical),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
     Ok(())
 }

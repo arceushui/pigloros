@@ -8,7 +8,7 @@ use pos_conformance::{
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, ImplementationIdentityV1, IndependenceEvidenceV1,
     IndependenceRequirementsV1, ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1,
-    SubjectAdapterKindV1, VerificationOutcomeV1,
+    SubjectAdapterKindV1, TrustedRootPolicyV1, VerificationOutcomeV1,
 };
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -520,6 +520,23 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
     stable.lifecycle = pos_conformance::ProfileLifecycleV1::Stable;
     stable.profile_digest = stable.digest();
     assert_eq!(stable.digest(), candidate.digest());
+}
+
+#[test]
+fn public_stable_evidence_decoder_rejects_oversized_profile_before_policy_use() {
+    let oversized = vec![0_u8; 16 * 1024 * 1024 + 1];
+    let policy = TrustedRootPolicyV1 {
+        trusted_root_public_keys: Vec::new(),
+        trust_policy_snapshot_digest: [0; 32],
+    };
+    assert_eq!(
+        ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+            &oversized,
+            Vec::new(),
+            &policy,
+        ),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
 }
 
 #[test]
