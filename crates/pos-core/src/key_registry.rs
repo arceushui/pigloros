@@ -916,53 +916,129 @@ mod tests {
         Ok(())
     }
 
+    fn state_value(
+        state: &KeyRegistryStateV1,
+    ) -> Result<ciborium::value::Value, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(state, &mut bytes)?;
+        Ok(ciborium::from_reader(bytes.as_slice())?)
+    }
+
+    fn state_from_value(
+        value: ciborium::value::Value,
+    ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes)?;
+        Ok(ciborium::from_reader(bytes.as_slice())?)
+    }
+
+    fn edit_state<F>(
+        state: &KeyRegistryStateV1,
+        edit: F,
+    ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut ciborium::value::Value) -> Result<(), Box<dyn std::error::Error>>,
+    {
+        let mut value = state_value(state)?;
+        edit(&mut value)?;
+        state_from_value(value)
+    }
+
+    fn top_level_field<'a>(
+        value: &'a mut ciborium::value::Value,
+        name: &str,
+    ) -> Result<&'a mut ciborium::value::Value, Box<dyn std::error::Error>> {
+        let ciborium::value::Value::Map(entries) = value else {
+            return Err("registry state is not a CBOR map".into());
+        };
+        entries
+            .iter_mut()
+            .find_map(|(key, value)| match key {
+                ciborium::value::Value::Text(key) if key == name => Some(value),
+                _ => None,
+            })
+            .ok_or_else(|| format!("missing registry field {name}").into())
+    }
+
+    fn replace_first_bytes(
+        value: &mut ciborium::value::Value,
+        from: &[u8; 32],
+        to: ciborium::value::Value,
+    ) -> bool {
+        match value {
+            ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
+                *value = to;
+                true
+            }
+            ciborium::value::Value::Array(values) => values
+                .iter_mut()
+                .any(|value| replace_first_bytes(value, from, to.clone())),
+            ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+                replace_first_bytes(key, from, to.clone())
+                    || replace_first_bytes(value, from, to.clone())
+            }),
+            ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
+            _ => false,
+        }
+    }
+
     #[test]
-    fn malformed_tombstone_state_cannot_authorize_signing() -> Result<(), KeyRegistryErrorV1> {
-        let mut missing_tombstone = KeyRegistryStateV1::new();
-        missing_tombstone.register_key(signing_registration(ATTRIBUTION, 19))?;
-        missing_tombstone
-            .records
-            .get_mut(&ATTRIBUTION)
-            .ok_or(KeyRegistryErrorV1::NotFound)?
-            .private_material_digest = None;
-        assert_eq!(
-            missing_tombstone.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+    fn malformed_state_without_tombstone_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = KeyRegistryStateV1::new();
+        state.register_key(signing_registration(ATTRIBUTION, 19))?;
+        let state = edit_state(&state, |value| {
+            if replace_first_bytes(value, &[19; 32], ciborium::value::Value::Null) {
+                Ok(())
+            } else {
+                Err("private-material digest was not encoded".into())
+            }
+        })?;
+        assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        Ok(())
+    }
 
-        let mut missing_record = KeyRegistryStateV1::new();
-        missing_record.tombstones.insert(
+    #[test]
+    fn malformed_state_without_record_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = KeyRegistryStateV1::new();
+        state.register_key(signing_registration(ATTRIBUTION, 18))?;
+        state.destroy_key(KeyDestructionRequestV1::new(
             ATTRIBUTION,
-            KeyTombstoneV1 {
-                identity: ATTRIBUTION,
-                destroyed_material_digest: digest(18),
-                destruction_digest: digest(17),
-            },
-        );
-        assert_eq!(
-            missing_record.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+            digest(18),
+            digest(17),
+        ))?;
+        let state = edit_state(&state, |value| {
+            let records = top_level_field(value, "records")?;
+            let ciborium::value::Value::Map(entries) = records else {
+                return Err("registry records are not a CBOR map".into());
+            };
+            entries.clear();
+            Ok(())
+        })?;
+        assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        Ok(())
+    }
 
-        let mut registry = KeyRegistryStateV1::new();
-        registry.register_key(signing_registration(ATTRIBUTION, 20))?;
-        registry.destroy_key(KeyDestructionRequestV1::new(
+    #[test]
+    fn malformed_destroyed_state_cannot_authorize_signing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut destroyed = KeyRegistryStateV1::new();
+        destroyed.register_key(signing_registration(ATTRIBUTION, 20))?;
+        destroyed.destroy_key(KeyDestructionRequestV1::new(
             ATTRIBUTION,
             digest(20),
             digest(21),
         ))?;
-        registry.active.insert(ATTRIBUTION.role, ATTRIBUTION);
-        assert_eq!(registry.validate(), Err(KeyRegistryErrorV1::InvalidState));
-        registry.active.remove(&ATTRIBUTION.role);
-        registry
-            .records
-            .get_mut(&ATTRIBUTION)
-            .ok_or(KeyRegistryErrorV1::NotFound)?
-            .private_material_digest = Some(digest(20));
-
-        assert_eq!(registry.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        let mut live = KeyRegistryStateV1::new();
+        live.register_key(signing_registration(ATTRIBUTION, 22))?;
+        let mut live_value = state_value(&live)?;
+        let active = top_level_field(&mut live_value, "active")?.clone();
+        let state = edit_state(&destroyed, |value| {
+            *top_level_field(value, "active")? = active;
+            Ok(())
+        })?;
+        assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
         assert_eq!(
-            registry.with_signing_authorization(
+            state.clone().with_signing_authorization(
                 ATTRIBUTION,
                 digest(20),
                 PublicKey::from_bytes([20; 32]),
@@ -970,58 +1046,56 @@ mod tests {
             ),
             Err(KeyRegistryErrorV1::RegistryUnavailable)
         );
+        Ok(())
+    }
 
+    #[test]
+    fn malformed_state_rejects_epoch_rollback_and_material_reuse(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let first = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
         let second = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
-        let mut rollback = KeyRegistryStateV1::new();
-        rollback.register_key(signing_registration(first, 30))?;
-        rollback.register_key(signing_registration(second, 31))?;
-        rollback.active.insert(first.role, first);
-        assert_eq!(rollback.validate(), Err(KeyRegistryErrorV1::InvalidState));
-        rollback.active.insert(second.role, second);
-        rollback.highest_epoch.insert(second.role, 1);
+        let mut first_state = KeyRegistryStateV1::new();
+        first_state.register_key(signing_registration(first, 30))?;
+        let mut both = first_state.clone();
+        both.register_key(signing_registration(second, 31))?;
+
+        let mut first_value = state_value(&first_state)?;
+        let rollback = edit_state(&both, |value| {
+            let first_active = top_level_field(&mut first_value, "active")?.clone();
+            *top_level_field(value, "active")? = first_active;
+            Ok(())
+        })?;
         assert_eq!(rollback.validate(), Err(KeyRegistryErrorV1::InvalidState));
 
-        let mut reused_material = KeyRegistryStateV1::new();
-        reused_material.register_key(signing_registration(first, 32))?;
-        reused_material.records.insert(
-            second,
-            KeyRecordV1 {
-                identity: second,
-                private_material_digest: Some(digest(32)),
-                public_verification_key: Some(PublicKey::from_bytes([33; 32])),
-            },
-        );
-        reused_material.active.insert(second.role, second);
-        reused_material
-            .highest_epoch
-            .insert(second.role, second.epoch);
-        assert_eq!(
-            reused_material.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        let reused = edit_state(&both, |value| {
+            if replace_first_bytes(
+                value,
+                &[31; 32],
+                ciborium::value::Value::Bytes(vec![30; 32]),
+            ) {
+                Ok(())
+            } else {
+                Err("second private-material digest was not encoded".into())
+            }
+        })?;
+        assert_eq!(reused.validate(), Err(KeyRegistryErrorV1::InvalidState));
 
-        let mut live_tombstone_reuse = KeyRegistryStateV1::new();
-        live_tombstone_reuse.register_key(signing_registration(first, 34))?;
-        live_tombstone_reuse.destroy_key(KeyDestructionRequestV1::new(
-            first,
-            digest(34),
-            digest(35),
-        ))?;
-        live_tombstone_reuse.records.insert(
-            second,
-            KeyRecordV1 {
-                identity: second,
-                private_material_digest: Some(digest(34)),
-                public_verification_key: Some(PublicKey::from_bytes([35; 32])),
-            },
-        );
-        live_tombstone_reuse.active.insert(second.role, second);
-        live_tombstone_reuse
-            .highest_epoch
-            .insert(second.role, second.epoch);
+        let mut destroyed = first_state;
+        destroyed.destroy_key(KeyDestructionRequestV1::new(first, digest(30), digest(32)))?;
+        destroyed.register_key(signing_registration(second, 33))?;
+        let tombstone_reuse = edit_state(&destroyed, |value| {
+            if replace_first_bytes(
+                value,
+                &[33; 32],
+                ciborium::value::Value::Bytes(vec![30; 32]),
+            ) {
+                Ok(())
+            } else {
+                Err("live private-material digest was not encoded".into())
+            }
+        })?;
         assert_eq!(
-            live_tombstone_reuse.validate(),
+            tombstone_reuse.validate(),
             Err(KeyRegistryErrorV1::InvalidState)
         );
         Ok(())

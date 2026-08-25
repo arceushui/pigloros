@@ -2191,43 +2191,11 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn validate_committed_batch_rejects_gaps_and_dup_ids() -> Result<(), Box<dyn std::error::Error>>
-    {
-        struct TestHasher {
-            should_match: bool,
-        }
-        impl Hasher for TestHasher {
-            fn genesis_hash(&self) -> Hash {
-                Hash::zero()
-            }
-            fn hash_payload(&self, _payload: &CanonicalBytes) -> Hash {
-                if self.should_match {
-                    Hash::zero()
-                } else {
-                    Hash::from_bytes([1u8; 32])
-                }
-            }
-            fn hash_event(
-                &self,
-                previous_hash: &Hash,
-                _event_id_bytes: &[u8],
-                _payload: &CanonicalBytes,
-            ) -> Hash {
-                *previous_hash
-            }
-        }
-        let match_hasher = TestHasher { should_match: true };
-        let mismatch_hasher = TestHasher {
-            should_match: false,
-        };
-
-        let entity = crate::ids::EntityId::new();
-        let mk = |seq: u64, id: crate::ids::EventId| Event {
+    fn validation_test_event(seq: u64, id: crate::ids::EventId) -> Event {
+        Event {
             id,
-            entity,
-            event_type: Kind::new("t"),
+            entity: crate::ids::EntityId::new(),
+            event_type: Kind::new("test.validation"),
             payload: CanonicalBytes::from_vec(b"x".to_vec()),
             wall_time: WallTime::now(),
             seq: Seq::from_u64(seq),
@@ -2237,15 +2205,55 @@ mod tests {
             signature: None,
             signature_identity: None,
             payload_hash: Hash::zero(),
+        }
+    }
+
+    struct ValidationTestHasher {
+        should_match: bool,
+    }
+
+    impl Hasher for ValidationTestHasher {
+        fn genesis_hash(&self) -> Hash {
+            Hash::zero()
+        }
+        fn hash_payload(&self, _payload: &CanonicalBytes) -> Hash {
+            if self.should_match {
+                Hash::zero()
+            } else {
+                Hash::from_bytes([1u8; 32])
+            }
+        }
+        fn hash_event(
+            &self,
+            previous_hash: &Hash,
+            _event_id_bytes: &[u8],
+            _payload: &CanonicalBytes,
+        ) -> Hash {
+            *previous_hash
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_committed_batch_rejects_gaps_duplicates_and_hashes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let match_hasher = ValidationTestHasher { should_match: true };
+        let mismatch_hasher = ValidationTestHasher {
+            should_match: false,
         };
         let id = crate::ids::EventId::new();
-        let err = validate_committed_batch(Seq::ZERO, &[mk(2, id)], &mut |_| false, &match_hasher)
-            .test_err()?;
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[validation_test_event(2, id)],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(1, id), mk(2, id)],
+            &[validation_test_event(1, id), validation_test_event(2, id)],
             &mut |_| false,
             &match_hasher,
         )
@@ -2254,7 +2262,7 @@ mod tests {
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(1, crate::ids::EventId::new())],
+            &[validation_test_event(1, crate::ids::EventId::new())],
             &mut |_| true,
             &match_hasher,
         )
@@ -2263,7 +2271,7 @@ mod tests {
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(1, crate::ids::EventId::new())],
+            &[validation_test_event(1, crate::ids::EventId::new())],
             &mut |_| false,
             &mismatch_hasher,
         )
@@ -2272,14 +2280,21 @@ mod tests {
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(0, crate::ids::EventId::new())],
+            &[validation_test_event(0, crate::ids::EventId::new())],
             &mut |_| false,
             &match_hasher,
         )
         .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains(">= 1")));
+        Ok(())
+    }
 
-        let mut signature_without_identity = mk(1, crate::ids::EventId::new());
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_committed_batch_rejects_incomplete_signature_and_sorts(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let match_hasher = ValidationTestHasher { should_match: true };
+        let mut signature_without_identity = validation_test_event(1, crate::ids::EventId::new());
         signature_without_identity.signature = Some(crate::Signature::from_bytes([1; 64]));
         let err = validate_committed_batch(
             Seq::ZERO,
@@ -2290,7 +2305,7 @@ mod tests {
         .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
 
-        let mut identity_without_signature = mk(1, crate::ids::EventId::new());
+        let mut identity_without_signature = validation_test_event(1, crate::ids::EventId::new());
         identity_without_signature.signature_identity = Some(crate::KeyIdentityV1::new(
             crate::KeyRoleV1::TimelineIntegritySigning,
             1,
@@ -2308,12 +2323,11 @@ mod tests {
             validate_committed_batch(Seq::ZERO, &[], &mut |_| false, &match_hasher).test_ok()?;
         assert!(ok.is_empty());
 
-        // Success path with contiguous events (covers Ok(ordered)).
-        let e1 = mk(1, crate::ids::EventId::new());
-        let e2 = mk(2, crate::ids::EventId::new());
+        let e1 = validation_test_event(1, crate::ids::EventId::new());
+        let e2 = validation_test_event(2, crate::ids::EventId::new());
         let accepted = validate_committed_batch(
             Seq::ZERO,
-            &[e2.clone(), e1.clone()], // out of order — must sort
+            &[e2.clone(), e1.clone()],
             &mut |_| false,
             &match_hasher,
         )
@@ -2321,7 +2335,6 @@ mod tests {
         assert_eq!(accepted.len(), 2);
         assert_eq!(accepted[0].id, e1.id);
         assert_eq!(accepted[1].id, e2.id);
-
         Ok(())
     }
 
