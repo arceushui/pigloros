@@ -260,3 +260,27 @@ fn sqlite_key_registry_load_rejects_malformed_persisted_state(
     ));
     Ok(())
 }
+
+#[test]
+fn sqlite_key_registry_requires_a_persisted_snapshot_for_authorization(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SqliteStore::open_in_memory()?;
+    let timeline = store.create_timeline("missing-registry")?;
+    let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    };
+
+    assert!(matches!(
+        store.append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut callback),
+        Err(CoreError::Storage(message)) if message.contains("durable key registry")
+    ));
+    assert!(matches!(
+        store.destroy_key_registry(KeyDestructionRequestV1::new(
+            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+            Hash::from_bytes([1; 32]),
+            Hash::from_bytes([2; 32]),
+        )),
+        Err(CoreError::Storage(message)) if message.contains("durable key registry")
+    ));
+    Ok(())
+}
