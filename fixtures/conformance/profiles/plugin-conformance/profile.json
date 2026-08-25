@@ -13,7 +13,7 @@
   "authority_inventory": "expected-authority/inventory.json",
   "authority_inventory_sha256_digest": "5f60065a0cc39dd43e74eb0a373424006e4d23db8affa60a22bfa7ed12ab20c8",
   "adr_059_execution_matrix": "matrix/adr-059-complete.json",
-  "adr_059_execution_matrix_blake3_digest": "d647bc0b56ad3b9a80c6750dbdafd977ded621294bc17ae0e68b40d525dde0d9",
+  "adr_059_execution_matrix_blake3_digest": "6d0d7b3769a6b95673582557b2420724e02a177f99dda122f505afa84a4ad318",
   "adr_059_execution_matrix_status": "Draft",
   "execution_profiles": ["deterministic-local-v1", "deterministic-air-gapped-v1"],
   "bundle_modes": ["local", "air-gapped"]

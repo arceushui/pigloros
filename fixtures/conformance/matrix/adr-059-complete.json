@@ -9,6 +9,80 @@
   "mode_count": 4,
   "case_count": 192,
   "expected_result_policy": "Every executed case must carry a real BLAKE3 expected-result digest before Candidate; open slots are never a pass.",
+  "equality_predicates": [
+    {
+      "fixture_id": "NI-TOOL-001",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "count/category/digest, with provider text absent"
+    },
+    {
+      "fixture_id": "NI-CACHE-002",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "bounded hit-class counters after all key/value/latency fields are removed"
+    },
+    {
+      "fixture_id": "NI-STATE-003",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "migration phase/category; no canary bytes or canary-derived digest"
+    },
+    {
+      "fixture_id": "NI-OBS-004",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "schema/category/count/padded length; text, stack, path, raw IDs absent"
+    },
+    {
+      "fixture_id": "NI-TIME-005",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "after deleting wall timestamps/durations; watchdog cannot create an authoritative Event or change public error category"
+    },
+    {
+      "fixture_id": "NI-PUBLIC-006",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical including category, status order, cursor count, page count, and padded length; operational diagnostics omitted",
+      "OpEq": "operational diagnostics omitted"
+    },
+    {
+      "fixture_id": "NI-EVAL-007",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "evaluator input member names/order/bytes/digests and ordered case outcomes are identical in all four modes"
+    },
+    {
+      "fixture_id": "NI-FORK-008",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "all listed artifact bytes/digests/order and ADR-060 ReplayClaim are identical"
+    },
+    {
+      "fixture_id": "NI-ARCHIVE-009",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "member names/order/modes/lengths/decompressed bytes are identical; canonical archive mode also requires archive bytes identical"
+    },
+    {
+      "fixture_id": "NI-NET-010",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "identical category/count with endpoint/body/timing absent; zero live calls in Air-Gapped, Replay, and Fork"
+    },
+    {
+      "fixture_id": "NI-SERVICE-011",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "request digests, call ordinals, projected response bytes, dependency edges, and outputs are identical"
+    },
+    {
+      "fixture_id": "NI-CRASH-012",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "safe category/count/padded length, with strings/stacks/dumps/paths absent"
+    }
+  ],
   "rows": [
     {
       "fixture_id": "NI-TOOL-001",
