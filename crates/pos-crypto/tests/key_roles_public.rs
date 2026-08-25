@@ -76,17 +76,6 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
         sign_for_registered_role(&mut registry, &signing_key, encryption_identity, &payload,),
         Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
     );
-    let wrong_signing_key = SigningKey::from_bytes(&[34; 32]);
-    assert_eq!(
-        sign_for_registered_role(
-            &mut registry,
-            &wrong_signing_key,
-            signing_identity,
-            &payload,
-        ),
-        Err(pos_core::KeyRegistryErrorV1::SigningKeyMismatch)
-    );
-
     assert_eq!(
         with_registered_encryption_authorization(
             &mut registry,
@@ -114,6 +103,36 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
         ),
         Err(pos_core::KeyRegistryErrorV1::EncryptionRoleRequired)
     );
+    Ok(())
+}
+
+#[test]
+fn public_role_bound_key_mismatch_errors_are_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[31; 32]);
+    let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        signing_identity,
+        key_material_digest(&signing_key.to_bytes()),
+        Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+    ))?;
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+    registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        key_material_digest(&[32; 32]),
+        None,
+    ))?;
+
+    let wrong_signing_key = SigningKey::from_bytes(&[34; 32]);
+    assert_eq!(
+        sign_for_registered_role(
+            &mut registry,
+            &wrong_signing_key,
+            signing_identity,
+            &CanonicalBytes::from_static(b"mismatch"),
+        ),
+        Err(pos_core::KeyRegistryErrorV1::SigningKeyMismatch)
+    );
     assert_eq!(
         with_registered_encryption_authorization(
             &mut registry,
@@ -123,6 +142,5 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
         ),
         Err(pos_core::KeyRegistryErrorV1::EncryptionKeyMismatch)
     );
-
     Ok(())
 }
