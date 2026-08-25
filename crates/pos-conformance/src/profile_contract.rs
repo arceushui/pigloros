@@ -2597,6 +2597,7 @@ fn optional_safe_error(value: &Value) -> Result<Option<SafeErrorCodeV1>, Conform
     }
 }
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     // The public contract tests below exercise canonical CBOR, validation,
     // lifecycle transitions, and hard-cap entrypoints. Closed enum mapping
