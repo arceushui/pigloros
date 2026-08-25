@@ -3,10 +3,14 @@
 use pos_conformance::verify_archive_independently;
 use std::env;
 use std::error::Error;
+use std::ffi::OsString;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut arguments = env::args_os();
+    run(env::args_os())
+}
+
+fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let paths = arguments.collect::<Vec<_>>();
     if paths.is_empty() {
@@ -26,8 +30,17 @@ fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::verify_path;
+    use super::{run, verify_path};
+    use std::ffi::OsString;
     use std::fs;
+
+    #[test]
+    fn verifier_argument_errors_are_explicit() {
+        assert!(run([OsString::from("verify")].into_iter()).is_err());
+        let missing =
+            std::env::temp_dir().join(format!("pigloros-missing-cfb1-{}", std::process::id()));
+        assert!(run([OsString::from("verify"), missing.into_os_string()].into_iter()).is_err());
+    }
 
     #[test]
     fn verify_path_rejects_invalid_archive() -> Result<(), Box<dyn std::error::Error>> {
