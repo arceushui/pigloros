@@ -3031,6 +3031,7 @@ mod tests {
             .create_timeline("consent-grant-errors")
             .await
             .test_ok();
+        let subject = EntityId::new();
         let mut invalid = consent_grant(EntityId::new(), 1);
         invalid.modalities = 0x10;
         let codec_error = gateway
@@ -3043,17 +3044,11 @@ mod tests {
         ));
 
         gateway
-            .issue_consent_grant(
-                &timeline.id().to_string(),
-                consent_grant(EntityId::new(), 1),
-            )
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(subject, 1))
             .await
             .test_ok();
         let ceiling_error = gateway
-            .issue_consent_grant(
-                &timeline.id().to_string(),
-                consent_grant(EntityId::new(), 2),
-            )
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(subject, 2))
             .await
             .test_err();
         assert!(matches!(
