@@ -1951,11 +1951,11 @@ mod tests {
     }
 
     fn materialized_hex(bytes: &[u8]) -> String {
-        use std::fmt::Write;
-
+        const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut value = String::with_capacity(bytes.len() * 2);
         for byte in bytes {
-            write!(&mut value, "{byte:02x}").expect("writing to a String cannot fail");
+            value.push(HEX[usize::from(byte >> 4)] as char);
+            value.push(HEX[usize::from(byte & 0x0f)] as char);
         }
         value
     }
