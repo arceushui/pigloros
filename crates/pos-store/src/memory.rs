@@ -5051,19 +5051,15 @@ mod coverage_entrypoints {
                 keyed_draft(key),
             ));
         }
-        let first = ok(store.remove_append_identities_bounded(
-            identity_scope,
-            std::num::NonZeroUsize::new(1).expect("non-zero fixture limit"),
-        ));
+        let first =
+            ok(store.remove_append_identities_bounded(identity_scope, std::num::NonZeroUsize::MIN));
         assert!(first.more_may_remain);
         assert_eq!(
             ok(store.pending_append_identity_cleanup()),
             Some(identity_scope)
         );
-        let second = ok(store.remove_append_identities_bounded(
-            identity_scope,
-            std::num::NonZeroUsize::new(1).expect("non-zero fixture limit"),
-        ));
+        let second =
+            ok(store.remove_append_identities_bounded(identity_scope, std::num::NonZeroUsize::MIN));
         assert!(!second.more_may_remain);
         assert_eq!(ok(store.pending_append_identity_cleanup()), None);
     }
