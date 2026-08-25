@@ -204,7 +204,7 @@ mod fixtures {
         Ok(members)
     }
 
-    fn candidate_bundle() -> Result<
+    pub(super) fn candidate_bundle() -> Result<
         Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
         Box<dyn std::error::Error>,
     > {
@@ -323,7 +323,7 @@ mod fixtures {
             BundleModeV1::Local,
             members,
             expected_results,
-        )?)
+        ))
     }
 }
 
