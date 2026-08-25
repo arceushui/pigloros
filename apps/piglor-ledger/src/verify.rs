@@ -1298,8 +1298,7 @@ mod tests {
         store.save_key_registry(&registry).test_ok()?;
         drop(store);
 
-        let supplied_public_key =
-            crate::hex_encode(&PublicKey::from_bytes(legacy_verifying_key.to_bytes()));
+        let supplied_public_key = crate::hex_encode(legacy_verifying_key.as_bytes());
         let report = run(&Source::Store(db), Some(&supplied_public_key), None).test_ok()?;
         assert_eq!(report.outcome, VerifyOutcome::Ok);
 
