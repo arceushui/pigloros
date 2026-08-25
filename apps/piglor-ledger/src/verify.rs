@@ -1269,14 +1269,16 @@ mod tests {
             }
         };
 
-        let mut legacy = event(pos_plugin_ledger::EVENT_TYPE_PREDICTION, 1);
+        // Keep the legacy event on the Outcome arm by itself so the detector
+        // cannot pass when that arm is accidentally changed.
+        let mut legacy = event(pos_plugin_ledger::EVENT_TYPE_OUTCOME, 1);
         legacy.signature = Some(Signature::from_bytes(
             legacy_signing_key
                 .sign(legacy.payload.as_slice())
                 .to_bytes(),
         ));
 
-        let mut bound = event(pos_plugin_ledger::EVENT_TYPE_OUTCOME, 2);
+        let mut bound = event(pos_plugin_ledger::EVENT_TYPE_PREDICTION, 2);
         bound.signature_identity = Some(identity);
         bound.signature = Some(sign_for_registered_role(
             &mut registry,
