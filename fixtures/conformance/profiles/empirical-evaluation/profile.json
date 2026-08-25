@@ -3,6 +3,11 @@
   "claim_layer": "empirical-evaluation",
   "input": "inputs/empirical-independent.json",
   "expected": "expected/empirical-independent.json",
+  "authority_inventory": "expected-authority/inventory.json",
+  "authority_inventory_sha256_digest": "19b1c5fddc40857558b0ac645f19e78e2b8148fa94297c7cd89f55057f1e1836",
+  "adr_059_execution_matrix": "matrix/adr-059-complete.json",
+  "adr_059_execution_matrix_blake3_digest": "d647bc0b56ad3b9a80c6750dbdafd977ded621294bc17ae0e68b40d525dde0d9",
+  "adr_059_execution_matrix_status": "Draft",
   "execution_profiles": ["deterministic-local-v1", "deterministic-air-gapped-v1"],
   "bundle_modes": ["local", "air-gapped"]
 }

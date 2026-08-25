@@ -25,6 +25,8 @@ const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
 const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
+const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
+const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/adr-059-execution-matrix.json";
 
 /// Closed bundle failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -117,6 +119,10 @@ pub enum BundleMemberRoleV1 {
     Provenance,
     /// The limitations and exclusions artifact.
     Limitations,
+    /// The checked-in #172 expected-authority inventory.
+    AuthorityInventory,
+    /// The accepted ADR-059 execution inventory.
+    ExecutionMatrix,
 }
 
 impl BundleMemberRoleV1 {
@@ -132,6 +138,8 @@ impl BundleMemberRoleV1 {
             Self::Sbom => 7,
             Self::Provenance => 8,
             Self::Limitations => 9,
+            Self::AuthorityInventory => 10,
+            Self::ExecutionMatrix => 11,
         }
     }
 
@@ -434,6 +442,7 @@ impl ConformanceBundleV1 {
         }
         validate_total_bytes(total_bytes)?;
         validate_supporting_members(&profile, &self.members)?;
+        validate_authority_members(&profile, &self.members)?;
         if profile.lifecycle == ProfileLifecycleV1::Candidate {
             validate_candidate_publication(&profile, &self.members)?;
         }
@@ -1036,6 +1045,8 @@ const fn decode_member_role(code: u64) -> Result<BundleMemberRoleV1, BundleContr
         7 => Ok(BundleMemberRoleV1::Sbom),
         8 => Ok(BundleMemberRoleV1::Provenance),
         9 => Ok(BundleMemberRoleV1::Limitations),
+        10 => Ok(BundleMemberRoleV1::AuthorityInventory),
+        11 => Ok(BundleMemberRoleV1::ExecutionMatrix),
         _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
     }
 }
@@ -1318,12 +1329,58 @@ fn validate_supporting_members(
     } else if members.iter().any(|member| {
         (member.role.is_supporting() && member.bytes.is_empty())
             || (member.role.is_supporting()
+                && !matches!(
+                    member.role,
+                    BundleMemberRoleV1::AuthorityInventory | BundleMemberRoleV1::ExecutionMatrix
+                )
                 && !support_digest_is_bound(profile, member.role, &member.digest))
     }) {
         Err(BundleContractErrorV1::MemberDigestMismatch)
     } else {
         Ok(())
     }
+}
+
+fn validate_authority_members(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    let provenance = members
+        .iter()
+        .find(|member| {
+            member.role == BundleMemberRoleV1::Provenance
+                && member.digest == profile.provenance_digest
+        })
+        .ok_or(BundleContractErrorV1::MemberMissing)?;
+    let required = [
+        (
+            BundleMemberRoleV1::AuthorityInventory,
+            AUTHORITY_INVENTORY_MEMBER_PATH,
+            b"\"expected-authority/inventory.json\"".as_slice(),
+        ),
+        (
+            BundleMemberRoleV1::ExecutionMatrix,
+            EXECUTION_MATRIX_MEMBER_PATH,
+            b"\"matrix/adr-059-complete.json\"".as_slice(),
+        ),
+    ];
+    for (role, path, provenance_marker) in required {
+        let matched = members
+            .iter()
+            .filter(|member| member.role == role)
+            .collect::<Vec<_>>();
+        if matched.len() != 1 || matched[0].path != path || matched[0].bytes.is_empty() {
+            return Err(BundleContractErrorV1::MemberMissing);
+        }
+        if !provenance
+            .bytes
+            .windows(provenance_marker.len())
+            .any(|window| window == provenance_marker)
+        {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+    }
+    Ok(())
 }
 
 fn required_support_digests(
@@ -1387,7 +1444,9 @@ fn required_support_digests(
         }
         BundleMemberRoleV1::FixtureInput
         | BundleMemberRoleV1::ExpectedResult
-        | BundleMemberRoleV1::Profile => {}
+        | BundleMemberRoleV1::Profile
+        | BundleMemberRoleV1::AuthorityInventory
+        | BundleMemberRoleV1::ExecutionMatrix => {}
     }
     digests
 }
@@ -1928,6 +1987,18 @@ mod tests {
                 "support/limitations.md",
                 include_bytes!("../../../fixtures/conformance/support/limitations.md").to_vec(),
                 BundleMemberRoleV1::Limitations,
+            ),
+            BundleMemberV1::supporting(
+                AUTHORITY_INVENTORY_MEMBER_PATH,
+                include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json")
+                    .to_vec(),
+                BundleMemberRoleV1::AuthorityInventory,
+            ),
+            BundleMemberV1::supporting(
+                EXECUTION_MATRIX_MEMBER_PATH,
+                include_bytes!("../../../fixtures/conformance/matrix/adr-059-complete.json")
+                    .to_vec(),
+                BundleMemberRoleV1::ExecutionMatrix,
             ),
         ]);
         Ok((members, expected_results))
@@ -4204,7 +4275,7 @@ mod coverage_entrypoints {
             .members
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::Profile)
-            .ok_or("missing profile member")?;
+            .ok_or(BundleContractErrorV1::MemberMissing)?;
         profile_member.bytes = vec![0x01];
         assert_eq!(
             invalid_profile.validate(),
@@ -4549,26 +4620,59 @@ mod instrumented_candidate_entrypoints {
     }
 
     #[test]
+    fn authority_members_are_required_and_profile_bound() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut profile = tests::profile();
+        let (members, _) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        assert_eq!(
+            super::validate_authority_members(&profile, &members),
+            Ok(())
+        );
+
+        let mut missing_inventory = members.clone();
+        missing_inventory.retain(|member| member.role != BundleMemberRoleV1::AuthorityInventory);
+        assert_eq!(
+            super::validate_authority_members(&profile, &missing_inventory),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut unbound_inventory = members;
+        let provenance = unbound_inventory
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or(BundleContractErrorV1::MemberMissing)?;
+        provenance.bytes = b"{}".to_vec();
+        provenance.digest = *blake3::hash(&provenance.bytes).as_bytes();
+        profile.provenance_digest = provenance.digest;
+        assert_eq!(
+            super::validate_authority_members(&profile, &unbound_inventory),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn candidate_publication_rejects_a_mismatched_review_digest(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut bundle = signed_candidate_bundle()?;
         let mut profile = tests::profile();
         profile.fixtures[0].provenance.publication_review_digest =
             *blake3::hash(b"different review evidence").as_bytes();
         profile.profile_digest = profile.digest();
-        let (mut members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
-        members.push(super::BundleMemberV1::supporting(
+        let profile_member = bundle
+            .members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or(BundleContractErrorV1::MemberMissing)?;
+        profile_member.bytes = profile.to_canonical_cbor()?;
+        profile_member.digest = *blake3::hash(&profile_member.bytes).as_bytes();
+        bundle.manifest.profile_digest = profile.profile_digest;
+        bundle.members.push(super::BundleMemberV1::supporting(
             "support/review-evidence.json",
             b"different review evidence".to_vec(),
             BundleMemberRoleV1::Provenance,
         ));
-        let bundle = ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            expected_results,
-        )?;
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-        let bundle = bundle.sign(&signing_key)?;
+        bundle.rebuild_member_descriptors();
         assert_eq!(
             bundle.validate(),
             Err(BundleContractErrorV1::CandidateEvidenceMissing)

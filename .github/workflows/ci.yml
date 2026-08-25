@@ -103,6 +103,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install independent BLAKE3 verifier
+        run: sudo apt-get update && sudo apt-get install --yes b3sum
       - name: Verify public conformance fixtures
         run: bash scripts/verify-conformance-fixtures.sh
 
@@ -119,12 +121,13 @@ jobs:
         with:
           shared-key: conformance-materialization
       - name: Materialize deterministic Draft/Candidate CPF1 bundles
-        run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/pigloros-conformance-bundles"
+        run: bash scripts/materialize-conformance-bundles.sh
       - name: Upload materialized conformance bundles
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conformance-bundles-${{ github.sha }}
-          path: ${{ runner.temp }}/pigloros-conformance-bundles
+          path: fixtures/conformance/published/${{ github.sha }}
+          retention-days: 90
           if-no-files-found: error
 
   clippy:
