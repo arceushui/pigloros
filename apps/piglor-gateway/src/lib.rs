@@ -97,12 +97,12 @@ mod coverage_tests {
         }
     }
 
-    use super::{Gateway, GatewayError, OwnTracksOwnerKey};
+    use super::{Gateway, OwnTracksOwnerKey};
     use pos_core::{
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
-        CanonicalBytes, ConsentError, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
+        CanonicalBytes, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Seq,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};

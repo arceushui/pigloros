@@ -218,10 +218,6 @@ enum Command {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Option<Timeline>, StoreExecutorError>>,
     },
-    LogicalHead {
-        timeline: TimelineId,
-        reply: oneshot::Sender<Result<Seq, StoreExecutorError>>,
-    },
     ProtectedLogicalHead {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Seq, StoreExecutorError>>,
@@ -249,7 +245,6 @@ impl Command {
             | Self::Read { .. }
             | Self::ReadOne { .. }
             | Self::GetTimeline { .. }
-            | Self::LogicalHead { .. }
             | Self::ProtectedLogicalHead { .. } => CommandClass::Read,
             Self::PrepareOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
@@ -1135,13 +1130,6 @@ impl StoreExecutor {
     ) -> Result<Option<Timeline>, StoreExecutorError> {
         submit!(self, |reply| Command::GetTimeline { timeline, reply })
     }
-    pub(crate) async fn logical_head(
-        &self,
-        timeline: TimelineId,
-    ) -> Result<Seq, StoreExecutorError> {
-        submit!(self, |reply| Command::LogicalHead { timeline, reply })
-    }
-
     pub(crate) async fn protected_logical_head(
         &self,
         timeline: TimelineId,
@@ -1485,9 +1473,6 @@ fn expire_command(command: Command) {
         Command::GetTimeline { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::LogicalHead { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
         Command::ProtectedLogicalHead { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1676,9 +1661,6 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         Command::GetTimeline { timeline, reply } => {
             execute_get_timeline_command(state, timeline, reply);
         }
-        Command::LogicalHead { timeline, reply } => {
-            send_store_result(reply, state.store.event_store().logical_head(timeline));
-        }
         Command::ProtectedLogicalHead { timeline, reply } => {
             send_store_result(reply, state.store.protected_logical_head(timeline));
         }
@@ -1799,9 +1781,9 @@ fn execute_append_consent_grant_command(
     maximum: u64,
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
+    let head = state.store.protected_logical_head(timeline);
     let store = state.store.event_store();
-    let result = store
-        .logical_head(timeline)
+    let result = head
         .and_then(|head| {
             if grant.grant_seq != head.as_u64().saturating_add(1) {
                 return Err(CoreError::Storage(
@@ -1838,9 +1820,9 @@ fn execute_append_consent_revocation_command(
     reservation: ConsentRevocationReservation,
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
+    let head = state.store.protected_logical_head(timeline);
     let store = state.store.event_store();
-    let result = store
-        .logical_head(timeline)
+    let result = head
         .and_then(|head| {
             if revocation.fence_seq != head.as_u64().saturating_add(1) {
                 return Err(CoreError::Storage(
