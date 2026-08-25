@@ -531,6 +531,15 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Return one durable revocation-cleanup scope, if the adapter has one.
+    ///
+    /// Adapters may persist this marker when a bounded scope cleanup reports
+    /// remaining identities. Returning the marker without consuming it keeps
+    /// retries safe across process restarts and transient store failures.
+    fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
+        Ok(None)
+    }
+
     /// Read events from a timeline in a seq range.
     ///
     /// For a forked timeline, this transparently stitches `parent[0..fork_seq]` + child events.

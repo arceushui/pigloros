@@ -512,6 +512,8 @@ const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize = match NonZeroUsize::new(256) {
     Some(value) => value,
     None => NonZeroUsize::MIN,
 };
+const CONSENT_DEDUP_CLEANUP_RETRY_LIMIT: u8 = 3;
+const CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS: u64 = 50;
 
 type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
 
@@ -923,15 +925,35 @@ impl Gateway {
     fn schedule_pending_consent_cleanup(&self) {
         let gateway = self.clone();
         tokio::spawn(async move {
+            let mut retries = 0_u8;
             loop {
                 match gateway.process_pending_consent_cleanup().await {
                     Ok(Some(outcome)) if outcome.more_may_remain => {
+                        retries = 0;
                         tokio::task::yield_now().await;
                     }
-                    Ok(Some(_)) | Ok(None) | Err(_) => break,
+                    Ok(Some(_)) => {
+                        retries = 0;
+                    }
+                    Ok(None) => break,
+                    Err(_) if retries < CONSENT_DEDUP_CLEANUP_RETRY_LIMIT => {
+                        retries = retries.saturating_add(1);
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS,
+                        ))
+                        .await;
+                    }
+                    Err(_) => break,
                 }
             }
         });
+    }
+
+    fn schedule_startup_consent_cleanup(self) -> Self {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.schedule_pending_consent_cleanup();
+        }
+        self
     }
 
     /// Run one bounded consent-revocation cleanup pass.
@@ -941,12 +963,20 @@ impl Gateway {
     /// each invocation removes at most the adapter batch limit.
     ///
     /// # Errors
-    /// Returns the underlying bounded store error.  A failed scope remains
-    /// queued for a later retry.
+    /// Returns the underlying bounded store error. A failed scope remains
+    /// queued for the scheduler's bounded retry budget or a later maintenance
+    /// invocation.
     pub async fn process_pending_consent_cleanup(
         &self,
     ) -> Result<Option<PurgeOutcome>, GatewayError> {
-        let scope = self.pending_consent_cleanup.lock().await.pop();
+        let scope = match self.pending_consent_cleanup.lock().await.pop() {
+            Some(scope) => Some(scope),
+            None => self
+                .store
+                .pending_append_identity_cleanup()
+                .await
+                .map_err(GatewayError::from)?,
+        };
         let Some(scope) = scope else {
             return Ok(None);
         };
@@ -1027,6 +1057,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.
@@ -1054,6 +1085,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Wrap a store with World bodies and an authenticated action principal.
@@ -1082,6 +1114,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: Some(principal),
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Construct the only Gateway shape that can submit core geographic admission.
@@ -1112,6 +1145,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Construct the Gateway shape that accepts authenticated local `OwnTracks` ingress.
@@ -1143,6 +1177,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     #[cfg(test)]
@@ -1170,6 +1205,7 @@ impl Gateway {
             pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Submit one already-authorized core geographic admission request.
@@ -3089,6 +3125,25 @@ mod tests {
             .await
             .test_ok();
         assert!(!retried.duplicate);
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn scheduled_consent_cleanup_retries_bounded_store_failures() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailList,
+        }));
+        gateway
+            .enqueue_consent_cleanup(ingress_dedup_scope(EntityId::new()))
+            .await;
+        gateway.schedule_pending_consent_cleanup();
+        tokio::time::sleep(Duration::from_millis(
+            CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS
+                * u64::from(CONSENT_DEDUP_CLEANUP_RETRY_LIMIT.saturating_add(1)),
+        ))
+        .await;
+        assert!(gateway.process_pending_consent_cleanup().await.is_err());
         drop(gateway);
     }
 

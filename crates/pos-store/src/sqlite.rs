@@ -425,6 +425,9 @@ impl SqliteStore {
              ON append_identities(expires_at);
              CREATE INDEX IF NOT EXISTS idx_append_identities_scope
              ON append_identities(scope_key);
+             CREATE TABLE IF NOT EXISTS pending_append_identity_cleanup (
+                 scope_key BLOB PRIMARY KEY CHECK (length(scope_key) = 32)
+             );
              CREATE TABLE IF NOT EXISTS geographic_presence (
                  timeline_id TEXT PRIMARY KEY,
                  has_evidence INTEGER NOT NULL CHECK (has_evidence = 1)
@@ -2953,12 +2956,24 @@ impl EventStore for SqliteStore {
     }
 
     fn remove_append_identities(&mut self, scope: AppendDedupScope) -> Result<usize, CoreError> {
-        self.conn
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let removed = tx
             .execute(
                 "DELETE FROM append_identities WHERE scope_key = ?1",
                 params![scope.as_bytes().as_slice()],
             )
-            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "DELETE FROM pending_append_identity_cleanup WHERE scope_key = ?1",
+            params![scope.as_bytes().as_slice()],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(removed)
     }
 
     fn remove_append_identities_bounded(
@@ -2999,12 +3014,45 @@ impl EventStore for SqliteStore {
             )
             .map_err(|error| CoreError::Storage(error.to_string()))?
             != 0;
+        if more_may_remain {
+            tx.execute(
+                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        } else {
+            tx.execute(
+                "DELETE FROM pending_append_identity_cleanup WHERE scope_key = ?1",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
         tx.commit()
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(PurgeOutcome {
             removed: keys.len(),
             more_may_remain,
         })
+    }
+
+    fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT scope_key FROM pending_append_identity_cleanup ORDER BY scope_key LIMIT 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        bytes
+            .map(|bytes| {
+                let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+                    CoreError::Storage("invalid pending cleanup scope length".to_owned())
+                })?;
+                Ok(AppendDedupScope::from_keyed_hash(bytes))
+            })
+            .transpose()
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {

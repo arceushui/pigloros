@@ -169,6 +169,9 @@ enum Command {
         limit: NonZeroUsize,
         reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
     },
+    PendingAppendIdentityCleanup {
+        reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
+    },
     RootCount {
         maximum: usize,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
@@ -1039,6 +1042,13 @@ impl StoreExecutor {
             reply
         })
     }
+    pub(crate) async fn pending_append_identity_cleanup(
+        &self,
+    ) -> Result<Option<AppendDedupScope>, StoreExecutorError> {
+        submit!(self, |reply| Command::PendingAppendIdentityCleanup {
+            reply
+        })
+    }
     pub(crate) async fn admit_geo_location(
         &self,
         request: GeoLocationAdmissionRequestV1,
@@ -1632,6 +1642,12 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
                     .store
                     .event_store()
                     .remove_append_identities_bounded(scope, limit),
+            );
+        }
+        Command::PendingAppendIdentityCleanup { reply } => {
+            send_store_result(
+                reply,
+                state.store.event_store().pending_append_identity_cleanup(),
             );
         }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),

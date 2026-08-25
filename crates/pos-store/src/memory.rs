@@ -122,6 +122,8 @@ pub struct MemoryStore {
     event_ids: HashSet<EventId>,
     /// Opaque append identities retained only until their fixed horizon.
     append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
+    /// Durable-equivalent markers for bounded revocation cleanup continuation.
+    pending_append_identity_cleanup: Vec<AppendDedupScope>,
     /// Durable-equivalent marker for Timelines containing protected evidence.
     geographic_timelines: HashSet<TimelineId>,
     /// The sole current authorization state for protected geographic admission.
@@ -426,6 +428,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
+            pending_append_identity_cleanup: Vec::new(),
             geographic_timelines: HashSet::new(),
             owntracks_enrollment: OwnTracksEnrollmentStateV1::absent(),
             geographic_admission_dedup: HashMap::new(),
@@ -1722,6 +1725,8 @@ impl EventStore for MemoryStore {
         let before = self.append_identities.len();
         self.append_identities
             .retain(|_, record| record.scope != scope);
+        self.pending_append_identity_cleanup
+            .retain(|pending| *pending != scope);
         Ok(before.saturating_sub(self.append_identities.len()))
     }
 
@@ -1742,10 +1747,22 @@ impl EventStore for MemoryStore {
         for (_, key) in matching.into_iter().take(removed) {
             self.append_identities.remove(&key);
         }
+        if more_may_remain {
+            if !self.pending_append_identity_cleanup.contains(&scope) {
+                self.pending_append_identity_cleanup.push(scope);
+            }
+        } else {
+            self.pending_append_identity_cleanup
+                .retain(|pending| *pending != scope);
+        }
         Ok(PurgeOutcome {
             removed,
             more_may_remain,
         })
+    }
+
+    fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
+        Ok(self.pending_append_identity_cleanup.last().copied())
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
