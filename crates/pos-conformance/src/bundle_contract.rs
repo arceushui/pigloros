@@ -27,6 +27,7 @@ const MAX_MEMBER_PATH_BYTES: usize = 256;
 const MAX_MEMBERS: usize = 65_536;
 const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = MAX_CONFORMANCE_BUNDLE_BYTES_V1;
+const MAX_PROFILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
 const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
@@ -654,9 +655,8 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     let profile_bytes = preflight
         .profile_bytes
         .ok_or(BundleContractErrorV1::MemberMissing)?;
-    let profile = ConformanceProfileV1::from_canonical_cbor(profile_bytes)
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    validate_preflight_archive_caps(&profile, &preflight, bytes.len())?;
+    let caps = independent_archive_caps(profile_bytes)?;
+    validate_independent_preflight_caps(&caps, &preflight, bytes.len())?;
     let value: Value = ciborium::from_reader(Cursor::new(bytes))
         .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
     if encode_archive_value(&value)?.as_slice() != bytes {
@@ -986,6 +986,15 @@ struct ScannedArchiveItem<'a> {
     maximum_depth: usize,
 }
 
+struct IndependentArchiveCaps {
+    max_profile_bytes: u64,
+    max_bundle_members: u64,
+    max_member_path_bytes: u64,
+    max_member_bytes: u64,
+    max_total_bundle_bytes: u64,
+    max_structural_nesting: u64,
+}
+
 mod archive_preflight {
     use super::{
         ArchivePreflight, BundleContractErrorV1, BundleMemberRoleV1, ScannedArchiveItem,
@@ -1200,6 +1209,79 @@ fn validate_preflight_archive_caps(
         u64::try_from(encoded_len).unwrap_or(u64::MAX),
     )
     .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)
+}
+
+fn independent_archive_caps(
+    profile_bytes: &[u8],
+) -> Result<IndependentArchiveCaps, BundleContractErrorV1> {
+    let profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    if encode_archive_value(&profile)?.as_slice() != profile_bytes {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let fields =
+        independent_array(&profile, 17).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    let protocol =
+        independent_array(&fields[10], 5).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    let caps =
+        independent_array(&protocol[4], 10).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    let values = caps
+        .iter()
+        .map(|value| archive_u64(value).map_err(|_| BundleContractErrorV1::ProfileInvalid))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [max_profile_bytes, max_cases, max_bundle_members, max_member_path_bytes, max_member_bytes, max_total_bundle_bytes, max_compression_expansion, max_structural_nesting, _max_coordinate_bytes, _max_diagnostic_bytes] =
+        values.as_slice()
+    else {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    };
+    if *max_profile_bytes == 0
+        || *max_profile_bytes > MAX_PROFILE_BYTES
+        || *max_cases == 0
+        || *max_cases > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX)
+        || *max_bundle_members == 0
+        || *max_bundle_members > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX)
+        || *max_member_path_bytes == 0
+        || *max_member_path_bytes > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX)
+        || *max_member_bytes == 0
+        || *max_member_bytes > MAX_MEMBER_BYTES
+        || *max_total_bundle_bytes == 0
+        || *max_total_bundle_bytes > MAX_TOTAL_BUNDLE_BYTES
+        || *max_compression_expansion == 0
+        || *max_compression_expansion > u64::from(u32::MAX)
+        || *max_structural_nesting == 0
+        || *max_structural_nesting > u64::from(MAX_STRUCTURAL_NESTING)
+    {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    Ok(IndependentArchiveCaps {
+        max_profile_bytes: *max_profile_bytes,
+        max_bundle_members: *max_bundle_members,
+        max_member_path_bytes: *max_member_path_bytes,
+        max_member_bytes: *max_member_bytes,
+        max_total_bundle_bytes: *max_total_bundle_bytes,
+        max_structural_nesting: *max_structural_nesting,
+    })
+}
+
+fn validate_independent_preflight_caps(
+    caps: &IndependentArchiveCaps,
+    preflight: &ArchivePreflight<'_>,
+    encoded_len: usize,
+) -> Result<(), BundleContractErrorV1> {
+    let encoded_len = u64::try_from(encoded_len).unwrap_or(u64::MAX);
+    if encoded_len > caps.max_total_bundle_bytes
+        || u64::try_from(preflight.profile_bytes.map_or(0, <[u8]>::len)).unwrap_or(u64::MAX)
+            > caps.max_profile_bytes
+        || u64::try_from(preflight.maximum_depth).unwrap_or(u64::MAX) > caps.max_structural_nesting
+        || u64::try_from(preflight.member_count).unwrap_or(u64::MAX) > caps.max_bundle_members
+        || u64::try_from(preflight.largest_member_path_bytes).unwrap_or(u64::MAX)
+            > caps.max_member_path_bytes
+        || preflight.largest_member_bytes > caps.max_member_bytes
+        || preflight.total_member_bytes > caps.max_total_bundle_bytes
+    {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    Ok(())
 }
 
 fn validate_archive_caps(
