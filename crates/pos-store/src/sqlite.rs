@@ -76,27 +76,6 @@ thread_local! {
 }
 
 #[cfg(test)]
-static DESTRUCTION_TRANSACTION_HOOK: std::sync::Mutex<
-    Option<(
-        std::sync::mpsc::Sender<()>,
-        std::sync::mpsc::Receiver<()>,
-    )>,
-> = std::sync::Mutex::new(None);
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn destruction_transaction_started_for_test() {
-    let hook = DESTRUCTION_TRANSACTION_HOOK
-        .lock()
-        .expect("destruction transaction hook lock poisoned")
-        .take();
-    if let Some((started, release)) = hook {
-        let _ = started.send(());
-        let _ = release.recv();
-    }
-}
-
-#[cfg(test)]
 fn bounded_materialization_delay_for_test() {
     let delay_millis = BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(std::cell::Cell::get);
     if delay_millis != 0 {
@@ -116,6 +95,9 @@ pub struct SqliteStore {
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
+    #[cfg(test)]
+    destruction_transaction_hook:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
 impl SqliteStore {
@@ -2983,7 +2965,7 @@ impl EventStore for SqliteStore {
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         #[cfg(test)]
-        destruction_transaction_started_for_test();
+        self.destruction_transaction_started_for_test();
         let result = (|| {
             let mut registry = self.load_key_registry()?.ok_or_else(|| {
                 CoreError::Storage("durable key registry is unavailable".to_owned())
@@ -2995,6 +2977,16 @@ impl EventStore for SqliteStore {
             Ok((outcome, registry))
         })();
         finish_immediate_transaction(&self.conn, result)
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn destruction_transaction_started_for_test(&mut self) {
+        if let Some((started, release)) = self.destruction_transaction_hook.take() {
+            if started.send(()).is_ok() {
+                assert!(release.recv().is_ok());
+            }
+        }
     }
 
     fn append_bounded(
@@ -9273,47 +9265,36 @@ mod tests {
 
         let mut destruction_store = SqliteStore::open(path).test_ok();
         let mut signing_store = SqliteStore::open(path).test_ok();
-        let request = KeyDestructionRequestV1::new(
-            identity,
-            material_digest,
-            Hash::from_bytes([7; 32]),
-        );
+        let (signing_contended_tx, signing_contended_rx) = std::sync::mpsc::channel();
+        signing_store
+            .conn
+            .busy_handler(Some(move |_| signing_contended_tx.send(()).is_ok()))
+            .test_ok();
+        let request =
+            KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
         let (destruction_started_tx, destruction_started_rx) = std::sync::mpsc::channel();
         let (release_destruction_tx, release_destruction_rx) = std::sync::mpsc::channel();
-        *DESTRUCTION_TRANSACTION_HOOK
-            .lock()
-            .expect("destruction transaction hook lock poisoned") =
+        destruction_store.destruction_transaction_hook =
             Some((destruction_started_tx, release_destruction_rx));
-        let (destruction_done_tx, destruction_done_rx) = std::sync::mpsc::channel();
-        let (signing_started_tx, signing_started_rx) = std::sync::mpsc::channel();
         let (callback_called_tx, callback_called_rx) = std::sync::mpsc::channel();
 
         let (destruction_result, signing_result) = std::thread::scope(|scope| {
             let destruction_handle = scope.spawn(move || {
                 let result = destruction_store.destroy_key_registry(request);
-                let _ = destruction_done_tx.send(());
                 result
             });
             destruction_started_rx.recv().test_ok();
 
             let signing_handle = scope.spawn(move || {
-                let _ = signing_started_tx.send(());
                 let mut callback = move |_registry: &KeyRegistryStateV1, _seq: Seq| {
-                    let _ = callback_called_tx.send(());
+                    assert!(callback_called_tx.send(()).is_ok());
                     Err::<Event, _>(CoreError::Storage(
                         "destroyed signing key callback must not run".to_owned(),
                     ))
                 };
-                signing_store.append_signed_authorized(
-                    timeline_id,
-                    &registry,
-                    &mut callback,
-                )
+                signing_store.append_signed_authorized(timeline_id, &registry, &mut callback)
             });
-            signing_started_rx.recv().test_ok();
-            assert!(destruction_done_rx
-                .recv_timeout(Duration::from_millis(50))
-                .is_err());
+            signing_contended_rx.recv().test_ok();
             release_destruction_tx.send(()).test_ok();
 
             (
@@ -9327,13 +9308,7 @@ mod tests {
         assert!(callback_called_rx.try_recv().is_err());
 
         let verify = SqliteStore::open(path).test_ok();
-        assert_eq!(
-            verify
-                .read(timeline_id, SeqRange::all())
-                .test_ok()
-                .len(),
-            1
-        );
+        assert_eq!(verify.read(timeline_id, SeqRange::all()).test_ok().len(), 1);
         assert!(verify
             .load_key_registry()
             .test_ok()
