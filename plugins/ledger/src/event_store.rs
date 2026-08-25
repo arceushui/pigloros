@@ -646,7 +646,7 @@ mod tests {
             raw_store,
             timeline.id(),
             EntityId::new(),
-            signing_key,
+            signing_key.clone(),
             registry,
             identity,
             Box::new(Blake3Hasher),
