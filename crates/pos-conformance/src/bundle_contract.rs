@@ -4203,6 +4203,13 @@ mod tests {
 
     #[test]
     fn authority_json_validation_seams_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+        authority_provenance_json_validation_seams()?;
+        authority_inventory_json_validation_seams()?;
+        authority_matrix_json_validation_seams()?;
+        Ok(())
+    }
+
+    fn authority_provenance_json_validation_seams() -> Result<(), Box<dyn std::error::Error>> {
         let provenance: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/support/provenance.json"
         ))?;
@@ -4239,7 +4246,10 @@ mod tests {
             validate_provenance_authority_binding(&missing_matrix, "Draft"),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        Ok(())
+    }
 
+    fn authority_inventory_json_validation_seams() -> Result<(), Box<dyn std::error::Error>> {
         let inventory: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/expected-authority/inventory.json"
         ))?;
@@ -4269,7 +4279,10 @@ mod tests {
             validate_authority_inventory(&wrong_pending_field, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        Ok(())
+    }
 
+    fn authority_matrix_json_validation_seams() -> Result<(), Box<dyn std::error::Error>> {
         let matrix: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/matrix/adr-059-complete.json"
         ))?;
