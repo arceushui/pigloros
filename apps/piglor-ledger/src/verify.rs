@@ -1223,6 +1223,91 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
+    fn verify_store_keeps_legacy_key_compatibility_for_mixed_events(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use ed25519_dalek::Signer;
+        use pos_core::{
+            clock::{Seq, WallTime},
+            event::{CanonicalBytes, Event, Kind, SchemaVersion},
+            ids::{EntityId, EventId},
+            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey, Signature,
+        };
+        use pos_crypto::{
+            chain::hash_payload,
+            key_roles::{key_material_digest, sign_for_registered_role},
+        };
+
+        let (legacy_signing_key, legacy_verifying_key) = pos_crypto::signing::generate_keypair();
+        let (registered_signing_key, registered_verifying_key) =
+            pos_crypto::signing::generate_keypair();
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let registered_public_key = PublicKey::from_bytes(registered_verifying_key.to_bytes());
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                key_material_digest(&registered_signing_key.to_bytes()),
+                Some(registered_public_key),
+            ))
+            .test_ok()?;
+
+        let event = |event_type: &str, seq: u64| {
+            let payload = CanonicalBytes::from_vec(vec![seq as u8]);
+            Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new(event_type),
+                payload: payload.clone(),
+                wall_time: WallTime::from_micros(seq),
+                seq: Seq::from_u64(seq),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                payload_hash: hash_payload(&payload),
+            }
+        };
+
+        let mut legacy = event(pos_plugin_ledger::EVENT_TYPE_PREDICTION, 1);
+        legacy.signature = Some(Signature::from_bytes(
+            legacy_signing_key
+                .sign(legacy.payload.as_slice())
+                .to_bytes(),
+        ));
+
+        let mut bound = event(pos_plugin_ledger::EVENT_TYPE_OUTCOME, 2);
+        bound.signature_identity = Some(identity);
+        bound.signature = Some(sign_for_registered_role(
+            &mut registry,
+            &registered_signing_key,
+            identity,
+            &bound.payload,
+        )?);
+
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("ledger.db");
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .test_ok()?;
+        let timeline = store.create_timeline("ledger").test_ok()?;
+        store
+            .append_committed(timeline.id(), &[legacy, bound])
+            .test_ok()?;
+        store.save_key_registry(&registry).test_ok()?;
+        drop(store);
+
+        let supplied_public_key =
+            crate::hex_encode(&PublicKey::from_bytes(legacy_verifying_key.to_bytes()));
+        let report = run(&Source::Store(db), Some(&supplied_public_key), None).test_ok()?;
+        assert_eq!(report.outcome, VerifyOutcome::Ok);
+
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
     fn nib_rejects_invalid_hex_char() {
         // Exercises the `_` error arm in the test module's nib helper.
         assert!(nib('g').is_err());
