@@ -7,6 +7,35 @@ use pos_core::{
 };
 use pos_store::sqlite::SqliteStore;
 
+fn replace_first_bytes(value: &mut ciborium::value::Value, from: &[u8; 32], to: [u8; 32]) -> bool {
+    match value {
+        ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
+            *value = ciborium::value::Value::Bytes(to.to_vec());
+            true
+        }
+        ciborium::value::Value::Array(values) => values
+            .iter_mut()
+            .any(|value| replace_first_bytes(value, from, to)),
+        ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+            replace_first_bytes(key, from, to) || replace_first_bytes(value, from, to)
+        }),
+        ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
+        _ => false,
+    }
+}
+
+fn changed_tombstone_digest(
+    registry: &KeyRegistryStateV1,
+) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(registry, &mut bytes)?;
+    let mut value: ciborium::value::Value = ciborium::from_reader(bytes.as_slice())?;
+    assert!(replace_first_bytes(&mut value, &[3; 32], [9; 32]));
+    let mut changed_bytes = Vec::new();
+    ciborium::into_writer(&value, &mut changed_bytes)?;
+    Ok(ciborium::from_reader(changed_bytes.as_slice())?)
+}
+
 fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     let material_digest = Hash::from_bytes([3; 32]);
@@ -99,6 +128,8 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
     let (_, destroyed) = store.destroy_key_registry(valid_request)?;
     assert!(destroyed.key_record(identity).is_some());
     assert!(store.save_key_registry(&KeyRegistryStateV1::new()).is_err());
+    let changed_tombstone = changed_tombstone_digest(&destroyed)?;
+    assert!(store.save_key_registry(&changed_tombstone).is_err());
     assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
 }
