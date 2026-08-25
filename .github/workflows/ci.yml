@@ -109,6 +109,15 @@ jobs:
           cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log
 
+  conformance-fixtures:
+    name: conformance-fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Verify public conformance fixtures
+        run: bash scripts/verify-conformance-fixtures.sh
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
