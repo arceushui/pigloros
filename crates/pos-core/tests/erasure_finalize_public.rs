@@ -1,6 +1,8 @@
+use std::{cell::RefCell, rc::Rc};
+
 use pos_core::erasure::{
     target_closure_digest, ErasureAuthorizationDecisionV1, ErasureCoordinator,
-    ErasureFreezeAdmissionV1,
+    ErasureCoordinatorRecordPartsV1, ErasureFreezeAdmissionV1,
 };
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
@@ -78,6 +80,7 @@ struct PublicPort {
     records: Vec<ErasureCoordinatorRecordV1>,
     states: Vec<pos_core::ErasureStateV1>,
     target: ErasureRequiredTargetV1,
+    last_record: Rc<RefCell<Option<ErasureCoordinatorRecordV1>>>,
 }
 
 impl ErasureStateResolverV1 for PublicPort {
@@ -159,6 +162,7 @@ impl ErasureCoordinatorPortV1 for PublicPort {
     }
 
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
+        *self.last_record.borrow_mut() = Some(record.clone());
         if let Some(existing) = self
             .records
             .iter_mut()
@@ -173,6 +177,93 @@ impl ErasureCoordinatorPortV1 for PublicPort {
     }
 }
 
+fn partial_receipt_input(target: ErasureRequiredTargetV1) -> ErasureReceiptInputV1 {
+    ErasureReceiptInputV1 {
+        request: reference(1),
+        terminal_state: reference(99),
+        coordinator: reference(2),
+        lifecycle: ErasureLifecycleV1::PartialFailure,
+        freeze_position: 10,
+        acknowledgements: Vec::new(),
+        required_targets: vec![target],
+        pending_owners: vec![target.replica_id],
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: vec![inventory(target)],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(2),
+        trust: reference(3),
+        provenance: reference(4),
+        issue_position: 11,
+        signature: reference(5),
+        receipt_digest: reference(99),
+    }
+}
+
+fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecordPartsV1 {
+    ErasureCoordinatorRecordPartsV1 {
+        request: record.request().clone(),
+        state: record.state().clone(),
+        reserved_targets: record.reserved_targets().to_vec(),
+        targets: record.targets().to_vec(),
+        acknowledgements: record.acknowledgements().to_vec(),
+        receipt: record.receipt().cloned(),
+        receipt_input: record.receipt_input().cloned(),
+        authorize_provenance: record.authorize_provenance(),
+        freeze_provenance: record.freeze_provenance(),
+        freeze_admission: record.freeze_admission(),
+        dispatch_provenance: record.dispatch_provenance(),
+    }
+}
+
+fn expect_terminal_binding_conflict(
+    record: &ErasureCoordinatorRecordV1,
+    mutate: impl FnOnce(&mut ErasureReceiptInputV1),
+) -> Result<(), ErasureErrorV1> {
+    let mut input = record
+        .receipt_input()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    mutate(&mut input);
+    let receipt = ErasureReceiptV1::new(input.clone())?;
+    let mut parts = record_parts(record);
+    parts.receipt = Some(receipt);
+    parts.receipt_input = Some(input);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+fn committed_partial_record(
+    history: Rc<RefCell<Option<ErasureCoordinatorRecordV1>>>,
+) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let target = target();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        PublicPort {
+            records: Vec::new(),
+            states: Vec::new(),
+            target,
+            last_record: history.clone(),
+        },
+        reference(2),
+    );
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(reference(1), transition(ErasureLifecycleV1::AccessFrozen))?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    coordinator.finalize(reference(1), partial_receipt_input(target))?;
+    history
+        .borrow()
+        .clone()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
 #[test]
 fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(), ErasureErrorV1> {
     let target = target();
@@ -182,6 +273,7 @@ fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(
             records: Vec::new(),
             states: Vec::new(),
             target,
+            last_record: Rc::new(RefCell::new(None)),
         },
         reference(2),
     );
@@ -190,33 +282,7 @@ fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(
     coordinator.freeze_inventory(reference(1), transition(ErasureLifecycleV1::AccessFrozen))?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
 
-    let receipt = coordinator.finalize(
-        reference(1),
-        ErasureReceiptInputV1 {
-            request: reference(1),
-            terminal_state: reference(99),
-            coordinator: reference(2),
-            lifecycle: ErasureLifecycleV1::PartialFailure,
-            freeze_position: 10,
-            acknowledgements: Vec::new(),
-            required_targets: vec![target],
-            pending_owners: vec![target.replica_id],
-            failed_owners: Vec::new(),
-            inventories: ErasureReceiptInventoriesV1 {
-                artifacts: vec![inventory(target)],
-                keys: Vec::new(),
-                replicas: Vec::new(),
-                backups: Vec::new(),
-            },
-            replay_claim: ErasureReplayClaimV1::Exact,
-            policy: reference(2),
-            trust: reference(3),
-            provenance: reference(4),
-            issue_position: 11,
-            signature: reference(5),
-            receipt_digest: reference(99),
-        },
-    )?;
+    let receipt = coordinator.finalize(reference(1), partial_receipt_input(target))?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     Ok(())
 }
@@ -261,6 +327,75 @@ fn public_receipt_rejects_acknowledgement_outside_required_closure() {
 }
 
 #[test]
+fn public_record_validation_rejects_wrong_acknowledgement_owner() -> Result<(), ErasureErrorV1> {
+    let required = target();
+    let state = pos_core::ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    let parts = ErasureCoordinatorRecordPartsV1 {
+        request: request()?,
+        state,
+        reserved_targets: Vec::new(),
+        targets: vec![required],
+        acknowledgements: vec![ErasureAcknowledgementV1 {
+            target: required,
+            owner: reference(99),
+            evidence: reference(30),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        }],
+        receipt: None,
+        receipt_input: None,
+        authorize_provenance: None,
+        freeze_provenance: None,
+        freeze_admission: None,
+        dispatch_provenance: None,
+    };
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_record_validation_rejects_each_terminal_receipt_binding_mismatch(
+) -> Result<(), ErasureErrorV1> {
+    let record = committed_partial_record(Rc::new(RefCell::new(None)))?;
+    expect_terminal_binding_conflict(&record, |input| input.terminal_state = reference(98))?;
+    expect_terminal_binding_conflict(&record, |input| input.coordinator = reference(97))?;
+    expect_terminal_binding_conflict(&record, |input| input.request = reference(96))?;
+    expect_terminal_binding_conflict(&record, |input| {
+        let mut outside = target();
+        outside.replica_id = reference(95);
+        input.required_targets = vec![outside];
+        input.pending_owners = vec![outside.replica_id];
+        input.inventories.artifacts[0].target = outside;
+    })?;
+    expect_terminal_binding_conflict(&record, |input| {
+        let acknowledgement = ErasureAcknowledgementV1 {
+            target: target(),
+            owner: target().replica_id,
+            evidence: reference(94),
+            outcome: ErasureAcknowledgementOutcomeV1::Negative,
+        };
+        input.acknowledgements = vec![acknowledgement];
+        input.pending_owners = Vec::new();
+        input.failed_owners = vec![acknowledgement.owner];
+    })?;
+    expect_terminal_binding_conflict(&record, |input| {
+        input.lifecycle = ErasureLifecycleV1::Complete;
+        let acknowledgement = ErasureAcknowledgementV1 {
+            target: target(),
+            owner: target().replica_id,
+            evidence: reference(93),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        };
+        input.acknowledgements = vec![acknowledgement];
+        input.pending_owners = Vec::new();
+        input.failed_owners = Vec::new();
+    })?;
+    Ok(())
+}
+
+#[test]
 fn public_submit_rejects_same_reference_with_conflicting_request_fields(
 ) -> Result<(), ErasureErrorV1> {
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
@@ -268,6 +403,7 @@ fn public_submit_rejects_same_reference_with_conflicting_request_fields(
             records: Vec::new(),
             states: Vec::new(),
             target: target(),
+            last_record: Rc::new(RefCell::new(None)),
         },
         reference(2),
     );
@@ -286,6 +422,7 @@ fn public_coordinator_trait_rejects_a_submitted_request() -> Result<(), ErasureE
             records: Vec::new(),
             states: Vec::new(),
             target: target(),
+            last_record: Rc::new(RefCell::new(None)),
         },
         reference(2),
     );

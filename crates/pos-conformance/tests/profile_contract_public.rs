@@ -8,7 +8,8 @@ use pos_conformance::{
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, ImplementationIdentityV1, IndependenceEvidenceV1,
     IndependenceRequirementsV1, ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1,
-    SubjectAdapterKindV1, TrustedRootPolicyV1, VerificationOutcomeV1,
+    StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
+    TrustedRootPolicyV1, VerificationOutcomeV1,
 };
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -537,6 +538,66 @@ fn public_stable_evidence_decoder_rejects_oversized_profile_before_policy_use() 
         ),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
+}
+
+#[test]
+fn public_profile_digest_encodes_every_closed_case_outcome_variant() {
+    let mut profile = profile_for_digest();
+    let implementation = ImplementationIdentityV1 {
+        implementation_id: "independent".to_owned(),
+        source_digest: [1; 32],
+        build_digest: [2; 32],
+        binary_digest: [3; 32],
+        public_contract_digest: [4; 32],
+        organization_id: None,
+    };
+    let independence = IndependenceEvidenceV1 {
+        technical_independent: true,
+        authorship_independent: true,
+        organizational_independent: false,
+        declaration_digest: [5; 32],
+        shared_code_audit_digest: [6; 32],
+        reviewer_ids: vec!["reviewer".to_owned()],
+    };
+    let case_outcomes = [
+        CaseOutcomeStatusV1::Skip,
+        CaseOutcomeStatusV1::Unavailable,
+        CaseOutcomeStatusV1::NotApplicable,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, outcome)| ProfileCaseOutcomeV1 {
+        case_id: format!("case-{index}"),
+        fixture_digest: [7; 32],
+        execution_profile_digest: [8; 32],
+        mode: ExecutionModeV1::Local,
+        claim_layer: ClaimLayerV1::ArtifactIntegrity,
+        outcome,
+        verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
+        divergence_kind: None,
+        first_coordinate: None,
+        expected_digest: None,
+        actual_digest: None,
+        expected_error: None,
+        actual_error: None,
+        replay_claim: ReplayClaimV1::Exact,
+        redaction_state: RedactionStateV1::None,
+        provenance_digest: [9; 32],
+    })
+    .collect();
+    profile.stable_evidence = vec![StableImplementationEvidenceV1 {
+        implementation,
+        independence,
+        evaluator_protocol_digest: [10; 32],
+        report: report_with_cases(1),
+        case_outcomes,
+        attestation: StableEvidenceAttestationV1 {
+            signer_public_key: [11; 32],
+            signature: [12; 64],
+            trust_root_digest: [13; 32],
+        },
+    }];
+    let _ = profile.digest();
 }
 
 #[test]
