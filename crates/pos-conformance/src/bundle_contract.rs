@@ -3110,7 +3110,7 @@ mod tests {
         let valid = bundle_value(&bundle);
         independent_member_component_rejections(&valid)?;
         independent_expected_result_component_rejections(&valid)?;
-        independent_profile_component_rejections(&bundle, &valid)
+        independent_profile_component_rejections(&valid)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3232,7 +3232,6 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn independent_profile_component_rejections(
-        bundle: &ConformanceBundleV1,
         valid: &Value,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let Value::Array(envelope) = &valid else {
