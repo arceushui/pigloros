@@ -121,6 +121,14 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
     let (_, destroyed) = store.destroy_key_registry(valid_request)?;
     assert!(destroyed.key_record(identity).is_some());
 
+    let mut restored = KeyRegistryStateV1::new();
+    restored.register_key(KeyRegistrationV1::new(
+        identity,
+        material_digest,
+        Some(pos_core::PublicKey::from_bytes([4; 32])),
+    ))?;
+    assert!(store.save_key_registry(&restored).is_err());
+
     let mut encoded = Vec::new();
     ciborium::into_writer(&destroyed, &mut encoded)?;
     let mut value: ciborium::value::Value = ciborium::from_reader(encoded.as_slice())?;
