@@ -344,10 +344,7 @@ fn validate_profile_record_bindings(
     Ok(())
 }
 
-fn fixture_context(
-    profile_record_bytes: &'static [u8],
-    claim_layer: ClaimLayerV1,
-) -> FixtureContext {
+fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> FixtureContext {
     let profile_record_digest =
         labeled_digest("PiglorOS.CPF1ProfileRecord.v1", profile_record_bytes);
     let normative =
