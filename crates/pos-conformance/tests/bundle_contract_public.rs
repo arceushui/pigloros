@@ -758,7 +758,8 @@ fn public_unsigned_bundle_contract_edges_fail_closed() -> Result<(), Box<dyn std
     );
 
     let mut invalid_descriptor_path = bundle.clone();
-    invalid_descriptor_path.manifest.members[0].path = "renamed".to_owned();
+    let descriptor_path = invalid_descriptor_path.manifest.members[0].path.clone();
+    invalid_descriptor_path.manifest.members[0].path = format!("{descriptor_path}:");
     assert_eq!(
         invalid_descriptor_path.validate(),
         Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
@@ -790,7 +791,7 @@ fn public_unsigned_bundle_contract_edges_fail_closed() -> Result<(), Box<dyn std
         Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
     );
 
-    let mut invalid_input_path = bundle.clone();
+    let mut invalid_input_path = bundle;
     invalid_input_path.members[fixture_index].path = "inputs/not-declared.bin".to_owned();
     invalid_input_path.manifest.members[fixture_index].path = "inputs/not-declared.bin".to_owned();
     assert_eq!(
@@ -817,8 +818,10 @@ fn public_unsigned_bundle_member_edges_fail_closed() -> Result<(), Box<dyn std::
     );
 
     let mut invalid_member_path = bundle.clone();
-    invalid_member_path.members[support_index].path = "../outside".to_owned();
-    invalid_member_path.manifest.members[support_index].path = "../outside".to_owned();
+    let support_path = invalid_member_path.members[support_index].path.clone();
+    let invalid_path = format!("{support_path}\u{1}");
+    invalid_member_path.members[support_index].path = invalid_path.clone();
+    invalid_member_path.manifest.members[support_index].path = invalid_path;
     assert_eq!(
         invalid_member_path.validate(),
         Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
@@ -851,7 +854,7 @@ fn public_unsigned_bundle_member_edges_fail_closed() -> Result<(), Box<dyn std::
         Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
     );
 
-    let mut secret_member = bundle.clone();
+    let mut secret_member = bundle;
     secret_member.members[support_index].bytes = b"\"password\"".to_vec();
     secret_member.members[support_index].digest =
         *blake3::hash(&secret_member.members[support_index].bytes).as_bytes();
