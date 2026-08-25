@@ -4883,6 +4883,14 @@ mod coverage_entrypoints {
         )
     }
 
+    fn keyed_draft(key: u8) -> EventDraft {
+        EventDraft::new(
+            pos_core::EntityId::new(),
+            Kind::new("coverage.event"),
+            pos_core::CanonicalBytes::from_vec(vec![key]),
+        )
+    }
+
     fn identity(key: u8, scope: u8) -> AppendIdentity {
         AppendIdentity::new(
             AppendDedupKey::from_keyed_hash([key; 32]),
@@ -5040,7 +5048,7 @@ mod coverage_entrypoints {
                 ordinary.id(),
                 AppendIdentity::new(AppendDedupKey::from_keyed_hash([key; 32]), identity_scope),
                 WallTime::from_micros(1),
-                make_draft(EntityId::new(), &[key]),
+                keyed_draft(key),
             ));
         }
         let first = ok(store.remove_append_identities_bounded(
