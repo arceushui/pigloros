@@ -22,7 +22,8 @@
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
 //! | Verified identity | [`export_timeline_own`] | [`import_timeline_with_verified_signatures`] |
 //!
-//! Signatures cover **payload bytes only** (not metadata). See
+//! Signatures cover the role/epoch domain and **payload bytes only** (not
+//! event metadata). See
 //! [`import_timeline_with_verified_signatures`].
 //!
 //! # Backend features
@@ -369,12 +370,13 @@ pub fn open_store_with_hasher(
 
 /// Cryptographically verify signed events in `export`, then identity-import.
 ///
-/// Every event must carry a signature that verifies under `public_key` against its
-/// **payload bytes only** (event metadata is not covered). An empty event list is allowed.
+/// Every event must carry a signature and role/epoch identity that verifies under
+/// `public_key` against the role/epoch domain and its **payload bytes only** (event
+/// metadata is not covered). An empty event list is allowed.
 ///
 /// Use this when the export is uniformly signed by one key. For mixed unsigned events
-/// or multiple signers, call [`pos_crypto::signing::verify_events`] (or filter) yourself,
-/// then [`import_timeline_with_id`].
+/// or multiple signers, apply the appropriate role-bound verifier per event (or filter)
+/// yourself, then call [`import_timeline_with_id`].
 ///
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if any event is unsigned or fails
@@ -385,7 +387,21 @@ pub fn import_timeline_with_verified_signatures(
     public_key: &pos_core::PublicKey,
 ) -> Result<pos_core::Timeline, CoreError> {
     let vk = pos_crypto::signing::verifying_key_from_public_key(public_key)?;
-    pos_crypto::signing::verify_events_all_signed(&vk, &export.events)?;
+    for event in &export.events {
+        let Some(signature) = &event.signature else {
+            return Err(CoreError::SignatureVerificationFailed);
+        };
+        let Some(identity) = event.signature_identity else {
+            return Err(CoreError::SignatureVerificationFailed);
+        };
+        pos_crypto::key_roles::verify_for_role(
+            &vk,
+            identity.role,
+            identity.epoch,
+            &event.payload,
+            signature,
+        )?;
+    }
     import_timeline_with_id(store, export)
 }
 
@@ -1011,21 +1027,32 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_with_verified_signatures_accepts_valid_and_rejects_bad() {
-        use ed25519_dalek::Signer;
         use pos_core::{
             clock::{Seq, WallTime},
             event::{Event, SchemaVersion},
             ids::EventId,
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
-            KeyIdentityV1, KeyRoleV1,
+            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
         };
-        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
+        use pos_crypto::{
+            key_roles::{key_material_digest, sign_for_registered_role},
+            signing::{generate_keypair, public_key_from_verifying_key},
+        };
 
         let (sk, vk) = generate_keypair();
         let pk = public_key_from_verifying_key(&vk);
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                key_material_digest(&sk.to_bytes()),
+                Some(pk),
+            ))
+            .test_ok();
         let payload = CanonicalBytes::from_vec(b"signed".to_vec());
-        let sig = pos_core::Signature::from_bytes(sk.sign(payload.as_slice()).to_bytes());
+        let sig = sign_for_registered_role(&mut registry, &sk, identity, &payload).test_ok();
         let entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1038,7 +1065,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(sig),
-            signature_identity: Some(KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1)),
+            signature_identity: Some(identity),
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let export = TimelineExport {

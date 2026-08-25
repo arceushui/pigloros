@@ -6,7 +6,7 @@
 //! |--------|--------|--------|-------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] | Remints timeline/event ids; converts to drafts (signatures dropped) |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] | Parent first, then child; forks need `parent_fork_hash` |
-//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must be signed under one key |
+//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must carry a role/epoch-bound signature under one key |
 //!
 //! Prefer [`export_timeline_own`] (alias: [`export_timeline_cow`]) for copy-on-write sync.
 //! [`export_timeline_raw`] is the same function kept for existing call sites.
