@@ -2218,7 +2218,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         record: &mut ErasureCoordinatorRecordV1,
         input: &ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
-        Self::prepare_finalization(self, request, record, &input)
+        Self::prepare_finalization(self, request, record, input)
             .and_then(|(terminal_record, receipt)| self.commit(terminal_record).map(|()| receipt))
     }
 
