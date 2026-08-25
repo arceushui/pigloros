@@ -1668,6 +1668,11 @@ fn validate_authority_members(
             inventory_lifecycle,
             matrix_lifecycle,
         )?;
+        // The current authority inventory identifies expected-result artifacts
+        // by fixture id, but does not provide a canonical binding for every
+        // matrix coordinate. Set membership is useful for checking the shape
+        // of a provisional matrix, but it cannot authorize Candidate
+        // publication: one digest could otherwise be reused across coordinates.
         let authority_result_digests = members
             .iter()
             .filter(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
@@ -1684,6 +1689,9 @@ fn validate_authority_members(
     }
     validate_authority_inventory_digest(&provenance, &inventory.bytes)?;
     validate_authority_inventory(&inventory_json, members)?;
+    if profile.lifecycle == ProfileLifecycleV1::Candidate {
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
     Ok(())
 }
 
@@ -4736,7 +4744,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_bundle_validates_lifecycle_specific_authority_evidence(
+    fn candidate_bundle_fails_closed_without_coordinate_bound_authority(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut candidate = profile();
         candidate.lifecycle = ProfileLifecycleV1::Candidate;
@@ -4819,15 +4827,17 @@ mod tests {
 
         candidate_authority_rejection_seams(&candidate, &members)?;
 
-        assert_eq!(validate_authority_members(&candidate, &members), Ok(()));
-        let bundle = ConformanceBundleV1::materialize(
+        assert_eq!(
+            validate_authority_members(&candidate, &members),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
+        let result = ConformanceBundleV1::materialize(
             &candidate,
             BundleModeV1::Local,
             members,
             expected_results,
-        )?;
-        let signed_bundle = bundle.sign(&ed25519_dalek::SigningKey::from_bytes(&[42; 32]))?;
-        assert_eq!(signed_bundle.validate(), Ok(()));
+        );
+        assert_eq!(result, Err(BundleContractErrorV1::CandidateEvidenceMissing));
         Ok(())
     }
 
