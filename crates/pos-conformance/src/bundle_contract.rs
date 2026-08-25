@@ -7184,14 +7184,14 @@ mod instrumented_candidate_entrypoints {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut invalid_expected = bundle.clone();
+        let mut invalid_expected = bundle;
         invalid_expected.manifest.expected_results[0].digest = [0; 32];
         assert_eq!(
             invalid_expected.validate(),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
 
-        let mut trailing = archive.clone();
+        let mut trailing = archive;
         trailing.push(0);
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&trailing),
