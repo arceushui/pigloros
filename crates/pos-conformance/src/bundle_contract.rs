@@ -6,6 +6,7 @@
 //! validates them against CPF1, and verifies the bundle signature.
 
 use ciborium::value::Value;
+use ed25519_dalek::Verifier;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
 use pos_crypto::signing;
 use serde_json::Value as JsonValue;
@@ -633,6 +634,204 @@ impl ConformanceBundleV1 {
             .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
         bundle.validate().map(|()| bundle)
     }
+}
+
+/// Independently verify the public CFB1 archive envelope and every embedded
+/// member, expected-result, profile, and signature digest.
+///
+/// This verifier intentionally operates on generic CBOR values rather than
+/// decoding through [`ConformanceBundleV1`]. It is suitable for a publication
+/// check performed by a separate consumer of the generated archive.
+///
+/// # Errors
+///
+/// Returns a closed bundle error when the archive is malformed, noncanonical,
+/// internally inconsistent, or signed by a key that does not authenticate its
+/// manifest.
+pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+    let value: Value = ciborium::from_reader(Cursor::new(bytes))
+        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+    if encode_archive_value(&value)?.as_slice() != bytes {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    }
+    let archive = independent_array(&value, 6)?;
+    if archive_text(&archive[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&archive[1])? != 1 {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    }
+    let manifest = independent_array(&archive[2], 6)?;
+    let lifecycle = archive_u64(&manifest[1])?;
+    if lifecycle > 1 || archive_u64(&manifest[2])? > 1 {
+        return Err(BundleContractErrorV1::LifecycleInvalid);
+    }
+    independent_verify_signature(&archive[2], &archive[4], &archive[5])?;
+    let members = independent_array_bounded(&archive[3])?;
+    let descriptors = independent_array_bounded(&manifest[4])?;
+    if members.len() != descriptors.len() {
+        return Err(BundleContractErrorV1::UndeclaredMember);
+    }
+    let (expected_result_paths, profile_bytes) =
+        independent_member_paths_and_profile(members, descriptors)?;
+    let expected_results = independent_array_bounded(&manifest[5])?;
+    independent_verify_expected_results(expected_results, descriptors, &expected_result_paths)?;
+    let profile_bytes = profile_bytes.ok_or(BundleContractErrorV1::MemberMissing)?;
+    independent_verify_profile(profile_bytes, lifecycle, &manifest[3])
+}
+
+fn independent_verify_signature(
+    manifest: &Value,
+    public_key: &Value,
+    signature: &Value,
+) -> Result<(), BundleContractErrorV1> {
+    let manifest_bytes = encode_archive_value(manifest)?;
+    let public_key = independent_digest::<32>(public_key)?;
+    let signature = independent_digest::<64>(signature)?;
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| BundleContractErrorV1::SignatureInvalid)?;
+    verifying_key
+        .verify(
+            &manifest_bytes,
+            &ed25519_dalek::Signature::from_bytes(&signature),
+        )
+        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+}
+
+fn independent_member_paths_and_profile<'a>(
+    members: &'a [Value],
+    descriptors: &[Value],
+) -> Result<(BTreeSet<String>, Option<&'a [u8]>), BundleContractErrorV1> {
+    let mut member_paths = BTreeSet::new();
+    let mut expected_result_paths = BTreeSet::new();
+    let mut profile_bytes = None;
+    for (member_value, descriptor_value) in members.iter().zip(descriptors) {
+        let member = independent_array(member_value, 3)?;
+        let descriptor = independent_array(descriptor_value, 4)?;
+        let member_path = archive_text(&member[0])?;
+        let member_bytes = archive_bytes(&member[1])?;
+        let member_role = archive_u64(&member[2])?;
+        if !member_paths.insert(member_path.to_owned())
+            || archive_text(&descriptor[0])? != member_path
+            || archive_u64(&descriptor[1])? != u64::try_from(member_bytes.len()).unwrap_or(u64::MAX)
+            || independent_digest::<32>(&descriptor[2])? != *blake3::hash(member_bytes).as_bytes()
+            || archive_u64(&descriptor[3])? != member_role
+        {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if member_role == BundleMemberRoleV1::ExpectedResult.code() {
+            expected_result_paths.insert(member_path.to_owned());
+        }
+        if member_role == BundleMemberRoleV1::Profile.code()
+            && (member_path != PROFILE_MEMBER_PATH || profile_bytes.replace(member_bytes).is_some())
+        {
+            return Err(BundleContractErrorV1::MemberMissing);
+        }
+    }
+    Ok((expected_result_paths, profile_bytes))
+}
+
+fn independent_verify_expected_results(
+    expected_results: &[Value],
+    descriptors: &[Value],
+    expected_result_paths: &BTreeSet<String>,
+) -> Result<(), BundleContractErrorV1> {
+    let mut referenced_expected_results = BTreeSet::new();
+    for expected_value in expected_results {
+        let expected = independent_array(expected_value, 6)?;
+        let path = archive_text(&expected[4])?;
+        if !referenced_expected_results.insert(path.to_owned()) {
+            return Err(BundleContractErrorV1::ExpectedResultMismatch);
+        }
+        let matching_descriptor = descriptors.iter().find(|descriptor_value| {
+            independent_array(descriptor_value, 4)
+                .ok()
+                .and_then(|descriptor| archive_text(&descriptor[0]).ok())
+                == Some(path)
+        });
+        let Some(descriptor_value) = matching_descriptor else {
+            return Err(BundleContractErrorV1::MemberMissing);
+        };
+        let descriptor = independent_array(descriptor_value, 4)?;
+        if archive_u64(&descriptor[3])? != BundleMemberRoleV1::ExpectedResult.code()
+            || independent_digest::<32>(&expected[5])? != independent_digest::<32>(&descriptor[2])?
+        {
+            return Err(BundleContractErrorV1::ExpectedResultMismatch);
+        }
+    }
+    if expected_result_paths != &referenced_expected_results {
+        return Err(BundleContractErrorV1::ExpectedResultMismatch);
+    }
+    Ok(())
+}
+
+fn independent_verify_profile(
+    profile_bytes: &[u8],
+    lifecycle: u64,
+    manifest_profile_digest: &Value,
+) -> Result<(), BundleContractErrorV1> {
+    let profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    if encode_archive_value(&profile)?.as_slice() != profile_bytes {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let profile_fields = independent_array(&profile, 17)?;
+    if archive_text(&profile_fields[0])? != "CPF1"
+        || archive_u64(&profile_fields[1])? != 1
+        || archive_u64(&profile_fields[4])? != lifecycle
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let embedded_profile_digest = independent_digest::<32>(&profile_fields[16])?;
+    if embedded_profile_digest != independent_digest::<32>(manifest_profile_digest)? {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    let mut profile_identity = profile_fields.to_vec();
+    profile_identity[16] = Value::Null;
+    let stable_evidence_digest = independent_domain_digest(
+        b"PiglorOS.ConformanceProfileStableEvidence.v1",
+        &Value::Array(Vec::new()),
+    )?;
+    let recomputed_profile_digest = independent_domain_digest(
+        b"PiglorOS.ConformanceProfile.v1",
+        &Value::Array(vec![
+            Value::Array(profile_identity),
+            Value::Bytes(stable_evidence_digest.to_vec()),
+        ]),
+    )?;
+    if embedded_profile_digest != recomputed_profile_digest {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    Ok(())
+}
+
+fn independent_array(value: &Value, length: usize) -> Result<&[Value], BundleContractErrorV1> {
+    match value {
+        Value::Array(values) if values.len() == length => Ok(values),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn independent_array_bounded(value: &Value) -> Result<&[Value], BundleContractErrorV1> {
+    match value {
+        Value::Array(values) if values.len() <= MAX_MEMBERS => Ok(values),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    }
+}
+
+fn independent_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleContractErrorV1> {
+    archive_bytes(value)?
+        .try_into()
+        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
+}
+
+fn independent_domain_digest(
+    domain: &[u8],
+    value: &Value,
+) -> Result<[u8; 32], BundleContractErrorV1> {
+    let encoded = encode_archive_value(value)?;
+    let mut input = Vec::with_capacity(domain.len() + encoded.len() + 1);
+    input.extend_from_slice(domain);
+    input.push(0);
+    input.extend_from_slice(&encoded);
+    Ok(*blake3::hash(&input).as_bytes())
 }
 
 fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
@@ -1775,7 +1974,7 @@ fn validate_execution_matrix_for_lifecycle(
                         .get("expected_result_digest")
                         .and_then(JsonValue::as_str)
                         .and_then(decode_blake3_hex)
-                        .is_some()
+                        .is_none()
             } else {
                 case.get("executed").and_then(JsonValue::as_bool) != Some(false)
                     || !case
@@ -3710,7 +3909,7 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             ),
-            Err(BundleContractErrorV1::LifecycleInvalid)
+            Err(BundleContractErrorV1::MemberOutOfBounds)
         );
 
         let mut invalid_magic = bundle.clone();
@@ -4176,8 +4375,7 @@ mod tests {
             fixture.provenance.publication_review_digest = approved_provenance_digest;
         }
         candidate_profile.profile_digest = candidate_profile.digest();
-        let (mut members, expected_results) =
-            bundle_inputs(&candidate_profile, BundleModeV1::Local)?;
+        let (mut members, expected_results) = bundle_inputs(&profile(), BundleModeV1::Local)?;
         let provenance_member = members
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::Provenance)
@@ -4191,13 +4389,13 @@ mod tests {
         inventory_member.bytes = candidate_inventory_bytes;
         inventory_member.digest = candidate_inventory_digest;
         members.extend(authority_members);
-        let bundle = ConformanceBundleV1::materialize(
+        let result = ConformanceBundleV1::materialize(
             &candidate_profile,
             BundleModeV1::Local,
             members,
             expected_results,
-        )?;
-        assert_eq!(bundle.manifest.lifecycle, ProfileLifecycleV1::Candidate);
+        );
+        assert_eq!(result, Err(BundleContractErrorV1::CandidateEvidenceMissing));
         Ok(())
     }
 
@@ -4820,6 +5018,23 @@ mod tests {
             validate_provenance_authority_binding(&invalid_executed_count, "Candidate"),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        let mut candidate_provenance: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))?;
+        candidate_provenance["authority_inventory"]["status"] =
+            JsonValue::String("Candidate".to_owned());
+        candidate_provenance["adr_059_execution_matrix"]["status"] =
+            JsonValue::String("Candidate".to_owned());
+        candidate_provenance["adr_059_execution_matrix"]["executed_case_count"] =
+            JsonValue::Number(192_u64.into());
+        assert_eq!(
+            validate_provenance_authority_binding_for_lifecycle(
+                &candidate_provenance,
+                "Candidate",
+                "Candidate",
+            ),
+            Ok(())
+        );
         Ok(())
     }
 
@@ -5109,6 +5324,25 @@ mod tests {
         assert_eq!(
             validate_execution_matrix(&invalid_matrix),
             Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        let mut candidate: JsonValue = serde_json::from_slice(matrix_bytes)?;
+        candidate["lifecycle"] = JsonValue::String("Candidate".to_owned());
+        for row in candidate["rows"]
+            .as_array_mut()
+            .ok_or("candidate rows are missing")?
+        {
+            row["executed_case_count"] = JsonValue::Number(16_u64.into());
+        }
+        for case in candidate["cases"]
+            .as_array_mut()
+            .ok_or("candidate cases are missing")?
+        {
+            case["executed"] = JsonValue::Bool(true);
+            case["expected_result_digest"] = JsonValue::String("00".repeat(32));
+        }
+        assert_eq!(
+            validate_execution_matrix_for_lifecycle(&candidate, "Candidate"),
+            Ok(())
         );
         Ok(())
     }

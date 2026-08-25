@@ -37,6 +37,12 @@ diff -rq "${first_output}" "${second_output}"
 mapfile -t materialized_files < <(
   find "${first_output}" -type f \( -name '*.cbor' -o -name '*.cfb1' \) -print | sort
 )
+mapfile -t archive_files < <(
+  find "${first_output}" -type f -name '*.cfb1' -print | sort
+)
+if ((${#archive_files[@]} > 0)); then
+  cargo run -p pos-conformance --bin verify-conformance-bundle --locked -- "${archive_files[@]}"
+fi
 authority_lifecycle="$(jq -r '.lifecycle' fixtures/conformance/expected-authority/inventory.json)"
 case "${authority_lifecycle}" in
   Draft) lifecycle_count=1 ;;
