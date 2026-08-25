@@ -30,7 +30,7 @@ fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{run, verify_path};
+    use super::{main, run, verify_path};
     use std::ffi::OsString;
     use std::fs;
 
@@ -40,6 +40,11 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("pigloros-missing-cfb1-{}", std::process::id()));
         assert!(run([OsString::from("verify"), missing.into_os_string()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn verifier_main_wires_the_process_arguments() {
+        assert!(main().is_err());
     }
 
     #[test]

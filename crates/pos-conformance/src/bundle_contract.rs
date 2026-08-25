@@ -3075,6 +3075,10 @@ mod tests {
         let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
         let valid = bundle_value(&bundle);
         assert_eq!(
+            independent_array(&Value::Null, 6),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
             verify_archive_independently(&encode_archive_value(&valid)?),
             Ok(())
         );
