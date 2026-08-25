@@ -82,7 +82,7 @@ fn run(
         &mut arguments,
         encoded_signing_key,
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
-        authority_root.as_deref(),
+        authority_root,
     )
 }
 
@@ -366,7 +366,7 @@ fn fixture_context(
 
 fn fixtures_from_profile_record(
     profile_record: &JsonValue,
-    context: FixtureContext,
+    context: &FixtureContext,
 ) -> Result<Vec<FixtureDescriptorV1>, Box<dyn Error>> {
     let fixture_records = profile_record
         .get("fixtures")
@@ -394,7 +394,7 @@ fn profile_for_claim_layer(
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let (profile_record_bytes, profile_record) = validated_profile_record(claim_layer)?;
     let context = fixture_context(profile_record_bytes, claim_layer);
-    let fixtures = fixtures_from_profile_record(&profile_record, context)?;
+    let fixtures = fixtures_from_profile_record(&profile_record, &context)?;
     let air_gapped_execution_profile_digest = labeled_digest(
         "PiglorOS.ExecutionProfile.v1",
         b"deterministic-air-gapped-v1",
@@ -464,7 +464,7 @@ const fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
 
 fn fixture(
     record: &JsonValue,
-    context: FixtureContext,
+    context: &FixtureContext,
 ) -> Result<FixtureDescriptorV1, Box<dyn Error>> {
     let case_id = json_text(record, "case_id")?;
     let family = json_text(record, "family")?;
