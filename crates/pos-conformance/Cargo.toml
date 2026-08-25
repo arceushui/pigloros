@@ -12,6 +12,7 @@ ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

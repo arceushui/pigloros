@@ -2,9 +2,10 @@
 
 These files are the public, deterministic inputs and expected-result records
 for the seven CPF1 claim layers. Each directory under `profiles/` is a
-separate public profile manifest and binds exactly one claim layer to its
-input/expected-result pair. They contain no implementation-private state,
-credentials, or signing material.
+separate public profile manifest and binds exactly one claim layer to all seven
+required fixture families: positive, negative, malformed, resource, deletion,
+downgrade, and independent evaluation. They contain no implementation-private
+state, credentials, or signing material.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
@@ -13,7 +14,9 @@ materialized separately with the same expected-result records; the Air-Gapped
 profile capability policy remains network-deny.
 
 The scenario names intentionally cover positive, negative, malformed, resource
-limit, deletion, downgrade, and independent-evaluation cases.
+limit, deletion, downgrade, and independent-evaluation cases. A profile
+manifest lists every family explicitly; no profile is represented by a single
+input/result pair.
 
 `SHA256SUMS` is the independent byte inventory for all seven profile manifests,
 seven input records, seven expected-result records, the ADR-059 matrix, and
