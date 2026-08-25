@@ -658,7 +658,9 @@ mod tests {
             "artifact-integrity",
         )
         .is_err());
-        std::fs::remove_dir_all(output)?;
+        if output.exists() {
+            std::fs::remove_dir_all(output)?;
+        }
 
         let mut invalid_profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
         invalid_profile.fixtures.clear();
@@ -672,7 +674,9 @@ mod tests {
             "artifact-integrity",
         )
         .is_err());
-        std::fs::remove_dir_all(output)?;
+        if output.exists() {
+            std::fs::remove_dir_all(output)?;
+        }
 
         let mut unsupported_mode = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
         unsupported_mode.fixtures[0].modes.clear();
