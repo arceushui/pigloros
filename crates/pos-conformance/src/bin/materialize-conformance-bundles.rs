@@ -391,18 +391,17 @@ fn fixtures_from_profile_record(
     }
     let mut fixtures = Vec::with_capacity(fixture_records.len() * 2);
     for fixture_record in fixture_records {
-        fixtures.push(fixture(
+        let local = fixture(
             fixture_record,
             context,
             context.local_execution_profile_digest,
             pos_conformance::ExecutionModeV1::Local,
-        )?);
-        fixtures.push(fixture(
-            fixture_record,
-            context,
-            context.air_gapped_execution_profile_digest,
-            pos_conformance::ExecutionModeV1::AirGapped,
-        )?);
+        )?;
+        let mut air_gapped = local.clone();
+        air_gapped.execution_profile_digest = context.air_gapped_execution_profile_digest;
+        air_gapped.modes = vec![pos_conformance::ExecutionModeV1::AirGapped];
+        fixtures.push(local);
+        fixtures.push(air_gapped);
     }
     fixtures.sort_by_key(|fixture| {
         (
