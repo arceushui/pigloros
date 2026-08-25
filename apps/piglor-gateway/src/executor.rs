@@ -16,7 +16,7 @@ use pos_core::{
     timeline::Timeline,
     ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
     OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
-    PreparedOwnTracksIngressV1, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
+    PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use std::{
     collections::HashMap,
