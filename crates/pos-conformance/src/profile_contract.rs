@@ -4896,7 +4896,7 @@ mod tests {
         );
         reject_profile_change(
             |value| {
-                value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped]
+                value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped];
             },
             ConformanceContractError::FieldOutOfBounds,
         );
