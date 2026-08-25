@@ -7332,7 +7332,7 @@ mod instrumented_candidate_entrypoints {
     fn public_archive_cap_boundaries(
         profile: &super::ConformanceProfileV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut limited_profiles = [profile.clone(), profile.clone(), profile];
+        let mut limited_profiles = [profile.clone(), profile.clone(), profile.clone()];
         limited_profiles[0]
             .evaluator_protocol
             .hard_caps
