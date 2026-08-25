@@ -1502,7 +1502,7 @@ impl SqliteStore {
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
         let logical_prefix = self.logical_prefix(timeline)?;
         self.get_head_seq(timeline)
-            .map(|head_seq| head_seq.as_u64())
+            .map(Seq::as_u64)
             .and_then(|head_seq| {
                 let tx = self
                     .conn
