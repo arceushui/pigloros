@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 blake3 = { workspace = true }
 ciborium = { workspace = true }
-ciborium-io = { workspace = true }
 ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }

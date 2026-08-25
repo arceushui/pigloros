@@ -840,15 +840,13 @@ fn independent_domain_digest(domain: &[u8], value: &Value) -> [u8; 32] {
 
 struct InfallibleCborWriter(Vec<u8>);
 
-impl ciborium_io::Write for InfallibleCborWriter {
-    type Error = std::convert::Infallible;
-
-    fn write_all(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+impl std::io::Write for InfallibleCborWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.0.extend_from_slice(data);
-        Ok(())
+        Ok(data.len())
     }
 
-    fn flush(&mut self) -> Result<(), Self::Error> {
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
 }
