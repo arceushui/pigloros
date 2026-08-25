@@ -4526,27 +4526,53 @@ mod coverage_entrypoints {
 #[cfg(test)]
 mod instrumented_candidate_entrypoints {
     use super::tests;
-    use super::{validate_candidate_publication, BundleContractErrorV1, BundleMemberRoleV1};
+    use super::{BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1};
 
-    #[test]
-    fn valid_candidate_bundle_reaches_public_validation() {
-        assert!(super::coverage_entrypoints::signed_bundle()
-            .is_ok_and(|bundle| { bundle.validate().is_ok() }));
+    fn signed_candidate_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        let bundle = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        Ok(bundle.sign(&signing_key)?)
     }
 
     #[test]
-    fn candidate_publication_rejects_a_mismatched_review_digest() {
+    fn valid_candidate_bundle_reaches_public_validation() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert!(signed_candidate_bundle()?.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_publication_rejects_a_mismatched_review_digest(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut profile = tests::profile();
         profile.fixtures[0].provenance.publication_review_digest =
             *blake3::hash(b"different review evidence").as_bytes();
-        let members = vec![super::BundleMemberV1::supporting(
-            "support/provenance.json",
-            include_bytes!("../../../fixtures/conformance/support/provenance.json").to_vec(),
+        profile.profile_digest = profile.digest();
+        let (mut members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        members.push(super::BundleMemberV1::supporting(
+            "support/review-evidence.json",
+            b"independent review evidence".to_vec(),
             BundleMemberRoleV1::Provenance,
-        )];
+        ));
+        let bundle = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let bundle = bundle.sign(&signing_key)?;
         assert_eq!(
-            validate_candidate_publication(&profile, &members),
+            bundle.validate(),
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
+        Ok(())
     }
 }
