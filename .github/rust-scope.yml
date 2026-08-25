@@ -1,0 +1,11 @@
+# The Rust gate is skipped only when every changed path is documentation-only.
+# Keep this list conservative: an unknown path must run the full gate set.
+rust:
+  - '**'
+  - '!**/*.md'
+  - '!**/*.mdx'
+  - '!**/*.adoc'
+  - '!**/*.rst'
+  - '!.agents/**'
+  - '!.cursor/**'
+  - '!docs/**'

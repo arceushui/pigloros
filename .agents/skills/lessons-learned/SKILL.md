@@ -124,7 +124,7 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Keep workflow changes minimal and executable.** Remove whitespace-only churn, use the repository’s naming conventions, and verify folded shell commands, quoting, environment transport, path filters, timeouts, cancellation behavior, and aggregators on the actual runner. Performance improvements should be measured; do not hide architectural debt with larger timeouts.
 
-- **Make conditional gates fail closed.** For documentation-only pull requests, load the scope classifier from the trusted base revision, default to the full gate set when it is unavailable, allow only an explicit documentation allowlist to skip Rust-heavy jobs, include deleted paths, and disable rename collapsing so a moved build input cannot bypass required checks. Skipped jobs must still emit successful conclusions, while pushes, schedules, and manual runs remain full checks.
+- **Keep required workflows alive while scoping expensive gates.** Use a pinned path-filter action and a conservative documentation-only allowlist to drive job-level `needs`/`if` conditions; keep required workflow triggers broad because top-level path filters can leave checks pending. Ensure unknown, deleted, renamed, generated, and policy inputs run the full suite, and keep pushes, schedules, and manual runs full.
 
 - **Give every fixture one owner and lifecycle.** Shipped conformance fixtures, test-only fixtures, public authority bytes, and mutation reports have different audiences and validity. Keep them separate, bind reports to the commit that produced them, and remove embedded sample data when its product owner is removed.
 

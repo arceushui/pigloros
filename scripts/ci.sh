@@ -21,9 +21,6 @@ echo "==> pinned dependency policy"
 bash "$ROOT/scripts/check-pinned-dependencies.sh"
 bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
 
-echo "==> Rust change scope policy"
-bash "$ROOT/scripts/test-check-rust-change-scope.sh"
-
 echo "==> ASan CI policy"
 bash "$ROOT/scripts/check-asan-ci-policy.sh"
 python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
