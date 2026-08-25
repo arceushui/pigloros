@@ -299,7 +299,7 @@ fn verify_store_event(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{run, Source, VerifyOutcome, VerifyReport};
+    use super::{run, verify_store_event, Source, VerifyOutcome, VerifyReport};
     use crate::cli::run as cli_run;
     use crate::hex::{hex_decode, nib};
     use crate::test_helpers::{running_as_root, TestOptionExt, TestResultExt};
