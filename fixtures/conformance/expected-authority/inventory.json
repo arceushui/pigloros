@@ -82,7 +82,7 @@
       "fixture_bytes_path": "expected-authority/fixtures/RES-001.json",
       "fixture_bytes_digest": "6b154c95bb7185fa3716233e9afcfa0b76c8e768e9946757928b6128b4fdc359",
       "expected_result_path": "expected-authority/results/RES-001.json",
-      "expected_result_digest": "be83ae59b1726063e9afdd45fb8683327424847a4dd11ec024f98466ff0520",
+      "expected_result_digest": "be83ae59b1726069ea17abfb2ea1491bb0a50553833293c647f9a3e8352f3838",
       "materialization_status": "materialized"
     },
     {
