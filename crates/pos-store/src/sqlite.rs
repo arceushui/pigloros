@@ -97,7 +97,6 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geo_cell_consent_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         consent_record_id: &AdmissionSnapshotId,
@@ -282,7 +281,6 @@ impl SqliteStore {
     ///
     /// # Errors
     /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn open_with_hasher(path: &str, hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
         let conn = Connection::open_with_flags(
             path,
@@ -860,7 +858,6 @@ impl SqliteStore {
         Ok(events)
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn validate_own_events_bounded(
         conn: &Connection,
         timeline_id: TimelineId,
@@ -1488,7 +1485,6 @@ impl SqliteStore {
             })
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_with_limit_visible(
         &mut self,
         timeline: TimelineId,
@@ -1794,7 +1790,6 @@ impl OwnTracksEnrollmentStore for SqliteStore {
 }
 
 impl OwnTracksIngressStore for SqliteStore {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn prepare_owntracks_ingress(
         &mut self,
         input: OwnTracksIngressInputV1,
@@ -1826,7 +1821,6 @@ impl SqliteStore {
         })
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn write_enrollment_state(
         tx: &rusqlite::Transaction<'_>,
         state: &OwnTracksEnrollmentStateV1,
@@ -2214,7 +2208,6 @@ impl GeographicAdmissionAdmin for SqliteStore {
 }
 
 impl GeographicAdmissionConsentResolver for SqliteStore {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn resolve_admission_consent(
         &self,
         consent_record_id: &AdmissionSnapshotId,
@@ -2750,7 +2743,6 @@ impl SqliteStore {
         .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
         let chain = self.fork_chain(id)?;
         let mut logical_head = 0_u64;
@@ -3021,7 +3013,6 @@ impl EventStore for SqliteStore {
         Ok(removed)
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn remove_append_identities_bounded(
         &mut self,
         scope: AppendDedupScope,
@@ -3101,7 +3092,6 @@ impl EventStore for SqliteStore {
             .transpose()
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| {
@@ -3336,7 +3326,6 @@ impl EventStore for SqliteStore {
         self.logical_head_unchecked(id)
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
         let id = meta.id;
         // Resolve fork parent before the duplicate-id check so storage failures on the
@@ -3475,7 +3464,6 @@ impl EventStore for SqliteStore {
             })
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
         self.ensure_generic_timeline_visibility(id).and_then(|()| {
             let id_str = id.to_string();
@@ -9471,7 +9459,7 @@ mod coverage_entrypoints {
         for statement in [
             "INSERT INTO geographic_cell_admission_consent_records
              (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
-             VALUES (?1, 'bad', zeroblob(32), zeroblob(1))",
+             VALUES (?1, X'01', zeroblob(32), zeroblob(1))",
             "INSERT INTO geographic_cell_admission_consent_records
              (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
              VALUES (?1, 12, 'bad', zeroblob(1))",
@@ -9591,6 +9579,27 @@ mod coverage_entrypoints {
             EventReadBounds::new(1024, 1024, 1024, 8),
         );
         expect_err(result);
+    }
+
+    #[test]
+    fn bounded_metadata_rejects_a_non_text_payload_type() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("metadata-type-error"));
+        ok(store.append(
+            timeline.id(),
+            &[tests::make_draft(EntityId::new(), b"metadata")],
+        ));
+        ok(store.conn.create_scalar_function(
+            "typeof",
+            1,
+            rusqlite::functions::FunctionFlags::default(),
+            |_context| Ok(1_i64),
+        ));
+        expect_err(store.read_bounded(
+            timeline.id(),
+            SeqRange::all(),
+            EventReadBounds::new(1024, 1024, 1024, 8),
+        ));
     }
 
     #[test]
@@ -10123,6 +10132,38 @@ mod coverage_entrypoints {
         ok(query_error.conn.authorizer(
             None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
         ));
+
+        let scope = AppendDedupScope::from_keyed_hash([131; 32]);
+        let mut view_error = tests::new_store();
+        insert_identity(&view_error, 132, scope, 1);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_function = std::sync::Arc::clone(&calls);
+        ok(view_error.conn.create_scalar_function(
+            "scope_for_test",
+            0,
+            rusqlite::functions::FunctionFlags::default(),
+            move |_context| {
+                if calls_for_function.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    Ok(vec![0_u8; 32])
+                } else {
+                    Err(rusqlite::Error::UserFunctionError(Box::new(
+                        std::io::Error::other("scope query denied"),
+                    )))
+                }
+            },
+        ));
+        ok(view_error
+            .conn
+            .execute_batch("ALTER TABLE append_identities RENAME TO append_identities_real"));
+        ok(view_error.conn.execute_batch(
+            "CREATE VIEW append_identities AS
+             SELECT dedup_key, scope_for_test() AS scope_key, event_id, expires_at
+             FROM append_identities_real",
+        ));
+        expect_err(
+            view_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
     }
 
     #[test]
