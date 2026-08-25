@@ -112,33 +112,39 @@ impl SqliteStore {
                     i64::try_from(consent_revision).unwrap_or(i64::MAX)
                 ],
                 |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
+                    row.get::<_, i64>(0).and_then(|revision| {
+                        row.get::<_, Vec<u8>>(1).and_then(|hash| {
+                            row.get::<_, Vec<u8>>(2)
+                                .map(|bytes| (revision, hash, bytes))
+                        })
+                    })
                 },
             )
             .optional()
             .map_err(|error| CoreError::Storage(error.to_string()))?
             .ok_or(CoreError::GeographicAdmissionValidationFailed)?;
         let stored_revision =
-            u64::try_from(row.0).map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-        let stored_hash: [u8; 32] = row
+            u64::try_from(row.0).map_err(|_| CoreError::GeographicAdmissionValidationFailed);
+        let stored_hash: Result<[u8; 32], CoreError> = row
             .1
             .try_into()
-            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-        let record = AdmissionConsentRecordV1::from_persistence_parts(
-            consent_record_id.clone(),
-            stored_revision,
-            CanonicalBytes::from_vec(row.2),
-        );
-        if stored_revision != consent_revision
-            || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
-        {
-            return Err(CoreError::GeographicAdmissionValidationFailed);
-        }
-        Ok(record)
+            .map_err(|_| CoreError::GeographicAdmissionValidationFailed);
+        stored_revision.and_then(|stored_revision| {
+            stored_hash.and_then(|stored_hash| {
+                let record = AdmissionConsentRecordV1::from_persistence_parts(
+                    consent_record_id.clone(),
+                    stored_revision,
+                    CanonicalBytes::from_vec(row.2),
+                );
+                if stored_revision != consent_revision
+                    || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
+                {
+                    Err(CoreError::GeographicAdmissionValidationFailed)
+                } else {
+                    Ok(record)
+                }
+            })
+        })
     }
 
     fn append_one_in_transaction(
@@ -291,18 +297,19 @@ impl SqliteStore {
         .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-        Self::require_utf8_encoding(&conn)?;
-        let store = Self {
-            conn,
-            hasher,
-            clock: Box::new(SystemAdmissionClock),
-            consent_authority_permit: None,
-        };
-        store.init_schema()?;
-        store.validate_event_sequence_invariant()?;
-        Ok(store)
+            .map_err(|e| CoreError::Storage(e.to_string()))
+            .and_then(|()| Self::require_utf8_encoding(&conn))
+            .and_then(|()| {
+                let store = Self {
+                    conn,
+                    hasher,
+                    clock: Box::new(SystemAdmissionClock),
+                    consent_authority_permit: None,
+                };
+                store
+                    .init_schema()
+                    .and_then(|()| store.validate_event_sequence_invariant().map(|()| store))
+            })
     }
 
     /// Open a `SQLite` store with a trusted admission clock.
@@ -1494,7 +1501,10 @@ impl SqliteStore {
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
         let logical_prefix = self.logical_prefix(timeline)?;
-        let head_seq = self.get_head_seq(timeline)?.as_u64();
+        let head_seq = match self.get_head_seq(timeline) {
+            Ok(head_seq) => head_seq.as_u64(),
+            Err(error) => return Err(error),
+        };
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1800,8 +1810,8 @@ impl OwnTracksIngressStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let enrollment = Self::enrollment_state_in_transaction(&tx)?;
         tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        enrollment.prepare_owntracks_ingress(&input)
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .and_then(|()| enrollment.prepare_owntracks_ingress(&input))
     }
 }
 
@@ -1825,13 +1835,15 @@ impl SqliteStore {
         tx: &rusqlite::Transaction<'_>,
         state: &OwnTracksEnrollmentStateV1,
     ) -> Result<(), CoreError> {
-        tx.execute(
-            "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, ?1)
-             ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
-            params![state.persistence_bytes()?],
-        )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(())
+        state.persistence_bytes().and_then(|bytes| {
+            tx.execute(
+                "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
+                params![bytes],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map(|_| ())
+        })
     }
 
     fn transition_enrollment_state(
@@ -2223,11 +2235,12 @@ impl GeographicAdmissionConsentResolver for SqliteStore {
                     i64::try_from(consent_revision).unwrap_or(i64::MAX)
                 ],
                 |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
+                    row.get::<_, i64>(0).and_then(|revision| {
+                        row.get::<_, Vec<u8>>(1).and_then(|hash| {
+                            row.get::<_, Vec<u8>>(2)
+                                .map(|bytes| (revision, hash, bytes))
+                        })
+                    })
                 },
             )
             .map_err(|error| match error {
@@ -2237,22 +2250,26 @@ impl GeographicAdmissionConsentResolver for SqliteStore {
                 other => CoreError::Storage(other.to_string()),
             })
             .and_then(|(revision, hash, bytes)| {
-                let revision = u64::try_from(revision)
-                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-                let stored_hash: [u8; 32] = hash
-                    .try_into()
-                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-                let record = AdmissionConsentRecordV1::from_persistence_parts(
-                    consent_record_id.clone(),
-                    revision,
-                    CanonicalBytes::from_vec(bytes),
-                );
-                if revision != consent_revision
-                    || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
-                {
-                    return Err(CoreError::GeographicAdmissionValidationFailed);
-                }
-                Ok(record)
+                u64::try_from(revision)
+                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)
+                    .and_then(|revision| {
+                        hash.try_into()
+                            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)
+                            .and_then(|stored_hash| {
+                                let record = AdmissionConsentRecordV1::from_persistence_parts(
+                                    consent_record_id.clone(),
+                                    revision,
+                                    CanonicalBytes::from_vec(bytes),
+                                );
+                                if revision != consent_revision
+                                    || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
+                                {
+                                    Err(CoreError::GeographicAdmissionValidationFailed)
+                                } else {
+                                    Ok(record)
+                                }
+                            })
+                    })
             })
     }
 }
@@ -2745,14 +2762,14 @@ impl SqliteStore {
 
     fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
         let chain = self.fork_chain(id)?;
-        let mut logical_head = 0_u64;
-        for (index, (timeline, _)) in chain.iter().enumerate() {
-            logical_head = Self::add_logical_segment(
-                logical_head,
-                self.logical_segment_length(&chain, index, *timeline)?,
-            )?;
-        }
-        Ok(Seq::from_u64(logical_head))
+        chain
+            .iter()
+            .enumerate()
+            .try_fold(0_u64, |logical_head, (index, (timeline, _))| {
+                self.logical_segment_length(&chain, index, *timeline)
+                    .and_then(|segment| Self::add_logical_segment(logical_head, segment))
+            })
+            .map(Seq::from_u64)
     }
 }
 
@@ -3101,11 +3118,11 @@ impl EventStore for SqliteStore {
                 for (i, &(tid, _)) in chain.iter().enumerate() {
                     let logical_prefix = chain[i].1.map_or(0, Seq::as_u64);
                     if i + 1 < chain.len() {
-                        let logical_fork = chain[i + 1].1.ok_or_else(|| {
-                            CoreError::Storage(
+                        let Some(logical_fork) = chain[i + 1].1 else {
+                            return Err(CoreError::Storage(
                                 "non-root chain entry is missing its fork sequence".to_owned(),
-                            )
-                        })?;
+                            ));
+                        };
                         let local_limit = logical_fork
                             .as_u64()
                             .checked_sub(logical_prefix)
@@ -3114,7 +3131,10 @@ impl EventStore for SqliteStore {
                                     "Fork point precedes inherited history for timeline {tid}"
                                 ))
                             })?;
-                        let local_head = self.get_head_seq(tid)?.as_u64();
+                        let local_head = match self.get_head_seq(tid) {
+                            Ok(local_head) => local_head.as_u64(),
+                            Err(error) => return Err(error),
+                        };
                         if local_limit > local_head {
                             return Err(CoreError::Storage(format!(
                                 "Fork point exceeds parent logical Event head for timeline {tid}"
