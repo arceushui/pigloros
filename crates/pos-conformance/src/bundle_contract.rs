@@ -5347,7 +5347,7 @@ mod coverage_entrypoints {
         archive_array_bounded, archive_array_exact, archive_bytes, archive_text, archive_u64,
         bundle_value, encode_archive_value, manifest_value, preflight_archive,
         preflight_archive_caps, required_support_digests, validate_archive_caps,
-        validate_expected_results, validate_fixture_inputs, validate_member_count,
+        validate_expected_results, validate_fixture_inputs_for_mode, validate_member_count,
         validate_member_size, validate_preflight_archive_caps, validate_selected_bundle_caps,
         validate_supporting_members, validate_total_bytes, BundleContractErrorV1,
         BundleMemberRoleV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1, PublicKey,
