@@ -822,7 +822,7 @@ fn independent_domain_digest(domain: &[u8], value: &Value) -> [u8; 32] {
     let mut encoded = Vec::new();
     // `Vec<u8>` has an infallible `Write` implementation. The serializer's
     // result therefore has no reachable error state at this boundary.
-    let _ = ciborium::into_writer(value, &mut encoded);
+    drop(ciborium::into_writer(value, &mut encoded));
     let mut input = Vec::with_capacity(domain.len() + encoded.len() + 1);
     input.extend_from_slice(domain);
     input.push(0);
