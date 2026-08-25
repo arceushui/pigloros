@@ -3754,7 +3754,7 @@ mod coverage_entrypoints {
         MAX_TOTAL_BUNDLE_BYTES,
     };
 
-    fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+    pub(super) fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
         signed_bundle_for(&tests::profile(), BundleModeV1::Local)
     }
 
@@ -4520,5 +4520,33 @@ mod coverage_entrypoints {
             Err(BundleContractErrorV1::LifecycleInvalid)
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod instrumented_candidate_entrypoints {
+    use super::tests;
+    use super::{validate_candidate_publication, BundleContractErrorV1, BundleMemberRoleV1};
+
+    #[test]
+    fn valid_candidate_bundle_reaches_public_validation() {
+        assert!(super::coverage_entrypoints::signed_bundle()
+            .is_ok_and(|bundle| { bundle.validate().is_ok() }));
+    }
+
+    #[test]
+    fn candidate_publication_rejects_a_mismatched_review_digest() {
+        let mut profile = tests::profile();
+        profile.fixtures[0].provenance.publication_review_digest =
+            *blake3::hash(b"different review evidence").as_bytes();
+        let members = vec![super::BundleMemberV1::supporting(
+            "support/provenance.json",
+            include_bytes!("../../../fixtures/conformance/support/provenance.json").to_vec(),
+            BundleMemberRoleV1::Provenance,
+        )];
+        assert_eq!(
+            validate_candidate_publication(&profile, &members),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
     }
 }
