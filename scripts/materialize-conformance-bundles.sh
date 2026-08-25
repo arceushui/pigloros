@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-output_root="${1:-${RUNNER_TEMP:-/tmp}/pigloros-conformance-bundles}"
+if (($# > 1)); then
+  echo "usage: $0 [published-output-root]" >&2
+  exit 2
+fi
+
+publication_id="${PIGLOROS_CONFORMANCE_PUBLICATION_ID:-$(git rev-parse HEAD)}"
+output_root="${1:-fixtures/conformance/published/${publication_id}}"
+if [[ -e "${output_root}" ]]; then
+  echo "refusing to overwrite retained conformance publication: ${output_root}" >&2
+  exit 1
+fi
 mkdir -p "${output_root}"
 
 PIGLOROS_MATERIALIZE_CONFORMANCE="${output_root}" \
@@ -17,4 +27,4 @@ if ((${#materialized_files[@]} != 70)); then
 fi
 
 (cd "${output_root}" && sha256sum --tag "${materialized_files[@]#${output_root}/}" > SHA256SUMS)
-echo "materialized ${#materialized_files[@]} deterministic conformance files under ${output_root}"
+echo "materialized ${#materialized_files[@]} deterministic conformance files under retained path ${output_root}"

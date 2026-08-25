@@ -3,6 +3,11 @@ set -euo pipefail
 
 fixture_root="${1:-fixtures/conformance}"
 
+command -v b3sum >/dev/null || {
+  echo "b3sum is required to independently verify BLAKE3 authority digests" >&2
+  exit 1
+}
+
 if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/support" ]]; then
   echo "missing conformance fixture directories under ${fixture_root}" >&2
   exit 1
@@ -44,18 +49,75 @@ jq -e '
 }
 
 jq -e '
-  .magic == "W8H1" and .version == 1 and .lifecycle == "Draft" and
+  .magic == "W8H1" and .version == 1 and
+  .lifecycle == "Candidate" and .digest_algorithm == "BLAKE3-256" and
   (.entries | length == 11) and
   ([.entries[].fixture_id] == [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002",
     "INV-003", "RES-001", "LIVE-001", "ERA-001", "SEC-001"
   ]) and
   ([.entries[].fixture_id] | unique | length == 11) and
-  all(.entries[]; .expected_result_digest == null and .materialization_status == "open-draft-slot")
+  all(.entries[];
+    (.fixture_bytes_path | type == "string") and
+    (.expected_result_path | type == "string") and
+    (.fixture_bytes_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+    .materialization_status == "materialized"
+  )
 ' "${authority_path}" >/dev/null || {
-  echo "invalid #172 expected-authority inventory" >&2
+  echo "invalid #172 Candidate expected-authority inventory" >&2
   exit 1
 }
+
+mapfile -t authority_files < <(
+  jq -r '.entries[] | .fixture_bytes_path, .expected_result_path' "${authority_path}"
+)
+if (( ${#authority_files[@]} != 22 )); then
+  echo "expected eleven authority fixture/result pairs" >&2
+  exit 1
+fi
+for authority_file in "${authority_files[@]}"; do
+  [[ -s "${fixture_root}/${authority_file}" ]] || {
+    echo "missing authority artifact: ${fixture_root}/${authority_file}" >&2
+    exit 1
+  }
+done
+
+authority_inventory_sha256="$(sha256sum "${authority_path}" | awk '{print $1}')"
+matrix_blake3_digest="$(b3sum "${matrix_path}" | awk '{print $1}')"
+while IFS=$'\t' read -r fixture_id fixture_path fixture_digest result_path result_digest expected_outcome; do
+  for value in "${fixture_path}" "${result_path}"; do
+    [[ "${value}" != /* && "${value}" != *".."* ]] || {
+      echo "unsafe authority artifact path for ${fixture_id}: ${value}" >&2
+      exit 1
+    }
+  done
+  actual_fixture_digest="$(b3sum "${fixture_root}/${fixture_path}" | awk '{print $1}')"
+  actual_result_digest="$(b3sum "${fixture_root}/${result_path}" | awk '{print $1}')"
+  [[ "${actual_fixture_digest}" == "${fixture_digest}" ]] || {
+    echo "BLAKE3 mismatch for authority fixture ${fixture_id}" >&2
+    exit 1
+  }
+  [[ "${actual_result_digest}" == "${result_digest}" ]] || {
+    echo "BLAKE3 mismatch for authority result ${fixture_id}" >&2
+    exit 1
+  }
+  jq -e --arg fixture_id "${fixture_id}" --arg outcome "${expected_outcome}" \
+    '.fixture_id == $fixture_id and .outcome == $outcome' \
+    "${fixture_root}/${result_path}" >/dev/null || {
+    echo "authority result metadata disagrees with inventory for ${fixture_id}" >&2
+    exit 1
+  }
+done < <(
+  jq -r '.entries[] | [
+    .fixture_id,
+    .fixture_bytes_path,
+    .fixture_bytes_digest,
+    .expected_result_path,
+    .expected_result_digest,
+    .expected_outcome
+  ] | @tsv' "${authority_path}"
+)
 
 mapfile -t inputs < <(find "${fixture_root}/inputs" -type f -print | sort)
 mapfile -t expected < <(find "${fixture_root}/expected" -type f -print | sort)
@@ -95,8 +157,17 @@ for index in "${!profile_layers[@]}"; do
     --arg layer "${layer}" \
     --arg input "inputs/${profile_inputs[${index}]}" \
     --arg expected "expected/${profile_inputs[${index}]}" \
+    --arg authority "expected-authority/inventory.json" \
+    --arg authority_sha256 "${authority_inventory_sha256}" \
+    --arg matrix "matrix/adr-059-complete.json" \
+    --arg matrix_blake3 "${matrix_blake3_digest}" \
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
-    '.claim_layer == $layer and .input == $input and .expected == $expected and (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and (if $layer == "knowledge-non-interference" then (.matrix == "matrix/adr-059-complete.json" and .matrix_size_bytes == $matrix_size and .matrix_blake3_digest == null) else true end)' \
+    '.claim_layer == $layer and .input == $input and .expected == $expected and
+      .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
+      .adr_059_execution_matrix == $matrix and .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
+      .adr_059_execution_matrix_status == "Draft" and
+      (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
+      (if $layer == "knowledge-non-interference" then (.matrix == $matrix and .matrix_size_bytes == $matrix_size and .matrix_blake3_digest == $matrix_blake3) else true end)' \
     "${profile}" >/dev/null || {
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
@@ -111,9 +182,23 @@ fi
 jq -e '
   .candidate_status == "approved" and
   .deletion_review == "approved" and
-  .secret_scan == "clean"
+  .secret_scan == "clean" and
+  .authority_inventory.path == "expected-authority/inventory.json" and
+  .authority_inventory.digest_algorithm == "SHA-256" and
+  .authority_inventory.status == "Candidate" and
+  .adr_059_execution_matrix.path == "matrix/adr-059-complete.json" and
+  .adr_059_execution_matrix.digest_algorithm == "BLAKE3-256" and
+  .adr_059_execution_matrix.status == "Draft" and
+  .adr_059_execution_matrix.executed_case_count == 0
 ' "${fixture_root}/support/provenance.json" >/dev/null || {
   echo "Candidate publication review evidence is missing or not approved" >&2
+  exit 1
+}
+
+jq -e --arg authority_sha256 "${authority_inventory_sha256}" \
+  '.authority_inventory.sha256_digest == $authority_sha256' \
+  "${fixture_root}/support/provenance.json" >/dev/null || {
+  echo "profile-bound authority inventory digest is incorrect" >&2
   exit 1
 }
 

@@ -1,1 +1,20 @@
-{"source":"fixtures/conformance","builder":"PiglorOS","reproducible":true,"candidate_status":"approved","deletion_review":"approved","secret_scan":"clean"}
+{
+  "source": "fixtures/conformance",
+  "builder": "PiglorOS",
+  "reproducible": true,
+  "authority_inventory": {
+    "digest_algorithm": "SHA-256",
+    "path": "expected-authority/inventory.json",
+    "sha256_digest": "19b1c5fddc40857558b0ac645f19e78e2b8148fa94297c7cd89f55057f1e1836",
+    "status": "Candidate"
+  },
+  "adr_059_execution_matrix": {
+    "digest_algorithm": "BLAKE3-256",
+    "executed_case_count": 0,
+    "path": "matrix/adr-059-complete.json",
+    "status": "Draft"
+  },
+  "candidate_status": "approved",
+  "deletion_review": "approved",
+  "secret_scan": "clean"
+}
