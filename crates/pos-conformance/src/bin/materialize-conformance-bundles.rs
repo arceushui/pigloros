@@ -1228,7 +1228,7 @@ mod tests {
             validate_profile_record_bindings(ClaimLayerV1::ArtifactIntegrity, &invalid_digest)
                 .is_err()
         );
-        let mut invalid_matrix_digest = canonical_record.clone();
+        let mut invalid_matrix_digest = canonical_record;
         invalid_matrix_digest["adr_059_execution_matrix_blake3_digest"] =
             JsonValue::String("00".repeat(32));
         assert!(validate_profile_record_bindings(
