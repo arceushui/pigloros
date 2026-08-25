@@ -1194,6 +1194,34 @@ mod tests {
     }
 
     #[test]
+    fn canonical_record_required_fields_reject_missing_values() -> Result<(), Box<dyn Error>> {
+        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
+        let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
+        for field in [
+            "profile_id",
+            "claim_layer",
+            "authority_inventory",
+            "adr_059_execution_matrix",
+            "adr_059_execution_matrix_status",
+            "execution_profiles",
+            "bundle_modes",
+            "authority_inventory_sha256_digest",
+            "adr_059_execution_matrix_blake3_digest",
+        ] {
+            let mut missing = canonical_record.clone();
+            missing
+                .as_object_mut()
+                .ok_or("canonical profile record is not an object")?
+                .remove(field);
+            assert!(
+                validate_profile_record_bindings(ClaimLayerV1::ArtifactIntegrity, &missing)
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn archive_validation_seams() -> Result<(), Box<dyn Error>> {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let signing_key = SigningKey::from_bytes(&[7; 32]);
@@ -1305,6 +1333,28 @@ mod tests {
         )
         .is_err());
         assert!(std::fs::remove_dir_all(authority_root).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_authority_and_nested_file_seams() -> Result<(), Box<dyn Error>> {
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        let candidate = serde_json::json!({"lifecycle":"Candidate", "entries":[{}]});
+        let root = output_root("candidate-error");
+        assert!(bundle_inputs_with_authority(
+            &profile,
+            BundleModeV1::Local,
+            &serde_json::to_vec(&candidate)?,
+            Some(&root),
+        )
+        .is_err());
+        drop(std::fs::remove_dir_all(&root));
+
+        let nested_root = output_root("write-success");
+        write_materialized_file(&nested_root, "nested/file", b"bytes")?;
+        assert_eq!(std::fs::read(nested_root.join("nested/file"))?, b"bytes");
+        assert!(std::fs::remove_dir_all(nested_root).is_ok());
+        assert!(canonical_fixture_input("artifact-positive", "unknown").is_err());
         Ok(())
     }
 
