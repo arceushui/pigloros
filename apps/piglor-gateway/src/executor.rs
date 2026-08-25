@@ -8,7 +8,7 @@ use pos_core::{
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
     },
-    ids::{EntityId, EventId, TimelineId},
+    ids::{EventId, TimelineId},
     store::{
         AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
         EventStore, PurgeOutcome, SeqRange,
