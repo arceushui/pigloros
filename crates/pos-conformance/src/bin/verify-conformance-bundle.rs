@@ -28,14 +28,15 @@ fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::verify_path;
     use std::fs;
-    use tempfile::TempDir;
 
     #[test]
     fn verify_path_rejects_invalid_archive() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = TempDir::new()?;
-        let path = temp.path().join("invalid.cfb1");
+        let path =
+            std::env::temp_dir().join(format!("pigloros-invalid-cfb1-{}.cbor", std::process::id()));
         fs::write(&path, [0x9f, 0xff])?;
-        assert!(verify_path(&path).is_err());
+        let result = verify_path(&path);
+        fs::remove_file(&path)?;
+        assert!(result.is_err());
         Ok(())
     }
 }
