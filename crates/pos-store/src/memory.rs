@@ -1662,6 +1662,7 @@ impl EventStore for MemoryStore {
         max_owned_events: u64,
         cleanup_scope: AppendDedupScope,
     ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_gateway_consent_revocation(drafts, timeline)?;
         self.append_bounded_with_boundary(
             timeline,
             drafts,

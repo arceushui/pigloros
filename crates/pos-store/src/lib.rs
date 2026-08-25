@@ -136,6 +136,19 @@ pub(crate) fn ensure_gateway_consent_types(
     }
 }
 
+/// Validate the single-revocation batch required by the atomic revocation seam.
+pub(crate) fn ensure_gateway_consent_revocation(
+    drafts: &[EventDraft],
+    timeline: TimelineId,
+) -> Result<(), CoreError> {
+    if drafts.len() != 1 || drafts[0].event_type.as_str() != pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
+    {
+        Err(CoreError::TimelineNotFound(timeline))
+    } else {
+        Ok(())
+    }
+}
+
 /// Validate the dedicated Gateway-owned V1 consent append seam, including the
 /// canonical payload and logical Timeline coordinates.
 pub(crate) fn ensure_gateway_consent_drafts(

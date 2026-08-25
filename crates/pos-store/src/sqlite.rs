@@ -2839,16 +2839,18 @@ impl EventStore for SqliteStore {
         max_owned_events: u64,
         cleanup_scope: AppendDedupScope,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_gateway_consent_types(drafts, timeline).and_then(|()| {
-            self.append_bounded_visible(
-                timeline,
-                drafts,
-                max_owned_events,
-                true,
-                Some(permit),
-                Some(cleanup_scope),
-            )
-        })
+        crate::ensure_gateway_consent_revocation(drafts, timeline)
+            .and_then(|()| crate::ensure_gateway_consent_types(drafts, timeline))
+            .and_then(|()| {
+                self.append_bounded_visible(
+                    timeline,
+                    drafts,
+                    max_owned_events,
+                    true,
+                    Some(permit),
+                    Some(cleanup_scope),
+                )
+            })
     }
 
     fn append_or_duplicate(
