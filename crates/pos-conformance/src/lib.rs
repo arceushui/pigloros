@@ -2978,7 +2978,7 @@ pub mod strict_codec {
             .collect()
     }
 
-    fn encode_consent(audit: &ConsentAuditV1) -> Value {
+    pub(crate) fn encode_consent(audit: &ConsentAuditV1) -> Value {
         Value::Array(vec![
             text(&audit.subject),
             uint(audit.requested_after_seq),
@@ -2990,7 +2990,7 @@ pub mod strict_codec {
         ])
     }
 
-    fn decode_consent(value: &Value) -> Result<ConsentAuditV1, StrictCborError> {
+    pub(crate) fn decode_consent(value: &Value) -> Result<ConsentAuditV1, StrictCborError> {
         let fields = array(value, "consent_audit", 7)?;
         Ok(ConsentAuditV1 {
             subject: string(&fields[0], "consent_subject")?,
@@ -5385,7 +5385,7 @@ fn verify_plugin_failures(failures: &[PluginFailureV1]) -> Result<(), EvidenceEr
     }
 }
 
-fn verify_consent_audit(
+pub(crate) fn verify_consent_audit(
     audit: &ConsentAuditV1,
     events: &[AuthoritativeEventV1],
 ) -> Result<(), EvidenceError> {
