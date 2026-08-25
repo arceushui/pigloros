@@ -11393,7 +11393,7 @@ mod coverage_entrypoints {
 }
 
 #[cfg(all(test, feature = "sqlite"))]
-mod key_registry_coverage {
+pub(super) mod key_registry_coverage {
     use super::*;
     use pos_core::{
         CanonicalBytes, EntityId, Event, EventDraft, EventId, EventStore, KeyRegistrationV1,
@@ -11617,5 +11617,18 @@ mod key_registry_coverage {
         assert!(destroyed.key_record(identity).is_some());
         sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
         Ok(())
+    }
+
+    pub(super) fn exercise_public_paths() -> Result<(), Box<dyn std::error::Error>> {
+        sqlite_key_registry_public_paths_are_instrumented()
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod instrumented_key_registry_entrypoints {
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_key_registry_paths_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+        super::key_registry_coverage::exercise_public_paths()
     }
 }
