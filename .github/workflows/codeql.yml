@@ -1,5 +1,7 @@
 # CodeQL's Rust extractor provides a separate semantic security analysis from
-# cargo-audit, cargo-deny, and the sanitizer jobs in the repository CI.
+# cargo-audit, cargo-deny, and the sanitizer jobs in the repository CI. The
+# analysis is skipped successfully for pull requests with no Rust-affecting
+# change; scheduled and main-branch runs always analyze the full repository.
 name: codeql
 
 on:
@@ -21,8 +23,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  codeql_change_scope:
+    name: codeql change scope
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Classify Rust-affecting changes
+        id: scope
+        run: scripts/check-rust-change-scope.sh
+
   analyze:
     name: CodeQL (Rust)
+    needs: codeql_change_scope
+    if: ${{ needs.codeql_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

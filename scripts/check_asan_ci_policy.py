@@ -63,7 +63,20 @@ EXPECTED_STEP_ENV = {
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
-EXPECTED_JOB_KEYS = {"name", "runs-on", "timeout-minutes", "strategy", "steps"}
+EXPECTED_SCOPE_JOB = "ci_change_scope"
+EXPECTED_SCOPE_IF = (
+    "${{ needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request' }}"
+)
+EXPECTED_JOB_KEYS = {
+    "name",
+    "needs",
+    "if",
+    "runs-on",
+    "timeout-minutes",
+    "strategy",
+    "steps",
+}
 EXPECTED_STRATEGY = {
     "fail-fast": False,
     "matrix": {"shard": ["bundle-contracts", "remainder"]},
@@ -166,6 +179,8 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     job = jobs.get("asan")
     require(isinstance(job, dict), "missing ASan shard job")
     require(set(job) == EXPECTED_JOB_KEYS, "ASan shard graph or metadata changed")
+    require(job.get("needs") == EXPECTED_SCOPE_JOB, "ASan scope prerequisite changed")
+    require(job.get("if") == EXPECTED_SCOPE_IF, "ASan scope condition changed")
     require(
         job.get("name") == "asan shard (${{ matrix.shard }})",
         "ASan shard check name changed",
@@ -176,7 +191,6 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
         job.get("strategy") == EXPECTED_STRATEGY,
         "ASan shard matrix must contain the exact complete partition",
     )
-    require("if" not in job, "ASan job must be unconditional")
     require("continue-on-error" not in job, "ASan job must fail the workflow")
     require("defaults" not in job, "ASan job must use the standard failing shell")
     require("env" not in job, "ASan job-level environment is not allowed")
