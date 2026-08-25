@@ -601,6 +601,16 @@ fn public_profile_digest_encodes_every_closed_case_outcome_variant() {
 }
 
 #[test]
+fn public_expected_result_bytes_encodes_a_canonical_result() {
+    let expected = ExpectedResultV1::CanonicalBytes {
+        bytes: vec![1, 2, 3],
+        digest: [4; 32],
+    };
+    let encoded = pos_conformance::expected_result_bytes(&expected);
+    assert!(encoded.is_ok_and(|bytes| !bytes.is_empty()));
+}
+
+#[test]
 fn public_stable_case_outcome_type_can_be_constructed_externally() {
     let outcome = ProfileCaseOutcomeV1 {
         case_id: "ART-001".to_owned(),
