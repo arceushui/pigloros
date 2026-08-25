@@ -4987,4 +4987,13 @@ mod coverage_entrypoints {
         let _ = ok(store.read_bounded(timeline.id(), SeqRange::all(), bounds));
         let _ = ok(store.append_bounded(timeline.id(), &[draft(b"too-many")], 1));
     }
+
+    #[test]
+    fn consent_append_rejects_a_missing_permit_after_authority_binding() {
+        let mut store = MemoryStore::new();
+        let timeline = ok(store.create_timeline("coverage-missing-permit"));
+        let authority = ConsentAuthority::new();
+        ok(store.bind_consent_authority(authority.append_permit()));
+        expect_err(store.append_bounded_with_boundary(timeline.id(), &[], 10, true, None, None));
+    }
 }

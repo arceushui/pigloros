@@ -6682,6 +6682,22 @@ pub mod tests {
         }
     }
 
+    #[test]
+    fn consent_audit_codec_round_trips_at_the_public_seam() {
+        let audit = ConsentAuditV1 {
+            subject: "subject-1".to_owned(),
+            requested_after_seq: 4,
+            effective_after_seq: 5,
+            revocation_event_seq: 6,
+            revocation_event_type: "consent.revoked.v1".to_owned(),
+            revocation_payload_digest: [7; 32],
+            halted_at_tick_boundary: true,
+        };
+        let encoded = strict_codec::encode_consent(&audit);
+        assert_eq!(strict_codec::decode_consent(&encoded), Ok(audit));
+        assert!(strict_codec::decode_consent(&Value::Array(Vec::new())).is_err());
+    }
+
     fn test_authorization_fixtures() -> (PrincipalRefV1, CapabilityGrantV1, AuthorizationDecisionV1)
     {
         let principal = PrincipalRefV1 {

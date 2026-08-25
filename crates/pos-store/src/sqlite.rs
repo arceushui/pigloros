@@ -9610,6 +9610,28 @@ mod coverage_entrypoints {
             SqliteStore::fork_chain_bounded_on(&store.conn, timeline.id(), 4, Instant::now(), 0);
         BOUNDED_READ_DELAY_PHASE.with(|phase| phase.set(0));
         expect_err(timeout);
+
+        let mut store = tests::new_store();
+        let root = ok(store.create_timeline("logical-head-error-root"));
+        ok(store.append(
+            root.id(),
+            &[tests::make_draft(EntityId::new(), b"root-event")],
+        ));
+        let child = ok(store.fork(root.id(), Seq::from_u64(1), "logical-head-error-child"));
+        ok(store.conn.execute(
+            "UPDATE timelines SET fork_seq = 2 WHERE id = ?1",
+            rusqlite::params![child.id().to_string()],
+        ));
+        expect_err(store.logical_head(child.id()));
+    }
+
+    #[test]
+    fn consent_append_rejects_a_missing_permit_after_authority_binding() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("sqlite-missing-permit"));
+        let authority = ConsentAuthority::new();
+        ok(store.bind_consent_authority(authority.append_permit()));
+        expect_err(store.append_bounded_visible(timeline.id(), &[], 10, true, None, None));
     }
 
     #[test]
