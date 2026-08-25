@@ -397,6 +397,29 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Atomically append one Gateway-owned V1 consent revocation and persist
+    /// its bounded append-identity cleanup marker in the same adapter commit.
+    ///
+    /// The separate grant seam remains available above; revocations use this
+    /// stronger operation so a committed revocation is always restart-visible
+    /// to cleanup recovery.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement the
+    /// atomic revocation-and-marker boundary.
+    fn append_consent_revocation_bounded(
+        &mut self,
+        _timeline: TimelineId,
+        _drafts: &[EventDraft],
+        _permit: ConsentAppendPermit,
+        _max_owned_events: u64,
+        _cleanup_scope: AppendDedupScope,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        Err(CoreError::Storage(
+            "atomic consent revocation cleanup is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
     /// Atomically append one externally identified draft or report its prior admission.
     ///
     /// Implementations must persist the opaque identity and Event in the same
@@ -538,17 +561,6 @@ pub trait EventStore: Send {
     /// retries safe across process restarts and transient store failures.
     fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
         Ok(None)
-    }
-
-    /// Durably mark one revocable scope for bounded cleanup continuation.
-    ///
-    /// The marker is written before the first cleanup attempt so a committed
-    /// revocation remains recoverable even when that attempt fails.
-    fn mark_append_identity_cleanup_pending(
-        &mut self,
-        _scope: AppendDedupScope,
-    ) -> Result<(), CoreError> {
-        Ok(())
     }
 
     /// Read events from a timeline in a seq range.

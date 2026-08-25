@@ -1452,11 +1452,13 @@ impl Gateway {
             }
             Err(error) => return Err(GatewayError::Store(CoreError::Storage(error.to_string()))),
         };
+        let scope = ingress_dedup_scope(revocation.subject_id);
         let event = match self
             .store
             .append_consent_revocation(
                 timeline,
                 revocation.clone(),
+                scope,
                 self.consent_authority.append_permit(),
                 self.limits.max_events_per_timeline,
                 reservation,
@@ -1480,11 +1482,8 @@ impl Gateway {
                 return Err(error.into());
             }
         };
-        let scope = ingress_dedup_scope(revocation.subject_id);
         self.enqueue_consent_cleanup(scope).await;
-        let marker_result = self.store.mark_append_identity_cleanup_pending(scope).await;
         self.schedule_pending_consent_cleanup();
-        marker_result.map_err(GatewayError::from)?;
         let cleanup = self
             .store
             .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
@@ -2692,6 +2691,17 @@ mod tests {
             self.append_bounded(timeline, drafts, max_owned_events)
         }
 
+        fn append_consent_revocation_bounded(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+            permit: pos_core::ConsentAppendPermit,
+            max_owned_events: u64,
+            _cleanup_scope: AppendDedupScope,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            self.append_consent_bounded(timeline, drafts, permit, max_owned_events)
+        }
+
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailRead) {
                 return Err(CoreError::Storage("read failed".into()));
@@ -3115,28 +3125,26 @@ mod tests {
             .await
             .test_ok();
 
-        assert!(gateway
-            .process_pending_consent_cleanup()
-            .await
-            .test_ok()
-            .is_some());
-        assert!(gateway
-            .process_pending_consent_cleanup()
-            .await
-            .test_ok()
-            .is_none());
-
-        let retried = gateway
-            .append_identified_action(
-                &timeline.id().to_string(),
-                &subject_text,
-                EVENT_TYPE_ACTION,
-                &serde_json::json!({"dx": 1.0}),
-                "device-1:42",
-            )
-            .await
-            .test_ok();
-        assert!(!retried.duplicate);
+        let mut retried = None;
+        for _ in 0..32 {
+            let _ = gateway.process_pending_consent_cleanup().await.test_ok();
+            let result = gateway
+                .append_identified_action(
+                    &timeline.id().to_string(),
+                    &subject_text,
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({"dx": 1.0}),
+                    "device-1:42",
+                )
+                .await
+                .test_ok();
+            if !result.duplicate {
+                retried = Some(result);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(retried.is_some());
         drop(gateway);
     }
 

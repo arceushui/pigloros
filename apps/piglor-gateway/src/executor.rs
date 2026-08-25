@@ -172,10 +172,6 @@ enum Command {
     PendingAppendIdentityCleanup {
         reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
     },
-    MarkAppendIdentityCleanupPending {
-        scope: AppendDedupScope,
-        reply: oneshot::Sender<Result<(), StoreExecutorError>>,
-    },
     RootCount {
         maximum: usize,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
@@ -211,6 +207,7 @@ enum Command {
     AppendConsentRevocation {
         timeline: TimelineId,
         revocation: ConsentRevokedV1,
+        cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
         reservation: ConsentRevocationReservation,
@@ -260,7 +257,6 @@ impl Command {
             | Self::Purge { .. }
             | Self::RemoveAppendIdentitiesBounded { .. }
             | Self::PendingAppendIdentityCleanup { .. }
-            | Self::MarkAppendIdentityCleanupPending { .. }
             | Self::Create { .. }
             | Self::Append { .. }
             | Self::AppendConsentGrant { .. }
@@ -1055,15 +1051,6 @@ impl StoreExecutor {
             reply
         })
     }
-    pub(crate) async fn mark_append_identity_cleanup_pending(
-        &self,
-        scope: AppendDedupScope,
-    ) -> Result<(), StoreExecutorError> {
-        submit!(self, |reply| Command::MarkAppendIdentityCleanupPending {
-            scope,
-            reply
-        })
-    }
     pub(crate) async fn admit_geo_location(
         &self,
         request: GeoLocationAdmissionRequestV1,
@@ -1145,6 +1132,7 @@ impl StoreExecutor {
         &self,
         timeline: TimelineId,
         revocation: ConsentRevokedV1,
+        cleanup_scope: AppendDedupScope,
         permit: ConsentAppendPermit,
         maximum: u64,
         reservation: ConsentRevocationReservation,
@@ -1152,6 +1140,7 @@ impl StoreExecutor {
         submit!(self, |reply| Command::AppendConsentRevocation {
             timeline,
             revocation,
+            cleanup_scope,
             permit,
             maximum,
             reservation,
@@ -1495,9 +1484,6 @@ fn expire_command(command: Command) {
         Command::PendingAppendIdentityCleanup { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::MarkAppendIdentityCleanupPending { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
         Command::RootCount { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1671,15 +1657,6 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
                 state.store.event_store().pending_append_identity_cleanup(),
             );
         }
-        Command::MarkAppendIdentityCleanupPending { scope, reply } => {
-            send_store_result(
-                reply,
-                state
-                    .store
-                    .event_store()
-                    .mark_append_identity_cleanup_pending(scope),
-            );
-        }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
         Command::Create { name, reply } => execute_create_command(state, &name, reply),
         Command::Read {
@@ -1709,6 +1686,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         Command::AppendConsentRevocation {
             timeline,
             revocation,
+            cleanup_scope,
             permit,
             maximum,
             reservation,
@@ -1718,6 +1696,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
                 state,
                 timeline,
                 &revocation,
+                cleanup_scope,
                 permit,
                 maximum,
                 reservation,
@@ -1891,6 +1870,7 @@ fn execute_append_consent_revocation_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
     revocation: &ConsentRevokedV1,
+    cleanup_scope: AppendDedupScope,
     permit: ConsentAppendPermit,
     maximum: u64,
     reservation: ConsentRevocationReservation,
@@ -1910,7 +1890,7 @@ fn execute_append_consent_revocation_command(
                 .map_err(|error| CoreError::Storage(error.to_string()))
         })
         .and_then(|payload| {
-            store.append_consent_bounded(
+            store.append_consent_revocation_bounded(
                 timeline,
                 &[EventDraft::new(
                     revocation.subject_id,
@@ -1919,6 +1899,7 @@ fn execute_append_consent_revocation_command(
                 )],
                 permit,
                 maximum,
+                cleanup_scope,
             )
         })
         .and_then(|events| {
@@ -2205,6 +2186,7 @@ mod tests {
             &mut state,
             timeline,
             &revocation,
+            AppendDedupScope::from_keyed_hash([0; 32]),
             authority.append_permit(),
             10,
             reservation,
@@ -2887,11 +2869,19 @@ mod tests {
             .test_ok()
             .test_value();
         let permit = authority.append_permit();
+        let cleanup_scope = AppendDedupScope::from_keyed_hash([0; 32]);
         let task = tokio::spawn({
             let executor = executor.clone();
             async move {
                 executor
-                    .append_consent_revocation(timeline, revocation, permit, 10, reservation)
+                    .append_consent_revocation(
+                        timeline,
+                        revocation,
+                        cleanup_scope,
+                        permit,
+                        10,
+                        reservation,
+                    )
                     .await
             }
         });

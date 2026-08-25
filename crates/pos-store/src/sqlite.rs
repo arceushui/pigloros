@@ -1640,6 +1640,7 @@ impl SqliteStore {
         max_owned_events: u64,
         gateway_consent: bool,
         permit: Option<ConsentAppendPermit>,
+        cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         if gateway_consent {
             let bound_permit = self.consent_authority_permit.ok_or_else(|| {
@@ -1686,6 +1687,13 @@ impl SqliteStore {
                 timeline,
                 draft.clone(),
             )?);
+        }
+        if let Some(scope) = cleanup_scope {
+            tx.execute(
+                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
         if let Some(owner) = owner {
             if Self::timeline_owner_in_transaction(&tx, timeline)?.is_none() {
@@ -2800,7 +2808,7 @@ impl EventStore for SqliteStore {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| {
-                self.append_bounded_visible(timeline, drafts, max_owned_events, false, None)
+                self.append_bounded_visible(timeline, drafts, max_owned_events, false, None, None)
             })
     }
 
@@ -2812,7 +2820,34 @@ impl EventStore for SqliteStore {
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         crate::ensure_gateway_consent_types(drafts, timeline).and_then(|()| {
-            self.append_bounded_visible(timeline, drafts, max_owned_events, true, Some(permit))
+            self.append_bounded_visible(
+                timeline,
+                drafts,
+                max_owned_events,
+                true,
+                Some(permit),
+                None,
+            )
+        })
+    }
+
+    fn append_consent_revocation_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        max_owned_events: u64,
+        cleanup_scope: AppendDedupScope,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_gateway_consent_types(drafts, timeline).and_then(|()| {
+            self.append_bounded_visible(
+                timeline,
+                drafts,
+                max_owned_events,
+                true,
+                Some(permit),
+                Some(cleanup_scope),
+            )
         })
     }
 
@@ -3053,19 +3088,6 @@ impl EventStore for SqliteStore {
                 Ok(AppendDedupScope::from_keyed_hash(bytes))
             })
             .transpose()
-    }
-
-    fn mark_append_identity_cleanup_pending(
-        &mut self,
-        scope: AppendDedupScope,
-    ) -> Result<(), CoreError> {
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
-                params![scope.as_bytes().as_slice()],
-            )
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(())
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {

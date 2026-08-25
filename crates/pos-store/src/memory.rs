@@ -876,6 +876,7 @@ impl MemoryStore {
         max_owned_events: u64,
         gateway_consent: bool,
         permit: Option<ConsentAppendPermit>,
+        cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         if gateway_consent {
             let bound_permit = self.consent_authority_permit.ok_or_else(|| {
@@ -929,6 +930,11 @@ impl MemoryStore {
                     crate::checked_logical_head(logical_prefix, next_head)?;
                     let events =
                         self.append_visible_with_prefix(timeline, drafts, logical_prefix)?;
+                    if let Some(scope) = cleanup_scope {
+                        if !self.pending_append_identity_cleanup.contains(&scope) {
+                            self.pending_append_identity_cleanup.push(scope);
+                        }
+                    }
                     if let Some(owner) = owner {
                         if let Some(state) = self.timelines.get_mut(&timeline) {
                             state.timeline.meta.owner = Some(owner);
@@ -1628,7 +1634,7 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false, None)
+        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false, None, None)
     }
 
     fn append_consent_bounded(
@@ -1638,7 +1644,32 @@ impl EventStore for MemoryStore {
         permit: ConsentAppendPermit,
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, true, Some(permit))
+        self.append_bounded_with_boundary(
+            timeline,
+            drafts,
+            max_owned_events,
+            true,
+            Some(permit),
+            None,
+        )
+    }
+
+    fn append_consent_revocation_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        max_owned_events: u64,
+        cleanup_scope: AppendDedupScope,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        self.append_bounded_with_boundary(
+            timeline,
+            drafts,
+            max_owned_events,
+            true,
+            Some(permit),
+            Some(cleanup_scope),
+        )
     }
 
     fn append_or_duplicate(
@@ -1763,16 +1794,6 @@ impl EventStore for MemoryStore {
 
     fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
         Ok(self.pending_append_identity_cleanup.last().copied())
-    }
-
-    fn mark_append_identity_cleanup_pending(
-        &mut self,
-        scope: AppendDedupScope,
-    ) -> Result<(), CoreError> {
-        if !self.pending_append_identity_cleanup.contains(&scope) {
-            self.pending_append_identity_cleanup.push(scope);
-        }
-        Ok(())
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
