@@ -1162,6 +1162,30 @@ fn assert_archive_profile_rejections(
     Ok(())
 }
 
+fn raw_archive_with_header(top_header: &[u8], first: &[u8], members: &[u8]) -> Vec<u8> {
+    let mut bytes = top_header.to_vec();
+    bytes.extend_from_slice(first);
+    bytes.extend_from_slice(&[0x01, 0x80]);
+    bytes.extend_from_slice(members);
+    bytes.extend_from_slice(&[0x58, 0x20]);
+    bytes.extend_from_slice(&[0; 32]);
+    bytes.extend_from_slice(&[0x58, 0x40]);
+    bytes.extend_from_slice(&[0; 64]);
+    bytes
+}
+
+fn raw_archive(first: &[u8], members: &[u8]) -> Vec<u8> {
+    raw_archive_with_header(&[0x86], first, members)
+}
+
+fn exact_member_array() -> Vec<u8> {
+    let mut bytes = vec![0x9a, 0, 1, 0, 0];
+    for _ in 0..65_536 {
+        bytes.extend_from_slice(&[0x83, 0x60, 0x40, 0x00]);
+    }
+    bytes
+}
+
 #[test]
 fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -1173,6 +1197,26 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     let mut deeply_nested = vec![0x81; 34];
     deeply_nested.push(0xf6);
     assert!(pos_conformance::verify_archive_independently(&deeply_nested).is_err());
+    assert!(pos_conformance::verify_archive_independently(&raw_archive(
+        &[0x60],
+        &[0x81, 0x83, 0x60, 0x40, 0x00],
+    ))
+    .is_err());
+    assert!(pos_conformance::verify_archive_independently(&raw_archive(
+        &[0x60],
+        &[0x81, 0x83, 0x60, 0x41],
+    ))
+    .is_err());
+    assert!(pos_conformance::verify_archive_independently(&raw_archive(
+        &[0x60],
+        &[0x81, 0x83, 0x79, 0x01, 0x01],
+    ))
+    .is_err());
+    assert!(pos_conformance::verify_archive_independently(&raw_archive(
+        &[0x60],
+        &exact_member_array(),
+    ))
+    .is_err());
     assert_archive_shape_rejections(&bundle, &signing_key)?;
     assert_archive_member_rejections(&bundle, &signing_key)?;
     assert_archive_expected_rejections(&bundle, &signing_key)?;
