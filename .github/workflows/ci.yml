@@ -54,15 +54,34 @@ jobs:
   ci_change_scope:
     name: ci change scope
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
-      - name: Classify Rust-affecting changes
+      - name: Classify Rust-affecting changes from base policy
         id: scope
-        run: scripts/check-rust-change-scope.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            printf 'rust=true\n' >> "$GITHUB_OUTPUT"
+            printf 'Full-repository event; Rust-affecting scope: true\n'
+            exit 0
+          fi
+          base_ref="$(jq -er '.pull_request.base.ref' "$GITHUB_EVENT_PATH")"
+          git fetch --no-tags origin "$base_ref"
+          trusted_scope="$RUNNER_TEMP/check-rust-change-scope.sh"
+          if ! git cat-file -e "origin/${base_ref}:scripts/check-rust-change-scope.sh"; then
+            printf 'rust=true\n' >> "$GITHUB_OUTPUT"
+            printf 'Base policy has no scope classifier; Rust-affecting scope: true\n'
+            exit 0
+          fi
+          git show "origin/${base_ref}:scripts/check-rust-change-scope.sh" > "$trusted_scope"
+          chmod +x "$trusted_scope"
+          "$trusted_scope"
 
   fmt:
     name: fmt
@@ -698,6 +717,8 @@ jobs:
         run: bash scripts/check-pinned-dependencies.sh
       - name: Test pinned dependency checker
         run: bash scripts/test-check-pinned-dependencies.sh
+      - name: Test Rust change scope classifier
+        run: bash scripts/test-check-rust-change-scope.sh
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker

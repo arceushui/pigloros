@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
-# Emit rust=true when a pull request can affect Rust builds, policies, or reports.
+# Emit rust=false only when every pull-request change is documentation-only.
 # Non-pull-request runs are full-repository checks and always emit rust=true.
 set -euo pipefail
 
-rust=false
+rust=true
 if [[ "${GITHUB_EVENT_NAME:?}" != "pull_request" ]]; then
-  rust=true
+  :
 else
   base_ref="$(jq -er '.pull_request.base.ref' "${GITHUB_EVENT_PATH:?}")"
   git fetch --no-tags origin "$base_ref"
+  rust=false
   while IFS= read -r path; do
     printf 'changed: %s\n' "$path"
     case "$path" in
-      *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|\
-      rustfmt.toml|clippy.toml|deny.toml|.cargo/*|fuzz/*|scripts/*|\
-      .githooks/*|Dockerfile|Dockerfile.*|docker/*|\
-      requirements-pinned-dependencies.txt|.github/workflows/*|\
-      Trunk.yaml|trunk.yaml|.trunk/*|.pre-commit-config.yaml|\
-      .yamllint*|.markdownlint*|apps/piglor-world-client/*)
+      *.md|*.mdx|*.adoc|*.rst|.agents/*|.cursor/*|docs/*)
+        ;;
+      *)
         rust=true
+        break
         ;;
     esac
   done < <(
-    git diff --name-only --diff-filter=ACMR "origin/${base_ref}...HEAD"
+    git diff --name-only --diff-filter=ACDMRT "origin/${base_ref}...HEAD"
   )
 fi
 
