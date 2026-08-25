@@ -1312,16 +1312,11 @@ fn validate_supporting_members(
         required.is_empty() || !required.is_subset(&provided)
     }) {
         Err(BundleContractErrorV1::MemberMissing)
-    } else if members
-        .iter()
-        .any(|member| member.role.is_supporting() && member.bytes.is_empty())
-    {
-        Err(BundleContractErrorV1::MemberDigestMismatch)
-    } else if members
-        .iter()
-        .filter(|member| member.role.is_supporting())
-        .any(|member| !support_digest_is_bound(profile, member.role, &member.digest))
-    {
+    } else if members.iter().any(|member| {
+        (member.role.is_supporting() && member.bytes.is_empty())
+            || (member.role.is_supporting()
+                && !support_digest_is_bound(profile, member.role, &member.digest))
+    }) {
         Err(BundleContractErrorV1::MemberDigestMismatch)
     } else {
         Ok(())
