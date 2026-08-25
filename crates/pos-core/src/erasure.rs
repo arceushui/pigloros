@@ -2137,7 +2137,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if let Some(stored) = record.receipt.clone() {
                 let normalized =
                     Self::normalize_receipt_input(request, self.coordinator, &record, input)?;
-                return if record.receipt_input.as_ref() == Some(&normalized) {
+                return if record.receipt_input.as_ref() == Some(&normalized)
+                    && Self::receipt_input_matches_authority(&input, &normalized)
+                {
                     Ok(stored)
                 } else {
                     Err(ErasureErrorV1::PolicyConflict)
