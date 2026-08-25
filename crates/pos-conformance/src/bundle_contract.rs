@@ -3839,7 +3839,7 @@ mod tests {
         let malformed_provenance = serde_json::to_vec(&malformed_provenance_value)?;
         let malformed_provenance_digest = *blake3::hash(&malformed_provenance).as_bytes();
         let mut missing_review = signed_bundle(&draft_profile, BundleModeV1::Local)?;
-        let mut missing_review_profile = draft_profile.clone();
+        let mut missing_review_profile = draft_profile;
         missing_review_profile.lifecycle = ProfileLifecycleV1::Candidate;
         missing_review_profile.provenance_digest = malformed_provenance_digest;
         for fixture in &mut missing_review_profile.fixtures {
