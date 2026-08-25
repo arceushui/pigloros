@@ -110,7 +110,10 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
         }
         Err(error) => error,
     };
-    assert!(error.to_string().contains("public key"));
+    assert_eq!(
+        error.to_string(),
+        "invalid --key: signature verification failed"
+    );
     Ok(())
 }
 
