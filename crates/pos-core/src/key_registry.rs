@@ -531,7 +531,10 @@ impl KeyRegistryStateV1 {
                 {
                     return Err(KeyRegistryErrorV1::InvalidState);
                 }
-                (_, Some(_)) => {}
+                (Some(_), Some(_)) => {}
+                (None, Some(_)) => {
+                    return Err(KeyRegistryErrorV1::InvalidState);
+                }
                 (Some(previous_digest), None) => {
                     if !next.tombstones.get(identity).is_some_and(|tombstone| {
                         tombstone.destroyed_material_digest == previous_digest
@@ -1669,6 +1672,19 @@ mod tests {
             digest(53),
         ))?;
         assert_eq!(previous.validate_replacement(&destroyed), Ok(()));
+
+        let mut restored = destroyed.clone();
+        restored
+            .records
+            .get_mut(&ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .private_material_digest = Some(digest(50));
+        restored.active.insert(ATTRIBUTION.role, ATTRIBUTION);
+        restored.tombstones.remove(&ATTRIBUTION);
+        assert_eq!(
+            destroyed.validate_replacement(&restored),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
 
         let mut tombstone_changed = destroyed.clone();
         tombstone_changed
