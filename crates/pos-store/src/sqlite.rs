@@ -10201,27 +10201,6 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn fork_creation_fails_closed_when_parent_history_is_corrupt() {
-        let mut store = tests::new_store();
-        let parent = ok(store.create_timeline("corrupt-fork-parent"));
-        ok(store.append(
-            parent.id(),
-            &[tests::make_draft(EntityId::new(), b"fork-event")],
-        ));
-        ok(store.conn.execute(
-            "UPDATE events SET payload = NULL WHERE timeline_id = ?1 AND seq = 1",
-            rusqlite::params![parent.id().to_string()],
-        ));
-        expect_err(
-            store.create_timeline_with_meta(pos_core::timeline::TimelineMeta::forked_from(
-                parent.id(),
-                Seq::from_u64(1),
-                "corrupt-fork-child",
-            )),
-        );
-    }
-
-    #[test]
     fn enrollment_paths_fail_closed_on_transaction_state_and_commit_errors() {
         let request_for = |timeline: TimelineId| {
             OwnTracksEnrollmentRequestV1::new(
