@@ -10102,18 +10102,20 @@ mod coverage_entrypoints {
         ));
 
         let mut begin_error = tests::new_store();
-        ok(begin_error.conn.authorizer(Some(|context| {
-            if matches!(
-                context.action,
-                rusqlite::hooks::AuthAction::Transaction {
-                    operation: rusqlite::hooks::TransactionOperation::Begin
+        ok(begin_error
+            .conn
+            .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Begin
+                    }
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
                 }
-            ) {
-                rusqlite::hooks::Authorization::Deny
-            } else {
-                rusqlite::hooks::Authorization::Allow
-            }
-        })));
+            })));
         expect_err(begin_error.create_timeline_with_meta(
             pos_core::timeline::TimelineMeta::root_owned("begin-authorizer", subject),
         ));
@@ -10123,18 +10125,20 @@ mod coverage_entrypoints {
 
         let mut nested_write_error = tests::new_store();
         ok(nested_write_error.conn.execute_batch("BEGIN IMMEDIATE"));
-        ok(nested_write_error.conn.authorizer(Some(|context| {
-            if matches!(
-                context.action,
-                rusqlite::hooks::AuthAction::Insert {
-                    table_name: "timeline_owners"
+        ok(nested_write_error.conn.authorizer(Some(
+            |context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Insert {
+                        table_name: "timeline_owners"
+                    }
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
                 }
-            ) {
-                rusqlite::hooks::Authorization::Deny
-            } else {
-                rusqlite::hooks::Authorization::Allow
-            }
-        })));
+            },
+        )));
         expect_err(nested_write_error.create_timeline_with_meta(
             pos_core::timeline::TimelineMeta::root_owned("nested-authorizer", subject),
         ));
@@ -10149,7 +10153,7 @@ mod coverage_entrypoints {
         let id = ok(AdmissionSnapshotId::from_canonical(
             "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
         ));
-        let mut malformed_type = tests::new_store();
+        let malformed_type = tests::new_store();
         ok(malformed_type
             .conn
             .execute_batch("PRAGMA ignore_check_constraints = ON"));
@@ -10164,7 +10168,7 @@ mod coverage_entrypoints {
         let id = ok(AdmissionSnapshotId::from_canonical(
             "01ARZ3NDEKTSV4RRFFQ69G5FB0",
         ));
-        let mut malformed_revision = tests::new_store();
+        let malformed_revision = tests::new_store();
         ok(malformed_revision
             .conn
             .execute_batch("PRAGMA ignore_check_constraints = ON"));
