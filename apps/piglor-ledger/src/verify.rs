@@ -1127,9 +1127,8 @@ mod tests {
         };
 
         let missing_identity =
-            run_store_event(event(), KeyRegistryStateV1::new(), None, None, true)?.test_ok()?;
-        let (_, reason) = expect_mismatch(missing_identity.outcome)?;
-        assert!(reason.contains("identity is missing"));
+            run_store_event(event(), KeyRegistryStateV1::new(), None, None, true)?.test_err()?;
+        assert!(missing_identity.to_string().contains("signed event"));
 
         let wrong_role = run_store_event(
             event(),
@@ -1138,9 +1137,8 @@ mod tests {
             Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1)),
             true,
         )?
-        .test_ok()?;
-        let (_, reason) = expect_mismatch(wrong_role.outcome)?;
-        assert!(reason.contains("TimelineIntegritySigning"));
+        .test_err()?;
+        assert!(wrong_role.to_string().contains("signed event"));
 
         let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
         let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);

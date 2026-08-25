@@ -383,7 +383,10 @@ impl KeyRegistryStateV1 {
     pub fn validate(&self) -> Result<(), KeyRegistryErrorV1> {
         let mut reserved_material = HashSet::new();
         for (identity, record) in &self.records {
-            if record.identity != *identity {
+            if record.identity != *identity
+                || identity.epoch == 0
+                || identity.role.is_signing() != record.public_verification_key.is_some()
+            {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
             if !self.highest_epoch.contains_key(&identity.role) {
@@ -986,6 +989,27 @@ mod tests {
         }
     }
 
+    fn replace_first_null(
+        value: &mut ciborium::value::Value,
+        replacement: ciborium::value::Value,
+    ) -> bool {
+        match value {
+            ciborium::value::Value::Null => {
+                *value = replacement;
+                true
+            }
+            ciborium::value::Value::Array(values) => values
+                .iter_mut()
+                .any(|value| replace_first_null(value, replacement.clone())),
+            ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+                replace_first_null(key, replacement.clone())
+                    || replace_first_null(value, replacement.clone())
+            }),
+            ciborium::value::Value::Tag(_, value) => replace_first_null(value, replacement),
+            _ => false,
+        }
+    }
+
     #[test]
     fn malformed_state_without_tombstone_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = KeyRegistryStateV1::new();
@@ -1031,6 +1055,54 @@ mod tests {
             }
         })?;
         assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_state_rejects_zero_epoch_and_role_material_mismatch(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut zero_epoch = KeyRegistryStateV1::new();
+        zero_epoch.register_key(signing_registration(ATTRIBUTION, 25))?;
+        let zero_epoch = edit_state(&zero_epoch, |value| {
+            if replace_first_integer(value, 1, 0) {
+                Ok(())
+            } else {
+                Err("record epoch was not encoded".into())
+            }
+        })?;
+        assert_eq!(zero_epoch.validate(), Err(KeyRegistryErrorV1::InvalidState));
+
+        let mut missing_signing_key = KeyRegistryStateV1::new();
+        missing_signing_key.register_key(KeyRegistrationV1::new(
+            ATTRIBUTION,
+            digest(26),
+            Some(PublicKey::from_bytes([27; 32])),
+        ))?;
+        let missing_signing_key = edit_state(&missing_signing_key, |value| {
+            if replace_first_bytes(value, &[27; 32], ciborium::value::Value::Null) {
+                Ok(())
+            } else {
+                Err("signing public key was not encoded".into())
+            }
+        })?;
+        assert_eq!(
+            missing_signing_key.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut unexpected_encryption_key = KeyRegistryStateV1::new();
+        unexpected_encryption_key.register_key(KeyRegistrationV1::new(DATA, digest(28), None))?;
+        let unexpected_encryption_key = edit_state(&unexpected_encryption_key, |value| {
+            if replace_first_null(value, ciborium::value::Value::Bytes(vec![29; 32])) {
+                Ok(())
+            } else {
+                Err("encryption public-key slot was not encoded".into())
+            }
+        })?;
+        assert_eq!(
+            unexpected_encryption_key.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
         Ok(())
     }
 
