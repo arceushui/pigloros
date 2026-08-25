@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Lessons Learned
 
-This is an internal PiglorOS skill and the canonical source of durable project lessons. Add guidance to the relevant section below; keep raw task-observation history and dated execution records outside Git.
+This is an internal PiglorOS skill and the canonical source of durable project lessons. Add guidance to the relevant section below; keep raw task-observation history and dated execution records outside Git. This file is a cross-cutting checklist: use the owning specialist skill (`code-review`, `diagnosing-bugs`, `technical-documentation-pipeline`, or `worktree-status`) for full procedures.
 
 ## Commits and worktrees
 
