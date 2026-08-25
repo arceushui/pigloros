@@ -1555,9 +1555,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn canonical_records_bind_fixture_families_and_candidate_authority(
-    ) -> Result<(), Box<dyn Error>> {
+    fn assert_canonical_profiles_bind_fixture_families() -> Result<(), Box<dyn Error>> {
         for (_, claim_layer) in PROFILE_RECORDS {
             let profile = test_profile(claim_layer)?;
             assert_eq!(profile.fixtures.len(), 14);
@@ -1586,7 +1584,13 @@ mod tests {
                     .is_some_and(|input| input.member_id.starts_with("inputs/"))
             }));
         }
+        Ok(())
+    }
 
+    #[test]
+    fn canonical_records_bind_fixture_families_and_candidate_authority(
+    ) -> Result<(), Box<dyn Error>> {
+        assert_canonical_profiles_bind_fixture_families()?;
         let mut inventory: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../../fixtures/conformance/expected-authority/inventory.json"
         ))?;
