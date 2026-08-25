@@ -1970,11 +1970,11 @@ fn validate_execution_matrix_for_lifecycle(
         || cases.iter().any(|case| {
             if expected_lifecycle == "Candidate" {
                 case.get("executed").and_then(JsonValue::as_bool) != Some(true)
-                    || !case
+                    || case
                         .get("expected_result_digest")
                         .and_then(JsonValue::as_str)
                         .and_then(decode_blake3_hex)
-                        .is_none()
+                        .is_some()
             } else {
                 case.get("executed").and_then(JsonValue::as_bool) != Some(false)
                     || !case
