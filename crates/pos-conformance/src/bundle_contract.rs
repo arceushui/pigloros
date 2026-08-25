@@ -306,7 +306,7 @@ impl ConformanceBundleV1 {
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, BundleContractErrorV1> {
         self.validate_unsigned()?;
-        let bytes = self.manifest_bytes().unwrap_or_default();
+        let bytes = self.manifest_bytes()?;
         self.signer_public_key = PublicKey::from_bytes(signing_key.verifying_key().to_bytes());
         self.signature = signing::sign(signing_key, &CanonicalBytes::from_vec(bytes));
         self.validate()
