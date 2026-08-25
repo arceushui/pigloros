@@ -9728,32 +9728,47 @@ mod coverage_entrypoints {
         assert_eq!(purged.removed, 1);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn grant_draft(subject: EntityId, grantee: EntityId) -> EventDraft {
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: grantee,
+            purpose: "owner-boundary".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            ok(grant.encode()),
+        )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revocation_draft(subject: EntityId, grantee: EntityId) -> EventDraft {
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grantee,
+            grant_seq: 1,
+            fence_seq: 1,
+        };
+        EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok(revocation.encode()),
+        )
+    }
+
     #[test]
-    fn consent_owner_and_cleanup_storage_boundaries_fail_closed() {
+    fn consent_owner_and_cleanup_success_paths_are_persisted() {
         let subject = EntityId::new();
         let grantee = EntityId::new();
-        let grant_draft = || {
-            let grant = pos_core::ConsentGrantedV1 {
-                subject_id: subject,
-                grantee_id: grantee,
-                purpose: "owner-boundary".to_owned(),
-                modalities: pos_core::MODALITY_LOCATION,
-                min_geo_resolution: 1,
-                fork_permitted: false,
-                export_permitted: false,
-                retention_days: 1,
-                expiry_secs: 0,
-                grant_seq: 1,
-            };
-            EventDraft::new(
-                subject,
-                Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
-                ok(grant.encode()),
-            )
-        };
-
-        let authority = ConsentAuthority::new();
-        let permit = authority.append_permit();
+        let permit = ConsentAuthority::new().append_permit();
         let mut owner_store = tests::new_store();
         ok(owner_store.bind_consent_authority(permit));
         let owned = ok(owner_store.create_timeline_with_meta(
@@ -9771,17 +9786,7 @@ mod coverage_entrypoints {
         ok(append_store.bind_consent_authority(permit));
         let timeline = ok(append_store.create_timeline("owner-append"));
         let scope = AppendDedupScope::from_keyed_hash([121; 32]);
-        let revocation = pos_core::ConsentRevokedV1 {
-            subject_id: subject,
-            grantee_id: grantee,
-            grant_seq: 1,
-            fence_seq: 1,
-        };
-        let revocation_draft = EventDraft::new(
-            subject,
-            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
-            ok(revocation.encode()),
-        );
+        let revocation_draft = revocation_draft(subject, grantee);
         let committed = ok(append_store.append_consent_revocation_bounded(
             timeline.id(),
             std::slice::from_ref(&revocation_draft),
@@ -9800,6 +9805,13 @@ mod coverage_entrypoints {
             ok(append_store.pending_append_identity_cleanup()),
             Some(scope)
         );
+    }
+
+    #[test]
+    fn consent_owner_storage_failures_fail_closed() {
+        let subject = EntityId::new();
+        let permit = ConsentAuthority::new().append_permit();
+        let grant = grant_draft(subject, EntityId::new());
 
         let mut owner_query_error = tests::new_store();
         let owner_query_timeline = ok(owner_query_error.create_timeline("owner-query-error"));
@@ -9816,7 +9828,7 @@ mod coverage_entrypoints {
             .execute_batch("DROP TABLE timeline_owners"));
         expect_err(owner_tx_error.append_consent_bounded(
             owner_tx_timeline.id(),
-            std::slice::from_ref(&grant_draft()),
+            std::slice::from_ref(&grant),
             permit,
             1,
         ));
@@ -9830,11 +9842,17 @@ mod coverage_entrypoints {
         ));
         expect_err(owner_write_error.append_consent_bounded(
             owner_write_timeline.id(),
-            std::slice::from_ref(&grant_draft()),
+            std::slice::from_ref(&grant),
             permit,
             1,
         ));
+    }
 
+    #[test]
+    fn cleanup_storage_failures_fail_closed() {
+        let subject = EntityId::new();
+        let permit = ConsentAuthority::new().append_permit();
+        let revocation = revocation_draft(subject, EntityId::new());
         let mut cleanup_write_error = tests::new_store();
         ok(cleanup_write_error.bind_consent_authority(permit));
         let cleanup_timeline = ok(cleanup_write_error.create_timeline("cleanup-write-error"));
@@ -9843,7 +9861,7 @@ mod coverage_entrypoints {
             .execute_batch("DROP TABLE pending_append_identity_cleanup"));
         expect_err(cleanup_write_error.append_consent_revocation_bounded(
             cleanup_timeline.id(),
-            std::slice::from_ref(&revocation_draft),
+            std::slice::from_ref(&revocation),
             permit,
             1,
             AppendDedupScope::from_keyed_hash([122; 32]),
