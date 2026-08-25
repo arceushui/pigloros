@@ -1027,9 +1027,10 @@ impl ConsentAuthority {
             return Err(ConsentError::NoConsent);
         };
         Self::validate_from_sessions(sessions, key, &active.token, timeline_head, now_secs)?;
+        active.token.authorize_event_type(&Kind::new("geo.location"))?;
         active
             .token
-            .authorize_event_type(&Kind::new("geo.location"))
+            .authorize_geo_resolution(crate::GEO_LOCATION_V1_RESOLUTION)
     }
 
     fn validate_with_timeline(

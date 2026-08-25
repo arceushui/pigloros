@@ -222,6 +222,10 @@ enum Command {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Seq, StoreExecutorError>>,
     },
+    ProtectedLogicalHead {
+        timeline: TimelineId,
+        reply: oneshot::Sender<Result<Seq, StoreExecutorError>>,
+    },
     #[cfg(test)]
     Panic {
         reply: oneshot::Sender<Result<(), StoreExecutorError>>,
@@ -245,7 +249,8 @@ impl Command {
             | Self::Read { .. }
             | Self::ReadOne { .. }
             | Self::GetTimeline { .. }
-            | Self::LogicalHead { .. } => CommandClass::Read,
+            | Self::LogicalHead { .. }
+            | Self::ProtectedLogicalHead { .. } => CommandClass::Read,
             Self::PrepareOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
@@ -370,6 +375,14 @@ impl ExecutorStore {
             Self::Generic(store) => store.as_mut(),
             Self::GeoLocation(store) => store.as_mut(),
             Self::OwnTracks(store) => store.as_mut(),
+        }
+    }
+
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        match self {
+            Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            Self::GeoLocation(store) => store.protected_logical_head(timeline),
+            Self::OwnTracks(store) => store.protected_logical_head(timeline),
         }
     }
 }
@@ -1128,6 +1141,16 @@ impl StoreExecutor {
     ) -> Result<Seq, StoreExecutorError> {
         submit!(self, |reply| Command::LogicalHead { timeline, reply })
     }
+
+    pub(crate) async fn protected_logical_head(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Seq, StoreExecutorError> {
+        submit!(self, |reply| Command::ProtectedLogicalHead {
+            timeline,
+            reply
+        })
+    }
 }
 
 async fn await_command_result<T>(
@@ -1465,6 +1488,9 @@ fn expire_command(command: Command) {
         Command::LogicalHead { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::ProtectedLogicalHead { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         #[cfg(test)]
         Command::Panic { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
@@ -1652,6 +1678,9 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         }
         Command::LogicalHead { timeline, reply } => {
             send_store_result(reply, state.store.event_store().logical_head(timeline));
+        }
+        Command::ProtectedLogicalHead { timeline, reply } => {
+            send_store_result(reply, state.store.protected_logical_head(timeline));
         }
         #[cfg(test)]
         Command::Panic { reply } => {

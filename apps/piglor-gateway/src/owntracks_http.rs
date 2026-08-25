@@ -64,17 +64,7 @@ fn owntracks_response(result: &Result<OwnTracksIngressResult, GatewayError>) -> 
         Err(GatewayError::Store(CoreError::GeographicAdmissionAuthenticationFailed)) => {
             error(StatusCode::UNAUTHORIZED, "unauthorized")
         }
-        Err(error_value) => {
-            #[cfg(test)]
-            {
-                panic!("owntracks admission error: {error_value:?}");
-            }
-            #[cfg(not(test))]
-            {
-                let _ = error_value;
-                error(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
-            }
-        }
+        Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
     }
 }
 
@@ -779,15 +769,20 @@ mod tests {
         material.extend_from_slice(&secret);
         let mut store = pos_store::memory::MemoryStore::new();
         let timeline = store.create_timeline("owntracks-rate-http").test_ok()?;
+        let entity = EntityId::new();
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
-                EntityId::new(),
+                entity,
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
             .test_ok()?;
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity))
+            .await
+            .test_ok()?;
 
         for _ in 0..5 {
             let response = post_owntracks(

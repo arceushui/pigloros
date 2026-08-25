@@ -2498,6 +2498,10 @@ impl GeographicReplayVerifier for SqliteStore {
 }
 
 impl GeoLocationAdmissionStore for SqliteStore {
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        self.logical_head_unchecked(timeline)
+    }
+
     fn admit_geo_location(
         &mut self,
         request: GeoLocationAdmissionRequestV1,
@@ -2657,6 +2661,20 @@ impl GeoLocationReplayVerifier for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        let chain = self.fork_chain(id)?;
+        let mut logical_head = 0_u64;
+        for (index, (timeline, _)) in chain.iter().enumerate() {
+            logical_head = Self::add_logical_segment(
+                logical_head,
+                self.logical_segment_length(&chain, index, *timeline)?,
+            )?;
+        }
+        Ok(Seq::from_u64(logical_head))
+    }
+}
+
 impl EventStore for SqliteStore {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
@@ -2705,7 +2723,6 @@ impl EventStore for SqliteStore {
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         crate::ensure_gateway_consent_types(drafts, timeline)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events, true))
     }
 
@@ -3123,15 +3140,7 @@ impl EventStore for SqliteStore {
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
         self.ensure_generic_timeline_visibility(id)?;
-        let chain = self.fork_chain(id)?;
-        let mut logical_head = 0_u64;
-        for (index, (timeline, _)) in chain.iter().enumerate() {
-            logical_head = Self::add_logical_segment(
-                logical_head,
-                self.logical_segment_length(&chain, index, *timeline)?,
-            )?;
-        }
-        Ok(Seq::from_u64(logical_head))
+        self.logical_head_unchecked(id)
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {

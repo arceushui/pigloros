@@ -7,6 +7,12 @@
 use crate::{CanonicalBytes, CoreError, EntityId, EventId, Hash, Seq, TimelineId};
 use serde::{Deserialize, Serialize};
 
+/// The sole geographic resolution emitted by the compact V1 admission path.
+///
+/// The value is part of the V1 contract, not caller input. Future admission
+/// profiles must introduce a new versioned request before they can vary it.
+pub const GEO_LOCATION_V1_RESOLUTION: u8 = 1;
+
 /// Already-minimized gateway input for one V1 geographic admission attempt.
 ///
 /// Its fields are deliberately private: callers can create it, but cannot
@@ -414,6 +420,18 @@ impl GeoLocationAdmissionRequestV1 {
 /// Generic [`crate::EventStore`] APIs do not expose this trait, so ordinary
 /// callers cannot use them to append protected geographic evidence.
 pub trait GeoLocationAdmissionStore {
+    /// Return the authoritative logical head for a protected Timeline.
+    ///
+    /// Generic [`crate::EventStore::logical_head`] intentionally hides a
+    /// Timeline after protected geographic evidence is present.  The host
+    /// consent fence needs this dedicated capability so later admissions can
+    /// continue to validate revocation coordinates without exposing the
+    /// protected Timeline to ordinary callers.
+    ///
+    /// # Errors
+    /// Returns a bounded storage error when the Timeline head is unavailable.
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError>;
+
     /// Admit one already-minimized V1 location request atomically.
     ///
     /// # Errors
@@ -655,6 +673,10 @@ mod tests {
     struct CoreAdmissionProbe;
 
     impl GeoLocationAdmissionStore for CoreAdmissionProbe {
+        fn protected_logical_head(&self, _timeline: TimelineId) -> Result<Seq, CoreError> {
+            Err(CoreError::GeographicAdmissionUnavailable)
+        }
+
         fn admit_geo_location(
             &mut self,
             _request: GeoLocationAdmissionRequestV1,

@@ -58,7 +58,7 @@ pub use erasure::{
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
-pub use geo_admission::GeoLocationAdmissionFenceV1;
+pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
 pub use geo_cell_admission::{
     hash_admission_consent_record_bytes, hash_admission_snapshot_bytes, AdmissionConsentRecordV1,
     AdmissionEntitlementDraftV1, AdmissionEntitlementSnapshotV1, AdmissionSnapshotHash,

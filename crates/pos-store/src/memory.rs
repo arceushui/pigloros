@@ -876,7 +876,13 @@ impl MemoryStore {
             crate::ensure_non_geographic_drafts
         };
         validate(drafts, timeline)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| {
+                if gateway_consent {
+                    self.timeline(timeline).map(|_| ())
+                } else {
+                    self.ensure_generic_timeline_visibility(timeline)
+                }
+            })
             .and_then(|()| {
                 // Visibility checked this key immediately above and no mutation
                 // occurs between the check and this read.
@@ -1107,6 +1113,10 @@ impl OwnTracksIngressStore for MemoryStore {
 }
 
 impl GeoLocationAdmissionStore for MemoryStore {
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        self.logical_head_unchecked(timeline)
+    }
+
     fn admit_geo_location(
         &mut self,
         request: GeoLocationAdmissionRequestV1,
@@ -1535,6 +1545,20 @@ impl GeographicReplayVerifier for MemoryStore {
     }
 }
 
+impl MemoryStore {
+    fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        let chain = self.fork_chain(id)?;
+        let mut logical_head = 0_u64;
+        for (index, timeline) in chain.timelines.iter().enumerate() {
+            let length = chain.segment_length(self, index, *timeline)?;
+            logical_head = logical_head
+                .checked_add(length)
+                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
+        }
+        Ok(Seq::from_u64(logical_head))
+    }
+}
+
 impl EventStore for MemoryStore {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
@@ -1747,15 +1771,7 @@ impl EventStore for MemoryStore {
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
         self.ensure_generic_timeline_visibility(id)?;
-        let chain = self.fork_chain(id)?;
-        let mut logical_head = 0_u64;
-        for (index, timeline) in chain.timelines.iter().enumerate() {
-            let length = chain.segment_length(self, index, *timeline)?;
-            logical_head = logical_head
-                .checked_add(length)
-                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
-        }
-        Ok(Seq::from_u64(logical_head))
+        self.logical_head_unchecked(id)
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {

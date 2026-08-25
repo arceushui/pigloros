@@ -344,27 +344,19 @@ mod coverage_tests {
         };
 
         assert!(gateway
-            .admit_geo_location_with_consent(request(), &token, 0, 1)
+            .admit_geo_location_with_consent(request(), &token, 0)
             .await
             .test_ok()
             .is_accepted());
         assert_eq!(notices.recv().await.test_ok().event_type, "geo.location");
         assert!(gateway
-            .admit_geo_location_with_consent(request(), &token, 0, 1)
+            .admit_geo_location_with_consent(request(), &token, 0)
             .await
             .test_ok()
             .is_duplicate());
         assert!(matches!(
             notices.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-        ));
-        let resolution_error = gateway
-            .admit_geo_location_with_consent(request(), &token, 0, 0)
-            .await
-            .test_err();
-        assert!(matches!(
-            resolution_error,
-            GatewayError::Consent(ConsentError::GeoResolutionNotPermitted)
         ));
         drop(gateway);
     }
@@ -1131,10 +1123,12 @@ impl Gateway {
         request: GeoLocationAdmissionRequestV1,
         token: &ConsentCapabilityToken,
         now_secs: u64,
-        effective_resolution: u8,
     ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
         let consent_timeline_guard = self.lock_consent_timeline(request.timeline()).await;
-        let timeline_head = self.store.logical_head(request.timeline()).await?;
+        let timeline_head = self
+            .store
+            .protected_logical_head(request.timeline())
+            .await?;
         self.consent_authority.validate_on_timeline(
             request.timeline(),
             token,
@@ -1142,7 +1136,7 @@ impl Gateway {
             now_secs,
         )?;
         token.authorize_event_type(&Kind::new("geo.location"))?;
-        token.authorize_geo_resolution(effective_resolution)?;
+        token.authorize_geo_resolution(pos_core::GEO_LOCATION_V1_RESOLUTION)?;
         let admission = self.admit_geo_location_from_core(request).await;
         drop(consent_timeline_guard);
         admission
@@ -1173,7 +1167,7 @@ impl Gateway {
         let timeline = request.timeline();
         let entity = request.entity();
         let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
-        let timeline_head = self.store.logical_head(timeline).await?;
+        let timeline_head = self.store.protected_logical_head(timeline).await?;
         self.consent_authority
             .validate_location_subject_on_timeline(timeline, entity, timeline_head.as_u64(), 0)?;
         let admission = self.store.admit_geo_location(request).await?;
