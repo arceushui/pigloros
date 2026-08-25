@@ -1233,17 +1233,6 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         Err(ErasureErrorV1::KeyRegistryUnavailable)
     );
 
-    let mut reload_failed = test_port(true, Vec::new());
-    let mut coordinator =
-        ErasureCoordinatorStateMachineV1::new(reload_failed.clone(), reference(2));
-    coordinator.submit(request()?, reference(3))?;
-    reload_failed.load_error = Some(ErasureErrorV1::KeyRegistryUnavailable);
-    coordinator.port.load_error = reload_failed.load_error;
-    assert_eq!(
-        coordinator.authorize(reference(1), reference(9)),
-        Err(ErasureErrorV1::KeyRegistryUnavailable)
-    );
-
     let mut commit_failed = test_port(true, Vec::new());
     commit_failed.commit_error = Some(ErasureErrorV1::ReceiptCommitFailed);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(commit_failed, reference(2));
@@ -1289,6 +1278,19 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
 
+    Ok(())
+}
+
+#[test]
+fn coordinator_rehydration_surfaces_port_load_failure() -> Result<(), ErasureErrorV1> {
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, Vec::new()), reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.port.load_error = Some(ErasureErrorV1::KeyRegistryUnavailable);
+    assert_eq!(
+        coordinator.authorize(reference(1), reference(9)),
+        Err(ErasureErrorV1::KeyRegistryUnavailable)
+    );
     Ok(())
 }
 
