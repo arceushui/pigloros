@@ -576,12 +576,11 @@ mod tests {
             .lock()
             .map_err(|_| "registry lock poisoned")?
             .clone();
+        let failure_store = RegistryFailureStore::new(persisted, RegistryFailure::Destroy);
+        let timeline_id = failure_store.timeline.id();
         let mut store = EventLedgerStore::new(
-            Box::new(RegistryFailureStore::new(
-                persisted,
-                RegistryFailure::Destroy,
-            )),
-            pos_core::ids::TimelineId::new(),
+            Box::new(failure_store),
+            timeline_id,
             EntityId::new(),
             signing_key.clone(),
             registry,
