@@ -4698,6 +4698,7 @@ mod tests {
         mismatched_review_profile.fixtures[0]
             .provenance
             .publication_review_digest = [9; 32];
+        mismatched_review_profile.profile_digest = mismatched_review_profile.digest();
         assert_eq!(
             materialize_candidate_for_test(&mismatched_review_profile, &approved_members)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
