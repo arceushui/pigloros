@@ -722,19 +722,20 @@ fn independent_member_paths_and_profile<'a>(
         let descriptor = independent_array(descriptor_value, 4)?;
         let member_path = archive_text(&member[0])?;
         let member_bytes = archive_bytes(&member[1])?;
-        let member_role = archive_u64(&member[2])?;
+        let member_role = decode_member_role(archive_u64(&member[2])?)?;
+        let descriptor_role = decode_member_role(archive_u64(&descriptor[3])?)?;
         if !member_paths.insert(member_path.to_owned())
             || archive_text(&descriptor[0])? != member_path
             || archive_u64(&descriptor[1])? != u64::try_from(member_bytes.len()).unwrap_or(u64::MAX)
             || independent_digest::<32>(&descriptor[2])? != *blake3::hash(member_bytes).as_bytes()
-            || archive_u64(&descriptor[3])? != member_role
+            || descriptor_role != member_role
         {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if member_role == BundleMemberRoleV1::ExpectedResult.code() {
+        if member_role == BundleMemberRoleV1::ExpectedResult {
             expected_result_paths.insert(member_path.to_owned());
         }
-        if member_role == BundleMemberRoleV1::Profile.code()
+        if member_role == BundleMemberRoleV1::Profile
             && (member_path != PROFILE_MEMBER_PATH || profile_bytes.replace(member_bytes).is_some())
         {
             return Err(BundleContractErrorV1::MemberMissing);
@@ -761,7 +762,7 @@ fn independent_verify_expected_results(
         }) else {
             return Err(BundleContractErrorV1::MemberMissing);
         };
-        if archive_u64(&descriptor[3])? != BundleMemberRoleV1::ExpectedResult.code()
+        if decode_member_role(archive_u64(&descriptor[3])?)? != BundleMemberRoleV1::ExpectedResult
             || independent_digest::<32>(&expected[5])? != independent_digest::<32>(&descriptor[2])?
         {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -7271,6 +7272,7 @@ mod instrumented_candidate_entrypoints {
             ConformanceBundleV1::from_canonical_cbor(&invalid_member_role),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
+        public_archive_rejects_unknown_member_role(archive)?;
 
         let mut nested = vec![0x81; 34];
         nested.push(0xf6);
@@ -7300,6 +7302,52 @@ mod instrumented_candidate_entrypoints {
             exact_members.extend_from_slice(&[0x83, 0x60, 0x40, 0x00]);
         }
         assert!(verify_archive_independently(&raw_archive(&[0x60], &exact_members)).is_err());
+        Ok(())
+    }
+
+    fn public_archive_rejects_unknown_member_role(
+        archive: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut value: ciborium::value::Value =
+            ciborium::from_reader(std::io::Cursor::new(archive))?;
+        {
+            let ciborium::value::Value::Array(fields) = &mut value else {
+                return Err("encoded bundle is not an array".into());
+            };
+            let ciborium::value::Value::Array(members) = &mut fields[3] else {
+                return Err("encoded members are not an array".into());
+            };
+            let ciborium::value::Value::Array(member) = &mut members[0] else {
+                return Err("encoded member is not an array".into());
+            };
+            member[2] = ciborium::value::Value::Integer(14_u64.into());
+            let ciborium::value::Value::Array(manifest) = &mut fields[2] else {
+                return Err("encoded manifest is not an array".into());
+            };
+            let ciborium::value::Value::Array(descriptors) = &mut manifest[4] else {
+                return Err("encoded descriptors are not an array".into());
+            };
+            let ciborium::value::Value::Array(descriptor) = &mut descriptors[0] else {
+                return Err("encoded descriptor is not an array".into());
+            };
+            descriptor[3] = ciborium::value::Value::Integer(14_u64.into());
+        }
+        let ciborium::value::Value::Array(fields) = &mut value else {
+            return Err("encoded bundle is not an array".into());
+        };
+        use ed25519_dalek::Signer;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut manifest_bytes = Vec::new();
+        ciborium::into_writer(&fields[2], &mut manifest_bytes)?;
+        fields[4] = ciborium::value::Value::Bytes(signing_key.verifying_key().to_bytes().to_vec());
+        fields[5] =
+            ciborium::value::Value::Bytes(signing_key.sign(&manifest_bytes).to_bytes().to_vec());
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&value, &mut encoded)?;
+        assert_eq!(
+            verify_archive_independently(&encoded),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
         Ok(())
     }
 
