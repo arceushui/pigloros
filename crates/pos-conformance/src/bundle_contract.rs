@@ -214,6 +214,25 @@ impl BundleMemberV1 {
             expected_result: false,
         }
     }
+
+    #[cfg(test)]
+    fn authority(path: impl Into<String>, bytes: Vec<u8>, role: BundleMemberRoleV1) -> Self {
+        debug_assert!(matches!(
+            role,
+            BundleMemberRoleV1::AuthorityInventory
+                | BundleMemberRoleV1::ExecutionMatrix
+                | BundleMemberRoleV1::AuthorityFixture
+                | BundleMemberRoleV1::AuthorityExpectedResult
+        ));
+        let digest = *blake3::hash(&bytes).as_bytes();
+        Self {
+            path: path.into(),
+            bytes,
+            digest,
+            role,
+            expected_result: false,
+        }
+    }
 }
 
 /// One expected-result pointer in the immutable manifest.
@@ -2195,13 +2214,13 @@ mod tests {
                 include_bytes!("../../../fixtures/conformance/support/limitations.md").to_vec(),
                 BundleMemberRoleV1::Limitations,
             ),
-            BundleMemberV1::supporting(
+            BundleMemberV1::authority(
                 AUTHORITY_INVENTORY_MEMBER_PATH,
                 include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json")
                     .to_vec(),
                 BundleMemberRoleV1::AuthorityInventory,
             ),
-            BundleMemberV1::supporting(
+            BundleMemberV1::authority(
                 EXECUTION_MATRIX_MEMBER_PATH,
                 include_bytes!("../../../fixtures/conformance/matrix/adr-059-complete.json")
                     .to_vec(),
@@ -2374,14 +2393,14 @@ mod tests {
         fixtures
             .into_iter()
             .map(|(fixture_id, bytes)| {
-                BundleMemberV1::supporting(
+                BundleMemberV1::authority(
                     format!("authority/expected-authority/fixtures/{fixture_id}.json"),
                     bytes.to_vec(),
                     BundleMemberRoleV1::AuthorityFixture,
                 )
             })
             .chain(results.into_iter().map(|(fixture_id, bytes)| {
-                BundleMemberV1::supporting(
+                BundleMemberV1::authority(
                     format!("authority/expected-authority/results/{fixture_id}.json"),
                     bytes.to_vec(),
                     BundleMemberRoleV1::AuthorityExpectedResult,
