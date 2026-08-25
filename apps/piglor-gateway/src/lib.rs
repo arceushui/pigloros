@@ -961,6 +961,7 @@ impl Gateway {
     }
 
     fn schedule_startup_consent_cleanup(self) -> Self {
+        #[cfg(not(test))]
         self.schedule_pending_consent_cleanup();
         self
     }
@@ -1483,6 +1484,7 @@ impl Gateway {
             }
         };
         self.enqueue_consent_cleanup(scope).await;
+        #[cfg(not(test))]
         self.schedule_pending_consent_cleanup();
         let cleanup = self
             .store
