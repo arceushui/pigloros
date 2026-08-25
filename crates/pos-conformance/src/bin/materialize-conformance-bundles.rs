@@ -1229,6 +1229,13 @@ mod tests {
         let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
         let invalid_collection = serde_json::json!({"fixtures": [JsonValue::Null]});
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
+        let invalid_fixture = serde_json::json!({
+            "case_id": "artifact-positive",
+            "family": "positive",
+            "input": "inputs/artifact-positive.json"
+        });
+        let invalid_collection = serde_json::json!({"fixtures": [invalid_fixture]});
+        assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         for field in [
             "profile_id",
             "claim_layer",
