@@ -9849,6 +9849,89 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn owner_lifecycle_storage_failures_fail_closed() {
+        let subject = EntityId::new();
+        let mut fork_query_error = tests::new_store();
+        let parent = ok(fork_query_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("fork-query", subject),
+        ));
+        ok(fork_query_error
+            .conn
+            .execute_batch("DROP TABLE timeline_owners"));
+        expect_err(fork_query_error.fork(parent.id(), Seq::ZERO, "child"));
+
+        let mut fork_write_error = tests::new_store();
+        let parent = ok(fork_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("fork-write", subject),
+        ));
+        ok(fork_write_error.conn.execute_batch(
+            "CREATE TRIGGER deny_fork_owner BEFORE INSERT ON timeline_owners
+             BEGIN SELECT RAISE(ABORT, 'fork owner denied'); END",
+        ));
+        expect_err(fork_write_error.fork(parent.id(), Seq::ZERO, "child"));
+
+        let mut list_error = tests::new_store();
+        ok(list_error.create_timeline("list-owner-error"));
+        ok(list_error.conn.execute_batch("DROP TABLE timeline_owners"));
+        expect_err(list_error.list_timelines());
+
+        let mut create_write_error = tests::new_store();
+        ok(create_write_error.conn.execute_batch(
+            "CREATE TRIGGER deny_create_owner BEFORE INSERT ON timeline_owners
+             BEGIN SELECT RAISE(ABORT, 'create owner denied'); END",
+        ));
+        expect_err(create_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("create-owner", subject),
+        ));
+
+        let mut delete_write_error = tests::new_store();
+        let owned = ok(delete_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("delete-owner", subject),
+        ));
+        ok(delete_write_error.conn.execute_batch(
+            "CREATE TRIGGER deny_delete_owner BEFORE DELETE ON timeline_owners
+             BEGIN SELECT RAISE(ABORT, 'delete owner denied'); END",
+        ));
+        expect_err(delete_write_error.delete_timeline(owned.id()));
+    }
+
+    #[test]
+    fn cleanup_transaction_boundaries_fail_closed() {
+        let scope = AppendDedupScope::from_keyed_hash([124; 32]);
+        let mut remove_begin = tests::new_store();
+        ok(remove_begin.conn.execute_batch("BEGIN IMMEDIATE"));
+        expect_err(remove_begin.remove_append_identities(scope));
+        ok(remove_begin.conn.execute_batch("ROLLBACK"));
+
+        let mut bounded_begin = tests::new_store();
+        ok(bounded_begin.conn.execute_batch("BEGIN IMMEDIATE"));
+        expect_err(
+            bounded_begin
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+        ok(bounded_begin.conn.execute_batch("ROLLBACK"));
+
+        let mut remove_pending_error = tests::new_store();
+        ok(remove_pending_error
+            .conn
+            .execute_batch("DROP TABLE pending_append_identity_cleanup"));
+        expect_err(remove_pending_error.remove_append_identities(scope));
+
+        let mut remove_commit_error = tests::new_store();
+        ok(remove_commit_error.conn.commit_hook(Some(|| true)));
+        expect_err(remove_commit_error.remove_append_identities(scope));
+        ok(remove_commit_error.conn.commit_hook::<fn() -> bool>(None));
+
+        let mut bounded_commit_error = tests::new_store();
+        ok(bounded_commit_error.conn.commit_hook(Some(|| true)));
+        expect_err(
+            bounded_commit_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+        ok(bounded_commit_error.conn.commit_hook::<fn() -> bool>(None));
+    }
+
+    #[test]
     fn cleanup_storage_failures_fail_closed() {
         let subject = EntityId::new();
         let permit = ConsentAuthority::new().append_permit();
