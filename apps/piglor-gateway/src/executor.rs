@@ -171,10 +171,6 @@ enum Command {
         limit: NonZeroUsize,
         reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
     },
-    RemoveAppendIdentities {
-        scope: AppendDedupScope,
-        reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
-    },
     RemoveAppendIdentitiesBounded {
         scope: AppendDedupScope,
         limit: NonZeroUsize,
@@ -261,7 +257,6 @@ impl Command {
             | Self::PrepareOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
-            | Self::RemoveAppendIdentities { .. }
             | Self::RemoveAppendIdentitiesBounded { .. }
             | Self::Create { .. }
             | Self::Append { .. }
@@ -1023,15 +1018,6 @@ impl StoreExecutor {
     ) -> Result<PurgeOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::Purge { limit, reply })
     }
-    pub(crate) async fn remove_append_identities(
-        &self,
-        scope: AppendDedupScope,
-    ) -> Result<usize, StoreExecutorError> {
-        submit!(self, |reply| Command::RemoveAppendIdentities {
-            scope,
-            reply
-        })
-    }
     pub(crate) async fn remove_append_identities_bounded(
         &self,
         scope: AppendDedupScope,
@@ -1478,9 +1464,6 @@ fn expire_command(command: Command) {
         Command::Purge { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
-        Command::RemoveAppendIdentities { reply, .. } => {
-            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
-        }
         Command::RemoveAppendIdentitiesBounded { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1666,12 +1649,6 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             execute_geo_location_command(state, request, reply);
         }
         Command::Purge { limit, reply } => execute_purge_command(state, limit, reply),
-        Command::RemoveAppendIdentities { scope, reply } => {
-            send_store_result(
-                reply,
-                state.store.event_store().remove_append_identities(scope),
-            );
-        }
         Command::RemoveAppendIdentitiesBounded {
             scope,
             limit,
@@ -2681,15 +2658,6 @@ mod tests {
         assert_expired(
             Command::Purge {
                 limit: NonZeroUsize::new(1).test_ok()?,
-                reply,
-            },
-            receiver,
-        );
-
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        assert_expired(
-            Command::RemoveAppendIdentities {
-                scope: AppendDedupScope::from_keyed_hash([3; 32]),
                 reply,
             },
             receiver,
