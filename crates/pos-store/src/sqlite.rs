@@ -526,22 +526,16 @@ impl SqliteStore {
     }
 
     fn ensure_event_signature_columns(&self) -> Result<(), CoreError> {
-        let mut statement = match self.conn.prepare("PRAGMA table_info(events)") {
-            Ok(statement) => statement,
-            Err(error) => return Err(Self::storage_error(&error)),
-        };
-        let rows = match statement.query_map([], |row| row.get::<_, String>(1)) {
-            Ok(rows) => rows,
-            Err(error) => return Err(Self::storage_error(&error)),
-        };
+        let mut statement = self
+            .conn
+            .prepare("PRAGMA table_info(events)")
+            .map_err(Self::storage_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(Self::storage_error)?;
         let mut columns = HashSet::new();
         for row in rows {
-            match row {
-                Ok(column) => {
-                    columns.insert(column);
-                }
-                Err(error) => return Err(Self::storage_error(&error)),
-            }
+            columns.insert(row.map_err(Self::storage_error)?);
         }
         drop(statement);
         if !columns.contains("signature_role") {

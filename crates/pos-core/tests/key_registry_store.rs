@@ -2,8 +2,10 @@
 
 use pos_core::{
     CanonicalBytes, CoreError, EntityId, Event, EventDraft, EventId, EventStore, Hash,
-    KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Kind, PublicKey,
-    SchemaVersion, Seq, SeqRange, Timeline, TimelineId, TimelineMeta, WallTime,
+    KeyDestructionOutcomeV1, KeyDestructionPortV1, KeyIdentityV1, KeyRegistrationV1,
+    KeyRegistryEncryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1, KeyRegistryStateV1,
+    KeyRoleV1, Kind, PublicKey, SchemaVersion, Seq, SeqRange, Timeline, TimelineId, TimelineMeta,
+    WallTime,
 };
 
 struct RegistryStore {
@@ -285,6 +287,103 @@ fn replacement_rejects_tombstone_rewrite_at_public_boundary(
     assert_eq!(
         destroyed.validate_replacement(&changed_tombstone),
         Err(pos_core::KeyRegistryErrorV1::InvalidState)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_registry_traits_and_role_boundaries_are_exercised(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let role_cases = [
+        (0, KeyRoleV1::SubjectDataEncryption, false, true),
+        (1, KeyRoleV1::SubjectAttributionSigning, true, false),
+        (2, KeyRoleV1::TimelineIntegritySigning, true, false),
+        (3, KeyRoleV1::PluginReleaseSigning, true, false),
+        (4, KeyRoleV1::ExportRecipientEncryption, false, true),
+    ];
+    for (code, role, signing, encryption) in role_cases {
+        assert_eq!(KeyRoleV1::from_code(code), Ok(role));
+        assert_eq!(role.is_signing(), signing);
+        assert_eq!(role.is_encryption(), encryption);
+    }
+    assert_eq!(
+        KeyRoleV1::from_code(5),
+        Err(pos_core::KeyRegistryErrorV1::InvalidRoleCode)
+    );
+
+    let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let signing_material = Hash::from_bytes([21; 32]);
+    let signing_public_key = PublicKey::from_bytes([22; 32]);
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_material = Hash::from_bytes([23; 32]);
+    let mut registry = KeyRegistryStateV1::new();
+
+    assert_eq!(
+        KeyRegistryPortV1::register_key(
+            &mut registry,
+            KeyRegistrationV1::new(signing_identity, signing_material, Some(signing_public_key),),
+        )?,
+        pos_core::KeyRegistrationOutcomeV1::Registered
+    );
+    assert_eq!(
+        KeyRegistryPortV1::register_key(
+            &mut registry,
+            KeyRegistrationV1::new(encryption_identity, encryption_material, None,),
+        )?,
+        pos_core::KeyRegistrationOutcomeV1::Registered
+    );
+    assert_eq!(
+        KeyRegistryPortV1::active_key(&registry, signing_identity.role)
+            .map(|record| record.identity),
+        Some(signing_identity)
+    );
+    assert_eq!(
+        KeyRegistryPortV1::key_record(&registry, signing_identity)
+            .ok_or("missing signing record")?
+            .identity,
+        signing_identity
+    );
+
+    assert_eq!(
+        KeyRegistrySigningPortV1::with_signing_authorization(
+            &mut registry,
+            signing_identity,
+            signing_material,
+            signing_public_key,
+            || "signed",
+        )?,
+        "signed"
+    );
+    assert_eq!(
+        KeyRegistryEncryptionPortV1::with_encryption_authorization(
+            &mut registry,
+            encryption_identity,
+            encryption_material,
+            || "encrypted",
+        )?,
+        "encrypted"
+    );
+
+    let destruction_request = pos_core::KeyDestructionRequestV1::new(
+        signing_identity,
+        signing_material,
+        Hash::from_bytes([24; 32]),
+    );
+    let first = KeyDestructionPortV1::destroy_key(&mut registry, destruction_request)?;
+    let second = KeyDestructionPortV1::destroy_key(&mut registry, destruction_request)?;
+    let first_tombstone = match first {
+        KeyDestructionOutcomeV1::Destroyed(tombstone) => tombstone,
+        other => return Err(format!("unexpected first destruction: {other:?}").into()),
+    };
+    assert_eq!(first.tombstone(), first_tombstone);
+    assert_eq!(
+        second,
+        KeyDestructionOutcomeV1::AlreadyDestroyed(first_tombstone)
+    );
+    assert_eq!(second.tombstone(), first_tombstone);
+    assert_eq!(
+        KeyRegistryPortV1::tombstone(&registry, signing_identity),
+        Some(first_tombstone)
     );
     Ok(())
 }
