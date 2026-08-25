@@ -82,7 +82,7 @@ fn run(
         &mut arguments,
         encoded_signing_key,
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
-        authority_root,
+        authority_root.as_deref(),
     )
 }
 
