@@ -5366,7 +5366,6 @@ mod coverage_entrypoints {
 }
 
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod instrumented_candidate_entrypoints {
     use super::tests;
     use super::{BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1};
@@ -5386,6 +5385,7 @@ mod instrumented_candidate_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn valid_candidate_bundle_reaches_public_validation() -> Result<(), Box<dyn std::error::Error>>
     {
         assert!(signed_candidate_bundle()?.validate().is_ok());
@@ -5393,6 +5393,7 @@ mod instrumented_candidate_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn authority_members_are_required_and_profile_bound() -> Result<(), Box<dyn std::error::Error>>
     {
         let mut profile = tests::profile();
@@ -5425,6 +5426,7 @@ mod instrumented_candidate_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_validation_rejects_missing_or_tampered_authority_artifacts(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut missing = signed_candidate_bundle()?;
@@ -5454,6 +5456,7 @@ mod instrumented_candidate_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn candidate_publication_rejects_a_mismatched_review_digest(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut bundle = signed_candidate_bundle()?;
