@@ -38,6 +38,27 @@ fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, Co
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    fn replace_first_bytes(
+        value: &mut ciborium::value::Value,
+        from: &[u8; 32],
+        to: [u8; 32],
+    ) -> bool {
+        match value {
+            ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
+                *value = ciborium::value::Value::Bytes(to.to_vec());
+                true
+            }
+            ciborium::value::Value::Array(values) => values
+                .iter_mut()
+                .any(|value| replace_first_bytes(value, from, to)),
+            ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+                replace_first_bytes(key, from, to) || replace_first_bytes(value, from, to)
+            }),
+            ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
+            _ => false,
+        }
+    }
+
     let (registry, identity, material_digest) = registry()?;
     let mut store = SqliteStore::open_in_memory()?;
     assert!(store.load_key_registry()?.is_none());
@@ -100,26 +121,6 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
     let (_, destroyed) = store.destroy_key_registry(valid_request)?;
     assert!(destroyed.key_record(identity).is_some());
 
-    fn replace_first_bytes(
-        value: &mut ciborium::value::Value,
-        from: &[u8; 32],
-        to: [u8; 32],
-    ) -> bool {
-        match value {
-            ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
-                *value = ciborium::value::Value::Bytes(to.to_vec());
-                true
-            }
-            ciborium::value::Value::Array(values) => values
-                .iter_mut()
-                .any(|value| replace_first_bytes(value, from, to)),
-            ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
-                replace_first_bytes(key, from, to) || replace_first_bytes(value, from, to)
-            }),
-            ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
-            _ => false,
-        }
-    }
     let mut encoded = Vec::new();
     ciborium::into_writer(&destroyed, &mut encoded)?;
     let mut value: ciborium::value::Value = ciborium::from_reader(encoded.as_slice())?;

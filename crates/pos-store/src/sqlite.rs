@@ -11621,8 +11621,6 @@ mod key_registry_coverage {
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
         let (_, destroyed) = sqlite_destroy_key_registry(&mut store, valid_request)?;
         assert!(destroyed.key_record(identity).is_some());
-        let changed_tombstone = changed_tombstone_digest(&destroyed)?;
-        assert!(sqlite_save_key_registry(&mut store, &changed_tombstone).is_err());
         sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
         Ok(())
     }
