@@ -27,10 +27,10 @@ fn top_fields(value: &mut Value) -> Result<&mut Vec<Value>, Box<dyn std::error::
     }
 }
 
-fn archive_array<'a>(
-    value: &'a mut Value,
+fn archive_array(
+    value: &mut Value,
     index: usize,
-) -> Result<&'a mut Vec<Value>, Box<dyn std::error::Error>> {
+) -> Result<&mut Vec<Value>, Box<dyn std::error::Error>> {
     let fields = top_fields(value)?;
     match fields.get_mut(index) {
         Some(Value::Array(fields)) => Ok(fields),
@@ -58,9 +58,8 @@ fn archive_descriptor<'a>(
     path: &str,
 ) -> Result<&'a mut Vec<Value>, Box<dyn std::error::Error>> {
     let manifest = archive_array(value, 2)?;
-    let descriptors = match manifest.get_mut(4) {
-        Some(Value::Array(descriptors)) => descriptors,
-        _ => return Err("archive descriptors are missing".into()),
+    let Some(Value::Array(descriptors)) = manifest.get_mut(4) else {
+        return Err("archive descriptors are missing".into());
     };
     let descriptor = descriptors
         .iter_mut()
@@ -72,13 +71,10 @@ fn archive_descriptor<'a>(
     }
 }
 
-fn archive_expected<'a>(
-    value: &'a mut Value,
-) -> Result<&'a mut Vec<Value>, Box<dyn std::error::Error>> {
+fn archive_expected(value: &mut Value) -> Result<&mut Vec<Value>, Box<dyn std::error::Error>> {
     let manifest = archive_array(value, 2)?;
-    let expected = match manifest.get_mut(5) {
-        Some(Value::Array(expected)) => expected,
-        _ => return Err("archive expected results are missing".into()),
+    let Some(Value::Array(expected)) = manifest.get_mut(5) else {
+        return Err("archive expected results are missing".into());
     };
     match expected.first_mut() {
         Some(Value::Array(fields)) => Ok(fields),
@@ -115,9 +111,8 @@ fn mutate_profile(
         _ => return Err("profile bytes are missing".into()),
     };
     let mut profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))?;
-    let profile_fields = match &mut profile {
-        Value::Array(fields) => fields,
-        _ => return Err("profile is not an array".into()),
+    let Value::Array(profile_fields) = &mut profile else {
+        return Err("profile is not an array".into());
     };
     mutate(profile_fields);
     let profile_bytes = encode_archive(&profile)?;
@@ -633,14 +628,20 @@ fn public_bundle_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-#[test]
-fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>>
-{
-    let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+fn assert_archive_rejected(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+    mutate: impl FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let archive = signed_archive_variant(bundle, signing_key, mutate)?;
+    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+    Ok(())
+}
 
-    assert!(pos_conformance::verify_archive_independently(&[0x01, 0x00]).is_err());
-
+fn assert_archive_shape_rejections(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<(), Box<dyn std::error::Error>> {
     for mutate in [
         Box::new(|value: &mut Value| {
             top_fields(value)?[0] = Value::Text("wrong".to_owned());
@@ -663,29 +664,28 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
             Ok(())
         }),
     ] {
-        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
-        assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+        assert_archive_rejected(bundle, signing_key, mutate)?;
     }
+    Ok(())
+}
 
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+fn assert_archive_member_rejections(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_archive_rejected(bundle, signing_key, |value| {
         archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(0_u64.into());
         archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Integer(0_u64.into());
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
-
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+    assert_archive_rejected(bundle, signing_key, |value| {
         top_fields(value)?[5] = Value::Bytes(vec![0]);
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
-
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+    assert_archive_rejected(bundle, signing_key, |value| {
         top_fields(value)?[4] = Value::Bytes(vec![0xff; 32]);
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
-
     for mutate in [
         Box::new(|value: &mut Value| {
             archive_member(value, "profile/CPF1.cbor")?[1] = Value::Null;
@@ -712,38 +712,41 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
             Ok(())
         }),
     ] {
-        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
-        assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+        assert_archive_rejected(bundle, signing_key, mutate)?;
     }
+    Ok(())
+}
 
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+fn assert_archive_expected_rejections(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_archive_rejected(bundle, signing_key, |value| {
         archive_expected(value)?[4] = Value::Null;
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
-
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+    assert_archive_rejected(bundle, signing_key, |value| {
         archive_expected(value)?[5] = Value::Null;
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
-
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
-        let expected_path = match &archive_expected(value)?[4] {
-            Value::Text(path) => path.clone(),
-            _ => return Err("expected path is not text".into()),
+    assert_archive_rejected(bundle, signing_key, |value| {
+        let Value::Text(expected_path) = &archive_expected(value)?[4] else {
+            return Err("expected path is not text".into());
         };
-        archive_descriptor(value, &expected_path)?[3] = Value::Integer(0_u64.into());
+        archive_descriptor(value, expected_path)?[3] = Value::Integer(0_u64.into());
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
-
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+    assert_archive_rejected(bundle, signing_key, |value| {
         archive_expected(value)?[5] = Value::Bytes(vec![0; 32]);
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+    Ok(())
+}
 
+fn assert_archive_profile_rejections(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<(), Box<dyn std::error::Error>> {
     for mutate in [
         Box::new(|value: &mut Value| {
             mutate_profile(value, |fields| fields[0] = Value::Text("wrong".to_owned()))
@@ -755,16 +758,25 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
             mutate_profile(value, |fields| fields[4] = Value::Integer(1_u64.into()))
         }),
     ] {
-        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
-        assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+        assert_archive_rejected(bundle, signing_key, mutate)?;
     }
-
-    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+    assert_archive_rejected(bundle, signing_key, |value| {
         mutate_profile(value, |fields| fields[16] = Value::Bytes(vec![7; 32]))?;
         archive_array(value, 2)?[3] = Value::Bytes(vec![7; 32]);
         Ok(())
     })?;
-    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+    Ok(())
+}
 
+#[test]
+fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    assert!(pos_conformance::verify_archive_independently(&[0x01, 0x00]).is_err());
+    assert_archive_shape_rejections(&bundle, &signing_key)?;
+    assert_archive_member_rejections(&bundle, &signing_key)?;
+    assert_archive_expected_rejections(&bundle, &signing_key)?;
+    assert_archive_profile_rejections(&bundle, &signing_key)?;
     Ok(())
 }
