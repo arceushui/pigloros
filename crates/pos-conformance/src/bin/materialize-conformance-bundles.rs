@@ -1026,7 +1026,7 @@ mod tests {
     fn local_bundle_artifacts(
         profile: &ConformanceProfileV1,
         signing_key: &SigningKey,
-    ) -> Result<(Vec<u8>, [u8; 32], Vec<u8>), Box<dyn Error>> {
+    ) -> Result<LocalBundleArtifacts, Box<dyn Error>> {
         let (members, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
         let bundle = ConformanceBundleV1::materialize(
             profile,
@@ -1040,6 +1040,8 @@ mod tests {
         let bytes = bundle.to_canonical_cbor()?;
         Ok((bytes, digest, manifest))
     }
+
+    type LocalBundleArtifacts = (Vec<u8>, [u8; 32], Vec<u8>);
 
     fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV1, Box<dyn Error>> {
         profile_for_claim_layer(claim_layer)
@@ -1147,7 +1149,11 @@ mod tests {
         assert!(fixture(&invalid_fixture, &context).is_err());
         assert!(canonical_fixture_bytes("unknown", "unknown").is_err());
         assert!(canonical_fixture_input("unknown", "unknown").is_err());
+        Ok(())
+    }
 
+    #[test]
+    fn archive_and_authority_validation_seams() -> Result<(), Box<dyn Error>> {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let (bundle_bytes, bundle_digest, manifest) =
@@ -1184,7 +1190,11 @@ mod tests {
         )
         .is_err());
         assert!(std::fs::remove_dir_all(authority_root).is_ok());
+        Ok(())
+    }
 
+    #[test]
+    fn helper_validation_seams_cover_materialization_errors() -> Result<(), Box<dyn Error>> {
         let candidate = br#"{"lifecycle":"Candidate"}"#;
         let lifecycles = publication_lifecycles_from_bytes(candidate);
         assert_eq!(
