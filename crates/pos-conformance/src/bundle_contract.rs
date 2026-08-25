@@ -2751,6 +2751,336 @@ mod tests {
         Ok(bundle.sign(&signing_key)?)
     }
 
+    fn resign_archive(value: &mut Value) -> Result<(), Box<dyn std::error::Error>> {
+        use ed25519_dalek::Signer;
+
+        let Value::Array(fields) = value else {
+            return Err("archive must be an array".into());
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let manifest_bytes = encode_archive_value(&fields[2])?;
+        fields[4] = Value::Bytes(signing_key.verifying_key().to_bytes().to_vec());
+        fields[5] = Value::Bytes(signing_key.sign(&manifest_bytes).to_bytes().to_vec());
+        Ok(())
+    }
+
+    fn replace_profile_bytes(
+        value: &mut Value,
+        bytes: Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Value::Array(fields) = value else {
+            return Err("archive must be an array".into());
+        };
+        let Value::Array(members) = &mut fields[3] else {
+            return Err("members must be an array".into());
+        };
+        let index = members
+            .iter()
+            .position(|member| {
+                matches!(
+                    member,
+                    Value::Array(fields)
+                        if fields.first() == Some(&Value::Text(PROFILE_MEMBER_PATH.to_owned()))
+                )
+            })
+            .ok_or("missing profile member")?;
+        let Value::Array(member) = &mut members[index] else {
+            return Err("member must be an array".into());
+        };
+        member[1] = Value::Bytes(bytes.clone());
+        let Value::Array(manifest) = &mut fields[2] else {
+            return Err("manifest must be an array".into());
+        };
+        let Value::Array(descriptors) = manifest
+            .get_mut(4)
+            .ok_or("manifest descriptors are missing")?
+        else {
+            return Err("descriptors must be an array".into());
+        };
+        let Value::Array(descriptor) = descriptors
+            .get_mut(index)
+            .ok_or("manifest descriptors must contain the profile")?
+        else {
+            return Err("descriptor must be an array".into());
+        };
+        descriptor[1] = Value::Integer(u64::try_from(bytes.len())?.into());
+        descriptor[2] = Value::Bytes(blake3::hash(&bytes).as_bytes().to_vec());
+        Ok(())
+    }
+
+    fn rename_profile_member(value: &mut Value) -> Result<(), Box<dyn std::error::Error>> {
+        let Value::Array(fields) = value else {
+            return Err("archive must be an array".into());
+        };
+        let Value::Array(members) = &mut fields[3] else {
+            return Err("members must be an array".into());
+        };
+        let index = members
+            .iter()
+            .position(|member| {
+                matches!(
+                    member,
+                    Value::Array(fields)
+                        if fields.first() == Some(&Value::Text(PROFILE_MEMBER_PATH.to_owned()))
+                )
+            })
+            .ok_or("missing profile member")?;
+        let replacement = "profile/not-cpf1.cbor".to_owned();
+        let Value::Array(member) = &mut members[index] else {
+            return Err("member must be an array".into());
+        };
+        member[0] = Value::Text(replacement.clone());
+        let Value::Array(manifest) = &mut fields[2] else {
+            return Err("manifest must be an array".into());
+        };
+        let Value::Array(descriptors) = manifest
+            .get_mut(4)
+            .ok_or("manifest descriptors are missing")?
+        else {
+            return Err("descriptors must be an array".into());
+        };
+        let Value::Array(descriptor) = descriptors
+            .get_mut(index)
+            .ok_or("manifest descriptors must contain the profile")?
+        else {
+            return Err("descriptor must be an array".into());
+        };
+        descriptor[0] = Value::Text(replacement);
+        Ok(())
+    }
+
+    #[test]
+    fn independent_archive_verifier_rejects_each_binding_error(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+        let valid = bundle_value(&bundle);
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&valid)?),
+            Ok(())
+        );
+        assert_eq!(
+            verify_archive_independently(&[0x9f, 0xff]),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        for (field, replacement, expected) in [
+            (
+                0,
+                Value::Text("wrong-magic".to_owned()),
+                BundleContractErrorV1::ArchiveEncodingInvalid,
+            ),
+            (
+                1,
+                Value::Integer(2_u64.into()),
+                BundleContractErrorV1::ArchiveEncodingInvalid,
+            ),
+        ] {
+            let mut invalid = valid.clone();
+            if let Value::Array(fields) = &mut invalid {
+                fields[field] = replacement;
+            }
+            assert_eq!(
+                verify_archive_independently(&encode_archive_value(&invalid)?),
+                Err(expected)
+            );
+        }
+
+        for field in [1, 2] {
+            let mut invalid = valid.clone();
+            if let Value::Array(fields) = &mut invalid {
+                fields[2] = match &fields[2] {
+                    Value::Array(manifest) => {
+                        let mut manifest = manifest.clone();
+                        manifest[field] = Value::Integer(2_u64.into());
+                        Value::Array(manifest)
+                    }
+                    _ => return Err("manifest must be an array".into()),
+                };
+            }
+            assert_eq!(
+                verify_archive_independently(&encode_archive_value(&invalid)?),
+                Err(BundleContractErrorV1::LifecycleInvalid)
+            );
+        }
+
+        let mut mismatched_count = valid.clone();
+        if let Value::Array(fields) = &mut mismatched_count {
+            if let Value::Array(members) = &mut fields[3] {
+                members.pop();
+            }
+        }
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&mismatched_count)?),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+
+        let mut mismatched_member = valid.clone();
+        if let Value::Array(fields) = &mut mismatched_member {
+            if let Value::Array(members) = &mut fields[3] {
+                if let Value::Array(member) = &mut members[0] {
+                    if let Value::Bytes(bytes) = &mut member[1] {
+                        bytes.push(0);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&mismatched_member)?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut wrong_profile_path = valid.clone();
+        rename_profile_member(&mut wrong_profile_path)?;
+        resign_archive(&mut wrong_profile_path)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&wrong_profile_path)?),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut duplicate_expected = valid.clone();
+        if let Value::Array(fields) = &mut duplicate_expected {
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("manifest must be an array".into());
+            };
+            let Value::Array(expected) = &mut manifest[5] else {
+                return Err("expected results must be an array".into());
+            };
+            expected[1] = expected[0].clone();
+        }
+        resign_archive(&mut duplicate_expected)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&duplicate_expected)?),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut missing_expected_member = valid.clone();
+        if let Value::Array(fields) = &mut missing_expected_member {
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("manifest must be an array".into());
+            };
+            let Value::Array(expected) = &mut manifest[5] else {
+                return Err("expected results must be an array".into());
+            };
+            if let Value::Array(first) = &mut expected[0] {
+                first[4] = Value::Text("expected/missing".to_owned());
+            }
+        }
+        resign_archive(&mut missing_expected_member)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&missing_expected_member)?),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut wrong_expected_digest = valid.clone();
+        if let Value::Array(fields) = &mut wrong_expected_digest {
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("manifest must be an array".into());
+            };
+            let Value::Array(expected) = &mut manifest[5] else {
+                return Err("expected results must be an array".into());
+            };
+            if let Value::Array(first) = &mut expected[0] {
+                first[5] = Value::Bytes(vec![9; 32]);
+            }
+        }
+        resign_archive(&mut wrong_expected_digest)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&wrong_expected_digest)?),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut missing_expected_reference = valid.clone();
+        if let Value::Array(fields) = &mut missing_expected_reference {
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("manifest must be an array".into());
+            };
+            manifest[5] = Value::Array(Vec::new());
+        }
+        resign_archive(&mut missing_expected_reference)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&missing_expected_reference)?),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut noncanonical_profile = valid.clone();
+        replace_profile_bytes(&mut noncanonical_profile, vec![0x9f, 0xff])?;
+        resign_archive(&mut noncanonical_profile)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&noncanonical_profile)?),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+
+        let profile_bytes = bundle
+            .members
+            .iter()
+            .find(|member| member.path == PROFILE_MEMBER_PATH)
+            .ok_or("missing profile member")?
+            .bytes
+            .clone();
+        let profile_value: Value = ciborium::from_reader(Cursor::new(profile_bytes))?;
+        let mut invalid_profile = profile_value.clone();
+        if let Value::Array(fields) = &mut invalid_profile {
+            fields[0] = Value::Text("CPF0".to_owned());
+        }
+        let mut invalid_profile_archive = valid.clone();
+        replace_profile_bytes(
+            &mut invalid_profile_archive,
+            encode_archive_value(&invalid_profile)?,
+        )?;
+        resign_archive(&mut invalid_profile_archive)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&invalid_profile_archive)?),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+
+        let mut embedded_digest_mismatch = profile_value.clone();
+        if let Value::Array(fields) = &mut embedded_digest_mismatch {
+            fields[16] = Value::Bytes(vec![9; 32]);
+        }
+        let mut embedded_digest_archive = valid.clone();
+        replace_profile_bytes(
+            &mut embedded_digest_archive,
+            encode_archive_value(&embedded_digest_mismatch)?,
+        )?;
+        resign_archive(&mut embedded_digest_archive)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&embedded_digest_archive)?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut recomputed_digest_mismatch = embedded_digest_archive.clone();
+        if let Value::Array(fields) = &mut recomputed_digest_mismatch {
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("manifest must be an array".into());
+            };
+            manifest[3] = Value::Bytes(vec![9; 32]);
+        }
+        resign_archive(&mut recomputed_digest_mismatch)?;
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&recomputed_digest_mismatch)?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut invalid_members_shape = valid.clone();
+        if let Value::Array(fields) = &mut invalid_members_shape {
+            fields[3] = Value::Null;
+        }
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&invalid_members_shape)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut invalid_signer_key = valid;
+        if let Value::Array(fields) = &mut invalid_signer_key {
+            fields[4] = Value::Bytes(vec![0]);
+        }
+        assert_eq!(
+            verify_archive_independently(&encode_archive_value(&invalid_signer_key)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
     fn expected_member_index(bundle: &ConformanceBundleV1) -> Option<usize> {
         bundle
             .members
@@ -4396,6 +4726,93 @@ mod tests {
             expected_results,
         );
         assert_eq!(result, Err(BundleContractErrorV1::CandidateEvidenceMissing));
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_bundle_validates_lifecycle_specific_authority_evidence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut candidate = profile();
+        candidate.lifecycle = ProfileLifecycleV1::Candidate;
+
+        let (candidate_inventory, authority_members) = authority_inventory_materialized_path()?;
+        let candidate_inventory_bytes = serde_json::to_vec(&candidate_inventory)?;
+        let candidate_inventory_digest = *blake3::hash(&candidate_inventory_bytes).as_bytes();
+        let mut candidate_matrix: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/matrix/adr-059-complete.json"
+        ))?;
+        candidate_matrix["lifecycle"] = JsonValue::String("Candidate".to_owned());
+        for row in candidate_matrix["rows"]
+            .as_array_mut()
+            .ok_or("candidate rows are missing")?
+        {
+            row["executed_case_count"] = JsonValue::Number(16_u64.into());
+        }
+        for case in candidate_matrix["cases"]
+            .as_array_mut()
+            .ok_or("candidate cases are missing")?
+        {
+            case["executed"] = JsonValue::Bool(true);
+            case["expected_result_digest"] = JsonValue::String("00".repeat(32));
+        }
+        let candidate_matrix_bytes = serde_json::to_vec(&candidate_matrix)?;
+        let candidate_matrix_digest = *blake3::hash(&candidate_matrix_bytes).as_bytes();
+
+        let mut provenance: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))?;
+        provenance["candidate_status"] = JsonValue::String("approved".to_owned());
+        provenance["deletion_review"] = JsonValue::String("approved".to_owned());
+        provenance["secret_scan"] = JsonValue::String("clean".to_owned());
+        provenance["authority_inventory"]["status"] = JsonValue::String("Candidate".to_owned());
+        provenance["authority_inventory"]["sha256_digest"] = JsonValue::String(materialized_hex(
+            &Sha256::digest(&candidate_inventory_bytes),
+        ));
+        provenance["adr_059_execution_matrix"]["status"] =
+            JsonValue::String("Candidate".to_owned());
+        provenance["adr_059_execution_matrix"]["sha256_digest"] =
+            JsonValue::String(materialized_hex(&candidate_matrix_digest));
+        provenance["adr_059_execution_matrix"]["executed_case_count"] =
+            JsonValue::Number(192_u64.into());
+        let provenance_bytes = serde_json::to_vec(&provenance)?;
+        let provenance_digest = *blake3::hash(&provenance_bytes).as_bytes();
+        candidate.provenance_digest = provenance_digest;
+        for fixture in &mut candidate.fixtures {
+            fixture.provenance.source_digest = provenance_digest;
+            fixture.provenance.build_digest = provenance_digest;
+            fixture.provenance.publication_review_digest = provenance_digest;
+        }
+        candidate.profile_digest = candidate.digest();
+
+        let (mut members, expected_results) = bundle_inputs(&profile(), BundleModeV1::Local)?;
+        let provenance_member = members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance member")?;
+        provenance_member.bytes = provenance_bytes;
+        provenance_member.digest = provenance_digest;
+        let inventory_member = members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
+            .ok_or("missing inventory member")?;
+        inventory_member.bytes = candidate_inventory_bytes;
+        inventory_member.digest = candidate_inventory_digest;
+        let matrix_member = members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix member")?;
+        matrix_member.bytes = candidate_matrix_bytes;
+        matrix_member.digest = candidate_matrix_digest;
+        members.extend(authority_members);
+
+        assert_eq!(validate_authority_members(&candidate, &members), Ok(()));
+        let bundle = ConformanceBundleV1::materialize(
+            &candidate,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?;
+        assert_eq!(bundle.validate(), Ok(()));
         Ok(())
     }
 
