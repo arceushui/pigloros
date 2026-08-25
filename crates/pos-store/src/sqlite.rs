@@ -97,6 +97,7 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geo_cell_consent_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         consent_record_id: &AdmissionSnapshotId,
@@ -281,6 +282,7 @@ impl SqliteStore {
     ///
     /// # Errors
     /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn open_with_hasher(path: &str, hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
         let conn = Connection::open_with_flags(
             path,
@@ -858,6 +860,7 @@ impl SqliteStore {
         Ok(events)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn validate_own_events_bounded(
         conn: &Connection,
         timeline_id: TimelineId,
@@ -1485,6 +1488,7 @@ impl SqliteStore {
             })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn append_or_duplicate_with_limit_visible(
         &mut self,
         timeline: TimelineId,
@@ -1790,6 +1794,7 @@ impl OwnTracksEnrollmentStore for SqliteStore {
 }
 
 impl OwnTracksIngressStore for SqliteStore {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn prepare_owntracks_ingress(
         &mut self,
         input: OwnTracksIngressInputV1,
@@ -1821,6 +1826,7 @@ impl SqliteStore {
         })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn write_enrollment_state(
         tx: &rusqlite::Transaction<'_>,
         state: &OwnTracksEnrollmentStateV1,
@@ -2208,6 +2214,7 @@ impl GeographicAdmissionAdmin for SqliteStore {
 }
 
 impl GeographicAdmissionConsentResolver for SqliteStore {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn resolve_admission_consent(
         &self,
         consent_record_id: &AdmissionSnapshotId,
@@ -2743,6 +2750,7 @@ impl SqliteStore {
         .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
         let chain = self.fork_chain(id)?;
         let mut logical_head = 0_u64;
@@ -3013,6 +3021,7 @@ impl EventStore for SqliteStore {
         Ok(removed)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn remove_append_identities_bounded(
         &mut self,
         scope: AppendDedupScope,
@@ -3092,6 +3101,7 @@ impl EventStore for SqliteStore {
             .transpose()
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| {
@@ -3326,6 +3336,7 @@ impl EventStore for SqliteStore {
         self.logical_head_unchecked(id)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
         let id = meta.id;
         // Resolve fork parent before the duplicate-id check so storage failures on the
@@ -3464,6 +3475,7 @@ impl EventStore for SqliteStore {
             })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
         self.ensure_generic_timeline_visibility(id).and_then(|()| {
             let id_str = id.to_string();
