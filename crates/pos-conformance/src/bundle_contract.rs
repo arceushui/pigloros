@@ -4558,7 +4558,7 @@ mod instrumented_candidate_entrypoints {
         let (mut members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
         members.push(super::BundleMemberV1::supporting(
             "support/review-evidence.json",
-            b"independent review evidence".to_vec(),
+            b"different review evidence".to_vec(),
             BundleMemberRoleV1::Provenance,
         ));
         let bundle = ConformanceBundleV1::materialize(
