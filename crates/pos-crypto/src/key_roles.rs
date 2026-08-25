@@ -23,28 +23,6 @@ pub fn key_material_digest(private_material: &[u8; 32]) -> Hash {
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-/// Sign a payload with an explicit role and epoch domain.
-///
-/// # Errors
-///
-/// Returns [`KeyRegistryErrorV1::SigningRoleRequired`] when an encryption role
-/// is supplied.
-#[cfg(test)]
-fn sign_for_role(
-    signing_key: &SigningKey,
-    role: KeyRoleV1,
-    epoch: u64,
-    payload: &CanonicalBytes,
-) -> Result<Signature, KeyRegistryErrorV1> {
-    if epoch == 0 {
-        return Err(KeyRegistryErrorV1::InvalidEpoch);
-    }
-    if !role.is_signing() {
-        return Err(KeyRegistryErrorV1::SigningRoleRequired);
-    }
-    Ok(sign_for_role_unchecked(signing_key, role, epoch, payload))
-}
-
 fn sign_for_role_unchecked(
     signing_key: &SigningKey,
     role: KeyRoleV1,
@@ -125,7 +103,6 @@ fn role_bound_message(role: KeyRoleV1, epoch: u64, payload: &CanonicalBytes) -> 
 mod tests {
     use super::*;
     use crate::signing::{generate_keypair, public_key_from_verifying_key};
-    use ed25519_dalek::Signer;
     use pos_core::{KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1};
 
     fn payload(bytes: &[u8]) -> CanonicalBytes {
@@ -149,12 +126,14 @@ mod tests {
         assert!(KeyRoleV1::PluginReleaseSigning.is_signing());
         assert!(!KeyRoleV1::SubjectDataEncryption.is_signing());
         assert!(!KeyRoleV1::ExportRecipientEncryption.is_signing());
-        let signature = sign_for_role(
-            &signing_key,
-            KeyRoleV1::SubjectAttributionSigning,
-            3,
-            &value,
-        )?;
+        let identity = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 3);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            key_material_digest(&signing_key.to_bytes()),
+            Some(public_key_from_verifying_key(&verifying_key)),
+        ))?;
+        let signature = sign_for_registered_role(&mut registry, &signing_key, identity, &value)?;
         assert!(verify_for_role(
             &verifying_key,
             KeyRoleV1::SubjectAttributionSigning,
@@ -179,20 +158,6 @@ mod tests {
             &signature
         )
         .is_err());
-        assert_eq!(
-            sign_for_role(&signing_key, KeyRoleV1::SubjectDataEncryption, 1, &value),
-            Err(KeyRegistryErrorV1::SigningRoleRequired)
-        );
-        assert_eq!(
-            sign_for_role(
-                &signing_key,
-                KeyRoleV1::SubjectAttributionSigning,
-                0,
-                &value,
-            ),
-            Err(KeyRegistryErrorV1::InvalidEpoch)
-        );
-        let mut registry = KeyRegistryStateV1::new();
         assert_eq!(
             sign_for_registered_role(
                 &mut registry,
@@ -220,21 +185,12 @@ mod tests {
         )
         .is_err());
 
-        let invalid_identity_signature = Signature::from_bytes(
-            signing_key
-                .sign(&role_bound_message(
-                    KeyRoleV1::SubjectAttributionSigning,
-                    0,
-                    &value,
-                ))
-                .to_bytes(),
-        );
         assert!(verify_for_role(
             &verifying_key,
             KeyRoleV1::SubjectAttributionSigning,
             0,
             &value,
-            &invalid_identity_signature,
+            &signature,
         )
         .is_err());
         assert_eq!(

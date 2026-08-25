@@ -290,6 +290,29 @@ mod tests {
         }
     }
 
+    fn run_store_event(
+        event: pos_core::event::Event,
+        registry: pos_core::KeyRegistryStateV1,
+        supplied_public_key: Option<pos_core::PublicKey>,
+    ) -> Result<Result<VerifyReport, crate::CliError>, Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("ledger.db");
+        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .test_ok()?;
+        let timeline = store.create_timeline("ledger").test_ok()?;
+        store.append_committed(timeline.id(), &[event]).test_ok()?;
+        store.save_key_registry(&registry).test_ok()?;
+        drop(store);
+        let supplied_public_key = supplied_public_key.map(|key| crate::hex_encode(key.as_bytes()));
+        Ok(run(
+            &Source::Store(db),
+            supplied_public_key.as_deref(),
+            None,
+        ))
+    }
+
     /// Covers the `Ok` arm of `expect_mismatch`.
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
@@ -1070,32 +1093,37 @@ mod tests {
         };
         use pos_crypto::key_roles::key_material_digest;
 
-        let payload = CanonicalBytes::from_static(b"signed payload");
-        let mut event = Event {
+        let event = |identity| Event {
             id: EventId::new(),
             entity: EntityId::new(),
             event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
-            payload,
+            payload: CanonicalBytes::from_static(b"signed payload"),
             wall_time: WallTime::from_micros(1),
             seq: Seq::from_u64(1),
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(Signature::from_bytes([0; 64])),
-            signature_identity: None,
+            signature_identity: identity,
             payload_hash: Hash::from_bytes([0; 32]),
         };
-        let empty_registry = KeyRegistryStateV1::new();
-        let missing_identity = super::verify_store_event(&event, None, &empty_registry)
-            .test_ok()?
-            .ok_or("expected missing identity mismatch")?;
-        assert!(missing_identity.1.contains("identity is missing"));
 
-        event.signature_identity = Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1));
-        let wrong_role = super::verify_store_event(&event, None, &empty_registry)
-            .test_ok()?
-            .ok_or("expected wrong role mismatch")?;
-        assert!(wrong_role.1.contains("TimelineIntegritySigning"));
+        let missing_identity =
+            run_store_event(event(None), KeyRegistryStateV1::new(), None)?.test_ok()?;
+        let (_, reason) = expect_mismatch(missing_identity.outcome)?;
+        assert!(reason.contains("identity is missing"));
+
+        let wrong_role = run_store_event(
+            event(Some(KeyIdentityV1::new(
+                KeyRoleV1::SubjectDataEncryption,
+                1,
+            ))),
+            KeyRegistryStateV1::new(),
+            None,
+        )?
+        .test_ok()?;
+        let (_, reason) = expect_mismatch(wrong_role.outcome)?;
+        assert!(reason.contains("TimelineIntegritySigning"));
 
         let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
         let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
@@ -1108,21 +1136,24 @@ mod tests {
                 Some(registered_key),
             ))
             .test_ok()?;
-        event.signature_identity = Some(identity);
 
-        let supplied_mismatch =
-            super::verify_store_event(&event, Some(PublicKey::from_bytes([7; 32])), &registry)
-                .test_ok()?
-                .ok_or("expected supplied-key mismatch")?;
-        assert!(supplied_mismatch.1.contains("persisted registry"));
+        let supplied_mismatch = run_store_event(
+            event(Some(identity)),
+            registry.clone(),
+            Some(PublicKey::from_bytes([7; 32])),
+        )?
+        .test_ok()?;
+        let (_, reason) = expect_mismatch(supplied_mismatch.outcome)?;
+        assert!(reason.contains("persisted registry"));
 
-        let no_public_key = super::verify_store_event(&event, None, &empty_registry).test_err()?;
+        let no_public_key =
+            run_store_event(event(Some(identity)), KeyRegistryStateV1::new(), None)?.test_err()?;
         assert!(no_public_key.to_string().contains("no public key"));
 
-        let invalid_signature = super::verify_store_event(&event, None, &registry)
-            .test_ok()?
-            .ok_or("expected invalid signature mismatch")?;
-        assert!(!invalid_signature.1.is_empty());
+        let invalid_signature =
+            run_store_event(event(Some(identity)), registry, None)?.test_ok()?;
+        let (_, reason) = expect_mismatch(invalid_signature.outcome)?;
+        assert!(!reason.is_empty());
         Ok(())
     }
 
