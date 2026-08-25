@@ -76,6 +76,27 @@ thread_local! {
 }
 
 #[cfg(test)]
+static DESTRUCTION_TRANSACTION_HOOK: std::sync::Mutex<
+    Option<(
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn destruction_transaction_started_for_test() {
+    let hook = DESTRUCTION_TRANSACTION_HOOK
+        .lock()
+        .expect("destruction transaction hook lock poisoned")
+        .take();
+    if let Some((started, release)) = hook {
+        drop(started.send(()));
+        drop(release.recv());
+    }
+}
+
+#[cfg(test)]
 fn bounded_materialization_delay_for_test() {
     let delay_millis = BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(std::cell::Cell::get);
     if delay_millis != 0 {
@@ -2961,6 +2982,8 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+        #[cfg(test)]
+        destruction_transaction_started_for_test();
         let result = (|| {
             let mut registry = self.load_key_registry()?.ok_or_else(|| {
                 CoreError::Storage("durable key registry is unavailable".to_owned())
@@ -9222,6 +9245,100 @@ mod tests {
             ),
             Err(CoreError::TimelineNotFound(_))
         ));
+    }
+
+    #[test]
+    fn sqlite_key_registry_destruction_wins_when_started_before_signing() {
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok();
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = Hash::from_bytes([3; 32]);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                material_digest,
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+
+        let mut setup = SqliteStore::open(path).test_ok();
+        setup.save_key_registry(&registry).test_ok();
+        let timeline = setup.create_timeline("destruction-first").test_ok();
+        let timeline_id = timeline.id();
+        setup
+            .append(timeline_id, &[make_draft(EntityId::new(), b"seed")])
+            .test_ok();
+        drop(setup);
+
+        let mut destruction_store = SqliteStore::open(path).test_ok();
+        let mut signing_store = SqliteStore::open(path).test_ok();
+        let request = KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            Hash::from_bytes([7; 32]),
+        );
+        let (destruction_started_tx, destruction_started_rx) = std::sync::mpsc::channel();
+        let (release_destruction_tx, release_destruction_rx) = std::sync::mpsc::channel();
+        *DESTRUCTION_TRANSACTION_HOOK
+            .lock()
+            .expect("destruction transaction hook lock poisoned") =
+            Some((destruction_started_tx, release_destruction_rx));
+        let (destruction_done_tx, destruction_done_rx) = std::sync::mpsc::channel();
+        let (signing_started_tx, signing_started_rx) = std::sync::mpsc::channel();
+        let (callback_called_tx, callback_called_rx) = std::sync::mpsc::channel();
+
+        let (destruction_result, signing_result) = std::thread::scope(|scope| {
+            let destruction_handle = scope.spawn(move || {
+                let result = destruction_store.destroy_key_registry(request);
+                drop(destruction_done_tx.send(()));
+                result
+            });
+            destruction_started_rx.recv().test_ok();
+
+            let signing_handle = scope.spawn(move || {
+                drop(signing_started_tx.send(()));
+                let mut callback = move |_registry: &KeyRegistryStateV1, _seq: Seq| {
+                    drop(callback_called_tx.send(()));
+                    Err::<Event, _>(CoreError::Storage(
+                        "destroyed signing key callback must not run".to_owned(),
+                    ))
+                };
+                signing_store.append_signed_authorized(
+                    timeline_id,
+                    &registry,
+                    &mut callback,
+                )
+            });
+            signing_started_rx.recv().test_ok();
+            assert!(destruction_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err());
+            release_destruction_tx.send(()).test_ok();
+
+            (
+                destruction_handle.join().test_ok(),
+                signing_handle.join().test_ok(),
+            )
+        });
+
+        assert!(destruction_result.is_ok());
+        assert!(signing_result.is_err());
+        assert!(callback_called_rx.try_recv().is_err());
+
+        let mut verify = SqliteStore::open(path).test_ok();
+        assert_eq!(
+            verify
+                .read(timeline_id, SeqRange::all())
+                .test_ok()
+                .len(),
+            1
+        );
+        assert!(verify
+            .load_key_registry()
+            .test_ok()
+            .and_then(|value| value.tombstone(identity))
+            .is_some());
     }
 
     #[test]
