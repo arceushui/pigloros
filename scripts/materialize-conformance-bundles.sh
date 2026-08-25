@@ -31,11 +31,9 @@ PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
 PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
   cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${second_output}"
 diff -rq "${first_output}" "${second_output}"
-mkdir -p "$(dirname "${output_root}")"
-mv "${first_output}" "${output_root}"
 
 mapfile -t materialized_files < <(
-  find "${output_root}" -type f \( -name '*.cbor' -o -name '*.cfb1' \) -print | sort
+  find "${first_output}" -type f \( -name '*.cbor' -o -name '*.cfb1' \) -print | sort
 )
 authority_lifecycle="$(jq -r '.lifecycle' fixtures/conformance/expected-authority/inventory.json)"
 case "${authority_lifecycle}" in
@@ -52,10 +50,16 @@ if ((${#materialized_files[@]} != expected_file_count)); then
   exit 1
 fi
 
-(cd "${output_root}" && sha256sum --tag "${materialized_files[@]#${output_root}/}" > SHA256SUMS)
-cp "${source_inventory}" "${output_root}/SOURCE-SHA256SUMS"
+(cd "${first_output}" && sha256sum --tag "${materialized_files[@]#${first_output}/}" > SHA256SUMS)
+cp "${source_inventory}" "${first_output}/SOURCE-SHA256SUMS"
 {
   printf 'source_sha256=%s\n' "${source_digest}"
   printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
-} > "${output_root}/SOURCE-BINDING"
+} > "${first_output}/SOURCE-BINDING"
+mkdir -p "$(dirname "${output_root}")"
+mv --no-clobber --no-target-directory "${first_output}" "${output_root}"
+if [[ -e "${first_output}" ]]; then
+  echo "retained conformance publication appeared during materialization: ${output_root}" >&2
+  exit 1
+fi
 echo "materialized ${#materialized_files[@]} signed conformance files under retained path ${output_root}"
