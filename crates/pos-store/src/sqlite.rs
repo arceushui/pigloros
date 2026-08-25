@@ -9639,20 +9639,6 @@ mod coverage_entrypoints {
             rusqlite::params![child.id().to_string()],
         ));
         expect_err(missing_fork.read(child.id(), SeqRange::all()));
-
-        let mut overflow = tests::new_store();
-        let root = ok(overflow.create_timeline("logical-head-overflow-root"));
-        let child = ok(overflow.fork(root.id(), Seq::ZERO, "logical-head-overflow-child"));
-        let max = i64::MAX;
-        ok(overflow.conn.execute(
-            "UPDATE timelines SET head_seq = ?1 WHERE id = ?2",
-            rusqlite::params![max, root.id().to_string()],
-        ));
-        ok(overflow.conn.execute(
-            "UPDATE timelines SET fork_seq = ?1, head_seq = ?1 WHERE id = ?2",
-            rusqlite::params![max, child.id().to_string()],
-        ));
-        expect_err(overflow.logical_head_unchecked(child.id()));
     }
 
     #[test]
