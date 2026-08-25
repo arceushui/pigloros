@@ -777,11 +777,18 @@ fn public_unsigned_bundle_contract_edges_fail_closed() -> Result<(), Box<dyn std
         Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
     );
 
+    let mut invalid_input_role = bundle.clone();
+    invalid_input_role.members[fixture_index].role = BundleMemberRoleV1::Profile;
+    assert_eq!(
+        invalid_input_role.validate(),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+
     let mut invalid_expected_flag = bundle.clone();
     invalid_expected_flag.members[fixture_index].expected_result = true;
     assert_eq!(
         invalid_expected_flag.validate(),
-        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
     );
 
     let mut missing_expected_reference = bundle.clone();
