@@ -915,10 +915,10 @@ mod tests {
     }
 
     fn state_from_value(
-        value: ciborium::value::Value,
+        value: &ciborium::value::Value,
     ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&value, &mut bytes)?;
+        ciborium::into_writer(value, &mut bytes)?;
         Ok(ciborium::from_reader(bytes.as_slice())?)
     }
 
@@ -931,7 +931,7 @@ mod tests {
     {
         let mut value = state_value(state)?;
         edit(&mut value)?;
-        state_from_value(value)
+        state_from_value(&value)
     }
 
     fn top_level_field<'a>(
@@ -1147,7 +1147,7 @@ mod tests {
         })?;
         assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
         assert_eq!(
-            state.clone().with_signing_authorization(
+            state.with_signing_authorization(
                 ATTRIBUTION,
                 digest(20),
                 PublicKey::from_bytes([20; 32]),
