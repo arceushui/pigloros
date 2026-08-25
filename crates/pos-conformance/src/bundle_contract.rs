@@ -2232,7 +2232,14 @@ mod tests {
     }
 
     fn authority_artifact_members() -> Vec<BundleMemberV1> {
-        let fixtures = [
+        authority_fixture_members()
+            .into_iter()
+            .chain(authority_result_members())
+            .collect()
+    }
+
+    fn authority_fixture_members() -> Vec<BundleMemberV1> {
+        [
             (
                 "DIV-001",
                 include_bytes!(
@@ -2310,8 +2317,20 @@ mod tests {
                 )
                 .as_slice(),
             ),
-        ];
-        let results = [
+        ]
+        .into_iter()
+        .map(|(fixture_id, bytes)| {
+            BundleMemberV1::authority(
+                format!("authority/expected-authority/fixtures/{fixture_id}.json"),
+                bytes.to_vec(),
+                BundleMemberRoleV1::AuthorityFixture,
+            )
+        })
+        .collect()
+    }
+
+    fn authority_result_members() -> Vec<BundleMemberV1> {
+        [
             (
                 "DIV-001",
                 include_bytes!(
@@ -2389,24 +2408,16 @@ mod tests {
                 )
                 .as_slice(),
             ),
-        ];
-        fixtures
-            .into_iter()
-            .map(|(fixture_id, bytes)| {
-                BundleMemberV1::authority(
-                    format!("authority/expected-authority/fixtures/{fixture_id}.json"),
-                    bytes.to_vec(),
-                    BundleMemberRoleV1::AuthorityFixture,
-                )
-            })
-            .chain(results.into_iter().map(|(fixture_id, bytes)| {
-                BundleMemberV1::authority(
-                    format!("authority/expected-authority/results/{fixture_id}.json"),
-                    bytes.to_vec(),
-                    BundleMemberRoleV1::AuthorityExpectedResult,
-                )
-            }))
-            .collect()
+        ]
+        .into_iter()
+        .map(|(fixture_id, bytes)| {
+            BundleMemberV1::authority(
+                format!("authority/expected-authority/results/{fixture_id}.json"),
+                bytes.to_vec(),
+                BundleMemberRoleV1::AuthorityExpectedResult,
+            )
+        })
+        .collect()
     }
 
     fn signed_bundle(
