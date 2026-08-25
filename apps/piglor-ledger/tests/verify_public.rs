@@ -1,7 +1,7 @@
 use piglor_ledger::{verify_source, Source};
 use pos_core::{
-    CanonicalBytes, EntityId, Event, EventId, Hash, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, Kind, SchemaVersion, Seq, Signature, WallTime,
+    CanonicalBytes, EntityId, Event, EventId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
+    KeyRoleV1, Kind, SchemaVersion, Seq, Signature, WallTime,
 };
 use rusqlite::params;
 
@@ -24,13 +24,14 @@ fn public_store_verification_rejects_a_non_timeline_signature_role(
     ))?;
     store.save_key_registry(&registry)?;
     let event_id = EventId::new();
+    let payload = CanonicalBytes::from_static(b"prediction");
     store.append_committed(
         timeline.id(),
         &[Event {
             id: event_id,
             entity: EntityId::new(),
             event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
-            payload: CanonicalBytes::from_static(b"prediction"),
+            payload: payload.clone(),
             wall_time: WallTime::from_micros(1),
             seq: Seq::from_u64(1),
             causation_id: None,
@@ -38,7 +39,7 @@ fn public_store_verification_rejects_a_non_timeline_signature_role(
             schema_version: SchemaVersion::V1,
             signature: Some(Signature::from_bytes([0; 64])),
             signature_identity: Some(identity),
-            payload_hash: Hash::from_bytes([0; 32]),
+            payload_hash: pos_crypto::chain::hash_payload(&payload),
         }],
     )?;
     drop(store);
