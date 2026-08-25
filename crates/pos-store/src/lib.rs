@@ -1203,3 +1203,64 @@ mod tests {
         assert_ne!(event_id, second_event_id);
     }
 }
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected consent guard fixture error: {error:?}"
+            )))
+        })
+    }
+
+    #[test]
+    fn consent_guard_boundaries_are_instrumented() {
+        let timeline = TimelineId::new();
+        assert!(ensure_gateway_consent_types(&[], timeline).is_err());
+        let invalid = EventDraft::new(
+            EntityId::new(),
+            Kind::new("not-consent"),
+            CanonicalBytes::from_static(b"invalid"),
+        );
+        assert!(ensure_gateway_consent_types(&[invalid], timeline).is_err());
+
+        let subject = EntityId::new();
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "coverage".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let grant_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            ok(grant.encode()),
+        );
+        assert!(ensure_gateway_consent_drafts(&[grant_draft], timeline, None, 1).is_ok());
+
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 2,
+        };
+        let revocation_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok(revocation.encode()),
+        );
+        assert!(
+            ensure_gateway_consent_drafts(&[revocation_draft], timeline, Some(subject), 2).is_ok()
+        );
+    }
+}

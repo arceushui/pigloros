@@ -4997,4 +4997,66 @@ mod coverage_entrypoints {
         ok(store.bind_consent_authority(authority.append_permit()));
         expect_err(store.append_bounded_with_boundary(timeline.id(), &[], 10, true, None, None));
     }
+
+    #[test]
+    fn consent_revocation_and_cleanup_boundaries_are_instrumented() {
+        let mut store = MemoryStore::new();
+        let timeline = ok(store.create_timeline("coverage-revocation"));
+        let subject = EntityId::new();
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 0,
+            fence_seq: 1,
+        };
+        let draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok(revocation.encode()),
+        );
+        let authority = ConsentAuthority::new();
+        let permit = authority.append_permit();
+        ok(store.bind_consent_authority(permit));
+        let consent_scope = AppendDedupScope::from_keyed_hash([101; 32]);
+        let appended = ok(store.append_consent_revocation_bounded(
+            timeline.id(),
+            std::slice::from_ref(&draft),
+            permit,
+            1,
+            consent_scope,
+        ));
+        assert_eq!(appended.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            ok(store.pending_append_identity_cleanup()),
+            Some(consent_scope)
+        );
+        assert_eq!(ok(store.remove_append_identities(consent_scope)), 0);
+        assert_eq!(ok(store.pending_append_identity_cleanup()), None);
+
+        let ordinary = ok(store.create_timeline("coverage-cleanup"));
+        let identity_scope = AppendDedupScope::from_keyed_hash([102; 32]);
+        for key in [103, 104] {
+            ok(store.append_or_duplicate(
+                ordinary.id(),
+                AppendIdentity::new(AppendDedupKey::from_keyed_hash([key; 32]), identity_scope),
+                WallTime::from_micros(1),
+                make_draft(EntityId::new(), &[key]),
+            ));
+        }
+        let first = ok(store.remove_append_identities_bounded(
+            identity_scope,
+            std::num::NonZeroUsize::new(1).expect("non-zero fixture limit"),
+        ));
+        assert!(first.more_may_remain);
+        assert_eq!(
+            ok(store.pending_append_identity_cleanup()),
+            Some(identity_scope)
+        );
+        let second = ok(store.remove_append_identities_bounded(
+            identity_scope,
+            std::num::NonZeroUsize::new(1).expect("non-zero fixture limit"),
+        ));
+        assert!(!second.more_may_remain);
+        assert_eq!(ok(store.pending_append_identity_cleanup()), None);
+    }
 }
