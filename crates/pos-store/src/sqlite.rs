@@ -6878,6 +6878,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_malformed_fork_chain_metadata() {
         let mut root_store = new_store();
         let root = root_store.create_timeline("root").test_ok();
@@ -9514,6 +9515,18 @@ mod coverage_entrypoints {
             )));
         }
         std::mem::drop((left, right));
+    }
+
+    #[test]
+    fn read_rejects_missing_intermediate_fork_sequence_at_public_boundary() {
+        let mut store = tests::new_store();
+        let root = ok(store.create_timeline("coverage-root"));
+        let child = ok(store.fork(root.id(), Seq::ZERO, "coverage-child"));
+        ok(store.conn.execute(
+            "UPDATE timelines SET fork_seq = NULL WHERE id = ?1",
+            rusqlite::params![child.id().to_string()],
+        ));
+        expect_err(store.read(child.id(), SeqRange::all()));
     }
 
     #[test]
