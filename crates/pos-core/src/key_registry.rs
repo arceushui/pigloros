@@ -1582,6 +1582,58 @@ mod tests {
     }
 
     #[test]
+    fn registry_mutators_fail_closed_for_invalid_snapshots_and_missing_records(
+    ) -> Result<(), KeyRegistryErrorV1> {
+        let mut invalid = KeyRegistryStateV1::new();
+        invalid.records.insert(
+            DATA,
+            KeyRecordV1 {
+                identity: DATA,
+                private_material_digest: Some(digest(58)),
+                public_verification_key: None,
+            },
+        );
+        let mut valid = KeyRegistryStateV1::new();
+        valid.register_key(KeyRegistrationV1::new(DATA, digest(59), None))?;
+
+        assert_eq!(
+            invalid.validate_replacement(&valid),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        let mut invalid_next = valid.clone();
+        invalid_next.active.clear();
+        assert_eq!(
+            valid.validate_replacement(&invalid_next),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        assert_eq!(
+            invalid.register_key(KeyRegistrationV1::new(DATA, digest(60), None)),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        assert_eq!(
+            KeyRegistryStateV1::new().with_encryption_authorization(DATA, digest(59), || ()),
+            Err(KeyRegistryErrorV1::NotFound)
+        );
+        assert_eq!(
+            invalid.destroy_key(KeyDestructionRequestV1::new(DATA, digest(58), digest(61))),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        valid.destroy_key(KeyDestructionRequestV1::new(DATA, digest(59), digest(62)))?;
+        let mut changed_tombstone = valid.clone();
+        changed_tombstone
+            .tombstones
+            .get_mut(&DATA)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .destroyed_material_digest = digest(63);
+        assert_eq!(
+            valid.validate_replacement(&changed_tombstone),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn durable_replacement_preserves_identity_material_and_tombstone_history(
     ) -> Result<(), KeyRegistryErrorV1> {
         let mut previous = KeyRegistryStateV1::new();
