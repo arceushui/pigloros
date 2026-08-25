@@ -787,28 +787,28 @@ fn durable_authorized_shape_checks_each_persisted_field() -> Result<(), ErasureE
     ))?;
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
-    let mut authorized = submitted;
+    let mut authorized = record_parts(&submitted);
     authorized.state = authorized_state;
     authorized.authorize_provenance = Some(reference(9));
 
     let mut with_targets = authorized.clone();
     with_targets.targets = vec![target];
     assert_eq!(
-        with_targets.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        ErasureCoordinatorRecordV1::from_parts(with_targets, reference(2)),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
     let mut with_acknowledgements = authorized.clone();
     with_acknowledgements.acknowledgements = vec![acknowledgement];
     assert_eq!(
-        with_acknowledgements.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        ErasureCoordinatorRecordV1::from_parts(with_acknowledgements, reference(2)),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
     let mut with_receipt = authorized.clone();
     with_receipt.receipt = Some(receipt()?);
     assert_eq!(
-        with_receipt.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        ErasureCoordinatorRecordV1::from_parts(with_receipt, reference(2)),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
@@ -820,7 +820,7 @@ fn durable_authorized_shape_checks_each_persisted_field() -> Result<(), ErasureE
         Vec::new(),
     ));
     assert_eq!(
-        with_receipt_input.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        ErasureCoordinatorRecordV1::from_parts(with_receipt_input, reference(2)),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
