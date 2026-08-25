@@ -2274,13 +2274,20 @@ mod tests {
                 BundleMemberRoleV1::ExecutionMatrix,
             ),
         ]);
+        append_authority_artifacts(&mut members)?;
+        Ok((members, expected_results))
+    }
+
+    fn append_authority_artifacts(
+        members: &mut Vec<BundleMemberV1>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let authority_inventory = parse_authority_json(include_bytes!(
             "../../../fixtures/conformance/expected-authority/inventory.json"
         ))?;
         if json_text(&authority_inventory, "lifecycle")? == "Candidate" {
             members.extend(authority_artifact_members_from_inventory()?);
         }
-        Ok((members, expected_results))
+        Ok(())
     }
 
     fn authority_artifact_members_from_inventory(
@@ -3823,7 +3830,7 @@ mod tests {
     #[test]
     fn candidate_publication_requires_review_and_deletion_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let profile = profile();
+        let draft_profile = profile();
         let mut malformed_provenance_value: serde_json::Value = serde_json::from_slice(
             include_bytes!("../../../fixtures/conformance/support/provenance.json"),
         )?;
@@ -3831,8 +3838,9 @@ mod tests {
             serde_json::Value::String("pending".to_owned());
         let malformed_provenance = serde_json::to_vec(&malformed_provenance_value)?;
         let malformed_provenance_digest = *blake3::hash(&malformed_provenance).as_bytes();
-        let mut missing_review = signed_bundle(&profile, BundleModeV1::Local)?;
-        let mut missing_review_profile = profile.clone();
+        let mut missing_review = signed_bundle(&draft_profile, BundleModeV1::Local)?;
+        let mut missing_review_profile = draft_profile.clone();
+        missing_review_profile.lifecycle = ProfileLifecycleV1::Candidate;
         missing_review_profile.provenance_digest = malformed_provenance_digest;
         for fixture in &mut missing_review_profile.fixtures {
             fixture.provenance.source_digest = malformed_provenance_digest;
@@ -3840,6 +3848,7 @@ mod tests {
             fixture.provenance.publication_review_digest = malformed_provenance_digest;
         }
         missing_review_profile.profile_digest = missing_review_profile.digest();
+        missing_review.manifest.lifecycle = ProfileLifecycleV1::Candidate;
         let profile_index = missing_review
             .members
             .iter()
@@ -3870,7 +3879,7 @@ mod tests {
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
 
-        let mut missing_deletion = profile;
+        let mut missing_deletion = missing_review_profile;
         missing_deletion.fixtures[0].redaction_state = RedactionStateV1::EvidenceMissing;
         missing_deletion.fixtures[0].replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
         missing_deletion.profile_digest = missing_deletion.digest();
