@@ -18,7 +18,7 @@ const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
 ];
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod fixtures {
+pub mod fixtures {
     use super::*;
 
     fn digest(bytes: &[u8]) -> [u8; 32] {
@@ -338,7 +338,7 @@ pub(crate) mod fixtures {
         (members, expected_result)
     }
 
-    pub(crate) fn candidate_bundle() -> Result<
+    pub fn candidate_bundle() -> Result<
         Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
         Box<dyn std::error::Error>,
     > {
