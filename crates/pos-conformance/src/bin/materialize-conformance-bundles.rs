@@ -275,8 +275,8 @@ fn materialize_profile_from_profile_with_authority(
                         .bundle_digest()
                         .map(|bundle_digest| (bundle, bundle_digest))
                 })?;
-        let manifest_bytes = bundle.manifest_bytes().unwrap_or_default();
-        let bundle_bytes = bundle.to_canonical_cbor().unwrap_or_default();
+        let manifest_bytes = bundle.manifest_bytes()?;
+        let bundle_bytes = bundle.to_canonical_cbor()?;
         verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
         write_materialized_file(
             output_root,
@@ -518,10 +518,10 @@ fn fixture(
     if family_for_path(input_path, expected_path) != Some(family) {
         return Err("canonical fixture family is not bound to its paths".into());
     }
-    let (input, expected) = canonical_fixture_bytes(input_path, expected_path).unwrap_or_default();
+    let (input, expected) = canonical_fixture_bytes(input_path, expected_path)?;
     let fixture_record_digest = labeled_digest(
         "PiglorOS.CPF1FixtureRecord.v1",
-        &serde_json::to_vec(record).unwrap_or_default(),
+        &serde_json::to_vec(record)?,
     );
     let (replay_claim, redaction_state) = if family == "deletion" {
         (
@@ -1005,9 +1005,9 @@ fn verify_public_archive(
     expected_manifest: &[u8],
 ) -> Result<(), Box<dyn Error>> {
     let decoded = ConformanceBundleV1::from_canonical_cbor(bundle_bytes)?;
-    if decoded.to_canonical_cbor().unwrap_or_default() != bundle_bytes
-        || decoded.manifest_bytes().unwrap_or_default() != expected_manifest
-        || decoded.bundle_digest().unwrap_or_default() != *expected_digest
+    if decoded.to_canonical_cbor()? != bundle_bytes
+        || decoded.manifest_bytes()? != expected_manifest
+        || decoded.bundle_digest()? != *expected_digest
     {
         return Err("public archive verification did not reproduce canonical bytes".into());
     }
