@@ -3351,32 +3351,40 @@ impl EventStore for SqliteStore {
             None => (None, None),
         };
         let timeline = Timeline::new(meta);
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        tx.execute(
-            "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-            params![
-                timeline.id().to_string(),
-                timeline.meta.name.as_deref(),
-                mode_str(timeline.mode()),
-                parent_id,
-                fork_seq,
-                chain_head.as_bytes().as_slice(),
-            ],
-        )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        if let Some(owner) = timeline.meta.owner {
-            tx.execute(
-                "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
-                params![timeline.id().to_string(), owner.to_string()],
+        let insert_rows = |conn: &Connection| -> Result<(), CoreError> {
+            conn.execute(
+                "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+                params![
+                    timeline.id().to_string(),
+                    timeline.meta.name.as_deref(),
+                    mode_str(timeline.mode()),
+                    parent_id.as_deref(),
+                    fork_seq,
+                    chain_head.as_bytes().as_slice(),
+                ],
             )
             .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if let Some(owner) = timeline.meta.owner {
+                conn.execute(
+                    "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+                    params![timeline.id().to_string(), owner.to_string()],
+                )
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            }
+            Ok(())
+        };
+        if self.conn.is_autocommit() {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            insert_rows(&tx)?;
+            tx.commit()
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+        } else {
+            insert_rows(&self.conn)?;
         }
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
         Ok(timeline)
     }
 

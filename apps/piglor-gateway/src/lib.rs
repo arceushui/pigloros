@@ -4077,22 +4077,17 @@ mod tests {
     async fn imported_oversized_event_type_returns_actionable_413_on_bundled_stores() {
         let mut source = open_store(StoreConfig::Memory).test_ok();
         let timeline = source.create_timeline("import-source").test_ok();
-        let source_append = source.append(
-            timeline.id(),
-            &[EventDraft::new(
-                EntityId::new(),
-                Kind::new("x".repeat(MAX_EVENT_TYPE_BYTES + 1)),
-                CanonicalBytes::from_static(b"x"),
-            )],
-        );
-        assert!(
-            source_append.is_ok(),
-            "source oversized append failed: {source_append:?}"
-        );
-        source_append.test_ok();
-        let export = export_timeline_own(source.as_ref(), timeline.id());
-        assert!(export.is_ok(), "oversized export failed: {export:?}");
-        let export = export.test_ok();
+        source
+            .append(
+                timeline.id(),
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("x".repeat(MAX_EVENT_TYPE_BYTES + 1)),
+                    CanonicalBytes::from_static(b"x"),
+                )],
+            )
+            .test_ok();
+        let export = export_timeline_own(source.as_ref(), timeline.id()).test_ok();
 
         let destinations = [
             open_store(StoreConfig::Memory).test_ok(),
@@ -4101,21 +4096,12 @@ mod tests {
             })
             .test_ok(),
         ];
-        for (destination_index, mut destination) in destinations.into_iter().enumerate() {
-            let import = import_timeline_with_id(destination.as_mut(), export.clone());
-            assert!(
-                import.is_ok(),
-                "destination {destination_index} oversized import failed: {import:?}"
-            );
-            import.test_ok();
-            let result = Gateway::new(destination)
+        for mut destination in destinations {
+            import_timeline_with_id(destination.as_mut(), export.clone()).test_ok();
+            let error = Gateway::new(destination)
                 .read_events_page(&timeline.id().to_string(), 0, 1)
-                .await;
-            assert!(
-                result.is_err(),
-                "destination {destination_index} unexpectedly read oversized event"
-            );
-            let error = result.test_err();
+                .await
+                .test_err();
             assert!(
                 matches!(
                     error,
@@ -4124,7 +4110,7 @@ mod tests {
                         maximum: MAX_EVENT_TYPE_BYTES
                     }
                 ),
-                "destination {destination_index} returned unexpected imported oversized-event error: {error:?}"
+                "unexpected imported oversized-event error: {error:?}"
             );
         }
     }
