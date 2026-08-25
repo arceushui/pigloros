@@ -91,8 +91,8 @@ fn destruction_transaction_started_for_test() {
         .expect("destruction transaction hook lock poisoned")
         .take();
     if let Some((started, release)) = hook {
-        drop(started.send(()));
-        drop(release.recv());
+        let _ = started.send(());
+        let _ = release.recv();
     }
 }
 
@@ -9291,15 +9291,15 @@ mod tests {
         let (destruction_result, signing_result) = std::thread::scope(|scope| {
             let destruction_handle = scope.spawn(move || {
                 let result = destruction_store.destroy_key_registry(request);
-                drop(destruction_done_tx.send(()));
+                let _ = destruction_done_tx.send(());
                 result
             });
             destruction_started_rx.recv().test_ok();
 
             let signing_handle = scope.spawn(move || {
-                drop(signing_started_tx.send(()));
+                let _ = signing_started_tx.send(());
                 let mut callback = move |_registry: &KeyRegistryStateV1, _seq: Seq| {
-                    drop(callback_called_tx.send(()));
+                    let _ = callback_called_tx.send(());
                     Err::<Event, _>(CoreError::Storage(
                         "destroyed signing key callback must not run".to_owned(),
                     ))
@@ -9326,7 +9326,7 @@ mod tests {
         assert!(signing_result.is_err());
         assert!(callback_called_rx.try_recv().is_err());
 
-        let mut verify = SqliteStore::open(path).test_ok();
+        let verify = SqliteStore::open(path).test_ok();
         assert_eq!(
             verify
                 .read(timeline_id, SeqRange::all())
