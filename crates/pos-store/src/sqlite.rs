@@ -1710,21 +1710,30 @@ impl SqliteStore {
             )
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         }
-        if let Some(owner) = owner {
-            if Self::timeline_owner_in_transaction(&tx, timeline)?.is_none() {
-                Self::persist_timeline_owner(&tx, timeline, owner)?;
-            }
-        }
-        tx.commit().map_err(Self::into_storage_error)?;
-        Ok(Some(
-            committed
-                .into_iter()
-                .map(|mut event| {
-                    event.seq = Seq::from_u64(logical_prefix + event.seq.as_u64());
-                    event
+        let owner_result = owner.map_or_else(
+            || Ok(()),
+            |owner| {
+                Self::timeline_owner_in_transaction(&tx, timeline).and_then(|current| {
+                    current.map_or_else(
+                        || Self::persist_timeline_owner(&tx, timeline, owner),
+                        |_| Ok(()),
+                    )
                 })
-                .collect(),
-        ))
+            },
+        );
+        owner_result
+            .and_then(|()| tx.commit().map_err(Self::into_storage_error))
+            .map(|()| {
+                Some(
+                    committed
+                        .into_iter()
+                        .map(|mut event| {
+                            event.seq = Seq::from_u64(logical_prefix + event.seq.as_u64());
+                            event
+                        })
+                        .collect(),
+                )
+            })
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
@@ -1815,7 +1824,7 @@ impl OwnTracksIngressStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let enrollment = Self::enrollment_state_in_transaction(&tx)?;
         tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map_err(Self::into_storage_error)
             .and_then(|()| enrollment.prepare_owntracks_ingress(&input))
     }
 }
@@ -3136,18 +3145,21 @@ impl EventStore for SqliteStore {
                                     "Fork point precedes inherited history for timeline {tid}"
                                 ))
                             })?;
-                        let local_head = match self.get_head_seq(tid) {
-                            Ok(local_head) => local_head.as_u64(),
-                            Err(error) => return Err(error),
-                        };
-                        if local_limit > local_head {
-                            return Err(CoreError::Storage(format!(
-                                "Fork point exceeds parent logical Event head for timeline {tid}"
-                            )));
-                        }
-                        let events =
-                            self.read_own_events(tid, Seq::ZERO, Some(Seq::from_u64(local_limit)))?;
-                        all.extend(events);
+                        self.get_head_seq(tid)
+                            .map(Seq::as_u64)
+                            .and_then(|local_head| {
+                                if local_limit > local_head {
+                                    return Err(CoreError::Storage(format!(
+                                        "Fork point exceeds parent logical Event head for timeline {tid}"
+                                    )));
+                                }
+                                self.read_own_events(
+                                    tid,
+                                    Seq::ZERO,
+                                    Some(Seq::from_u64(local_limit)),
+                                )
+                                .map(|events| all.extend(events))
+                            })?;
                     } else {
                         // Leaf: all own events; range applied after logical renumber.
                         let events = self.read_own_events(tid, Seq::ZERO, None)?;
@@ -3553,29 +3565,34 @@ impl EventStore for SqliteStore {
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
             let enrollment = Self::enrollment_state_in_transaction(&tx)?;
-            if enrollment.permits_geographic_admission_target(id) {
-                Self::write_enrollment_state(&tx, &enrollment.revoke()?)?;
-            }
-            tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
+            let enrollment_result = if enrollment.permits_geographic_admission_target(id) {
+                enrollment
+                    .revoke()
+                    .and_then(|revoked| Self::write_enrollment_state(&tx, &revoked))
+            } else {
+                Ok(())
+            };
+            enrollment_result.and_then(|()| {
+                tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_presence WHERE timeline_id = ?1",
+                    params![id_str],
+                )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_presence WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM timeline_owners WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            let deleted = tx
-                .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
+                tx.execute(
+                    "DELETE FROM timeline_owners WHERE timeline_id = ?1",
+                    params![id_str],
+                )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
-            if deleted == 0 {
-                return Err(CoreError::TimelineNotFound(id));
-            }
-            tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
-            Ok(())
+                let deleted = tx
+                    .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
+                if deleted == 0 {
+                    return Err(CoreError::TimelineNotFound(id));
+                }
+                tx.commit().map_err(|e| CoreError::Storage(e.to_string()))
+            })
         })
     }
 
