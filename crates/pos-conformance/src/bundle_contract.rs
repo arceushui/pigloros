@@ -74,7 +74,7 @@ const NON_INTERFERENCE_OP_EQ: [&str; 12] = [
     "evaluator input member names/order/bytes/digests and ordered case outcomes are identical in all four modes",
     "all listed artifact bytes/digests/order and ADR-060 ReplayClaim are identical",
     "member names/order/modes/lengths/decompressed bytes are identical; canonical archive mode also requires archive bytes identical",
-    "identical category/count with endpoint/body/timing absent; zero live calls in Air-Gapped, Replay, and Fork",
+    "identical category/count with endpoint/body/timing absent; zero live calls in deterministic Local, Air-Gapped, Replay, and Fork",
     "request digests, call ordinals, projected response bytes, dependency edges, and outputs are identical",
     "safe category/count/padded length, with strings/stacks/dumps/paths absent",
 ];
