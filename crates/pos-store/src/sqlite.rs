@@ -8832,10 +8832,18 @@ mod tests {
             .test_ok();
         store
             .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .test_ok();
+        store
+            .conn
             .execute(
                 "INSERT INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
                 rusqlite::params![vec![1_u8; 31]],
             )
+            .test_ok();
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")
             .test_ok();
         let error = store.pending_append_identity_cleanup().test_err();
         assert!(error

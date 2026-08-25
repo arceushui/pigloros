@@ -1085,7 +1085,14 @@ impl MemoryStore {
             });
         }
 
-        let meta = TimelineMeta::forked_from(parent, at_seq, name);
+        let meta = self
+            .timelines
+            .get(&parent)
+            .and_then(|state| state.timeline.meta.owner)
+            .map_or_else(
+                || TimelineMeta::forked_from(parent, at_seq, name),
+                |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+            );
         let child = Timeline::new(meta);
         let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
         self.timelines
