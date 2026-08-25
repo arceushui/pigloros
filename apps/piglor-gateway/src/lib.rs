@@ -946,17 +946,19 @@ impl Gateway {
                 gateway.run_pending_consent_cleanup_worker().await;
             });
         } else {
-            let _ = std::thread::Builder::new()
-                .name("piglor-consent-cleanup".to_owned())
-                .spawn(move || {
-                    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    else {
-                        return;
-                    };
-                    runtime.block_on(gateway.run_pending_consent_cleanup_worker());
-                });
+            drop(
+                std::thread::Builder::new()
+                    .name("piglor-consent-cleanup".to_owned())
+                    .spawn(move || {
+                        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        else {
+                            return;
+                        };
+                        runtime.block_on(gateway.run_pending_consent_cleanup_worker());
+                    }),
+            );
         }
     }
 
@@ -979,7 +981,8 @@ impl Gateway {
     pub async fn process_pending_consent_cleanup(
         &self,
     ) -> Result<Option<PurgeOutcome>, GatewayError> {
-        let scope = match self.pending_consent_cleanup.lock().await.pop() {
+        let queued_scope = self.pending_consent_cleanup.lock().await.pop();
+        let scope = match queued_scope {
             Some(scope) => Some(scope),
             None => self
                 .store

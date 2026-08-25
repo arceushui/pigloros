@@ -615,7 +615,7 @@ impl StoreExecutor {
         mut store: Box<dyn EventStore>,
         permit: ConsentAppendPermit,
     ) -> Self {
-        let _ = store.bind_consent_authority(permit);
+        drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
@@ -626,7 +626,7 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
-        let _ = store.bind_consent_authority(permit);
+        drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::GeoLocation(Box::new(store)), None)
     }
 
@@ -638,7 +638,7 @@ impl StoreExecutor {
     where
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
-        let _ = store.bind_consent_authority(permit);
+        drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::OwnTracks(Box::new(store)), Some(owner_key))
     }
 
@@ -1683,25 +1683,8 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             maximum,
             reply,
         } => execute_append_consent_grant_command(state, timeline, &grant, permit, maximum, reply),
-        Command::AppendConsentRevocation {
-            timeline,
-            revocation,
-            cleanup_scope,
-            permit,
-            maximum,
-            reservation,
-            reply,
-        } => {
-            execute_append_consent_revocation_command(
-                state,
-                timeline,
-                &revocation,
-                cleanup_scope,
-                permit,
-                maximum,
-                reservation,
-                reply,
-            );
+        command @ Command::AppendConsentRevocation { .. } => {
+            execute_append_consent_revocation_command_from_command(state, command);
         }
         Command::AppendIdentified {
             timeline,
@@ -1864,6 +1847,33 @@ fn execute_append_consent_grant_command(
         })
         .map(|mut events| events.remove(0));
     send_store_result(reply, result);
+}
+
+fn execute_append_consent_revocation_command_from_command(
+    state: &mut ExecutorState,
+    command: Command,
+) {
+    if let Command::AppendConsentRevocation {
+        timeline,
+        revocation,
+        cleanup_scope,
+        permit,
+        maximum,
+        reservation,
+        reply,
+    } = command
+    {
+        execute_append_consent_revocation_command(
+            state,
+            timeline,
+            &revocation,
+            cleanup_scope,
+            permit,
+            maximum,
+            reservation,
+            reply,
+        );
+    }
 }
 
 fn execute_append_consent_revocation_command(
