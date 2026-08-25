@@ -115,7 +115,8 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
     let mut setup = SqliteStore::open(path)?;
     setup.save_key_registry(&registry)?;
     let timeline = setup.create_timeline("registry-ordering")?;
-    let mut event = seed_event(&mut setup, timeline.id())?;
+    let timeline_id = timeline.id();
+    let mut event = seed_event(&mut setup, timeline_id)?;
     event.id = EventId::new();
     drop(setup);
 
@@ -141,7 +142,7 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
                 callback_event.seq = seq;
                 Ok::<Event, CoreError>(callback_event.clone())
             };
-            signing_store.append_signed_authorized(timeline.id(), &live_registry, &mut callback)
+            signing_store.append_signed_authorized(timeline_id, &live_registry, &mut callback)
         });
         callback_entered_rx.recv()?;
 
@@ -177,12 +178,12 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         ))
     };
     assert!(late_signing_store
-        .append_signed_authorized(timeline.id(), &registry, &mut late_callback)
+        .append_signed_authorized(timeline_id, &registry, &mut late_callback)
         .is_err());
     assert!(!callback_called);
     assert_eq!(
         late_signing_store
-            .read(timeline.id(), pos_core::SeqRange::all())?
+            .read(timeline_id, pos_core::SeqRange::all())?
             .len(),
         2
     );
