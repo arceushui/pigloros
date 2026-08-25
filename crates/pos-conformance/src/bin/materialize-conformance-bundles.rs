@@ -139,7 +139,7 @@ fn run_with_inventory_and_authority(
                 *lifecycle,
                 lifecycle_name,
                 inventory_bytes,
-                authority_root.as_deref(),
+                authority_root,
             )?;
         }
     }
