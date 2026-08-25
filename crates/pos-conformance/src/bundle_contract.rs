@@ -1546,9 +1546,10 @@ fn validate_fixture_inputs_for_mode(
             let Some(member) = members.iter().find(|member| member.path == path) else {
                 return Err(BundleContractErrorV1::MemberMissing);
             };
-            if member.role != BundleMemberRoleV1::FixtureInput
-                || member.expected_result
-                || member.bytes.is_empty()
+            if member.role != BundleMemberRoleV1::FixtureInput || member.expected_result {
+                return Err(BundleContractErrorV1::UndeclaredMember);
+            }
+            if member.bytes.is_empty()
                 || member.bytes.len() as u64 != input.size_bytes
                 || member.digest != input.digest
                 || member.digest != *blake3::hash(&member.bytes).as_bytes()
@@ -5981,7 +5982,7 @@ mod tests {
         marked_as_expected.members[input_index].expected_result = true;
         assert_eq!(
             marked_as_expected.validate(),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
 
         let mut undeclared = bundle;
@@ -6058,7 +6059,7 @@ mod tests {
         marked_expected[input_index].expected_result = true;
         assert_eq!(
             validate_fixture_inputs_for_mode(&profile, None, &marked_expected),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
         Ok(())
     }
