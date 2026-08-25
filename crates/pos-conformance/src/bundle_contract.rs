@@ -266,9 +266,14 @@ impl BundleMemberV1 {
         }
     }
 
-    #[cfg(test)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authority(path: impl Into<String>, bytes: Vec<u8>, role: BundleMemberRoleV1) -> Self {
+    /// Construct an authority-bearing member.
+    ///
+    /// Authority inventory, execution-matrix, fixture, and expected-result
+    /// members are public bundle inputs.  Their bytes remain content-addressed
+    /// and the complete role/path relationship is validated when the bundle is
+    /// materialized or decoded.
+    #[must_use]
+    pub fn authority(path: impl Into<String>, bytes: Vec<u8>, role: BundleMemberRoleV1) -> Self {
         debug_assert!(matches!(
             role,
             BundleMemberRoleV1::AuthorityInventory
