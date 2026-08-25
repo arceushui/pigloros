@@ -95,7 +95,7 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
             provenance: self
                 .admitted_freeze_provenance
                 .unwrap_or(requested.provenance),
-            target_closure: freeze_closure_digest(targets),
+            target_closure: target_closure_digest(targets),
         })
     }
     fn dispatch_destruction(
@@ -349,12 +349,14 @@ fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecord
     ErasureCoordinatorRecordPartsV1 {
         request: record.request().clone(),
         state: record.state().clone(),
+        reserved_targets: record.reserved_targets().to_vec(),
         targets: record.targets().to_vec(),
         acknowledgements: record.acknowledgements().to_vec(),
         receipt: record.receipt().cloned(),
         receipt_input: record.receipt_input().cloned(),
         authorize_provenance: record.authorize_provenance(),
         freeze_provenance: record.freeze_provenance(),
+        freeze_admission: record.freeze_admission(),
         dispatch_provenance: record.dispatch_provenance(),
     }
 }
@@ -1056,14 +1058,15 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
 }
 
 #[test]
-fn freeze_retry_reuses_the_reserved_v1_admission_after_commit_failure() -> Result<(), ErasureErrorV1>
+fn freeze_retry_reuses_the_durable_target_reservation_after_restart() -> Result<(), ErasureErrorV1>
 {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let port = test_port(true, vec![target]);
+    let mut port = test_port(true, vec![target]);
+    port.freeze_error = Some(ErasureErrorV1::AccessFreezeFailed);
+    let restart_port = port.clone();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
-    coordinator.port.commit_error = Some(ErasureErrorV1::ReceiptCommitFailed);
 
     let requested = change(
         ErasureLifecycleV1::AccessFrozen,
@@ -1073,20 +1076,32 @@ fn freeze_retry_reuses_the_reserved_v1_admission_after_commit_failure() -> Resul
     );
     assert_eq!(
         coordinator.freeze_inventory(reference(1), requested.clone()),
-        Err(ErasureErrorV1::ReceiptCommitFailed)
+        Err(ErasureErrorV1::AccessFreezeFailed)
+    );
+    assert_eq!(
+        coordinator
+            .port
+            .records
+            .borrow()
+            .first()
+            .map(|record| record.reserved_targets()),
+        Some([target].as_slice())
     );
 
     let later_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    coordinator.port.commit_error = None;
-    coordinator.port.targets = vec![later_target];
-    coordinator.port.admitted_freeze_position = Some(99);
-    coordinator.port.admitted_freeze_provenance = Some(reference(99));
-    let retry = coordinator.freeze_inventory(reference(1), requested)?;
+    drop(coordinator);
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(restart_port, reference(2));
+    restarted.port.freeze_error = None;
+    restarted.port.targets = vec![later_target];
+    restarted.port.admitted_freeze_position = Some(99);
+    restarted.port.admitted_freeze_provenance = Some(reference(99));
+    let retry = restarted.freeze_inventory(reference(1), requested)?;
     assert_eq!(retry.lifecycle(), ErasureLifecycleV1::AccessFrozen);
-    assert_eq!(retry.freeze_position(), Some(10));
-    assert_eq!(retry.provenance(), reference(9));
-    let records = coordinator.port.records.borrow();
+    assert_eq!(retry.freeze_position(), Some(99));
+    assert_eq!(retry.provenance(), reference(99));
+    let records = restarted.port.records.borrow();
     assert_eq!(records[0].targets, vec![target]);
+    assert_eq!(records[0].reserved_targets, Vec::new());
     Ok(())
 }
 
