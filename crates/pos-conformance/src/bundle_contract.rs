@@ -3187,7 +3187,9 @@ mod tests {
         let mut duplicate_case_profile = profile;
         let mut duplicate_case_fixture = duplicate_case_profile.fixtures[0].clone();
         duplicate_case_fixture.claim_layer = ClaimLayerV1::ReplayConformance;
-        duplicate_case_profile.fixtures.push(duplicate_case_fixture);
+        duplicate_case_profile
+            .fixtures
+            .insert(1, duplicate_case_fixture);
         duplicate_case_profile.profile_digest = duplicate_case_profile.digest();
         let duplicate_case_bundle = signed_bundle(&duplicate_case_profile, BundleModeV1::Local)?;
         let mut missing_one_of_duplicate_cases = duplicate_case_bundle.manifest.clone();
