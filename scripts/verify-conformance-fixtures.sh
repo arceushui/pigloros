@@ -20,9 +20,18 @@ authority_path="${fixture_root}/expected-authority/inventory.json"
   exit 1
 }
 
-jq -e '
+matrix_lifecycle="$(jq -r '.lifecycle' "${matrix_path}")"
+case "${matrix_lifecycle}" in
+  Draft|Candidate) ;;
+  *)
+    echo "invalid ADR-059 matrix lifecycle: ${matrix_lifecycle}" >&2
+    exit 1
+    ;;
+esac
+
+jq -e --arg matrix_lifecycle "${matrix_lifecycle}" '
   . as $root |
-  $root.magic == "NIM1" and $root.version == 1 and $root.lifecycle == "Draft" and
+  $root.magic == "NIM1" and $root.version == 1 and $root.lifecycle == $matrix_lifecycle and
   $root.row_count == 12 and $root.variant_count == 4 and $root.mode_count == 4 and
   $root.case_count == 192 and ($root.rows | length == 12) and
   ([$root.rows[].fixture_id] == [
@@ -43,12 +52,17 @@ jq -e '
   all($root.rows[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variants == ["S", "D", "W", "C"]) and
     (.modes == ["L", "A", "R", "F"]) and .case_count == 16 and
-    .executed_case_count == 0) and
+    .executed_case_count == (if $matrix_lifecycle == "Candidate" then 16 else 0 end)) and
   all($root.cases[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variant | IN("S", "D", "W", "C")) and
     (.mode | IN("L", "A", "R", "F")) and
     .case_id == ("\(.fixture_id)-\(.variant)-\(.mode)") and
-    .executed == false and .expected_result_digest == null)
+    (if $matrix_lifecycle == "Candidate" then
+      .executed == true and (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$"))
+    else
+      .executed == false and .expected_result_digest == null
+    end))
+  and (if $matrix_lifecycle == "Candidate" then .executed_case_count == 192 else true end)
   and all($root.rows[]; . as $row | ([$root.cases[] | select(.fixture_id == $row.fixture_id)] | length == 16))
 ' "${matrix_path}" >/dev/null || {
   echo "invalid ADR-059 Draft matrix inventory" >&2
@@ -170,12 +184,13 @@ for index in "${!profile_layers[@]}"; do
     --arg authority "expected-authority/inventory.json" \
     --arg authority_sha256 "${authority_inventory_sha256}" \
     --arg matrix "matrix/adr-059-complete.json" \
+    --arg matrix_lifecycle "${matrix_lifecycle}" \
     --arg matrix_blake3 "${matrix_blake3_digest}" \
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
     '.claim_layer == $layer and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
       .adr_059_execution_matrix == $matrix and .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
-      .adr_059_execution_matrix_status == "Draft" and
+      .adr_059_execution_matrix_status == $matrix_lifecycle and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
       (.fixtures | length == 7) and
       ([.fixtures[].family] == ["positive", "negative", "malformed", "resource", "deletion", "downgrade", "independent-evaluation"]) and
@@ -203,7 +218,9 @@ if [[ ! -s "${fixture_root}/SHA256SUMS" ]]; then
   exit 1
 fi
 
-jq -e --arg authority_lifecycle "${authority_lifecycle}" '
+jq -e \
+  --arg authority_lifecycle "${authority_lifecycle}" \
+  --arg matrix_lifecycle "${matrix_lifecycle}" '
   .candidate_status == (if $authority_lifecycle == "Candidate" then "approved" else "pending" end) and
   .deletion_review == (if $authority_lifecycle == "Candidate" then "approved" else "pending" end) and
   .secret_scan == "clean" and
@@ -212,8 +229,8 @@ jq -e --arg authority_lifecycle "${authority_lifecycle}" '
   .authority_inventory.status == $authority_lifecycle and
   .adr_059_execution_matrix.path == "matrix/adr-059-complete.json" and
   .adr_059_execution_matrix.digest_algorithm == "BLAKE3-256" and
-  .adr_059_execution_matrix.status == "Draft" and
-  .adr_059_execution_matrix.executed_case_count == 0
+  .adr_059_execution_matrix.status == $matrix_lifecycle and
+  .adr_059_execution_matrix.executed_case_count == (if $matrix_lifecycle == "Candidate" then 192 else 0 end)
 ' "${fixture_root}/support/provenance.json" >/dev/null || {
   echo "Candidate publication review evidence is missing or not approved" >&2
   exit 1

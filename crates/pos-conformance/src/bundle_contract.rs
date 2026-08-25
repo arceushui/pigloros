@@ -1180,7 +1180,7 @@ const fn validate_total_bytes(total_bytes: u64) -> Result<(), BundleContractErro
 
 const fn validate_member_count(member_count: usize) -> Result<(), BundleContractErrorV1> {
     if member_count > MAX_MEMBERS {
-        Err(BundleContractErrorV1::LifecycleInvalid)
+        Err(BundleContractErrorV1::MemberOutOfBounds)
     } else {
         Ok(())
     }
@@ -1463,10 +1463,24 @@ fn validate_authority_members(
     if profile.lifecycle == ProfileLifecycleV1::Candidate && inventory_lifecycle != "Candidate" {
         return Err(BundleContractErrorV1::CandidateEvidenceMissing);
     }
-    validate_provenance_authority_binding(&provenance, inventory_lifecycle)?;
+    let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
+    if profile.lifecycle == ProfileLifecycleV1::Candidate && matrix_lifecycle != "Candidate" {
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
+    if profile.lifecycle == ProfileLifecycleV1::Candidate {
+        validate_provenance_authority_binding_for_lifecycle(
+            &provenance,
+            inventory_lifecycle,
+            matrix_lifecycle,
+        )?;
+        validate_execution_matrix_for_lifecycle(&matrix_json, "Candidate")?;
+    } else {
+        validate_provenance_authority_binding(&provenance, inventory_lifecycle)?;
+        validate_execution_matrix(&matrix_json)?;
+    }
     validate_authority_inventory_digest(&provenance, &inventory.bytes)?;
     validate_authority_inventory(&inventory_json, members)?;
-    validate_execution_matrix(&matrix_json)
+    Ok(())
 }
 
 fn required_authority_member<'a>(
@@ -1517,6 +1531,14 @@ fn validate_provenance_authority_binding(
     provenance: &JsonValue,
     inventory_lifecycle: &str,
 ) -> Result<(), BundleContractErrorV1> {
+    validate_provenance_authority_binding_for_lifecycle(provenance, inventory_lifecycle, "Draft")
+}
+
+fn validate_provenance_authority_binding_for_lifecycle(
+    provenance: &JsonValue,
+    inventory_lifecycle: &str,
+    matrix_lifecycle: &str,
+) -> Result<(), BundleContractErrorV1> {
     let inventory = json_object(provenance, "authority_inventory")?;
     let matrix = json_object(provenance, "adr_059_execution_matrix")?;
     if json_text(inventory, "path")? != "expected-authority/inventory.json"
@@ -1525,8 +1547,14 @@ fn validate_provenance_authority_binding(
         || !matches!(inventory_lifecycle, "Draft" | "Candidate")
         || json_text(matrix, "path")? != "matrix/adr-059-complete.json"
         || json_text(matrix, "digest_algorithm")? != "BLAKE3-256"
-        || json_text(matrix, "status")? != "Draft"
-        || json_u64(matrix, "executed_case_count")? != 0
+        || json_text(matrix, "status")? != matrix_lifecycle
+        || !matches!(matrix_lifecycle, "Draft" | "Candidate")
+        || json_u64(matrix, "executed_case_count")?
+            != if matrix_lifecycle == "Candidate" {
+                192
+            } else {
+                0
+            }
     {
         Err(BundleContractErrorV1::MemberDigestMismatch)
     } else {
@@ -1690,6 +1718,13 @@ const fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErrorV1> {
+    validate_execution_matrix_for_lifecycle(matrix, "Draft")
+}
+
+fn validate_execution_matrix_for_lifecycle(
+    matrix: &JsonValue,
+    expected_lifecycle: &str,
+) -> Result<(), BundleContractErrorV1> {
     let rows = matrix
         .get("rows")
         .and_then(JsonValue::as_array)
@@ -1700,7 +1735,7 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
         .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
     if json_text(matrix, "magic")? != "NIM1"
         || json_u64(matrix, "version")? != 1
-        || json_text(matrix, "lifecycle")? != "Draft"
+        || json_text(matrix, "lifecycle")? != expected_lifecycle
         || json_u64(matrix, "row_count")? != 12
         || json_u64(matrix, "case_count")? != 192
         || rows.len() != 12
@@ -1725,14 +1760,28 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
                 || json_text(case, "mode") != Ok(NON_INTERFERENCE_MODES[mode_index])
                 || json_text(case, "case_id") != Ok(expected_case_id.as_str())
         })
-        || rows
-            .iter()
-            .any(|row| row.get("executed_case_count").and_then(JsonValue::as_u64) != Some(0))
+        || rows.iter().any(|row| {
+            row.get("executed_case_count").and_then(JsonValue::as_u64)
+                != Some(if expected_lifecycle == "Candidate" {
+                    16
+                } else {
+                    0
+                })
+        })
         || cases.iter().any(|case| {
-            case.get("executed").and_then(JsonValue::as_bool) != Some(false)
-                || !case
-                    .get("expected_result_digest")
-                    .is_some_and(JsonValue::is_null)
+            if expected_lifecycle == "Candidate" {
+                case.get("executed").and_then(JsonValue::as_bool) != Some(true)
+                    || !case
+                        .get("expected_result_digest")
+                        .and_then(JsonValue::as_str)
+                        .and_then(decode_blake3_hex)
+                        .is_some()
+            } else {
+                case.get("executed").and_then(JsonValue::as_bool) != Some(false)
+                    || !case
+                        .get("expected_result_digest")
+                        .is_some_and(JsonValue::is_null)
+            }
         })
     {
         Err(BundleContractErrorV1::MemberDigestMismatch)
@@ -2716,7 +2765,7 @@ mod tests {
         assert_eq!(validate_member_count(MAX_MEMBERS), Ok(()));
         assert_eq!(
             validate_member_count(MAX_MEMBERS + 1),
-            Err(BundleContractErrorV1::LifecycleInvalid)
+            Err(BundleContractErrorV1::MemberOutOfBounds)
         );
         assert_eq!(validate_member_size(MAX_MEMBER_BYTES), Ok(()));
         assert_eq!(
