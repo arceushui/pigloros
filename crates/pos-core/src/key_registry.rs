@@ -389,6 +389,39 @@ impl KeyRegistryStateV1 {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
         }
+        for (role, highest_epoch) in &self.highest_epoch {
+            let Some(maximum) = self
+                .records
+                .keys()
+                .filter(|identity| identity.role == *role)
+                .map(|identity| identity.epoch)
+                .max()
+            else {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            };
+            if maximum != *highest_epoch {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
+        for (role, identity) in &self.active {
+            if identity.role != *role
+                || self.tombstones.contains_key(identity)
+                || self.records.get(identity).is_none()
+                || self.highest_epoch.get(role) != Some(&identity.epoch)
+            {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
+        for (role, highest_epoch) in &self.highest_epoch {
+            let identity = KeyIdentityV1::new(*role, *highest_epoch);
+            if self.tombstones.contains_key(&identity) {
+                if self.active.contains_key(role) {
+                    return Err(KeyRegistryErrorV1::InvalidState);
+                }
+            } else if self.active.get(role) != Some(&identity) {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
+        }
         for (identity, tombstone) in &self.tombstones {
             let Some(record) = self.records.get(identity) else {
                 return Err(KeyRegistryErrorV1::InvalidState);
@@ -498,7 +531,8 @@ impl KeyRegistryStateV1 {
     where
         F: FnOnce() -> T,
     {
-        self.validate()?;
+        self.validate()
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
         if identity.epoch == 0 {
             return Err(KeyRegistryErrorV1::InvalidEpoch);
         }
@@ -922,8 +956,19 @@ mod tests {
                 PublicKey::from_bytes([20; 32]),
                 || (),
             ),
-            Err(KeyRegistryErrorV1::InvalidState)
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
         );
+
+        let first = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let second = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
+        let mut rollback = KeyRegistryStateV1::new();
+        rollback.register_key(signing_registration(first, 30))?;
+        rollback.register_key(signing_registration(second, 31))?;
+        rollback.active.insert(first.role, first);
+        assert_eq!(rollback.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        rollback.active.insert(second.role, second);
+        rollback.highest_epoch.insert(second.role, 1);
+        assert_eq!(rollback.validate(), Err(KeyRegistryErrorV1::InvalidState));
         Ok(())
     }
 
