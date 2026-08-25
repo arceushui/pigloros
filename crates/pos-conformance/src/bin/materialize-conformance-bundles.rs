@@ -1210,6 +1210,14 @@ mod tests {
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
         assert!(validated_profile_record_bytes(ClaimLayerV1::ArtifactIntegrity, b"{").is_err());
+        let mut invalid_record = canonical_record.clone();
+        invalid_record["profile_id"] = JsonValue::Null;
+        let invalid_record_bytes = serde_json::to_vec(&invalid_record)?;
+        assert!(validated_profile_record_bytes(
+            ClaimLayerV1::ArtifactIntegrity,
+            &invalid_record_bytes,
+        )
+        .is_err());
         let mut invalid_fixtures = canonical_record.clone();
         invalid_fixtures["fixtures"] = JsonValue::Null;
         assert!(profile_from_record(
@@ -1218,6 +1226,9 @@ mod tests {
             &invalid_fixtures,
         )
         .is_err());
+        let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
+        let invalid_collection = serde_json::json!({"fixtures": [JsonValue::Null]});
+        assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         for field in [
             "profile_id",
             "claim_layer",
