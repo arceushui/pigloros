@@ -1135,7 +1135,7 @@ mod tests {
             validate_profile_record_bindings(ClaimLayerV1::ArtifactIntegrity, &invalid_digest)
                 .is_err()
         );
-        let mut invalid_fixtures = canonical_record.clone();
+        let mut invalid_fixtures = canonical_record;
         invalid_fixtures["fixtures"] = JsonValue::Array(Vec::new());
         assert!(fixtures_from_profile_record(&invalid_fixtures, &context).is_err());
         invalid_fixtures["fixtures"] = JsonValue::Null;
