@@ -419,7 +419,6 @@ impl ConformanceBundleV1 {
             }
             if descriptor.size_bytes != u64::try_from(member.bytes.len()).unwrap_or(u64::MAX)
                 || descriptor.digest != member.digest
-                || member.bytes.is_empty()
                 || member.digest != *blake3::hash(&member.bytes).as_bytes()
             {
                 return Err(BundleContractErrorV1::MemberDigestMismatch);
@@ -490,9 +489,7 @@ impl ConformanceBundleV1 {
     /// Returns a closed error for malformed/noncanonical bytes, invalid bundle
     /// declarations, a profile-cap violation, or an invalid signature.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, BundleContractErrorV1> {
-        if bytes.is_empty() || bytes.len() as u64 > MAX_TOTAL_BUNDLE_BYTES {
-            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-        }
+        validate_archive_length(bytes.len())?;
         preflight_archive(bytes)?;
         let preflight = preflight_archive_caps(bytes)?;
         let preflight_profile = ConformanceProfileV1::from_canonical_cbor(
@@ -571,6 +568,14 @@ fn encode_archive_value(value: &Value) -> Result<Vec<u8>, BundleContractErrorV1>
         .map_err(|_| BundleContractErrorV1::EncodingFailed)
 }
 
+fn validate_archive_length(length: usize) -> Result<(), BundleContractErrorV1> {
+    if u64::try_from(length).unwrap_or(u64::MAX) > MAX_TOTAL_BUNDLE_BYTES {
+        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+    } else {
+        Ok(())
+    }
+}
+
 fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
     fn length(
         bytes: &[u8],
@@ -608,9 +613,8 @@ fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
         match major {
             0 | 1 => Ok(()),
             2 => {
-                if item_length > MAX_MEMBER_BYTES {
-                    return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-                }
+                validate_member_size(item_length)
+                    .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
                 let end = index.saturating_add(usize::try_from(item_length).unwrap_or(usize::MAX));
                 *index = end;
                 if end <= bytes.len() {
@@ -2003,6 +2007,17 @@ mod tests {
             validate_total_bytes(MAX_TOTAL_BUNDLE_BYTES + 1),
             Err(BundleContractErrorV1::MemberOutOfBounds)
         );
+        assert_eq!(validate_archive_length(0), Ok(()));
+        assert_eq!(
+            validate_archive_length(usize::try_from(MAX_TOTAL_BUNDLE_BYTES).unwrap_or(usize::MAX)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_archive_length(
+                usize::try_from(MAX_TOTAL_BUNDLE_BYTES + 1).unwrap_or(usize::MAX)
+            ),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
     }
 
     #[test]
@@ -2068,6 +2083,12 @@ mod tests {
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
         bundle.validate()?;
         let manifest_bytes = bundle.manifest_bytes()?;
+        assert_eq!(
+            manifest_bytes,
+            canonical::encode(&manifest_value(&bundle.manifest))
+                .map(|bytes| bytes.as_slice().to_vec())
+                .map_err(|_| BundleContractErrorV1::EncodingFailed)?
+        );
         let mut digest_input = b"PiglorOS.ConformanceBundle.v1\0".to_vec();
         digest_input.extend_from_slice(&manifest_bytes);
         assert_eq!(
@@ -2222,6 +2243,16 @@ mod tests {
             preflight_archive(&encode_archive_value(&oversized_array)?),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
+        assert_eq!(preflight_archive(&[0x1b, 0, 0, 0, 1, 0, 0, 0, 0]), Ok(()));
+
+        let mut exact_depth = Value::Null;
+        for _ in 0..usize::from(MAX_STRUCTURAL_NESTING) {
+            exact_depth = Value::Array(vec![exact_depth]);
+        }
+        assert_eq!(
+            preflight_archive(&encode_archive_value(&exact_depth)?),
+            Ok(())
+        );
         Ok(())
     }
 
@@ -2247,7 +2278,7 @@ mod tests {
         assert_eq!(preflight.total_member_bytes, 3);
         assert_eq!(preflight.largest_member_bytes, 3);
         assert_eq!(preflight.largest_member_path_bytes, 7);
-        assert!(preflight.maximum_depth >= 4);
+        assert_eq!(preflight.maximum_depth, 4);
         Ok(())
     }
 
@@ -2644,6 +2675,44 @@ mod tests {
         assert_eq!(
             mismatched_profile_path.validate(),
             Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validation_rejects_missing_profile_and_descriptor_digest_mismatches(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let profile_index = bundle
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or("missing profile member")?;
+        let support_index = bundle
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Schema)
+            .ok_or("missing schema support member")?;
+
+        let mut missing_profile = bundle.clone();
+        missing_profile.members[support_index].role = BundleMemberRoleV1::Profile;
+        missing_profile.members.remove(profile_index);
+        assert_eq!(
+            missing_profile.validate(),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let input_index = bundle
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::FixtureInput)
+            .ok_or("missing fixture input")?;
+        let mut mismatched_digest = bundle;
+        mismatched_digest.manifest.members[input_index].digest = digest(99);
+        assert_eq!(
+            mismatched_digest.validate(),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
@@ -3119,7 +3188,7 @@ mod tests {
             Err(BundleContractErrorV1::MemberMissing)
         );
 
-        let mut duplicate_case_profile = profile();
+        let mut duplicate_case_profile = profile.clone();
         let mut duplicate_case_fixture = duplicate_case_profile.fixtures[0].clone();
         duplicate_case_fixture.claim_layer = ClaimLayerV1::ReplayConformance;
         duplicate_case_profile.fixtures.push(duplicate_case_fixture);
@@ -3574,6 +3643,10 @@ mod coverage_entrypoints {
         let bundle = signed_bundle()?;
         let manifest = bundle.manifest_bytes()?;
         assert!(!manifest.is_empty());
+        assert_eq!(
+            manifest,
+            encode_archive_value(&manifest_value(&bundle.manifest))?
+        );
         assert!(bundle.bundle_digest()?.iter().any(|byte| *byte != 0));
         bundle.validate()?;
         let encoded = bundle.to_canonical_cbor()?;
