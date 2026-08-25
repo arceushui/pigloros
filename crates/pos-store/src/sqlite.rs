@@ -9729,7 +9729,7 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn grant_draft(subject: EntityId, grantee: EntityId) -> EventDraft {
+    fn grant_draft(subject: EntityId, grantee: EntityId, grant_seq: u64) -> EventDraft {
         let grant = pos_core::ConsentGrantedV1 {
             subject_id: subject,
             grantee_id: grantee,
@@ -9740,7 +9740,7 @@ mod coverage_entrypoints {
             export_permitted: false,
             retention_days: 1,
             expiry_secs: 0,
-            grant_seq: 1,
+            grant_seq,
         };
         EventDraft::new(
             subject,
@@ -9762,6 +9762,20 @@ mod coverage_entrypoints {
             Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
             ok(revocation.encode()),
         )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn insert_identity(store: &mut SqliteStore, key: u8, scope: AppendDedupScope, expires_at: i64) {
+        ok(store.conn.execute(
+            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                vec![key; 32],
+                scope.as_bytes().as_slice(),
+                EventId::new().to_string(),
+                expires_at,
+            ],
+        ));
     }
 
     #[test]
@@ -9805,13 +9819,29 @@ mod coverage_entrypoints {
             ok(append_store.pending_append_identity_cleanup()),
             Some(scope)
         );
+
+        let mut existing_owner = tests::new_store();
+        ok(existing_owner.bind_consent_authority(permit));
+        let existing_timeline = ok(existing_owner.create_timeline("existing-owner"));
+        ok(existing_owner.append_consent_bounded(
+            existing_timeline.id(),
+            std::slice::from_ref(&grant_draft(subject, grantee, 1)),
+            permit,
+            2,
+        ));
+        ok(existing_owner.append_consent_bounded(
+            existing_timeline.id(),
+            std::slice::from_ref(&grant_draft(subject, grantee, 2)),
+            permit,
+            2,
+        ));
     }
 
     #[test]
     fn consent_owner_storage_failures_fail_closed() {
         let subject = EntityId::new();
         let permit = ConsentAuthority::new().append_permit();
-        let grant = grant_draft(subject, EntityId::new());
+        let grant = grant_draft(subject, EntityId::new(), 1);
 
         let mut owner_query_error = tests::new_store();
         let owner_query_timeline = ok(owner_query_error.create_timeline("owner-query-error"));
@@ -9896,6 +9926,30 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn owned_timeline_transaction_boundaries_are_fail_closed() {
+        let subject = EntityId::new();
+        let mut nested = tests::new_store();
+        ok(nested.conn.execute_batch("BEGIN IMMEDIATE"));
+        let nested_timeline = ok(nested.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("nested-owner", subject),
+        ));
+        assert_eq!(
+            some(ok(nested.get_timeline(nested_timeline.id())))
+                .meta
+                .owner,
+            Some(subject)
+        );
+        ok(nested.conn.execute_batch("ROLLBACK"));
+
+        let mut commit_error = tests::new_store();
+        ok(commit_error.conn.commit_hook(Some(|| true)));
+        expect_err(commit_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("commit-owner", subject),
+        ));
+        ok(commit_error.conn.commit_hook::<fn() -> bool>(None));
+    }
+
+    #[test]
     fn cleanup_transaction_boundaries_fail_closed() {
         let scope = AppendDedupScope::from_keyed_hash([124; 32]);
         let mut remove_begin = tests::new_store();
@@ -9929,6 +9983,63 @@ mod coverage_entrypoints {
                 .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
         );
         ok(bounded_commit_error.conn.commit_hook::<fn() -> bool>(None));
+    }
+
+    #[test]
+    fn bounded_cleanup_query_and_write_failures_fail_closed() {
+        let scope = AppendDedupScope::from_keyed_hash([125; 32]);
+        let mut malformed = tests::new_store();
+        ok(malformed
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON"));
+        ok(malformed.conn.execute(
+            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (1, ?1, ?2, 1)",
+            rusqlite::params![scope.as_bytes().as_slice(), EventId::new().to_string()],
+        ));
+        ok(malformed
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF"));
+        expect_err(
+            malformed.remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+
+        let mut delete_error = tests::new_store();
+        insert_identity(&mut delete_error, 126, scope, 1);
+        ok(delete_error.conn.execute_batch(
+            "CREATE TRIGGER deny_identity_delete BEFORE DELETE ON append_identities
+             BEGIN SELECT RAISE(ABORT, 'identity delete denied'); END",
+        ));
+        expect_err(
+            delete_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+
+        let mut marker_insert_error = tests::new_store();
+        insert_identity(&mut marker_insert_error, 127, scope, 1);
+        insert_identity(&mut marker_insert_error, 128, scope, 1);
+        ok(marker_insert_error.conn.execute_batch(
+            "CREATE TRIGGER deny_cleanup_insert BEFORE INSERT ON pending_append_identity_cleanup
+             BEGIN SELECT RAISE(ABORT, 'cleanup insert denied'); END",
+        ));
+        expect_err(
+            marker_insert_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+
+        let mut marker_delete_error = tests::new_store();
+        ok(marker_delete_error.conn.execute(
+            "INSERT INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+            rusqlite::params![scope.as_bytes().as_slice()],
+        ));
+        ok(marker_delete_error.conn.execute_batch(
+            "CREATE TRIGGER deny_cleanup_delete BEFORE DELETE ON pending_append_identity_cleanup
+             BEGIN SELECT RAISE(ABORT, 'cleanup delete denied'); END",
+        ));
+        expect_err(
+            marker_delete_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
     }
 
     #[test]
