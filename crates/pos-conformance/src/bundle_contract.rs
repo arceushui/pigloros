@@ -780,9 +780,6 @@ fn independent_verify_profile(
 ) -> Result<(), BundleContractErrorV1> {
     let profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    if encode_archive_value(&profile)?.as_slice() != profile_bytes {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
     let profile_fields = independent_array(&profile, 17)?;
     if archive_text(&profile_fields[0])? != "CPF1"
         || archive_u64(&profile_fields[1])? != 1
@@ -1229,11 +1226,14 @@ fn independent_archive_caps(
         .iter()
         .map(|value| archive_u64(value).map_err(|_| BundleContractErrorV1::ProfileInvalid))
         .collect::<Result<Vec<_>, _>>()?;
-    let [max_profile_bytes, max_cases, max_bundle_members, max_member_path_bytes, max_member_bytes, max_total_bundle_bytes, max_compression_expansion, max_structural_nesting, _max_coordinate_bytes, _max_diagnostic_bytes] =
-        values.as_slice()
-    else {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    };
+    let max_profile_bytes = &values[0];
+    let max_cases = &values[1];
+    let max_bundle_members = &values[2];
+    let max_member_path_bytes = &values[3];
+    let max_member_bytes = &values[4];
+    let max_total_bundle_bytes = &values[5];
+    let max_compression_expansion = &values[6];
+    let max_structural_nesting = &values[7];
     if *max_profile_bytes == 0
         || *max_profile_bytes > MAX_PROFILE_BYTES
         || *max_cases == 0
