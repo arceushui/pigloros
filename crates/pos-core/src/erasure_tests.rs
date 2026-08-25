@@ -41,6 +41,9 @@ struct ReplyResolver {
     terminal: ErasureStateV1,
     previous: ErasureStateV1,
 }
+struct FailingPredecessorResolver {
+    terminal: ErasureStateV1,
+}
 impl ErasureStateResolverV1 for TestResolver {
     fn resolve_state(
         &self,
@@ -65,6 +68,18 @@ impl ErasureStateResolverV1 for ReplyResolver {
             Ok(Some(self.terminal.clone()))
         } else {
             Ok(Some(self.previous.clone()))
+        }
+    }
+}
+impl ErasureStateResolverV1 for FailingPredecessorResolver {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        if digest == self.terminal.state_digest() {
+            Ok(Some(self.terminal.clone()))
+        } else {
+            Err(ErasureErrorV1::ProvenanceMissing)
         }
     }
 }
@@ -559,6 +574,10 @@ fn coordinator_authorization_and_rejection_use_public_host_seams() -> Result<(),
     coordinator.submit(request()?, reference(3))?;
     let rejected = coordinator.reject(reference(1), reference(9))?;
     assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
+    assert_eq!(
+        coordinator.reject(reference(1), reference(8)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     assert_eq!(coordinator.reject(reference(1), reference(9))?, rejected);
     Ok(())
 }
@@ -1214,6 +1233,17 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         Err(ErasureErrorV1::KeyRegistryUnavailable)
     );
 
+    let mut reload_failed = test_port(true, Vec::new());
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(reload_failed.clone(), reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    reload_failed.load_error = Some(ErasureErrorV1::KeyRegistryUnavailable);
+    coordinator.port.load_error = reload_failed.load_error;
+    assert_eq!(
+        coordinator.authorize(reference(1), reference(9)),
+        Err(ErasureErrorV1::KeyRegistryUnavailable)
+    );
+
     let mut commit_failed = test_port(true, Vec::new());
     commit_failed.commit_error = Some(ErasureErrorV1::ReceiptCommitFailed);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(commit_failed, reference(2));
@@ -1722,6 +1752,16 @@ fn receipt_history_requires_a_resolved_monotonic_terminal_chain() -> Result<(), 
         unavailable: false,
     };
     receipt.verify_history(&resolver)?;
+    assert_eq!(
+        receipt.verify_history(&FailingPredecessorResolver {
+            terminal: resolver
+                .states
+                .last()
+                .cloned()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+        }),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     assert_eq!(
         receipt.verify_history(&TestResolver {
             states: Vec::new(),
