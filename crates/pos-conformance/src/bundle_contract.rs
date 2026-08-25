@@ -4018,6 +4018,12 @@ mod tests {
             serde_json::Value::String("approved".to_owned());
         approved_provenance_value["authority_inventory"]["status"] =
             serde_json::Value::String("Candidate".to_owned());
+        let (candidate_inventory, authority_members) = authority_inventory_materialized_path()?;
+        let candidate_inventory_bytes = serde_json::to_vec(&candidate_inventory)?;
+        let candidate_inventory_digest = *blake3::hash(&candidate_inventory_bytes).as_bytes();
+        approved_provenance_value["authority_inventory"]["sha256_digest"] = JsonValue::String(
+            materialized_hex(&Sha256::digest(&candidate_inventory_bytes)),
+        );
         let approved_provenance = serde_json::to_vec(&approved_provenance_value)?;
         let approved_provenance_digest = *blake3::hash(&approved_provenance).as_bytes();
         candidate_profile.provenance_digest = approved_provenance_digest;
@@ -4027,10 +4033,6 @@ mod tests {
             fixture.provenance.publication_review_digest = approved_provenance_digest;
         }
         candidate_profile.profile_digest = candidate_profile.digest();
-
-        let (candidate_inventory, authority_members) = authority_inventory_materialized_path()?;
-        let candidate_inventory_bytes = serde_json::to_vec(&candidate_inventory)?;
-        let candidate_inventory_digest = *blake3::hash(&candidate_inventory_bytes).as_bytes();
         let (mut members, expected_results) =
             bundle_inputs(&candidate_profile, BundleModeV1::Local)?;
         let provenance_member = members
