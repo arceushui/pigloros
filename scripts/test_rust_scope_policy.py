@@ -12,6 +12,10 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILTER_PATH = ROOT / ".github" / "rust-scope.yml"
+WORKFLOW_PATHS = (
+    ROOT / ".github" / "workflows" / "ci.yml",
+    ROOT / ".github" / "workflows" / "codeql.yml",
+)
 EXPECTED_EXCLUDES = {
     "!**/*.md",
     "!**/*.mdx",
@@ -55,6 +59,30 @@ class RustScopePolicyTests(unittest.TestCase):
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
+
+    def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
+        for workflow_path in WORKFLOW_PATHS:
+            with self.subTest(workflow=workflow_path.name):
+                with workflow_path.open(encoding="utf-8") as stream:
+                    workflow = yaml.safe_load(stream)
+                scope_name = (
+                    "ci_change_scope" if workflow_path.name == "ci.yml" else "codeql_change_scope"
+                )
+                scope = workflow["jobs"][scope_name]
+                steps = scope["steps"]
+                self.assertEqual(
+                    steps[0]["with"]["ref"],
+                    "${{ github.event.pull_request.base.sha }}",
+                )
+                filter_step = next(step for step in steps if step.get("id") == "scope")
+                self.assertEqual(filter_step["with"]["filters"], ".github/rust-scope.yml")
+                self.assertIn("hashFiles('.github/rust-scope.yml') != ''", filter_step["if"])
+                full_step = next(step for step in steps if step.get("id") == "full")
+                self.assertIn("hashFiles('.github/rust-scope.yml') == ''", full_step["if"])
+                self.assertEqual(
+                    scope["outputs"]["rust"],
+                    "${{ steps.scope.outputs.rust || steps.full.outputs.rust }}",
+                )
 
     def test_documentation_only_paths_skip_rust_gate(self) -> None:
         paths = [
