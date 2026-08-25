@@ -669,6 +669,16 @@ pub struct ConsentRevocationReservation {
     completed: bool,
 }
 
+/// Opaque host capability required to append Gateway-owned consent Events.
+///
+/// The capability is issued only by a [`ConsentAuthority`]. Requiring it at
+/// the [`EventStore`](crate::EventStore) boundary prevents a capability-free
+/// adapter caller from bypassing the Gateway consent host seam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConsentAppendPermit {
+    authority_id: u64,
+}
+
 impl ConsentRevocationReservation {
     fn rollback(&mut self) {
         if self.completed {
@@ -762,6 +772,14 @@ impl ConsentAuthority {
         Self {
             authority_id: NEXT_CONSENT_AUTHORITY_ID.fetch_add(1, Ordering::Relaxed),
             active: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Issue the opaque permit required by the dedicated consent append port.
+    #[must_use]
+    pub const fn append_permit(&self) -> ConsentAppendPermit {
+        ConsentAppendPermit {
+            authority_id: self.authority_id,
         }
     }
 

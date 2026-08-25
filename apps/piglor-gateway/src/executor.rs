@@ -14,8 +14,8 @@ use pos_core::{
         EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1, CoreError,
-    OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
+    ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
+    CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
     PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use std::{
@@ -197,12 +197,14 @@ enum Command {
     AppendConsentGrant {
         timeline: TimelineId,
         grant: ConsentGrantedV1,
+        permit: ConsentAppendPermit,
         maximum: u64,
         reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
     },
     AppendConsentRevocation {
         timeline: TimelineId,
         revocation: ConsentRevokedV1,
+        permit: ConsentAppendPermit,
         maximum: u64,
         reservation: ConsentRevocationReservation,
         reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
@@ -1085,11 +1087,13 @@ impl StoreExecutor {
         &self,
         timeline: TimelineId,
         grant: ConsentGrantedV1,
+        permit: ConsentAppendPermit,
         maximum: u64,
     ) -> Result<Event, StoreExecutorError> {
         submit!(self, |reply| Command::AppendConsentGrant {
             timeline,
             grant,
+            permit,
             maximum,
             reply,
         })
@@ -1098,12 +1102,14 @@ impl StoreExecutor {
         &self,
         timeline: TimelineId,
         revocation: ConsentRevokedV1,
+        permit: ConsentAppendPermit,
         maximum: u64,
         reservation: ConsentRevocationReservation,
     ) -> Result<Event, StoreExecutorError> {
         submit!(self, |reply| Command::AppendConsentRevocation {
             timeline,
             revocation,
+            permit,
             maximum,
             reservation,
             reply,
@@ -1632,12 +1638,14 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
         Command::AppendConsentGrant {
             timeline,
             grant,
+            permit,
             maximum,
             reply,
-        } => execute_append_consent_grant_command(state, timeline, &grant, maximum, reply),
+        } => execute_append_consent_grant_command(state, timeline, &grant, permit, maximum, reply),
         Command::AppendConsentRevocation {
             timeline,
             revocation,
+            permit,
             maximum,
             reservation,
             reply,
@@ -1646,6 +1654,7 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
                 state,
                 timeline,
                 &revocation,
+                permit,
                 maximum,
                 reservation,
                 reply,
@@ -1778,6 +1787,7 @@ fn execute_append_consent_grant_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
     grant: &ConsentGrantedV1,
+    permit: ConsentAppendPermit,
     maximum: u64,
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
 ) {
@@ -1802,6 +1812,7 @@ fn execute_append_consent_grant_command(
                     Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
                     payload,
                 )],
+                permit,
                 maximum,
             )
         })
@@ -1816,6 +1827,7 @@ fn execute_append_consent_revocation_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
     revocation: &ConsentRevokedV1,
+    permit: ConsentAppendPermit,
     maximum: u64,
     reservation: ConsentRevocationReservation,
     reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
@@ -1841,6 +1853,7 @@ fn execute_append_consent_revocation_command(
                     Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
                     payload,
                 )],
+                permit,
                 maximum,
             )
         })
@@ -2127,6 +2140,7 @@ mod tests {
             &mut state,
             timeline,
             &revocation,
+            authority.append_permit(),
             10,
             reservation,
             reply,
@@ -2717,6 +2731,7 @@ mod tests {
                     expiry_secs: 0,
                     grant_seq: 1,
                 },
+                permit: pos_core::ConsentAuthority::new().append_permit(),
                 maximum: 1,
                 reply,
             },
@@ -2753,6 +2768,7 @@ mod tests {
             Command::AppendConsentRevocation {
                 timeline,
                 revocation,
+                permit: authority.append_permit(),
                 maximum: 1,
                 reservation,
                 reply,
@@ -2805,7 +2821,13 @@ mod tests {
             let executor = executor.clone();
             async move {
                 executor
-                    .append_consent_revocation(timeline, revocation, 10, reservation)
+                    .append_consent_revocation(
+                        timeline,
+                        revocation,
+                        authority.append_permit(),
+                        10,
+                        reservation,
+                    )
                     .await
             }
         });

@@ -20,6 +20,7 @@
 
 use crate::{
     clock::{Seq, WallTime},
+    consent::ConsentAppendPermit,
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft},
@@ -377,6 +378,7 @@ pub trait EventStore: Send {
         &mut self,
         _timeline: TimelineId,
         _drafts: &[EventDraft],
+        _permit: ConsentAppendPermit,
         _max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         Err(CoreError::Storage(
@@ -1336,7 +1338,12 @@ mod tests {
             CanonicalBytes::from_static(b"bounded-default"),
         );
         let default_error = store
-            .append_consent_bounded(TimelineId::new(), &[consent_draft], 1)
+            .append_consent_bounded(
+                TimelineId::new(),
+                &[consent_draft],
+                crate::ConsentAuthority::new().append_permit(),
+                1,
+            )
             .test_err()?;
         assert!(default_error
             .to_string()

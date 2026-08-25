@@ -40,7 +40,7 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -392,6 +392,10 @@ impl SqliteStore {
                  fork_seq    INTEGER,
                  head_seq    INTEGER NOT NULL DEFAULT 0,
                  chain_head  BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS timeline_owners (
+                 timeline_id TEXT PRIMARY KEY,
+                 owner_id    TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS events (
                  timeline_id TEXT NOT NULL,
@@ -1446,6 +1450,7 @@ fn timeline_fields_to_timeline(
         id,
         mode,
         name,
+        owner: None,
         fork_point,
     };
     let mut tl = Timeline::new(meta);
@@ -1629,6 +1634,7 @@ impl SqliteStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
         gateway_consent: bool,
+        _permit: Option<ConsentAppendPermit>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         let tx = self
             .conn
@@ -1639,13 +1645,16 @@ impl SqliteStore {
             .last()
             .and_then(|(_, fork)| *fork)
             .map_or(0, Seq::as_u64);
-        if gateway_consent {
-            crate::ensure_gateway_consent_drafts(
+        let owner = if gateway_consent {
+            Some(crate::ensure_gateway_consent_drafts(
                 drafts,
                 timeline,
+                Self::timeline_owner_in_transaction(&tx, timeline)?,
                 logical_prefix.saturating_add(owned_head).saturating_add(1),
-            )?;
-        }
+            )?)
+        } else {
+            None
+        };
         let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
         let next_head = owned_head.saturating_add(batch_len);
         if next_head > max_owned_events {
@@ -1659,6 +1668,11 @@ impl SqliteStore {
                 timeline,
                 draft.clone(),
             )?);
+        }
+        if let Some(owner) = owner {
+            if Self::timeline_owner_in_transaction(&tx, timeline)?.is_none() {
+                Self::persist_timeline_owner(&tx, timeline, owner)?;
+            }
         }
         tx.commit().map_err(Self::into_storage_error)?;
         Ok(Some(
@@ -2662,6 +2676,47 @@ impl GeoLocationReplayVerifier for SqliteStore {
 }
 
 impl SqliteStore {
+    fn timeline_owner(&self, timeline: TimelineId) -> Result<Option<EntityId>, CoreError> {
+        self.conn
+            .query_row(
+                "SELECT owner_id FROM timeline_owners WHERE timeline_id = ?1",
+                params![timeline.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            .map(|owner| parse_entity_id(&owner))
+            .transpose()
+    }
+
+    fn timeline_owner_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        timeline: TimelineId,
+    ) -> Result<Option<EntityId>, CoreError> {
+        tx.query_row(
+            "SELECT owner_id FROM timeline_owners WHERE timeline_id = ?1",
+            params![timeline.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| CoreError::Storage(error.to_string()))?
+        .map(|owner| parse_entity_id(&owner))
+        .transpose()
+    }
+
+    fn persist_timeline_owner(
+        tx: &rusqlite::Transaction<'_>,
+        timeline: TimelineId,
+        owner: EntityId,
+    ) -> Result<(), CoreError> {
+        tx.execute(
+            "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+            params![timeline.to_string(), owner.to_string()],
+        )
+        .map(|_| ())
+        .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
     fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
         let chain = self.fork_chain(id)?;
         let mut logical_head = 0_u64;
@@ -2713,17 +2768,21 @@ impl EventStore for SqliteStore {
     ) -> Result<Option<Vec<Event>>, CoreError> {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events, false))
+            .and_then(|()| {
+                self.append_bounded_visible(timeline, drafts, max_owned_events, false, None)
+            })
     }
 
     fn append_consent_bounded(
         &mut self,
         timeline: TimelineId,
         drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_gateway_consent_types(drafts, timeline)
-            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events, true))
+        crate::ensure_gateway_consent_types(drafts, timeline).and_then(|()| {
+            self.append_bounded_visible(timeline, drafts, max_owned_events, true, Some(permit))
+        })
     }
 
     fn append_or_duplicate(
@@ -3001,7 +3060,10 @@ impl EventStore for SqliteStore {
                 // Compute chain hash at the fork point
                 let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
 
-                let meta = TimelineMeta::forked_from(parent, at_seq, name);
+                let meta = self.timeline_owner(parent)?.map_or_else(
+                    || TimelineMeta::forked_from(parent, at_seq, name),
+                    |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+                );
                 let child = Timeline::new(meta);
 
                 let tx = match self
@@ -3024,6 +3086,10 @@ impl EventStore for SqliteStore {
             ],
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+                if let Some(owner) = child.meta.owner {
+                    Self::persist_timeline_owner(&tx, child.id(), owner)?;
+                }
 
                 if let Err(error) = tx.commit() {
                     return Err(CoreError::Storage(error.to_string()));
@@ -3067,6 +3133,8 @@ impl EventStore for SqliteStore {
                 timeline_row.fork_seq,
                 timeline_row.head_seq,
             )?;
+            let mut timeline = timeline;
+            timeline.meta.owner = self.timeline_owner(timeline.id())?;
             if !crate::generic_timeline_is_visible(
                 self.timeline_contains_geographic_evidence(timeline.id()),
             )? {
@@ -3130,6 +3198,8 @@ impl EventStore for SqliteStore {
                     timeline_row.fork_seq,
                     timeline_row.head_seq,
                 )?;
+                let mut timeline = timeline;
+                timeline.meta.owner = self.timeline_owner(timeline.id())?;
                 crate::generic_timeline_is_visible(
                     self.timeline_contains_geographic_evidence(timeline.id()),
                 )
@@ -3182,6 +3252,14 @@ impl EventStore for SqliteStore {
                 ],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
+        if let Some(owner) = timeline.meta.owner {
+            self.conn
+                .execute(
+                    "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+                    params![timeline.id().to_string(), owner.to_string()],
+                )
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+        }
         Ok(timeline)
     }
 
@@ -3332,6 +3410,11 @@ impl EventStore for SqliteStore {
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
             tx.execute(
                 "DELETE FROM geographic_presence WHERE timeline_id = ?1",
+                params![id_str],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            tx.execute(
+                "DELETE FROM timeline_owners WHERE timeline_id = ?1",
                 params![id_str],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -8218,6 +8301,7 @@ mod tests {
             id: TimelineId::new(),
             mode: child_meta.mode,
             name: child_meta.name,
+            owner: child_meta.owner,
             fork_point: child_meta.fork_point,
         };
         let chosen_id = chosen.id;

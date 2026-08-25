@@ -141,9 +141,11 @@ pub(crate) fn ensure_gateway_consent_types(
 pub(crate) fn ensure_gateway_consent_drafts(
     drafts: &[EventDraft],
     timeline: TimelineId,
+    existing_owner: Option<pos_core::EntityId>,
     expected_first_seq: u64,
-) -> Result<(), CoreError> {
+) -> Result<pos_core::EntityId, CoreError> {
     ensure_gateway_consent_types(drafts, timeline)?;
+    let mut owner = existing_owner;
     for (index, draft) in drafts.iter().enumerate() {
         let expected_seq =
             expected_first_seq.saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
@@ -156,6 +158,15 @@ pub(crate) fn ensure_gateway_consent_drafts(
                         "consent grant coordinate mismatch".to_owned(),
                     ));
                 }
+                owner = match owner {
+                    Some(owner) if owner != grant.subject_id => {
+                        return Err(CoreError::Storage(
+                            "consent Timeline owner mismatch".to_owned(),
+                        ));
+                    }
+                    Some(owner) => Some(owner),
+                    None => Some(grant.subject_id),
+                };
             }
             pos_core::EVENT_TYPE_CONSENT_REVOKED_V1 => {
                 let revocation = pos_core::ConsentRevokedV1::decode(&draft.payload)
@@ -165,11 +176,20 @@ pub(crate) fn ensure_gateway_consent_drafts(
                         "consent revocation coordinate mismatch".to_owned(),
                     ));
                 }
+                owner = match owner {
+                    Some(owner) if owner != revocation.subject_id => {
+                        return Err(CoreError::Storage(
+                            "consent Timeline owner mismatch".to_owned(),
+                        ));
+                    }
+                    Some(owner) => Some(owner),
+                    None => Some(revocation.subject_id),
+                };
             }
             _ => return Err(CoreError::TimelineNotFound(timeline)),
         }
     }
-    Ok(())
+    owner.ok_or_else(|| CoreError::Storage("consent Timeline owner is missing".to_owned()))
 }
 
 /// Refuse committed sensitive Events before a generic import or append path can

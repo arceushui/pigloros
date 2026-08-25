@@ -1,7 +1,7 @@
 use pos_core::geo_admission::GeoLocationAdmissionStore;
 use pos_core::{
-    CanonicalBytes, ConsentGrantedV1, ConsentRevokedV1, EntityId, Event, EventDraft, EventId, Kind,
-    SchemaVersion, Seq, SeqRange, Timeline, TimelineMeta, WallTime,
+    CanonicalBytes, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Event,
+    EventDraft, EventId, Kind, SchemaVersion, Seq, SeqRange, Timeline, TimelineMeta, WallTime,
 };
 use pos_store::{
     import_timeline, import_timeline_with_id, memory::MemoryStore, AppendDedupKey,
@@ -175,6 +175,7 @@ fn assert_generic_consent_admission_is_closed(store: &mut dyn EventStore) {
                 Kind::new("ordinary.event"),
                 CanonicalBytes::from_static(b"not-consent"),
             )],
+            ConsentAuthority::new().append_permit(),
             10,
         )
         .is_err());
@@ -209,7 +210,12 @@ fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmis
         grant.encode().test_ok(),
     );
     assert!(store
-        .append_consent_bounded(timeline.id(), &[grant_draft], 10)
+        .append_consent_bounded(
+            timeline.id(),
+            &[grant_draft],
+            ConsentAuthority::new().append_permit(),
+            10,
+        )
         .test_err()
         .to_string()
         .contains("coordinate mismatch"));
@@ -226,7 +232,12 @@ fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmis
         revocation.encode().test_ok(),
     );
     assert!(store
-        .append_consent_bounded(timeline.id(), &[revocation_draft], 10)
+        .append_consent_bounded(
+            timeline.id(),
+            &[revocation_draft],
+            ConsentAuthority::new().append_permit(),
+            10,
+        )
         .test_err()
         .to_string()
         .contains("coordinate mismatch"));

@@ -42,7 +42,7 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -869,6 +869,7 @@ impl MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
         gateway_consent: bool,
+        _permit: Option<ConsentAppendPermit>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
         let validate = if gateway_consent {
             crate::ensure_gateway_consent_types
@@ -893,19 +894,28 @@ impl MemoryStore {
                     .fork_point
                     .map_or(0, |(_, fork)| fork.as_u64());
                 let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
+                let owner = if gateway_consent {
+                    Some(crate::ensure_gateway_consent_drafts(
+                        drafts,
+                        timeline,
+                        timeline_state.meta.owner,
+                        logical_prefix.saturating_add(owned_head).saturating_add(1),
+                    )?)
+                } else {
+                    None
+                };
                 if let Some(next_head) =
                     crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
                 {
                     crate::checked_logical_head(logical_prefix, next_head)?;
-                    if gateway_consent {
-                        crate::ensure_gateway_consent_drafts(
-                            drafts,
-                            timeline,
-                            logical_prefix.saturating_add(owned_head).saturating_add(1),
-                        )?;
+                    let events =
+                        self.append_visible_with_prefix(timeline, drafts, logical_prefix)?;
+                    if let Some(owner) = owner {
+                        if let Some(state) = self.timelines.get_mut(&timeline) {
+                            state.timeline.meta.owner = Some(owner);
+                        }
                     }
-                    self.append_visible_with_prefix(timeline, drafts, logical_prefix)
-                        .map(Some)
+                    Ok(Some(events))
                 } else {
                     Ok(None)
                 }
@@ -1586,16 +1596,17 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false)
+        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false, None)
     }
 
     fn append_consent_bounded(
         &mut self,
         timeline: TimelineId,
         drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, true)
+        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, true, Some(permit))
     }
 
     fn append_or_duplicate(
@@ -4113,6 +4124,7 @@ mod tests {
             id: TimelineId::new(),
             mode: pos_core::timeline::TimelineMode::Historical,
             name: Some("child".to_owned()),
+            owner: None,
             fork_point: Some((root.id(), Seq::from_u64(1))),
         };
         let child = store.create_timeline_with_meta(child_meta).test_ok();

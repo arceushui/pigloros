@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{clock::Seq, ids::TimelineId};
+use crate::{
+    clock::Seq,
+    ids::{EntityId, TimelineId},
+};
 
 /// Whether a timeline runs in the past, present, or future.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +22,9 @@ pub struct TimelineMeta {
     pub id: TimelineId,
     pub mode: TimelineMode,
     pub name: Option<String>,
+    /// Durable owner of a subject-owned Timeline. `None` means the Timeline
+    /// is a general-purpose Timeline and cannot host consent Events.
+    pub owner: Option<EntityId>,
     /// If this is a forked timeline, the parent id and the seq at which the fork happened.
     pub fork_point: Option<(TimelineId, Seq)>,
 }
@@ -29,6 +35,19 @@ impl TimelineMeta {
             id: TimelineId::new(),
             mode: TimelineMode::Live,
             name: Some(name.into()),
+            owner: None,
+            fork_point: None,
+        }
+    }
+
+    /// Create a root Timeline owned by one subject for consent contracts.
+    #[must_use]
+    pub fn root_owned(name: impl Into<String>, owner: EntityId) -> Self {
+        Self {
+            id: TimelineId::new(),
+            mode: TimelineMode::Live,
+            name: Some(name.into()),
+            owner: Some(owner),
             fork_point: None,
         }
     }
@@ -38,6 +57,24 @@ impl TimelineMeta {
             id: TimelineId::new(),
             mode: TimelineMode::Historical,
             name: Some(name.into()),
+            owner: None,
+            fork_point: Some((parent, at_seq)),
+        }
+    }
+
+    /// Create an owned Fork while preserving the subject owner.
+    #[must_use]
+    pub fn forked_from_owned(
+        parent: TimelineId,
+        at_seq: Seq,
+        name: impl Into<String>,
+        owner: EntityId,
+    ) -> Self {
+        Self {
+            id: TimelineId::new(),
+            mode: TimelineMode::Historical,
+            name: Some(name.into()),
+            owner: Some(owner),
             fork_point: Some((parent, at_seq)),
         }
     }

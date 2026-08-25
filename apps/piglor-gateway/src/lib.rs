@@ -27,8 +27,9 @@ use pos_core::{
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
-    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
+    ActionRejected, Capability, ConsentAppendPermit, ConsentAuthority, ConsentCapabilityToken,
+    ConsentCodecError, ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin,
+    ProposedAction,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
@@ -1252,7 +1253,12 @@ impl Gateway {
         let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
         let event = match self
             .store
-            .append_consent_grant(timeline, grant.clone(), self.limits.max_events_per_timeline)
+            .append_consent_grant(
+                timeline,
+                grant.clone(),
+                self.consent_authority.append_permit(),
+                self.limits.max_events_per_timeline,
+            )
             .await
         {
             Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
@@ -1321,6 +1327,7 @@ impl Gateway {
             .append_consent_revocation(
                 timeline,
                 revocation.clone(),
+                self.consent_authority.append_permit(),
                 self.limits.max_events_per_timeline,
                 reservation,
             )
@@ -1343,13 +1350,19 @@ impl Gateway {
                 return Err(error.into());
             }
         };
-        self.store
-            .remove_append_identities_bounded(
-                ingress_dedup_scope(revocation.subject_id),
-                CONSENT_DEDUP_CLEANUP_BATCH,
-            )
+        let scope = ingress_dedup_scope(revocation.subject_id);
+        let mut cleanup = self
+            .store
+            .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
             .await
             .map_err(GatewayError::from)?;
+        while cleanup.more_may_remain {
+            cleanup = self
+                .store
+                .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
+                .await
+                .map_err(GatewayError::from)?;
+        }
         Ok(event)
     }
 
@@ -2531,6 +2544,7 @@ mod tests {
             &mut self,
             timeline: TimelineId,
             drafts: &[EventDraft],
+            _permit: ConsentAppendPermit,
             max_owned_events: u64,
         ) -> Result<Option<Vec<Event>>, CoreError> {
             self.append_bounded(timeline, drafts, max_owned_events)

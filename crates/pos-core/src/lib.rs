@@ -36,11 +36,12 @@ pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
 };
 pub use consent::{
-    is_consent_event_type, required_modality_for_event, ConsentAuthority, ConsentCapabilityToken,
-    ConsentCodecError, ConsentError, ConsentGate, ConsentGrantedV1, ConsentRevocationFoldListener,
-    ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1,
-    EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS,
-    MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT, MODALITY_PERSONA,
+    is_consent_event_type, required_modality_for_event, ConsentAppendPermit, ConsentAuthority,
+    ConsentCapabilityToken, ConsentCodecError, ConsentError, ConsentGate, ConsentGrantedV1,
+    ConsentRevocationFoldListener, ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE,
+    MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT,
+    MODALITY_PERSONA,
 };
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};

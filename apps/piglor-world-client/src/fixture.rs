@@ -39,6 +39,7 @@ pub fn fixture_bytes() -> Vec<u8> {
                 id: TimelineId::from_ulid(fixed_ulid(TIMELINE_ID)),
                 mode: TimelineMode::Live,
                 name: Some("world-client-fixture".to_owned()),
+                owner: None,
                 fork_point: None,
             },
             head: Seq::from_u64(2),
