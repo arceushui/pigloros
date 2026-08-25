@@ -4363,7 +4363,7 @@ mod tests {
         ] {
             let invalid = replace_nested_array_field(
                 &archive,
-                &path,
+                path,
                 Value::Text("not-an-integer".to_owned()),
             )?;
             let mut invalid_bytes = Vec::new();
