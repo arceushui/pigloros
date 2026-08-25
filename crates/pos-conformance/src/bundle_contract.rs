@@ -28,6 +28,10 @@ const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/adr-059-execution-matrix.json";
+const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
+    "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
+    "LIVE-001", "ERA-001", "SEC-001",
+];
 
 /// Closed bundle failures.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -1492,6 +1496,13 @@ fn validate_authority_inventory(
         .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
     if entries.len() != 11 {
         return Err(BundleContractErrorV1::MemberMissing);
+    }
+    if entries
+        .iter()
+        .zip(AUTHORITY_FIXTURE_IDS)
+        .any(|(entry, id)| json_text(entry, "fixture_id") != Ok(id))
+    {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     if json_text(inventory, "lifecycle")? == "Draft" {
         let mut fixture_ids = BTreeSet::new();
@@ -3838,7 +3849,6 @@ mod tests {
             serde_json::Value::String("pending".to_owned());
         let malformed_provenance = serde_json::to_vec(&malformed_provenance_value)?;
         let malformed_provenance_digest = *blake3::hash(&malformed_provenance).as_bytes();
-        let mut missing_review = signed_bundle(&draft_profile, BundleModeV1::Local)?;
         let mut missing_review_profile = draft_profile;
         missing_review_profile.lifecycle = ProfileLifecycleV1::Candidate;
         missing_review_profile.provenance_digest = malformed_provenance_digest;
@@ -3848,49 +3858,24 @@ mod tests {
             fixture.provenance.publication_review_digest = malformed_provenance_digest;
         }
         missing_review_profile.profile_digest = missing_review_profile.digest();
-        missing_review.manifest.lifecycle = ProfileLifecycleV1::Candidate;
-        let profile_index = missing_review
-            .members
-            .iter()
-            .position(|member| member.role == BundleMemberRoleV1::Profile)
-            .ok_or("missing profile member")?;
-        let profile_bytes = missing_review_profile.to_canonical_cbor()?;
-        missing_review.members[profile_index].bytes = profile_bytes;
-        missing_review.members[profile_index].digest =
-            *blake3::hash(&missing_review.members[profile_index].bytes).as_bytes();
-        missing_review.manifest.profile_digest = missing_review_profile.profile_digest;
-        missing_review.manifest.members[profile_index].digest =
-            missing_review.members[profile_index].digest;
-        missing_review.manifest.members[profile_index].size_bytes =
-            missing_review.members[profile_index].bytes.len() as u64;
-        let provenance_index = missing_review
-            .members
+        let (mut missing_review_members, _) =
+            bundle_inputs(&missing_review_profile, BundleModeV1::Local)?;
+        let provenance_index = missing_review_members
             .iter()
             .position(|member| member.role == BundleMemberRoleV1::Provenance)
             .ok_or("missing provenance member")?;
-        missing_review.members[provenance_index].bytes = malformed_provenance;
-        missing_review.members[provenance_index].digest = malformed_provenance_digest;
-        missing_review.manifest.members[provenance_index].digest =
-            missing_review.members[provenance_index].digest;
-        missing_review.manifest.members[provenance_index].size_bytes =
-            missing_review.members[provenance_index].bytes.len() as u64;
+        missing_review_members[provenance_index].bytes = malformed_provenance;
+        missing_review_members[provenance_index].digest = malformed_provenance_digest;
         assert_eq!(
-            missing_review.validate(),
+            validate_candidate_publication(&missing_review_profile, &missing_review_members),
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
 
         let mut missing_deletion = missing_review_profile;
         missing_deletion.fixtures[0].redaction_state = RedactionStateV1::EvidenceMissing;
         missing_deletion.fixtures[0].replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
-        missing_deletion.profile_digest = missing_deletion.digest();
-        let (members, expected_results) = bundle_inputs(&missing_deletion, BundleModeV1::Local)?;
         assert_eq!(
-            ConformanceBundleV1::materialize(
-                &missing_deletion,
-                BundleModeV1::Local,
-                members,
-                expected_results,
-            ),
+            validate_candidate_publication(&missing_deletion, &missing_review_members),
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())
