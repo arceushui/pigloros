@@ -823,16 +823,34 @@ fn independent_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleCo
 }
 
 fn independent_domain_digest(domain: &[u8], value: &Value) -> [u8; 32] {
-    // `ciborium::Value` is already restricted to the archive's encodable value
-    // set, and a `Vec<u8>` cannot fail as the serializer's writer. Keeping
-    // this helper infallible also prevents an impossible serializer error from
-    // becoming an untestable verifier branch.
-    let encoded = encode_archive_value(value).unwrap_or_default();
+    let mut writer = InfallibleCborWriter(Vec::new());
+    let encoded = match ciborium::into_writer(value, &mut writer) {
+        Ok(()) => writer.0,
+        Err(ciborium::ser::Error::Io(error)) => match error {},
+        Err(ciborium::ser::Error::Value(error)) => {
+            panic!("canonical in-memory CBOR value encoding failed: {error}");
+        }
+    };
     let mut input = Vec::with_capacity(domain.len() + encoded.len() + 1);
     input.extend_from_slice(domain);
     input.push(0);
     input.extend_from_slice(&encoded);
     *blake3::hash(&input).as_bytes()
+}
+
+struct InfallibleCborWriter(Vec<u8>);
+
+impl ciborium_io::Write for InfallibleCborWriter {
+    type Error = std::convert::Infallible;
+
+    fn write_all(&mut self, data: &[u8]) -> Result<(), Self::Error> {
+        self.0.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
