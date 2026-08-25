@@ -216,6 +216,7 @@ impl BundleMemberV1 {
     }
 
     #[cfg(test)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn authority(path: impl Into<String>, bytes: Vec<u8>, role: BundleMemberRoleV1) -> Self {
         debug_assert!(matches!(
             role,
@@ -5202,6 +5203,7 @@ mod coverage_entrypoints {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod instrumented_candidate_entrypoints {
     use super::tests;
     use super::{BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1};
