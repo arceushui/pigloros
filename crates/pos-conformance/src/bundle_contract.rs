@@ -4354,7 +4354,13 @@ mod tests {
         let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
         let archive: Value =
             ciborium::from_reader(std::io::Cursor::new(bundle.to_canonical_cbor()?))?;
-        for path in [[2, 1], [2, 2], [2, 4, 0, 3], [2, 5, 0, 1], [2, 5, 0, 3]] {
+        for path in [
+            &[2, 1][..],
+            &[2, 2][..],
+            &[2, 4, 0, 3][..],
+            &[2, 5, 0, 1][..],
+            &[2, 5, 0, 3][..],
+        ] {
             let invalid = replace_nested_array_field(
                 &archive,
                 &path,
