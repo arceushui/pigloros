@@ -108,6 +108,15 @@ if [[ ! -s "${fixture_root}/SHA256SUMS" ]]; then
   exit 1
 fi
 
+jq -e '
+  .candidate_status == "approved" and
+  .deletion_review == "approved" and
+  .secret_scan == "clean"
+' "${fixture_root}/support/provenance.json" >/dev/null || {
+  echo "Candidate publication review evidence is missing or not approved" >&2
+  exit 1
+}
+
 (cd "${fixture_root}" && sha256sum --check --strict SHA256SUMS)
 
 for input in "${inputs[@]}"; do
