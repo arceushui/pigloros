@@ -1236,9 +1236,8 @@ fn validate_expected_results(
                 }
                 bytes.clone()
             }
-            typed_or_divergent => {
-                crate::expected_result_bytes(typed_or_divergent).unwrap_or_default()
-            }
+            typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)
+                .map_err(|_| BundleContractErrorV1::EncodingFailed)?,
         };
         if expected.digest != *blake3::hash(&expected_bytes).as_bytes() {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -1564,6 +1563,7 @@ mod tests {
         RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1,
         VerificationOutcomeV1,
     };
+    use pos_crypto::canonical;
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
