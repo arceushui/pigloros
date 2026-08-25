@@ -4749,6 +4749,12 @@ mod tests {
         let mut candidate = profile();
         candidate.lifecycle = ProfileLifecycleV1::Candidate;
 
+        let (draft_members, _) = bundle_inputs(&profile(), BundleModeV1::Local)?;
+        assert_eq!(
+            validate_authority_members(&candidate, &draft_members),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
+
         let (candidate_inventory, authority_members) = authority_inventory_materialized_path()?;
         let candidate_result_digest = authority_members
             .iter()
