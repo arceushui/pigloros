@@ -6698,6 +6698,28 @@ pub mod tests {
         assert!(strict_codec::decode_consent(&Value::Array(Vec::new())).is_err());
     }
 
+    #[test]
+    fn consent_audit_verifier_accepts_one_effective_revocation() {
+        let audit = ConsentAuditV1 {
+            subject: "subject-1".to_owned(),
+            requested_after_seq: 4,
+            effective_after_seq: 5,
+            revocation_event_seq: 5,
+            revocation_event_type: "consent.revoked.v1".to_owned(),
+            revocation_payload_digest: [7; 32],
+            halted_at_tick_boundary: true,
+        };
+        let events = [AuthoritativeEventV1 {
+            seq: 5,
+            tick: 2,
+            entity: "subject-1".to_owned(),
+            event_type: "consent.revoked.v1".to_owned(),
+            payload_digest: [7; 32],
+            causation_seq: None,
+        }];
+        assert_eq!(verify_consent_audit(&audit, &events), Ok(()));
+    }
+
     fn test_authorization_fixtures() -> (PrincipalRefV1, CapabilityGrantV1, AuthorizationDecisionV1)
     {
         let principal = PrincipalRefV1 {

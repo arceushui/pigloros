@@ -9624,6 +9624,7 @@ mod coverage_entrypoints {
             rusqlite::params![child.id().to_string()],
         ));
         expect_err(store.logical_head(child.id()));
+        expect_err(store.logical_head_unchecked(child.id()));
     }
 
     #[test]
@@ -9856,6 +9857,26 @@ mod coverage_entrypoints {
         assert!(
             matches!(outcome, Ok(GeographicAdmissionOutcome::OutcomeUnknown)),
             "link tamper outcome: {outcome:?}"
+        );
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("geo-cell-consent-linkage-tamper"));
+        let entity = EntityId::new();
+        let (consent, fence, request) = tests::geo_cell_request(timeline.id(), entity);
+        ok(store.set_geo_cell_admission_consent_record(consent));
+        ok(store.set_geo_cell_admission_fence(timeline.id(), entity, fence));
+        ok(store.conn.execute_batch(
+            "CREATE TRIGGER tamper_geo_cell_consent_linkage AFTER INSERT ON geographic_cell_admission_dedup
+             BEGIN
+                 UPDATE geographic_cell_admission_consent_records
+                 SET consent_record_cbor = X'74616d70657265642d636f6e73656e74',
+                     consent_record_hash = X'41cde6d9f404d9e85ae9d3b323464cb9afe96288b380e05d4a48f0590f8caf4a';
+             END",
+        ));
+        let outcome = store.admit(request);
+        assert!(
+            matches!(outcome, Ok(GeographicAdmissionOutcome::OutcomeUnknown)),
+            "consent linkage tamper outcome: {outcome:?}"
         );
     }
 
