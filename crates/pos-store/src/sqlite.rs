@@ -9284,10 +9284,8 @@ mod tests {
         let (callback_called_tx, callback_called_rx) = std::sync::mpsc::channel();
 
         let (destruction_result, signing_result) = std::thread::scope(|scope| {
-            let destruction_handle = scope.spawn(move || {
-                let result = destruction_store.destroy_key_registry(request);
-                result
-            });
+            let destruction_handle =
+                scope.spawn(move || destruction_store.destroy_key_registry(request));
             destruction_started_rx.recv().test_ok();
 
             let signing_handle = scope.spawn(move || {

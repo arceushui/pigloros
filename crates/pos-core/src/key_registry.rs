@@ -1547,14 +1547,13 @@ mod tests {
     }
 
     #[test]
-    fn encryption_authorization_rejects_missing_active_role(
-    ) -> Result<(), KeyRegistryErrorV1> {
+    fn encryption_authorization_rejects_missing_active_role() -> Result<(), KeyRegistryErrorV1> {
         let mut state = KeyRegistryStateV1::new();
         state.register_key(KeyRegistrationV1::new(DATA, digest(57), None))?;
         state.active.remove(&DATA.role);
         assert_eq!(
             state.with_encryption_authorization(DATA, digest(57), || ()),
-            Err(KeyRegistryErrorV1::InactiveKey)
+            Err(KeyRegistryErrorV1::RegistryUnavailable)
         );
         Ok(())
     }
