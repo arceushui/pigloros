@@ -7141,4 +7141,94 @@ mod instrumented_candidate_entrypoints {
         );
         Ok(())
     }
+
+    #[test]
+    fn public_bundle_contract_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        let unsigned = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let bundle = unsigned.sign(&signing_key)?;
+        assert!(bundle.validate().is_ok());
+        let archive = bundle.to_canonical_cbor()?;
+        assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
+        assert_eq!(verify_archive_independently(&archive), Ok(()));
+        assert!(bundle.bundle_digest()?.iter().any(|byte| *byte != 0));
+
+        let mut invalid_magic = bundle.clone();
+        invalid_magic.manifest.magic = "invalid".to_owned();
+        assert_eq!(
+            invalid_magic.validate(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+
+        let mut invalid_profile = bundle.clone();
+        invalid_profile.manifest.profile_digest = [0; 32];
+        assert_eq!(
+            invalid_profile.validate(),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+
+        let mut invalid_member = bundle.clone();
+        invalid_member.members[0].bytes.push(0);
+        assert_eq!(
+            invalid_member.validate(),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut invalid_expected = bundle.clone();
+        invalid_expected.manifest.expected_results[0].digest = [0; 32];
+        assert_eq!(
+            invalid_expected.validate(),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        let mut trailing = archive.clone();
+        trailing.push(0);
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&trailing),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&trailing),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut air_gapped_profile = profile;
+        air_gapped_profile.profile_digest = air_gapped_profile.digest();
+        let (air_gapped_members, air_gapped_expected) =
+            tests::bundle_inputs(&air_gapped_profile, BundleModeV1::AirGapped)?;
+        let air_gapped = ConformanceBundleV1::materialize(
+            &air_gapped_profile,
+            BundleModeV1::AirGapped,
+            air_gapped_members,
+            air_gapped_expected,
+        )?
+        .sign(&signing_key)?;
+        assert_eq!(
+            verify_archive_independently(&air_gapped.to_canonical_cbor()?),
+            Ok(())
+        );
+
+        let mut candidate_profile = air_gapped_profile;
+        candidate_profile.lifecycle = super::ProfileLifecycleV1::Candidate;
+        candidate_profile.profile_digest = candidate_profile.digest();
+        let (candidate_members, candidate_expected) =
+            tests::bundle_inputs(&candidate_profile, BundleModeV1::Local)?;
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &candidate_profile,
+                BundleModeV1::Local,
+                candidate_members,
+                candidate_expected,
+            ),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
+        Ok(())
+    }
 }
