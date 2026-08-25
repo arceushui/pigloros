@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use piglor_ledger::{verify_source, Source, VerifyOutcome};
+use piglor_ledger::{verify_source, Source};
 use pos_core::{
-    CanonicalBytes, EntityId, Event, EventId, EventStore, Hash, KeyIdentityV1, KeyRegistrationV1,
+    CanonicalBytes, EntityId, Event, EventId, Hash, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryStateV1, KeyRoleV1, Kind, SchemaVersion, Seq, Signature, WallTime,
 };
 
@@ -43,12 +43,8 @@ fn public_store_verification_rejects_a_non_timeline_signature_role(
     drop(store);
 
     let report = verify_source(&Source::Store(PathBuf::from(database_path)), None, None)?;
-    match report.outcome {
-        VerifyOutcome::Mismatch { which, reason } => {
-            assert_eq!(which, "seq=1");
-            assert!(reason.contains("TimelineIntegritySigning"));
-        }
-        VerifyOutcome::Ok => return Err("expected a role mismatch".into()),
-    }
+    let rendered = report.to_string();
+    assert!(rendered.contains("FAIL: store tier — seq=1"));
+    assert!(rendered.contains("TimelineIntegritySigning"));
     Ok(())
 }
