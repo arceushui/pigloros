@@ -6907,6 +6907,31 @@ mod tests {
         assert!(child_error
             .to_string()
             .contains("missing its Fork sequence"));
+
+        let mut nested_store = new_store();
+        let root = nested_store.create_timeline("nested-root").test_ok();
+        nested_store
+            .append(root.id(), &[make_draft(EntityId::new(), b"root")])
+            .test_ok();
+        let child = nested_store
+            .fork(root.id(), Seq::from_u64(1), "nested-child")
+            .test_ok();
+        let grandchild = nested_store
+            .fork(child.id(), Seq::from_u64(1), "nested-grandchild")
+            .test_ok();
+        nested_store
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = 0 WHERE id = ?1",
+                params![grandchild.id().to_string()],
+            )
+            .test_ok();
+        let error = nested_store
+            .read(grandchild.id(), SeqRange::all())
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("Fork point precedes inherited history"));
     }
 
     #[test]
