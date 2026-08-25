@@ -5014,7 +5014,7 @@ mod coverage_entrypoints {
         let revocation = pos_core::ConsentRevokedV1 {
             subject_id: subject,
             grantee_id: pos_core::EntityId::new(),
-            grant_seq: 0,
+            grant_seq: 1,
             fence_seq: 1,
         };
         let draft = EventDraft::new(
