@@ -11469,12 +11469,10 @@ mod key_registry_coverage {
         store.destroy_key_registry(request)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn changed_tombstone_digest(
         registry: &KeyRegistryStateV1,
     ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(registry, &mut bytes)?;
-        let mut value: ciborium::value::Value = ciborium::from_reader(bytes.as_slice())?;
         fn replace_first_bytes(
             value: &mut ciborium::value::Value,
             from: &[u8; 32],
@@ -11495,6 +11493,9 @@ mod key_registry_coverage {
                 _ => false,
             }
         }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(registry, &mut bytes)?;
+        let mut value: ciborium::value::Value = ciborium::from_reader(bytes.as_slice())?;
         assert!(replace_first_bytes(&mut value, &[3; 32], [9; 32]));
         let mut changed_bytes = Vec::new();
         ciborium::into_writer(&value, &mut changed_bytes)?;
@@ -11660,6 +11661,7 @@ mod key_registry_coverage {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sqlite_public_save_rejects_tombstone_rewrite() -> Result<(), Box<dyn std::error::Error>> {
         let (registry, identity, material_digest) = registered_state()?;
         let mut store = SqliteStore::open_in_memory()?;
@@ -11670,6 +11672,7 @@ mod key_registry_coverage {
             Hash::from_bytes([2; 32]),
         ))?;
         let destroyed = store.load_key_registry()?.ok_or("registry missing")?;
+        store.save_key_registry(&destroyed)?;
         let changed_tombstone = changed_tombstone_digest(&destroyed)?;
         assert!(store.save_key_registry(&changed_tombstone).is_err());
         Ok(())
