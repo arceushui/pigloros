@@ -4699,9 +4699,11 @@ mod tests {
             .provenance
             .publication_review_digest = [9; 32];
         mismatched_review_profile.profile_digest = mismatched_review_profile.digest();
+        // The public pipeline reports the missing digest-bound support member
+        // before it reaches Candidate publication-evidence validation.
         assert_eq!(
             materialize_candidate_for_test(&mismatched_review_profile, &approved_members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
     }
