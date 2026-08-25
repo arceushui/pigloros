@@ -4080,6 +4080,177 @@ mod tests {
     }
 
     #[test]
+    fn supporting_validation_seams_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let (members, _) = bundle_inputs(&profile, BundleModeV1::Local)?;
+        assert_eq!(validate_supporting_members(&profile, &members), Ok(()));
+
+        let mut missing = members.clone();
+        missing.retain(|member| member.role != BundleMemberRoleV1::NormativeSpecification);
+        assert_eq!(
+            validate_supporting_members(&profile, &missing),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut empty = members.clone();
+        empty
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::NormativeSpecification)
+            .ok_or("missing normative member")?
+            .bytes
+            .clear();
+        assert_eq!(
+            validate_supporting_members(&profile, &empty),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut unbound = members;
+        unbound.push(BundleMemberV1::supporting(
+            "support/unbound",
+            b"unbound".to_vec(),
+            BundleMemberRoleV1::Notice,
+        ));
+        assert_eq!(
+            validate_supporting_members(&profile, &unbound),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authority_json_validation_seams_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+        let provenance: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))?;
+        assert!(json_object(&provenance, "authority_inventory").is_ok());
+        assert_eq!(
+            json_object(&provenance, "missing"),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(json_text(&provenance, "candidate_status"), Ok("pending"));
+        assert_eq!(
+            json_u64(&provenance, "candidate_status"),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            validate_provenance_authority_binding(&provenance, "Draft"),
+            Ok(())
+        );
+        let mut missing_matrix = provenance.clone();
+        missing_matrix["adr_059_execution_matrix"] = JsonValue::Null;
+        assert_eq!(
+            validate_provenance_authority_binding(&missing_matrix, "Draft"),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let inventory: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/expected-authority/inventory.json"
+        ))?;
+        assert_eq!(validate_authority_inventory(&inventory, &[]), Ok(()));
+        let mut missing_entries = inventory.clone();
+        missing_entries["entries"] = JsonValue::Null;
+        assert_eq!(
+            validate_authority_inventory(&missing_entries, &[]),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        let mut wrong_entry_count = inventory.clone();
+        wrong_entry_count["entries"] = JsonValue::Array(Vec::new());
+        assert_eq!(
+            validate_authority_inventory(&wrong_entry_count, &[]),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        let mut wrong_id = inventory.clone();
+        wrong_id["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned());
+        assert_eq!(
+            validate_authority_inventory(&wrong_id, &[]),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        let mut wrong_pending_field = inventory.clone();
+        wrong_pending_field["entries"][0]["fixture_bytes_digest"] =
+            JsonValue::String("00".repeat(32));
+        assert_eq!(
+            validate_authority_inventory(&wrong_pending_field, &[]),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let matrix: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/matrix/adr-059-complete.json"
+        ))?;
+        assert_eq!(validate_execution_matrix(&matrix), Ok(()));
+        for (field, value) in [
+            ("magic", JsonValue::String("wrong".to_owned())),
+            ("version", JsonValue::Number(2_u64.into())),
+            ("lifecycle", JsonValue::String("Candidate".to_owned())),
+            ("row_count", JsonValue::Number(11_u64.into())),
+            ("case_count", JsonValue::Number(191_u64.into())),
+        ] {
+            let mut invalid = matrix.clone();
+            invalid[field] = value;
+            assert_eq!(
+                validate_execution_matrix(&invalid),
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            );
+        }
+        for field in ["rows", "cases"] {
+            let mut invalid = matrix.clone();
+            invalid[field] = JsonValue::Null;
+            assert_eq!(
+                validate_execution_matrix(&invalid),
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_evidence_status_seams_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut candidate = profile();
+        candidate.lifecycle = ProfileLifecycleV1::Candidate;
+        let mut approved: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))?;
+        approved["candidate_status"] = JsonValue::String("approved".to_owned());
+        approved["deletion_review"] = JsonValue::String("approved".to_owned());
+        approved["secret_scan"] = JsonValue::String("clean".to_owned());
+        let approved_bytes = serde_json::to_vec(&approved)?;
+        let approved_digest = *blake3::hash(&approved_bytes).as_bytes();
+        candidate.provenance_digest = approved_digest;
+        for fixture in &mut candidate.fixtures {
+            fixture.provenance.source_digest = approved_digest;
+            fixture.provenance.build_digest = approved_digest;
+            fixture.provenance.publication_review_digest = approved_digest;
+        }
+        let (mut members, _) = bundle_inputs(&candidate, BundleModeV1::Local)?;
+        let provenance = members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance member")?;
+        provenance.bytes = approved_bytes;
+        provenance.digest = approved_digest;
+        assert_eq!(validate_candidate_publication(&candidate, &members), Ok(()));
+        for field in ["candidate_status", "deletion_review", "secret_scan"] {
+            let mut invalid = approved.clone();
+            invalid[field] = JsonValue::String("pending".to_owned());
+            let bytes = serde_json::to_vec(&invalid)?;
+            let digest = *blake3::hash(&bytes).as_bytes();
+            let mut invalid_members = members.clone();
+            let provenance = invalid_members
+                .iter_mut()
+                .find(|member| member.role == BundleMemberRoleV1::Provenance)
+                .ok_or("missing provenance member")?;
+            provenance.bytes = bytes;
+            provenance.digest = digest;
+            let mut invalid_candidate = candidate.clone();
+            invalid_candidate.provenance_digest = digest;
+            assert_eq!(
+                validate_candidate_publication(&invalid_candidate, &invalid_members),
+                Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn authority_rejection_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
