@@ -4012,7 +4012,7 @@ mod tests {
     fn authority_member_rejections(
         profile: &ConformanceProfileV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut members, _) = bundle_inputs(&profile, BundleModeV1::Local)?;
+        let (mut members, _) = bundle_inputs(profile, BundleModeV1::Local)?;
         let provenance_index = members
             .iter()
             .position(|member| member.role == BundleMemberRoleV1::Provenance)
@@ -4020,13 +4020,13 @@ mod tests {
         members[provenance_index].bytes = b"not-json".to_vec();
         members[provenance_index].digest = profile.provenance_digest;
         assert_eq!(
-            validate_authority_members(&profile, &members),
+            validate_authority_members(profile, &members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
-        let mut missing_matrix_members = bundle_inputs(&profile, BundleModeV1::Local)?.0;
+        let mut missing_matrix_members = bundle_inputs(profile, BundleModeV1::Local)?.0;
         missing_matrix_members.retain(|member| member.role != BundleMemberRoleV1::ExecutionMatrix);
         assert_eq!(
-            validate_authority_members(&profile, &missing_matrix_members),
+            validate_authority_members(profile, &missing_matrix_members),
             Err(BundleContractErrorV1::MemberMissing)
         );
         Ok(())
