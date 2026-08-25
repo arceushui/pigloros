@@ -1629,15 +1629,15 @@ mod tests {
         [
             include_bytes!("../../../fixtures/conformance/inputs/artifact-positive.json")
                 .as_slice(),
-            include_bytes!("../../../fixtures/conformance/inputs/empirical-independent.json")
+            include_bytes!("../../../fixtures/conformance/inputs/replay-negative.json").as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/knowledge-malformed.json")
                 .as_slice(),
             include_bytes!("../../../fixtures/conformance/inputs/gateway-resource-limit.json")
                 .as_slice(),
-            include_bytes!("../../../fixtures/conformance/inputs/knowledge-malformed.json")
-                .as_slice(),
-            include_bytes!("../../../fixtures/conformance/inputs/metric-downgrade.json").as_slice(),
             include_bytes!("../../../fixtures/conformance/inputs/plugin-deletion.json").as_slice(),
-            include_bytes!("../../../fixtures/conformance/inputs/replay-negative.json").as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/metric-downgrade.json").as_slice(),
+            include_bytes!("../../../fixtures/conformance/inputs/empirical-independent.json")
+                .as_slice(),
         ][index]
             .to_vec()
     }
@@ -1646,17 +1646,17 @@ mod tests {
         [
             include_bytes!("../../../fixtures/conformance/expected/artifact-positive.json")
                 .as_slice(),
-            include_bytes!("../../../fixtures/conformance/expected/empirical-independent.json")
-                .as_slice(),
-            include_bytes!("../../../fixtures/conformance/expected/gateway-resource-limit.json")
+            include_bytes!("../../../fixtures/conformance/expected/replay-negative.json")
                 .as_slice(),
             include_bytes!("../../../fixtures/conformance/expected/knowledge-malformed.json")
                 .as_slice(),
-            include_bytes!("../../../fixtures/conformance/expected/metric-downgrade.json")
+            include_bytes!("../../../fixtures/conformance/expected/gateway-resource-limit.json")
                 .as_slice(),
             include_bytes!("../../../fixtures/conformance/expected/plugin-deletion.json")
                 .as_slice(),
-            include_bytes!("../../../fixtures/conformance/expected/replay-negative.json")
+            include_bytes!("../../../fixtures/conformance/expected/metric-downgrade.json")
+                .as_slice(),
+            include_bytes!("../../../fixtures/conformance/expected/empirical-independent.json")
                 .as_slice(),
         ][index]
             .to_vec()
@@ -1948,6 +1948,91 @@ mod tests {
             .members
             .iter()
             .position(|member| member.expected_result)
+    }
+
+    fn materialized_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+
+        let mut value = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut value, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        value
+    }
+
+    fn write_materialized_file(
+        root: &std::path::Path,
+        relative: impl AsRef<std::path::Path>,
+        bytes: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn materialize_fixture_bundles_when_requested() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(output_root) = std::env::var_os("PIGLOROS_MATERIALIZE_CONFORMANCE") else {
+            return Ok(());
+        };
+        let output_root = std::path::PathBuf::from(output_root);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let layers = [
+            (ClaimLayerV1::ArtifactIntegrity, "artifact-integrity"),
+            (ClaimLayerV1::ReplayConformance, "replay-conformance"),
+            (
+                ClaimLayerV1::KnowledgeNonInterference,
+                "knowledge-non-interference",
+            ),
+            (
+                ClaimLayerV1::GatewayClientConformance,
+                "gateway-client-conformance",
+            ),
+            (ClaimLayerV1::PluginConformance, "plugin-conformance"),
+            (ClaimLayerV1::MetricConformance, "metric-conformance"),
+            (ClaimLayerV1::EmpiricalEvaluation, "empirical-evaluation"),
+        ];
+        for (index, (claim_layer, layer_name)) in layers.into_iter().enumerate() {
+            let template = profile_for_claim_layer(index, claim_layer);
+            for (lifecycle, lifecycle_name) in [
+                (ProfileLifecycleV1::Draft, "draft"),
+                (ProfileLifecycleV1::Candidate, "candidate"),
+            ] {
+                let mut profile = template.clone();
+                profile.lifecycle = lifecycle;
+                profile.profile_digest = profile.digest();
+                let profile_bytes = profile.to_canonical_cbor()?;
+                let profile_name = format!(
+                    "{layer_name}/{lifecycle_name}/CPF1-{}.cbor",
+                    materialized_hex(&profile.profile_digest)
+                );
+                write_materialized_file(&output_root, profile_name, &profile_bytes)?;
+                for (mode, mode_name) in [
+                    (BundleModeV1::Local, "local"),
+                    (BundleModeV1::AirGapped, "air-gapped"),
+                ] {
+                    let bundle = signed_bundle(&profile, mode)?;
+                    let archive = bundle.to_canonical_cbor()?;
+                    let bundle_digest = materialized_hex(&bundle.bundle_digest()?);
+                    let prefix = format!("{layer_name}/{lifecycle_name}");
+                    write_materialized_file(
+                        &output_root,
+                        format!("{prefix}/manifest-{mode_name}-{bundle_digest}.cbor"),
+                        &bundle.manifest_bytes()?,
+                    )?;
+                    write_materialized_file(
+                        &output_root,
+                        format!("{prefix}/bundle-{mode_name}-{bundle_digest}.cfb1"),
+                        &archive,
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
