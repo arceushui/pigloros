@@ -1,1 +1,54 @@
-cpf1 = [magic, version, profile-id, semantic-version, lifecycle, normative]
+# CPF1 public conformance schema (canonical CBOR array)
+
+cpf1 = [
+  magic: "CPF1",
+  version: 1,
+  profile-id: tstr,
+  semantic-version: tstr,
+  lifecycle: 0..3,
+  normative-spec-digest: digest,
+  execution-profile-digests: [* digest],
+  public-schema-digests: [* digest],
+  fixtures: [* fixture],
+  allowed-divergences: [* divergence],
+  evaluator-protocol: protocol,
+  independence-requirements: requirements,
+  compatibility-digest: digest,
+  limitations-digest: digest,
+  provenance-digest: digest,
+  previous-profile-digest: null / digest,
+  profile-digest: digest
+]
+
+fixture = [
+  case-id: tstr,
+  mandatory: bool,
+  claim-layer: 0..6,
+  execution-profile-digest: digest,
+  public-schema-digest: digest,
+  modes: [* 0..3],
+  subject-adapter: 0..2,
+  inputs: [* input-member],
+  expected: expected-result,
+  verification-outcome: 0..5,
+  verification-error: null / uint,
+  replay-claim: 0..5,
+  redaction-state: 0..3,
+  bounds: [8* uint],
+  capability-policy: [bool, [* tstr]],
+  provenance: [tstr, digest, digest, digest, digest, digest, digest],
+  compatibility-digest: digest
+]
+
+input-member = [member-id: tstr, size-bytes: uint, digest, provenance-digest: digest]
+expected-result = [kind: 0..2, canonical-bytes: null / bstr,
+                   canonical-digest: null / digest,
+                   typed-failure: null / uint,
+                   divergence: null / divergence]
+divergence = [classification: uint, first-coordinate: bstr]
+protocol = [protocol-id: tstr, protocol-digest: digest,
+            request-schema-digest: digest, report-schema-digest: digest,
+            hard-caps: [10* uint]]
+requirements = [technical: bool, authorship: bool, organizational: bool,
+                trust-policy-snapshot-digest: digest, requirements-digest: digest]
+digest = bstr .size 32

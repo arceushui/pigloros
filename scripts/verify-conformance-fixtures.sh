@@ -151,15 +151,6 @@ profile_layers=(
   metric-conformance
   empirical-evaluation
 )
-profile_inputs=(
-  artifact-positive.json
-  replay-negative.json
-  knowledge-malformed.json
-  gateway-resource-limit.json
-  plugin-deletion.json
-  metric-downgrade.json
-  empirical-independent.json
-)
 for index in "${!profile_layers[@]}"; do
   layer="${profile_layers[${index}]}"
   profile="${profile_root}/${layer}/profile.json"
@@ -169,23 +160,35 @@ for index in "${!profile_layers[@]}"; do
   }
   jq -e \
     --arg layer "${layer}" \
-    --arg input "inputs/${profile_inputs[${index}]}" \
-    --arg expected "expected/${profile_inputs[${index}]}" \
     --arg authority "expected-authority/inventory.json" \
     --arg authority_sha256 "${authority_inventory_sha256}" \
     --arg matrix "matrix/adr-059-complete.json" \
     --arg matrix_blake3 "${matrix_blake3_digest}" \
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
-    '.claim_layer == $layer and .input == $input and .expected == $expected and
+    '.claim_layer == $layer and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
       .adr_059_execution_matrix == $matrix and .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
       .adr_059_execution_matrix_status == "Draft" and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
+      (.fixtures | length == 7) and
+      ([.fixtures[].family] == ["positive", "negative", "malformed", "resource", "deletion", "downgrade", "independent-evaluation"]) and
       (if $layer == "knowledge-non-interference" then (.matrix == $matrix and .matrix_size_bytes == $matrix_size and .matrix_blake3_digest == $matrix_blake3) else true end)' \
     "${profile}" >/dev/null || {
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
   }
+  while IFS=$'\t' read -r input_path expected_path; do
+    for path in "${input_path}" "${expected_path}"; do
+      [[ "${path}" != /* && "${path}" != *".."* ]] || {
+        echo "unsafe profile fixture path for ${layer}: ${path}" >&2
+        exit 1
+      }
+      [[ -s "${fixture_root}/${path}" ]] || {
+        echo "missing profile fixture for ${layer}: ${path}" >&2
+        exit 1
+      }
+    done
+  done < <(jq -r '.fixtures[] | [.input, .expected] | @tsv' "${profile}")
 done
 
 if [[ ! -s "${fixture_root}/SHA256SUMS" ]]; then

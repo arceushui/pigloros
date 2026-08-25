@@ -21,12 +21,17 @@ if [[ -e "${output_root}" ]]; then
   echo "refusing to overwrite retained conformance publication: ${output_root}" >&2
   exit 1
 fi
-mkdir -p "${output_root}"
+first_output="$(mktemp -d "${TMPDIR:-/tmp}/pigloros-conformance-first.XXXXXX")"
+second_output="$(mktemp -d "${TMPDIR:-/tmp}/pigloros-conformance-second.XXXXXX")"
+trap 'rm -rf "${first_output}" "${second_output}"' EXIT
 
-PIGLOROS_MATERIALIZE_CONFORMANCE="${output_root}" \
 PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
-  cargo test -p pos-conformance --lib \
-  bundle_contract::tests::materialize_fixture_bundles_when_requested -- --exact
+  cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${first_output}"
+PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
+  cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${second_output}"
+diff -rq "${first_output}" "${second_output}"
+mkdir -p "$(dirname "${output_root}")"
+mv "${first_output}" "${output_root}"
 
 mapfile -t materialized_files < <(
   find "${output_root}" -type f \( -name '*.cbor' -o -name '*.cfb1' \) -print | sort

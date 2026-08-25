@@ -20,6 +20,12 @@ only by the materialization environment. The repository contains no publication
 private key; the archive's public verification key and signature remain part of
 the immutable CFB1 bytes.
 
+GitHub Actions artifacts are a temporary transport copy and are not the
+retention authority. A release or externally managed immutable object store
+must retain every source-addressed publication for at least 24 months and the
+latest two Stable major versions, whichever is longer. The source and output
+SHA256SUMS files make that handoff verifiable.
+
 Candidate authority records are bundled as typed immutable members only after
 the inventory reaches Candidate with concrete bytes and digests. Until then,
 the ADR-059 matrix and #172 inventory remain Draft; their unexecuted slots do

@@ -1,8 +1,15 @@
 {
   "profile_id": "pigloros.w8.empirical-evaluation.1.0.0",
   "claim_layer": "empirical-evaluation",
-  "input": "inputs/empirical-independent.json",
-  "expected": "expected/empirical-independent.json",
+  "fixtures": [
+    {"case_id": "artifact-positive", "family": "positive", "input": "inputs/artifact-positive.json", "expected": "expected/artifact-positive.json"},
+    {"case_id": "replay-negative", "family": "negative", "input": "inputs/replay-negative.json", "expected": "expected/replay-negative.json"},
+    {"case_id": "knowledge-malformed", "family": "malformed", "input": "inputs/knowledge-malformed.json", "expected": "expected/knowledge-malformed.json"},
+    {"case_id": "gateway-resource-limit", "family": "resource", "input": "inputs/gateway-resource-limit.json", "expected": "expected/gateway-resource-limit.json"},
+    {"case_id": "plugin-deletion", "family": "deletion", "input": "inputs/plugin-deletion.json", "expected": "expected/plugin-deletion.json"},
+    {"case_id": "metric-downgrade", "family": "downgrade", "input": "inputs/metric-downgrade.json", "expected": "expected/metric-downgrade.json"},
+    {"case_id": "empirical-independent", "family": "independent-evaluation", "input": "inputs/empirical-independent.json", "expected": "expected/empirical-independent.json"}
+  ],
   "authority_inventory": "expected-authority/inventory.json",
   "authority_inventory_sha256_digest": "5f60065a0cc39dd43e74eb0a373424006e4d23db8affa60a22bfa7ed12ab20c8",
   "adr_059_execution_matrix": "matrix/adr-059-complete.json",
