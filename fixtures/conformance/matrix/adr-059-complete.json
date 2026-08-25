@@ -68,7 +68,7 @@
       "fixture_id": "NI-NET-010",
       "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
       "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
-      "OpEq": "identical category/count with endpoint/body/timing absent; zero live calls in Air-Gapped, Replay, and Fork"
+      "OpEq": "identical category/count with endpoint/body/timing absent; zero live calls in deterministic Local, Air-Gapped, Replay, and Fork"
     },
     {
       "fixture_id": "NI-SERVICE-011",
@@ -358,7 +358,7 @@
         "logs",
         "evaluator bundle"
       ],
-      "classification": "deterministic/Air-Gapped network absent; denied/live sequence cannot expose body",
+      "classification": "deterministic Local/Air-Gapped network absent; denied/live sequence cannot expose body",
       "variants": [
         "S",
         "D",

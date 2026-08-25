@@ -493,6 +493,11 @@ fn fixture(
         "PiglorOS.CPF1FixtureRecord.v1",
         &serde_json::to_vec(record).unwrap_or_default(),
     );
+    let (replay_claim, redaction_state) = if family == "deletion" {
+        (ReplayClaimV1::StructuralOnly, RedactionStateV1::StructuralOnly)
+    } else {
+        (ReplayClaimV1::Exact, RedactionStateV1::None)
+    };
     Ok(FixtureDescriptorV1 {
         case_id: case_id.to_owned(),
         mandatory: true,
@@ -516,8 +521,8 @@ fn fixture(
         },
         expected_verification_outcome: VerificationOutcomeV1::VerifiedExact,
         expected_verification_error: None,
-        replay_claim: ReplayClaimV1::Exact,
-        redaction_state: RedactionStateV1::None,
+        replay_claim,
+        redaction_state,
         bounds: FixtureBoundsV1 {
             cpu_fuel: 1,
             memory_bytes: 1,
