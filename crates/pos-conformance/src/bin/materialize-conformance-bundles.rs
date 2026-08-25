@@ -185,7 +185,7 @@ fn profile_for_claim_layer(
                 limitations_digest,
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     let mut profile = ConformanceProfileV1 {
         profile_id: profile_id(claim_layer).to_owned(),
         semantic_version: "1.0.0".to_owned(),
@@ -214,7 +214,7 @@ fn profile_for_claim_layer(
     Ok(profile)
 }
 
-fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
+const fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
     match claim_layer {
         ClaimLayerV1::ArtifactIntegrity => "pigloros.w8.artifact-integrity.1.0.0",
         ClaimLayerV1::ReplayConformance => "pigloros.w8.replay-conformance.1.0.0",
@@ -234,10 +234,10 @@ fn fixture(
     notice_digest: [u8; 32],
     sbom_digest: [u8; 32],
     limitations_digest: [u8; 32],
-) -> Result<FixtureDescriptorV1, Box<dyn Error>> {
+) -> FixtureDescriptorV1 {
     let input = INPUTS[index];
     let expected = EXPECTED[index];
-    Ok(FixtureDescriptorV1 {
+    FixtureDescriptorV1 {
         case_id: format!("case-{index:02}"),
         mandatory: true,
         claim_layer,
@@ -286,7 +286,7 @@ fn fixture(
             limitations_digest,
         },
         compatibility_digest: digest(11),
-    })
+    }
 }
 
 fn evaluator_protocol() -> EvaluatorProtocolV1 {
