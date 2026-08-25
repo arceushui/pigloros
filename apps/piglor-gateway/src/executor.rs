@@ -2817,17 +2817,12 @@ mod tests {
             .begin_revocation_on_timeline(timeline, &revocation)
             .test_ok()
             .test_value();
+        let permit = authority.append_permit();
         let task = tokio::spawn({
             let executor = executor.clone();
             async move {
                 executor
-                    .append_consent_revocation(
-                        timeline,
-                        revocation,
-                        authority.append_permit(),
-                        10,
-                        reservation,
-                    )
+                    .append_consent_revocation(timeline, revocation, permit, 10, reservation)
                     .await
             }
         });
