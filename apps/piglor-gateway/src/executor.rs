@@ -375,7 +375,7 @@ impl ExecutorStore {
 
     fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
         match self {
-            Self::Generic(_) => Err(CoreError::GeographicAdmissionUnavailable),
+            Self::Generic(store) => store.logical_head(timeline),
             Self::GeoLocation(store) => store.protected_logical_head(timeline),
             Self::OwnTracks(store) => store.protected_logical_head(timeline),
         }
