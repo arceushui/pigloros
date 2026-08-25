@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
@@ -990,6 +992,7 @@ fn hex(bytes: &[u8; 32]) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use pos_conformance::{ExecutionModeV1, SafeErrorCodeV1};
