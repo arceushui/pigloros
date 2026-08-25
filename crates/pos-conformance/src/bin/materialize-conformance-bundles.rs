@@ -729,6 +729,13 @@ fn bundle_inputs_with_authority(
         BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
         BundleModeV1::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
     };
+    if !profile
+        .fixtures
+        .iter()
+        .any(|fixture| fixture.modes.contains(&execution_mode))
+    {
+        return Err("profile has no fixtures for the requested bundle mode".into());
+    }
     let mut members = Vec::new();
     let mut expected_results = Vec::new();
     for fixture in &profile.fixtures {
