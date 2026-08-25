@@ -4,7 +4,7 @@
   "input": "inputs/gateway-resource-limit.json",
   "expected": "expected/gateway-resource-limit.json",
   "authority_inventory": "expected-authority/inventory.json",
-  "authority_inventory_sha256_digest": "19b1c5fddc40857558b0ac645f19e78e2b8148fa94297c7cd89f55057f1e1836",
+  "authority_inventory_sha256_digest": "4e12e356f931dc7767922c4e1e519136c4859169940f9b87fc88018682780787",
   "adr_059_execution_matrix": "matrix/adr-059-complete.json",
   "adr_059_execution_matrix_blake3_digest": "d647bc0b56ad3b9a80c6750dbdafd977ded621294bc17ae0e68b40d525dde0d9",
   "adr_059_execution_matrix_status": "Draft",

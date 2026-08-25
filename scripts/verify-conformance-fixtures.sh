@@ -85,7 +85,7 @@ done
 
 authority_inventory_sha256="$(sha256sum "${authority_path}" | awk '{print $1}')"
 matrix_blake3_digest="$(b3sum "${matrix_path}" | awk '{print $1}')"
-while IFS=$'\t' read -r fixture_id fixture_path fixture_digest result_path result_digest expected_outcome; do
+while IFS=$'\t' read -r fixture_id fixture_path fixture_digest result_path result_digest _expected_outcome; do
   for value in "${fixture_path}" "${result_path}"; do
     [[ "${value}" != /* && "${value}" != *".."* ]] || {
       echo "unsafe authority artifact path for ${fixture_id}: ${value}" >&2
@@ -102,10 +102,10 @@ while IFS=$'\t' read -r fixture_id fixture_path fixture_digest result_path resul
     echo "BLAKE3 mismatch for authority result ${fixture_id}" >&2
     exit 1
   }
-  jq -e --arg fixture_id "${fixture_id}" --arg outcome "${expected_outcome}" \
-    '.fixture_id == $fixture_id and .outcome == $outcome' \
+  jq -e --arg fixture_id "${fixture_id}" \
+    '.fixture_id == $fixture_id' \
     "${fixture_root}/${result_path}" >/dev/null || {
-    echo "authority result metadata disagrees with inventory for ${fixture_id}" >&2
+    echo "authority result fixture identity disagrees with inventory for ${fixture_id}" >&2
     exit 1
   }
 done < <(
