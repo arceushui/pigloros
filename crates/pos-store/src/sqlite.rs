@@ -10005,7 +10005,7 @@ mod coverage_entrypoints {
         );
 
         let mut delete_error = tests::new_store();
-        insert_identity(&mut delete_error, 126, scope, 1);
+        insert_identity(&delete_error, 126, scope, 1);
         ok(delete_error.conn.execute_batch(
             "CREATE TRIGGER deny_identity_delete BEFORE DELETE ON append_identities
              BEGIN SELECT RAISE(ABORT, 'identity delete denied'); END",
@@ -10016,8 +10016,8 @@ mod coverage_entrypoints {
         );
 
         let mut marker_insert_error = tests::new_store();
-        insert_identity(&mut marker_insert_error, 127, scope, 1);
-        insert_identity(&mut marker_insert_error, 128, scope, 1);
+        insert_identity(&marker_insert_error, 127, scope, 1);
+        insert_identity(&marker_insert_error, 128, scope, 1);
         ok(marker_insert_error.conn.execute_batch(
             "CREATE TRIGGER deny_cleanup_insert BEFORE INSERT ON pending_append_identity_cleanup
              BEGIN SELECT RAISE(ABORT, 'cleanup insert denied'); END",
