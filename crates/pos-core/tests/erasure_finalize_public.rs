@@ -1,11 +1,13 @@
+use pos_core::erasure::{
+    target_closure_digest, ErasureAuthorizationDecisionV1, ErasureFreezeAdmissionV1,
+};
 use pos_core::{
-    target_closure_digest, ErasureAcknowledgementV1, ErasureArtifactClassV1,
-    ErasureArtifactTransitionV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1,
-    ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureFreezeAdmissionV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureAcknowledgementV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
+    ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
+    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
+    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
 };
 
 fn reference(value: u8) -> ErasureReferenceV1 {
@@ -94,7 +96,7 @@ impl ErasureCoordinatorPortV1 for PublicPort {
         &self,
         _request: ErasureReferenceV1,
         _provenance: ErasureReferenceV1,
-        _decision: pos_core::ErasureAuthorizationDecisionV1,
+        _decision: ErasureAuthorizationDecisionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
