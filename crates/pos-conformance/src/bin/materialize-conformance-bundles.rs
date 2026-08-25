@@ -494,7 +494,10 @@ fn fixture(
         &serde_json::to_vec(record).unwrap_or_default(),
     );
     let (replay_claim, redaction_state) = if family == "deletion" {
-        (ReplayClaimV1::StructuralOnly, RedactionStateV1::StructuralOnly)
+        (
+            ReplayClaimV1::StructuralOnly,
+            RedactionStateV1::StructuralOnly,
+        )
     } else {
         (ReplayClaimV1::Exact, RedactionStateV1::None)
     };

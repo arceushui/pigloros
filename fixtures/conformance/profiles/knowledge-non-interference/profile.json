@@ -16,7 +16,7 @@
   "adr_059_execution_matrix_blake3_digest": "bee73dd569a240dcc00a07aa625f88b793fdc03f59941ad579e5ca0e4622046c",
   "adr_059_execution_matrix_status": "Draft",
   "matrix": "matrix/adr-059-complete.json",
-  "matrix_size_bytes": 52606,
+  "matrix_size_bytes": 52633,
   "matrix_blake3_digest": "bee73dd569a240dcc00a07aa625f88b793fdc03f59941ad579e5ca0e4622046c",
   "execution_profiles": ["deterministic-local-v1", "deterministic-air-gapped-v1"],
   "bundle_modes": ["local", "air-gapped"]
