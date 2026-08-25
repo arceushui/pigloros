@@ -1252,6 +1252,8 @@ mod tests {
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         invalid_collection["fixtures"] = JsonValue::Array(vec![JsonValue::Null]);
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
+        invalid_collection["fixtures"] = JsonValue::Array(vec![invalid_fixture.clone(); 7]);
+        assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         assert!(fixture(
             &invalid_fixture,
             &context,
