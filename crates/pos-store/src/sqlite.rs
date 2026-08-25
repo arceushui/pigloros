@@ -11470,7 +11470,6 @@ mod key_registry_coverage {
     }
 
     #[cfg(test)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn changed_tombstone_digest(
         registry: &KeyRegistryStateV1,
     ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
