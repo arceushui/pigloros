@@ -369,16 +369,19 @@ pub trait EventStore: Send {
     ///
     /// # Errors
     ///
-    /// The default delegates to [`Self::append_bounded`], preserving existing
-    /// adapter failure behavior; protected adapters override it to bypass the
-    /// generic `consent.*` rejection only after validating the V1 contract.
+    /// The default rejects the operation. Protected adapters must override it
+    /// and validate the V1 contract before bypassing the generic boundary; a
+    /// third-party adapter cannot accidentally turn generic append authority
+    /// into Gateway-owned consent authority.
     fn append_consent_bounded(
         &mut self,
-        timeline: TimelineId,
-        drafts: &[EventDraft],
-        max_owned_events: u64,
+        _timeline: TimelineId,
+        _drafts: &[EventDraft],
+        _max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.append_bounded(timeline, drafts, max_owned_events)
+        Err(CoreError::Storage(
+            "Gateway-owned consent append is unsupported by this EventStore".to_owned(),
+        ))
     }
 
     /// Atomically append one externally identified draft or report its prior admission.
@@ -1305,12 +1308,12 @@ mod tests {
             Kind::new("consent.granted.v1"),
             CanonicalBytes::from_static(b"bounded-default"),
         );
-        let delegated_error = store
+        let default_error = store
             .append_consent_bounded(TimelineId::new(), &[consent_draft], 1)
             .test_err()?;
-        assert!(delegated_error
+        assert!(default_error
             .to_string()
-            .contains("generic bounded adapter rejects consent"));
+            .contains("Gateway-owned consent append is unsupported"));
 
         Ok(())
     }
