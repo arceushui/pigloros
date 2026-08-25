@@ -664,6 +664,13 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
     independent_verify_signature(&archive[2], &archive[4], &archive[5])?;
+    if lifecycle == 1 {
+        // Candidate publication remains closed until the authority inventory
+        // binds every execution-matrix coordinate to an independently produced
+        // expected-result record. Do not let a self-consistent archive bypass
+        // the same fail-closed publication rule used by materialization.
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
     let members = independent_array_bounded(&archive[3])?;
     let descriptors = independent_array_bounded(&manifest[4])?;
     if members.len() != descriptors.len() {
@@ -3092,7 +3099,16 @@ mod tests {
         );
         independent_envelope_rejections(&valid)?;
         independent_expected_result_rejections(&valid)?;
-        independent_profile_rejections(&bundle, &valid)
+        independent_profile_rejections(&bundle, &valid)?;
+
+        let mut candidate = valid;
+        if let Value::Array(fields) = &mut candidate {
+            if let Value::Array(manifest) = &mut fields[2] {
+                manifest[1] = Value::Integer(1_u64.into());
+            }
+        }
+        resign_archive(&mut candidate)?;
+        assert_independent_error(&candidate, BundleContractErrorV1::CandidateEvidenceMissing)
     }
 
     fn expected_member_index(bundle: &ConformanceBundleV1) -> Option<usize> {
