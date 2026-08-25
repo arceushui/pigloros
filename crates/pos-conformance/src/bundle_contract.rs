@@ -784,14 +784,14 @@ fn independent_verify_profile(
     let stable_evidence_digest = independent_domain_digest(
         b"PiglorOS.ConformanceProfileStableEvidence.v1",
         &Value::Array(Vec::new()),
-    )?;
+    );
     let recomputed_profile_digest = independent_domain_digest(
         b"PiglorOS.ConformanceProfile.v1",
         &Value::Array(vec![
             Value::Array(profile_identity),
             Value::Bytes(stable_evidence_digest.to_vec()),
         ]),
-    )?;
+    );
     if embedded_profile_digest != recomputed_profile_digest {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
@@ -818,32 +818,16 @@ fn independent_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleCo
         .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
 }
 
-fn independent_domain_digest(
-    domain: &[u8],
-    value: &Value,
-) -> Result<[u8; 32], BundleContractErrorV1> {
-    let mut writer = InfallibleCborWriter(Vec::new());
-    ciborium::into_writer(value, &mut writer)
-        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-    let encoded = writer.0;
+fn independent_domain_digest(domain: &[u8], value: &Value) -> [u8; 32] {
+    let mut encoded = Vec::new();
+    // `Vec<u8>` has an infallible `Write` implementation. The serializer's
+    // result therefore has no reachable error state at this boundary.
+    let _ = ciborium::into_writer(value, &mut encoded);
     let mut input = Vec::with_capacity(domain.len() + encoded.len() + 1);
     input.extend_from_slice(domain);
     input.push(0);
     input.extend_from_slice(&encoded);
-    Ok(*blake3::hash(&input).as_bytes())
-}
-
-struct InfallibleCborWriter(Vec<u8>);
-
-impl std::io::Write for InfallibleCborWriter {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.0.extend_from_slice(data);
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+    *blake3::hash(&input).as_bytes()
 }
 
 fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
