@@ -8811,6 +8811,40 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pending_cleanup_scope_decodes_and_rejects_invalid_bytes() {
+        let mut store = new_store();
+        let scope = AppendDedupScope::from_keyed_hash([7; 32]);
+        store
+            .conn
+            .execute(
+                "INSERT INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                rusqlite::params![scope.as_bytes().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            store.pending_append_identity_cleanup().test_ok(),
+            Some(scope)
+        );
+
+        store
+            .conn
+            .execute("DELETE FROM pending_append_identity_cleanup", [])
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                rusqlite::params![vec![1_u8; 31]],
+            )
+            .test_ok();
+        let error = store.pending_append_identity_cleanup().test_err();
+        assert!(error
+            .to_string()
+            .contains("invalid pending cleanup scope length"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn import_committed_fails_when_commit_hook_aborts() {
         let mut store = new_store();
         store.conn.commit_hook(Some(|| true)).test_ok();

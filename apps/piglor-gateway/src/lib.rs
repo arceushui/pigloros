@@ -1459,7 +1459,6 @@ impl Gateway {
                     "consent revocation was already fenced".to_owned(),
                 )))
             }
-            Err(error) => return Err(GatewayError::Store(CoreError::Storage(error.to_string()))),
         };
         let scope = ingress_dedup_scope(revocation.subject_id);
         let event = match self
@@ -3108,7 +3107,7 @@ mod tests {
             .test_ok();
         assert!(!first.duplicate);
 
-        for index in 0..CONSENT_DEDUP_CLEANUP_BATCH.get() {
+        for index in 0..CONSENT_DEDUP_CLEANUP_BATCH.get().saturating_mul(2) {
             let result = gateway
                 .append_identified_action(
                     &timeline.id().to_string(),
@@ -3141,6 +3140,8 @@ mod tests {
             )
             .await
             .test_ok();
+
+        gateway.run_pending_consent_cleanup_worker().await;
 
         let mut retried = None;
         for _ in 0..32 {
@@ -3180,6 +3181,44 @@ mod tests {
         ))
         .await;
         assert!(gateway.process_pending_consent_cleanup().await.is_err());
+        drop(gateway);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn scheduled_consent_cleanup_uses_fallback_runtime_without_tokio() {
+        let gateway = memory_gw();
+        std::thread::spawn({
+            let gateway = gateway.clone();
+            move || gateway.schedule_pending_consent_cleanup()
+        })
+        .join()
+        .test_ok();
+        std::thread::sleep(Duration::from_millis(10));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn append_draft_suppresses_consent_event_notice() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailList,
+        }));
+        let mut notices = gateway.subscribe();
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"scripted-consent"),
+        );
+        let event = gateway
+            .append_draft(TimelineId::new(), draft)
+            .await
+            .test_ok();
+        assert_eq!(event.event_type.as_str(), EVENT_TYPE_CONSENT_GRANTED_V1);
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
         drop(gateway);
     }
 

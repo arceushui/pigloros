@@ -162,44 +162,40 @@ pub(crate) fn ensure_gateway_consent_drafts(
     for (index, draft) in drafts.iter().enumerate() {
         let expected_seq =
             expected_first_seq.saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
-        match draft.event_type.as_str() {
-            pos_core::EVENT_TYPE_CONSENT_GRANTED_V1 => {
-                let grant = pos_core::ConsentGrantedV1::decode(&draft.payload)
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
-                if draft.entity != grant.subject_id || grant.grant_seq != expected_seq {
+        if draft.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_GRANTED_V1 {
+            let grant = pos_core::ConsentGrantedV1::decode(&draft.payload)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if draft.entity != grant.subject_id || grant.grant_seq != expected_seq {
+                return Err(CoreError::Storage(
+                    "consent grant coordinate mismatch".to_owned(),
+                ));
+            }
+            owner = match owner {
+                Some(owner) if owner != grant.subject_id => {
                     return Err(CoreError::Storage(
-                        "consent grant coordinate mismatch".to_owned(),
+                        "consent Timeline owner mismatch".to_owned(),
                     ));
                 }
-                owner = match owner {
-                    Some(owner) if owner != grant.subject_id => {
-                        return Err(CoreError::Storage(
-                            "consent Timeline owner mismatch".to_owned(),
-                        ));
-                    }
-                    Some(owner) => Some(owner),
-                    None => Some(grant.subject_id),
-                };
+                Some(owner) => Some(owner),
+                None => Some(grant.subject_id),
+            };
+        } else {
+            let revocation = pos_core::ConsentRevokedV1::decode(&draft.payload)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if draft.entity != revocation.subject_id || revocation.fence_seq != expected_seq {
+                return Err(CoreError::Storage(
+                    "consent revocation coordinate mismatch".to_owned(),
+                ));
             }
-            pos_core::EVENT_TYPE_CONSENT_REVOKED_V1 => {
-                let revocation = pos_core::ConsentRevokedV1::decode(&draft.payload)
-                    .map_err(|error| CoreError::Storage(error.to_string()))?;
-                if draft.entity != revocation.subject_id || revocation.fence_seq != expected_seq {
+            owner = match owner {
+                Some(owner) if owner != revocation.subject_id => {
                     return Err(CoreError::Storage(
-                        "consent revocation coordinate mismatch".to_owned(),
+                        "consent Timeline owner mismatch".to_owned(),
                     ));
                 }
-                owner = match owner {
-                    Some(owner) if owner != revocation.subject_id => {
-                        return Err(CoreError::Storage(
-                            "consent Timeline owner mismatch".to_owned(),
-                        ));
-                    }
-                    Some(owner) => Some(owner),
-                    None => Some(revocation.subject_id),
-                };
-            }
-            _ => return Err(CoreError::TimelineNotFound(timeline)),
+                Some(owner) => Some(owner),
+                None => Some(revocation.subject_id),
+            };
         }
     }
     owner.ok_or_else(|| CoreError::Storage("consent Timeline owner is missing".to_owned()))
@@ -449,6 +445,108 @@ mod tests {
             checked_logical_head(u64::MAX, 1),
             Err(CoreError::Storage(_))
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_draft_guards_cover_revocation_and_owner_failures() {
+        let timeline = pos_core::TimelineId::new();
+        let subject = pos_core::EntityId::new();
+        let other = pos_core::EntityId::new();
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: pos_core::EntityId::new(),
+            purpose: "store-guard".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let grant_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            grant.encode().test_ok(),
+        );
+        assert!(ensure_gateway_consent_revocation(&[], timeline).is_err());
+        let grant_owner_error = ensure_gateway_consent_drafts(
+            std::slice::from_ref(&grant_draft),
+            timeline,
+            Some(other),
+            1,
+        )
+        .test_err();
+        assert!(grant_owner_error.to_string().contains("owner mismatch"));
+
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let revocation_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            revocation.encode().test_ok(),
+        );
+        let revocation_owner_error = ensure_gateway_consent_drafts(
+            std::slice::from_ref(&revocation_draft),
+            timeline,
+            Some(other),
+            1,
+        )
+        .test_err();
+        assert!(revocation_owner_error
+            .to_string()
+            .contains("owner mismatch"));
+    }
+
+    fn assert_consent_store_authority_boundary(store: &mut dyn EventStore) {
+        let timeline = store.create_timeline("consent-authority").test_ok();
+        let subject = EntityId::new();
+        let draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"grant"),
+        );
+        let authority = pos_core::ConsentAuthority::new();
+        let permit = authority.append_permit();
+        let missing = store
+            .append_consent_bounded(timeline.id(), &[draft], permit, 1)
+            .test_err();
+        assert!(missing.to_string().contains("not bound"));
+
+        store.bind_consent_authority(permit).test_ok();
+        store.bind_consent_authority(permit).test_ok();
+        let foreign = pos_core::ConsentAuthority::new().append_permit();
+        assert!(store.bind_consent_authority(foreign).is_err());
+
+        let owned = store
+            .create_timeline_with_meta(pos_core::timeline::TimelineMeta::root_owned(
+                "owned-authority",
+                subject,
+            ))
+            .test_ok();
+        let fetched = store.get_timeline(owned.id()).test_ok().test_ok();
+        assert_eq!(fetched.meta.owner, Some(subject));
+        let child = store
+            .fork(owned.id(), pos_core::Seq::ZERO, "owned-child")
+            .test_ok();
+        assert_eq!(child.meta.owner, Some(subject));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_store_authority_boundary_is_shared_by_backends() {
+        let mut memory = open_store(StoreConfig::Memory).test_ok();
+        assert_consent_store_authority_boundary(memory.as_mut());
+        #[cfg(feature = "sqlite")]
+        {
+            let mut sqlite = open_store(StoreConfig::SqliteInMemory).test_ok();
+            assert_consent_store_authority_boundary(sqlite.as_mut());
+        }
     }
 
     #[test]

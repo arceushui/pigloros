@@ -129,6 +129,21 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owned_root_and_fork_preserve_subject_owner() {
+        let parent = TimelineId::new();
+        let owner = EntityId::new();
+        let root = TimelineMeta::root_owned("owned", owner);
+        assert_eq!(root.owner, Some(owner));
+        assert!(root.is_root());
+
+        let fork = TimelineMeta::forked_from_owned(parent, Seq::from_u64(7), "owned-fork", owner);
+        assert_eq!(fork.owner, Some(owner));
+        assert_eq!(fork.fork_point, Some((parent, Seq::from_u64(7))));
+        assert!(!fork.is_root());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn forked_timeline_records_parent_and_seq() -> Result<(), Box<dyn std::error::Error>> {
         let parent = TimelineId::new();
         let at_seq = Seq::from_u64(42);

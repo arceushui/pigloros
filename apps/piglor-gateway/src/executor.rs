@@ -2680,6 +2680,9 @@ mod tests {
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(Command::PendingAppendIdentityCleanup { reply }, receiver);
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::RootCount { maximum: 1, reply }, receiver);
 
         let (reply, receiver) = tokio::sync::oneshot::channel();

@@ -1475,6 +1475,18 @@ mod tests {
             .test_err()?
             .to_string()
             .contains("atomic bounded append"));
+        let err = store
+            .append_consent_revocation_bounded(
+                id,
+                &[],
+                ConsentAuthority::new().append_permit(),
+                1,
+                AppendDedupScope::from_keyed_hash([8; 32]),
+            )
+            .test_err()?;
+        assert!(matches!(err, CoreError::Storage(_)));
+        let pending = store.pending_append_identity_cleanup().test_ok()?;
+        assert!(pending.is_none());
         let err = store.logical_head(id).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
         assert!(store.read_own(id, SeqRange::all()).is_ok());
