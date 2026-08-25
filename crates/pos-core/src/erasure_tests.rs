@@ -1204,6 +1204,7 @@ fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(),
     input.required_targets = vec![target];
     input.provenance = reference(9);
     input.inventories.artifacts = vec![inventory_result(target)];
+    coordinator.port.receipt_error = Some(ErasureErrorV1::PolicyConflict);
     assert_eq!(
         coordinator.finalize(reference(1), input),
         Err(ErasureErrorV1::PolicyConflict)
