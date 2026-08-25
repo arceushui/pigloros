@@ -597,7 +597,7 @@ fn public_profile_digest_encodes_every_closed_case_outcome_variant() {
             trust_root_digest: [13; 32],
         },
     }];
-    let _ = profile.digest();
+    assert_ne!(profile.digest(), [0; 32]);
 }
 
 #[test]
