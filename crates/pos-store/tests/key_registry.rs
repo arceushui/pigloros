@@ -148,7 +148,7 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
 
         let destroy_handle = scope.spawn(move || {
             let result = destruction_store.destroy_key_registry(destruction_request);
-            let _ = destruction_done_tx.send(());
+            drop(destruction_done_tx.send(()));
             result
         });
         let destruction_waited = matches!(
