@@ -7041,7 +7041,7 @@ mod instrumented_candidate_entrypoints {
     use super::tests;
     use super::{
         verify_archive_independently, BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1,
-        ConformanceBundleV1,
+        ConformanceBundleV1, ProfileLifecycleV1, Signature,
     };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -7233,6 +7233,132 @@ mod instrumented_candidate_entrypoints {
             ),
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn public_archive_boundaries_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let bundle = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?
+        .sign(&signing_key)?;
+        let archive = bundle.to_canonical_cbor()?;
+
+        for malformed in [
+            vec![0x01, 0],
+            vec![0xa0],
+            vec![0xc0],
+            vec![0xfa, 0, 0, 0, 0],
+        ] {
+            assert_eq!(
+                ConformanceBundleV1::from_canonical_cbor(&malformed),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+            assert_eq!(
+                verify_archive_independently(&malformed),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+        }
+
+        let mut encoded_value: ciborium::value::Value =
+            ciborium::from_reader(std::io::Cursor::new(&archive))?;
+        if let ciborium::value::Value::Array(fields) = &mut encoded_value {
+            if let ciborium::value::Value::Array(members) = &mut fields[3] {
+                if let ciborium::value::Value::Array(member) = &mut members[0] {
+                    member[2] = ciborium::value::Value::Integer(14_u64.into());
+                }
+            }
+        }
+        let mut invalid_member_role = Vec::new();
+        ciborium::into_writer(&encoded_value, &mut invalid_member_role)?;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&invalid_member_role),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut nested = vec![0x81; 34];
+        nested.push(0xf6);
+        assert!(verify_archive_independently(&nested).is_err());
+
+        let raw_archive = |first: &[u8], members: &[u8]| {
+            let mut bytes = vec![0x86];
+            bytes.extend_from_slice(first);
+            bytes.extend_from_slice(&[0x01, 0x80]);
+            bytes.extend_from_slice(members);
+            bytes.extend_from_slice(&[0x58, 0x20]);
+            bytes.extend_from_slice(&[0; 32]);
+            bytes.extend_from_slice(&[0x58, 0x40]);
+            bytes.extend_from_slice(&[0; 64]);
+            bytes
+        };
+        for members in [
+            vec![0x81, 0x83, 0x60, 0x40, 0x00],
+            vec![0x81, 0x83, 0x60, 0x41],
+            vec![0x81, 0x83, 0x79, 0x01, 0x01],
+            vec![0x81, 0x82, 0x60, 0x40],
+        ] {
+            assert!(verify_archive_independently(&raw_archive(&[0x60], &members)).is_err());
+        }
+        let mut exact_members = vec![0x9a, 0, 1, 0, 0];
+        for _ in 0..65_536 {
+            exact_members.extend_from_slice(&[0x83, 0x60, 0x40, 0x00]);
+        }
+        assert!(verify_archive_independently(&raw_archive(&[0x60], &exact_members)).is_err());
+
+        let mut invalid_unsigned = bundle.clone();
+        invalid_unsigned.manifest.lifecycle = ProfileLifecycleV1::Stable;
+        assert_eq!(
+            invalid_unsigned.validate(),
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
+        let mut invalid_signature = bundle.clone();
+        invalid_signature.signature = Signature::from_bytes([0; 64]);
+        assert_eq!(
+            invalid_signature.validate(),
+            Err(BundleContractErrorV1::SignatureInvalid)
+        );
+        let mut missing_profile = bundle.clone();
+        missing_profile
+            .members
+            .retain(|member| member.role != BundleMemberRoleV1::Profile);
+        assert_eq!(
+            missing_profile.validate(),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+
+        let mut limited_profiles = [profile.clone(), profile.clone(), profile];
+        limited_profiles[0]
+            .evaluator_protocol
+            .hard_caps
+            .max_member_path_bytes = 1;
+        limited_profiles[1]
+            .evaluator_protocol
+            .hard_caps
+            .max_member_bytes = 1;
+        limited_profiles[2]
+            .evaluator_protocol
+            .hard_caps
+            .max_total_bundle_bytes = 1;
+        for mut limited_profile in limited_profiles {
+            limited_profile.profile_digest = limited_profile.digest();
+            let (limited_members, limited_expected) =
+                tests::bundle_inputs(&limited_profile, BundleModeV1::Local)?;
+            assert_eq!(
+                ConformanceBundleV1::materialize(
+                    &limited_profile,
+                    BundleModeV1::Local,
+                    limited_members,
+                    limited_expected,
+                ),
+                Err(BundleContractErrorV1::MemberOutOfBounds)
+            );
+        }
         Ok(())
     }
 }
