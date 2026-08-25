@@ -598,7 +598,9 @@ fn json_string_array<'a>(
     value
         .get(field)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| format!("canonical profile array is missing: {field}").into())?
+        .ok_or_else(|| -> Box<dyn Error> {
+            format!("canonical profile array is missing: {field}").into()
+        })?
         .iter()
         .map(|value| {
             value.as_str().ok_or_else(|| {
@@ -810,12 +812,17 @@ fn append_authority_artifact(
     let source_path = json_text(entry, path_field)?;
     let relative_path = safe_authority_relative_path(source_path)?;
     let bytes = std::fs::read(authority_root.join(relative_path))?;
+    let artifact_fixture_id = serde_json::from_slice::<JsonValue>(&bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("fixture_id")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+        });
     if bytes.is_empty()
         || decode_hex(json_text(entry, digest_field)?) != Some(*blake3::hash(&bytes).as_bytes())
-        || serde_json::from_slice::<JsonValue>(&bytes)
-            .ok()
-            .and_then(|value| value.get("fixture_id").and_then(JsonValue::as_str))
-            != entry.get("fixture_id").and_then(JsonValue::as_str)
+        || artifact_fixture_id.as_deref() != entry.get("fixture_id").and_then(JsonValue::as_str)
     {
         return Err("Candidate authority artifact does not match inventory".into());
     }
@@ -831,7 +838,7 @@ fn safe_authority_relative_path(path: &str) -> Result<&Path, Box<dyn Error>> {
         || relative.components().any(|component| {
             matches!(
                 component,
-                Component::ParentDir | Component::Root | Component::Prefix(_)
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
             )
         })
     {
