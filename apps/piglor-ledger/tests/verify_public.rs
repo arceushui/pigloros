@@ -13,7 +13,7 @@ fn public_store_verification_rejects_a_non_timeline_signature_role(
     let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
         path: database_path.to_string_lossy().into_owned(),
     })?;
-    let timeline = store.create_timeline("verify-public")?;
+    let timeline = store.create_timeline("ledger")?;
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
     let mut registry = KeyRegistryStateV1::new();
