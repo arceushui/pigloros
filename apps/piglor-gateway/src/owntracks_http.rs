@@ -644,10 +644,11 @@ mod tests {
         material.extend_from_slice(&secret);
         let mut store = pos_store::memory::MemoryStore::new();
         let timeline = store.create_timeline("owntracks-http").test_ok()?;
+        let entity = EntityId::new();
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
-                EntityId::new(),
+                entity,
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
