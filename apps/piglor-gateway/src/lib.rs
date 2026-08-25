@@ -1143,7 +1143,9 @@ impl Gateway {
         )?;
         token.authorize_event_type(&Kind::new("geo.location"))?;
         token.authorize_geo_resolution(effective_resolution)?;
-        self.admit_geo_location_from_core(request).await
+        let admission = self.admit_geo_location_from_core(request).await;
+        drop(_consent_timeline_guard);
+        admission
     }
 
     /// Authenticate, rate-limit, and admit one minimized `OwnTracks` update.
