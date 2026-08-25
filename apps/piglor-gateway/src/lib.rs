@@ -2543,7 +2543,7 @@ mod tests {
             &mut self,
             timeline: TimelineId,
             drafts: &[EventDraft],
-            _permit: ConsentAppendPermit,
+            _permit: pos_core::ConsentAppendPermit,
             max_owned_events: u64,
         ) -> Result<Option<Vec<Event>>, CoreError> {
             self.append_bounded(timeline, drafts, max_owned_events)
