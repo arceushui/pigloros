@@ -40,7 +40,7 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, ConsentAuthority, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -9417,6 +9417,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
+    use pos_core::ConsentAuthority;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
