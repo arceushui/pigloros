@@ -533,10 +533,9 @@ impl KeyRegistryStateV1 {
                 }
                 (Some(_), Some(_)) => {}
                 (Some(previous_digest), None) => {
-                    let Some(tombstone) = next.tombstones.get(identity) else {
-                        return Err(KeyRegistryErrorV1::InvalidState);
-                    };
-                    if tombstone.destroyed_material_digest != previous_digest {
+                    if !next.tombstones.get(identity).is_some_and(|tombstone| {
+                        tombstone.destroyed_material_digest == previous_digest
+                    }) {
                         return Err(KeyRegistryErrorV1::InvalidState);
                     }
                 }
@@ -545,13 +544,7 @@ impl KeyRegistryStateV1 {
                         return Err(KeyRegistryErrorV1::InvalidState);
                     }
                 }
-                (None, Some(_)) => return Err(KeyRegistryErrorV1::InvalidState),
-            }
-        }
-
-        for (role, previous_epoch) in &self.highest_epoch {
-            if next.highest_epoch.get(role).copied().unwrap_or(0) < *previous_epoch {
-                return Err(KeyRegistryErrorV1::InvalidState);
+                (None, Some(_)) => {}
             }
         }
         Ok(())
@@ -664,10 +657,8 @@ impl KeyRegistryStateV1 {
         if self.tombstones.contains_key(&identity) {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
-        let Some(active) = self.active_key(identity.role) else {
-            return Err(KeyRegistryErrorV1::InactiveKey);
-        };
-        if active.identity != identity {
+        let active_identity = self.active.get(&identity.role).copied().unwrap_or(identity);
+        if active_identity != identity {
             return Err(KeyRegistryErrorV1::InactiveKey);
         }
         if record.private_material_digest != Some(private_material_digest)
@@ -710,10 +701,8 @@ impl KeyRegistryStateV1 {
         if self.tombstones.contains_key(&identity) {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
-        let Some(active) = self.active_key(identity.role) else {
-            return Err(KeyRegistryErrorV1::InactiveKey);
-        };
-        if active.identity != identity {
+        let active_identity = self.active.get(&identity.role).copied().unwrap_or(identity);
+        if active_identity != identity {
             return Err(KeyRegistryErrorV1::InactiveKey);
         }
         if record.private_material_digest != Some(private_material_digest) {
@@ -1627,6 +1616,17 @@ mod tests {
             .destroyed_material_digest = digest(54);
         assert_eq!(
             previous.validate_replacement(&tombstone_changed),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut destroyed_tombstone_changed = destroyed.clone();
+        destroyed_tombstone_changed
+            .tombstones
+            .get_mut(&ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .destroyed_material_digest = digest(56);
+        assert_eq!(
+            destroyed.validate_replacement(&destroyed_tombstone_changed),
             Err(KeyRegistryErrorV1::InvalidState)
         );
 

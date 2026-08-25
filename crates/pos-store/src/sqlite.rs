@@ -2966,9 +2966,8 @@ impl EventStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         #[cfg(test)]
         if let Some((started, release)) = self.destruction_transaction_hook.take() {
-            if started.send(()).is_ok() {
-                assert!(release.recv().is_ok());
-            }
+            assert!(started.send(()).is_ok());
+            assert!(release.recv().is_ok());
         }
         let result = (|| {
             let mut registry = self.load_key_registry()?.ok_or_else(|| {
