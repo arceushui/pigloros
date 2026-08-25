@@ -601,6 +601,7 @@ pub(crate) struct StoreExecutor {
 }
 
 impl StoreExecutor {
+    #[cfg(test)]
     pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
         Self::spawn(ExecutorStore::Generic(store), None)
     }

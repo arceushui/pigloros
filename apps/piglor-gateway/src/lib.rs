@@ -920,11 +920,25 @@ impl Gateway {
         }
     }
 
+    fn schedule_pending_consent_cleanup(&self) {
+        let gateway = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match gateway.process_pending_consent_cleanup().await {
+                    Ok(Some(outcome)) if outcome.more_may_remain => {
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(Some(_)) | Ok(None) | Err(_) => break,
+                }
+            }
+        });
+    }
+
     /// Run one bounded consent-revocation cleanup pass.
     ///
-    /// Hosts should call this from their maintenance scheduler until it returns
-    /// `Ok(None)`.  Each invocation removes at most the adapter batch limit;
-    /// protected revocation never performs an unbounded synchronous scan.
+    /// The Gateway schedules this method after a revocation when a continuation
+    /// is required. Hosts may also call it from their maintenance scheduler;
+    /// each invocation removes at most the adapter batch limit.
     ///
     /// # Errors
     /// Returns the underlying bounded store error.  A failed scope remains
@@ -1429,6 +1443,7 @@ impl Gateway {
             .map_err(GatewayError::from)?;
         if cleanup.more_may_remain {
             self.enqueue_consent_cleanup(scope).await;
+            self.schedule_pending_consent_cleanup();
         }
         Ok(event)
     }
