@@ -35,6 +35,7 @@ fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, Co
 }
 
 #[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registry()?;
@@ -98,6 +99,35 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
     let (_, destroyed) = store.destroy_key_registry(valid_request)?;
     assert!(destroyed.key_record(identity).is_some());
+
+    fn replace_first_bytes(
+        value: &mut ciborium::value::Value,
+        from: &[u8; 32],
+        to: [u8; 32],
+    ) -> bool {
+        match value {
+            ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
+                *value = ciborium::value::Value::Bytes(to.to_vec());
+                true
+            }
+            ciborium::value::Value::Array(values) => values
+                .iter_mut()
+                .any(|value| replace_first_bytes(value, from, to)),
+            ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+                replace_first_bytes(key, from, to) || replace_first_bytes(value, from, to)
+            }),
+            ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
+            _ => false,
+        }
+    }
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&destroyed, &mut encoded)?;
+    let mut value: ciborium::value::Value = ciborium::from_reader(encoded.as_slice())?;
+    assert!(replace_first_bytes(&mut value, &[3; 32], [9; 32]));
+    let mut changed_encoded = Vec::new();
+    ciborium::into_writer(&value, &mut changed_encoded)?;
+    let changed_tombstone: KeyRegistryStateV1 = ciborium::from_reader(changed_encoded.as_slice())?;
+    assert!(store.save_key_registry(&changed_tombstone).is_err());
     assert!(store.save_key_registry(&KeyRegistryStateV1::new()).is_err());
     assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
