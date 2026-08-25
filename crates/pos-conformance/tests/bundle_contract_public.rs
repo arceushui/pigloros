@@ -10,7 +10,6 @@ use pos_conformance::{
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
-const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/adr-059-execution-matrix.json";
 const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
@@ -19,15 +18,21 @@ const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
 ];
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod fixtures {
+pub(crate) mod fixtures {
     use super::*;
 
     fn digest(bytes: &[u8]) -> [u8; 32] {
         *blake3::hash(bytes).as_bytes()
     }
 
-    fn hex(bytes: &[u8; 32]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    fn hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        output
     }
 
     fn append_path_component(input: &mut Vec<u8>, value: &str) {
@@ -54,11 +59,13 @@ mod fixtures {
         format!("expected/{}.bin", blake3::hash(&input).to_hex())
     }
 
-    fn profile(provenance_digest: [u8; 32]) -> ConformanceProfileV1 {
-        let input = b"public candidate input".to_vec();
-        let expected = b"public candidate expected".to_vec();
-        let schema_digest = digest(b"public schema");
-        let fixture = FixtureDescriptorV1 {
+    fn fixture(
+        provenance_digest: [u8; 32],
+        input: &[u8],
+        expected: Vec<u8>,
+        schema_digest: [u8; 32],
+    ) -> FixtureDescriptorV1 {
+        FixtureDescriptorV1 {
             case_id: "ART-001".to_owned(),
             mandatory: true,
             claim_layer: ClaimLayerV1::ArtifactIntegrity,
@@ -69,7 +76,7 @@ mod fixtures {
             inputs: vec![FixtureInputMemberV1 {
                 member_id: "input.json".to_owned(),
                 size_bytes: input.len() as u64,
-                digest: digest(&input),
+                digest: digest(input),
                 provenance_digest,
             }],
             expected: ExpectedResultV1::CanonicalBytes {
@@ -110,7 +117,35 @@ mod fixtures {
                 )),
             },
             compatibility_digest: [11; 32],
-        };
+        }
+    }
+
+    fn evaluator_protocol() -> EvaluatorProtocolV1 {
+        EvaluatorProtocolV1 {
+            protocol_id: "pigloros.evaluator.v1".to_owned(),
+            protocol_digest: [13; 32],
+            request_schema_digest: [14; 32],
+            report_schema_digest: [15; 32],
+            hard_caps: EvaluatorHardCapsV1 {
+                max_profile_bytes: 16 * 1024 * 1024,
+                max_cases: 65_536,
+                max_bundle_members: 65_536,
+                max_member_path_bytes: 256,
+                max_member_bytes: 64 * 1024 * 1024,
+                max_total_bundle_bytes: 1024 * 1024 * 1024,
+                max_compression_expansion: 100,
+                max_structural_nesting: 32,
+                max_coordinate_bytes: 128,
+                max_diagnostic_bytes: 1024 * 1024,
+            },
+        }
+    }
+
+    fn profile(provenance_digest: [u8; 32]) -> ConformanceProfileV1 {
+        let input = b"public candidate input";
+        let expected = b"public candidate expected".to_vec();
+        let schema_digest = digest(b"public schema");
+        let fixture = fixture(provenance_digest, input, expected, schema_digest);
         let mut profile = ConformanceProfileV1 {
             profile_id: "pigloros.public-candidate-test".to_owned(),
             semantic_version: "1.0.0".to_owned(),
@@ -122,24 +157,7 @@ mod fixtures {
             public_schema_digests: vec![schema_digest],
             fixtures: vec![fixture],
             allowed_divergences: Vec::new(),
-            evaluator_protocol: EvaluatorProtocolV1 {
-                protocol_id: "pigloros.evaluator.v1".to_owned(),
-                protocol_digest: [13; 32],
-                request_schema_digest: [14; 32],
-                report_schema_digest: [15; 32],
-                hard_caps: EvaluatorHardCapsV1 {
-                    max_profile_bytes: 16 * 1024 * 1024,
-                    max_cases: 65_536,
-                    max_bundle_members: 65_536,
-                    max_member_path_bytes: 256,
-                    max_member_bytes: 64 * 1024 * 1024,
-                    max_total_bundle_bytes: 1024 * 1024 * 1024,
-                    max_compression_expansion: 100,
-                    max_structural_nesting: 32,
-                    max_coordinate_bytes: 128,
-                    max_diagnostic_bytes: 1024 * 1024,
-                },
-            },
+            evaluator_protocol: evaluator_protocol(),
             independence_requirements: IndependenceRequirementsV1 {
                 technical_independence_required: true,
                 authorship_independence_required: true,
@@ -204,10 +222,8 @@ mod fixtures {
         Ok(members)
     }
 
-    pub(super) fn candidate_bundle() -> Result<
-        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
-        Box<dyn std::error::Error>,
-    > {
+    fn candidate_authority_data(
+    ) -> Result<(Vec<BundleMemberV1>, Vec<u8>), Box<dyn std::error::Error>> {
         let mut provenance: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/support/provenance.json"
         ))?;
@@ -239,18 +255,13 @@ mod fixtures {
         provenance["deletion_review"] = JsonValue::String("approved".to_owned());
         provenance["secret_scan"] = JsonValue::String("clean".to_owned());
         provenance["authority_inventory"]["status"] = JsonValue::String("Candidate".to_owned());
-        provenance["authority_inventory"]["sha256_digest"] = JsonValue::String(
-            Sha256::digest(
-                &authority_members
-                    .iter()
-                    .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
-                    .ok_or("missing inventory")?
-                    .bytes,
-            )
+        let inventory = authority_members
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-        );
+            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
+            .ok_or("missing inventory")?;
+        let inventory_digest = Sha256::digest(&inventory.bytes);
+        provenance["authority_inventory"]["sha256_digest"] =
+            JsonValue::String(hex(&inventory_digest));
         provenance["adr_059_execution_matrix"]["status"] =
             JsonValue::String("Candidate".to_owned());
         provenance["adr_059_execution_matrix"]["sha256_digest"] =
@@ -258,8 +269,14 @@ mod fixtures {
         provenance["adr_059_execution_matrix"]["executed_case_count"] =
             JsonValue::Number(192_u64.into());
         let provenance_bytes = serde_json::to_vec(&provenance)?;
-        let provenance_digest = digest(&provenance_bytes);
-        let profile = profile(provenance_digest);
+        Ok((authority_members, provenance_bytes))
+    }
+
+    fn candidate_members(
+        profile: &ConformanceProfileV1,
+        provenance_bytes: Vec<u8>,
+        mut authority_members: Vec<BundleMemberV1>,
+    ) -> (Vec<BundleMemberV1>, BundleExpectedResultV1) {
         let input = b"public candidate input".to_vec();
         let expected = b"public candidate expected".to_vec();
         let input_path = input_path(
@@ -310,19 +327,30 @@ mod fixtures {
             ),
         ];
         members.append(&mut authority_members);
-        let expected_results = vec![BundleExpectedResultV1 {
+        let expected_result = BundleExpectedResultV1 {
             case_id: "ART-001".to_owned(),
             claim_layer: ClaimLayerV1::ArtifactIntegrity,
             execution_profile_digest: [1; 32],
             mode: BundleModeV1::Local,
             member_path: expected_path,
             digest: digest(&expected),
-        }];
+        };
+        (members, expected_result)
+    }
+
+    pub(crate) fn candidate_bundle() -> Result<
+        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
+        Box<dyn std::error::Error>,
+    > {
+        let (authority_members, provenance_bytes) = candidate_authority_data()?;
+        let profile = profile(digest(&provenance_bytes));
+        let (members, expected_result) =
+            candidate_members(&profile, provenance_bytes, authority_members);
         Ok(ConformanceBundleV1::materialize(
             &profile,
             BundleModeV1::Local,
             members,
-            expected_results,
+            vec![expected_result],
         ))
     }
 }
