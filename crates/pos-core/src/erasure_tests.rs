@@ -1109,24 +1109,6 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         Err(ErasureErrorV1::AccessFreezeFailed)
     );
 
-    let mut bad_closure = test_port(true, vec![target]);
-    bad_closure.admitted_freeze_closure = Some(reference(99));
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(bad_closure, reference(2));
-    coordinator.submit(request()?, reference(3))?;
-    coordinator.authorize(reference(1), reference(9))?;
-    assert_eq!(
-        coordinator.freeze_inventory(
-            reference(1),
-            change(
-                ErasureLifecycleV1::AccessFrozen,
-                Some(10),
-                Vec::new(),
-                Vec::new(),
-            ),
-        ),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-
     let mut dispatch_failed = test_port(true, vec![target]);
     dispatch_failed.dispatch_error = Some(ErasureErrorV1::KeyDestructionFailed);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(dispatch_failed, reference(2));
@@ -1146,6 +1128,30 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
 
+    Ok(())
+}
+
+#[test]
+fn coordinator_rejects_a_host_freeze_closure_mismatch() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut port = test_port(true, vec![target]);
+    port.admitted_freeze_closure = Some(reference(99));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+
+    assert_eq!(
+        coordinator.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     Ok(())
 }
 
@@ -1176,7 +1182,7 @@ fn freeze_retry_reuses_the_durable_target_reservation_after_restart() -> Result<
             .records
             .borrow()
             .first()
-            .map(|record| record.reserved_targets()),
+            .map(ErasureCoordinatorRecordV1::reserved_targets),
         Some([target].as_slice())
     );
 
