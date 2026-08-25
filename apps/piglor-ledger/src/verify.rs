@@ -1211,9 +1211,8 @@ mod tests {
         let legacy_public_key = PublicKey::from_bytes(legacy_verifying_key.to_bytes());
         assert!(verify_store_event(&legacy, Some(legacy_public_key), None, true)?.is_none());
         legacy.signature = Some(Signature::from_bytes([0; 64]));
-        let (_, legacy_reason) = expect_mismatch(
-            verify_store_event(&legacy, Some(legacy_public_key), None, true)?.ok_or("missing")?,
-        )?;
+        let (_, legacy_reason) =
+            verify_store_event(&legacy, Some(legacy_public_key), None, true)?.ok_or("missing")?;
         assert!(!legacy_reason.is_empty());
         let registryless =
             run_store_event(event(), None, Some(legacy_public_key), None, true)?.test_ok()?;
