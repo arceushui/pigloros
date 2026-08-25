@@ -746,6 +746,131 @@ fn public_bundle_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+#[test]
+fn public_unsigned_bundle_contract_edges_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = signed_draft_bundle()?;
+
+    let mut invalid_lifecycle = bundle.clone();
+    invalid_lifecycle.manifest.lifecycle = ProfileLifecycleV1::Stable;
+    assert_eq!(
+        invalid_lifecycle.validate(),
+        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
+    );
+
+    let mut invalid_descriptor_path = bundle.clone();
+    invalid_descriptor_path.manifest.members[0].path = "renamed".to_owned();
+    assert_eq!(
+        invalid_descriptor_path.validate(),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+
+    let fixture_index = bundle
+        .members
+        .iter()
+        .position(|member| member.role == BundleMemberRoleV1::FixtureInput)
+        .ok_or("fixture input member is missing")?;
+    let mut invalid_member_role = bundle.clone();
+    invalid_member_role.manifest.members[fixture_index].role = BundleMemberRoleV1::Profile;
+    assert_eq!(
+        invalid_member_role.validate(),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+
+    let mut invalid_expected_flag = bundle.clone();
+    invalid_expected_flag.members[fixture_index].expected_result = true;
+    assert_eq!(
+        invalid_expected_flag.validate(),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+
+    let mut missing_expected_reference = bundle.clone();
+    missing_expected_reference.manifest.expected_results.clear();
+    assert_eq!(
+        missing_expected_reference.validate(),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+
+    let mut invalid_input_path = bundle.clone();
+    invalid_input_path.members[fixture_index].path = "inputs/not-declared.bin".to_owned();
+    invalid_input_path.manifest.members[fixture_index].path = "inputs/not-declared.bin".to_owned();
+    assert_eq!(
+        invalid_input_path.validate(),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn public_unsigned_bundle_member_edges_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = signed_draft_bundle()?;
+    let support_index = bundle
+        .members
+        .iter()
+        .position(|member| member.role == BundleMemberRoleV1::NormativeSpecification)
+        .ok_or("normative support member is missing")?;
+    let mut invalid_support_digest = bundle.clone();
+    invalid_support_digest.members[support_index].bytes.push(0);
+    assert_eq!(
+        invalid_support_digest.validate(),
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
+
+    let mut invalid_member_path = bundle.clone();
+    invalid_member_path.members[support_index].path = "../outside".to_owned();
+    invalid_member_path.manifest.members[support_index].path = "../outside".to_owned();
+    assert_eq!(
+        invalid_member_path.validate(),
+        Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
+    );
+
+    let mut missing_support = bundle.clone();
+    missing_support.members.remove(support_index);
+    missing_support.manifest.members.remove(support_index);
+    assert_eq!(
+        missing_support.validate(),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    let expected_index = bundle
+        .members
+        .iter()
+        .position(|member| member.role == BundleMemberRoleV1::ExpectedResult)
+        .ok_or("expected-result member is missing")?;
+    let mut invalid_expected_digest = bundle.clone();
+    invalid_expected_digest.manifest.expected_results[0].digest = [0; 32];
+    assert_eq!(
+        invalid_expected_digest.validate(),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let mut invalid_expected_role = bundle.clone();
+    invalid_expected_role.members[expected_index].expected_result = false;
+    assert_eq!(
+        invalid_expected_role.validate(),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+
+    let mut secret_member = bundle.clone();
+    secret_member.members[support_index].bytes = b"\"password\"".to_vec();
+    secret_member.members[support_index].digest =
+        *blake3::hash(&secret_member.members[support_index].bytes).as_bytes();
+    secret_member.manifest.members[support_index].size_bytes =
+        secret_member.members[support_index].bytes.len() as u64;
+    secret_member.manifest.members[support_index].digest =
+        secret_member.members[support_index].digest;
+    assert_eq!(
+        secret_member.validate(),
+        Err(pos_conformance::BundleContractErrorV1::SecretMaterialDetected)
+    );
+    Ok(())
+}
+
+fn signed_draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    Ok(fixtures::draft_bundle()?.sign(&signing_key)?)
+}
+
 fn assert_archive_rejected(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
