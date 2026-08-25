@@ -942,7 +942,9 @@ impl Gateway {
     fn schedule_pending_consent_cleanup(&self) {
         let gateway = self.clone();
         if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(gateway.run_pending_consent_cleanup_worker());
+            tokio::spawn(async move {
+                gateway.run_pending_consent_cleanup_worker().await;
+            });
         } else {
             let _ = std::thread::Builder::new()
                 .name("piglor-consent-cleanup".to_owned())
