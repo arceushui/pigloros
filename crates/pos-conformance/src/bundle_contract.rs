@@ -4001,6 +4001,17 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn authority_rejection_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
+        authority_member_rejections(&profile)?;
+        authority_provenance_rejections()?;
+        authority_inventory_rejections()?;
+        authority_matrix_rejection()?;
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_member_rejections(
+        profile: &ConformanceProfileV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut members, _) = bundle_inputs(&profile, BundleModeV1::Local)?;
         let provenance_index = members
             .iter()
@@ -4012,7 +4023,17 @@ mod tests {
             validate_authority_members(&profile, &members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        let mut missing_matrix_members = bundle_inputs(&profile, BundleModeV1::Local)?.0;
+        missing_matrix_members.retain(|member| member.role != BundleMemberRoleV1::ExecutionMatrix);
+        assert_eq!(
+            validate_authority_members(&profile, &missing_matrix_members),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        Ok(())
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_provenance_rejections() -> Result<(), Box<dyn std::error::Error>> {
         let mut provenance: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/support/provenance.json"
         ))?;
@@ -4021,7 +4042,20 @@ mod tests {
             validate_provenance_authority_binding(&provenance),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        let mut invalid_status_provenance: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))?;
+        invalid_status_provenance["authority_inventory"]["status"] =
+            JsonValue::String("Draft".to_owned());
+        assert_eq!(
+            validate_provenance_authority_binding(&invalid_status_provenance),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        Ok(())
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_inventory_rejections() -> Result<(), Box<dyn std::error::Error>> {
         let inventory_bytes =
             include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
         let mut invalid_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
@@ -4057,8 +4091,8 @@ mod tests {
         let mut wrong_id_members = authority_members.clone();
         let wrong_id_index = wrong_id_members
             .iter()
-            .position(|member| member.path.ends_with("fixtures/DIV-001.json"))
-            .ok_or("missing DIV-001 fixture")?;
+            .position(|member| member.path.ends_with("fixtures/RPL-001.json"))
+            .ok_or("missing RPL-001 fixture")?;
         wrong_id_members[wrong_id_index].bytes = br#"{"fixture_id":"WRONG"}"#.to_vec();
         wrong_id_members[wrong_id_index].digest =
             *blake3::hash(&wrong_id_members[wrong_id_index].bytes).as_bytes();
@@ -4083,7 +4117,11 @@ mod tests {
             validate_authority_inventory(&short_digest_inventory, &authority_members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        Ok(())
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authority_matrix_rejection() -> Result<(), Box<dyn std::error::Error>> {
         let mut invalid_matrix: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/matrix/adr-059-complete.json"
         ))?;
