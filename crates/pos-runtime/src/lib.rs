@@ -32,13 +32,6 @@ pub mod registry;
 pub mod scheduler;
 pub mod schema;
 
-/// Host-owned Event emitted when a session's consent revocation becomes durable.
-///
-/// The host registers this schema without assigning ownership to a Plugin so a
-/// revocation can be recovered from a Timeline without granting a Plugin the
-/// ability to revoke consent itself.
-pub const HOST_CONSENT_REVOCATION_EVENT_TYPE: &str = "pos.host.consent.revoked.v1";
-
 pub use composition::{PluginComposition, RegisteredEventSchema, RegisteredPlugin};
 pub use driver::{
     Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey, RecoveryEvent,
@@ -46,6 +39,6 @@ pub use driver::{
 };
 pub use error::RuntimeError;
 pub use recorder::{RecordedOutput, Recorder, RunMode};
-pub use registry::PluginRegistry;
+pub use registry::{OperationContext, PluginRegistry};
 pub use scheduler::TickScheduler;
 pub use schema::SchemaRegistry;

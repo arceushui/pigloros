@@ -42,7 +42,7 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -122,6 +122,8 @@ pub struct MemoryStore {
     event_ids: HashSet<EventId>,
     /// Opaque append identities retained only until their fixed horizon.
     append_identities: HashMap<AppendDedupKey, AppendIdentityRecord>,
+    /// Durable-equivalent markers for bounded revocation cleanup continuation.
+    pending_append_identity_cleanup: Vec<AppendDedupScope>,
     /// Durable-equivalent marker for Timelines containing protected evidence.
     geographic_timelines: HashSet<TimelineId>,
     /// The sole current authorization state for protected geographic admission.
@@ -144,6 +146,8 @@ pub struct MemoryStore {
     geographic_cell_snapshots: HashMap<AdmissionSnapshotId, AdmissionEntitlementSnapshotV1>,
     /// Immutable `geo.cell` Event-to-snapshot links.
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
+    /// Trusted Gateway authority bound to this adapter's protected append port.
+    consent_authority_permit: Option<ConsentAppendPermit>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -241,14 +245,6 @@ fn mutable_state(
     timelines
         .get_mut(&id)
         .ok_or(CoreError::TimelineNotFound(id))
-}
-
-fn unbounded_append_outcome(
-    outcome: Option<AppendOrDuplicateOutcome>,
-) -> Result<AppendOrDuplicateOutcome, CoreError> {
-    outcome.ok_or_else(|| {
-        CoreError::Storage("unbounded append unexpectedly hit an event limit".to_owned())
-    })
 }
 
 #[inline(never)]
@@ -432,6 +428,7 @@ impl MemoryStore {
             timelines: HashMap::new(),
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
+            pending_append_identity_cleanup: Vec::new(),
             geographic_timelines: HashSet::new(),
             owntracks_enrollment: OwnTracksEnrollmentStateV1::absent(),
             geographic_admission_dedup: HashMap::new(),
@@ -442,6 +439,7 @@ impl MemoryStore {
             geographic_cell_dedup: HashMap::new(),
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
+            consent_authority_permit: None,
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -871,6 +869,84 @@ impl MemoryStore {
         Ok(selected)
     }
 
+    fn append_bounded_with_boundary(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        max_owned_events: u64,
+        gateway_consent: bool,
+        permit: Option<ConsentAppendPermit>,
+        cleanup_scope: Option<AppendDedupScope>,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        if gateway_consent {
+            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent authority is not bound".to_owned())
+            })?;
+            let permit = permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent append permit is missing".to_owned())
+            })?;
+            if permit != bound_permit {
+                return Err(CoreError::Storage(
+                    "Gateway consent append permit does not match the bound authority".to_owned(),
+                ));
+            }
+        }
+        let validate = if gateway_consent {
+            crate::ensure_gateway_consent_types
+        } else {
+            crate::ensure_non_geographic_drafts
+        };
+        validate(drafts, timeline)
+            .and_then(|()| {
+                if gateway_consent {
+                    self.timeline(timeline).map(|_| ())
+                } else {
+                    self.ensure_generic_timeline_visibility(timeline)
+                }
+            })
+            .and_then(|()| {
+                // Visibility checked this key immediately above and no mutation
+                // occurs between the check and this read.
+                let timeline_state = &self.timelines[&timeline].timeline;
+                let owned_head = timeline_state.head.as_u64();
+                let logical_prefix = timeline_state
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64());
+                let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
+                let owner = if gateway_consent {
+                    Some(crate::ensure_gateway_consent_drafts(
+                        drafts,
+                        timeline,
+                        timeline_state.meta.owner,
+                        logical_prefix.saturating_add(owned_head).saturating_add(1),
+                    )?)
+                } else {
+                    None
+                };
+                if let Some(next_head) =
+                    crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
+                {
+                    crate::checked_logical_head(logical_prefix, next_head)?;
+                    let events =
+                        self.append_visible_with_prefix(timeline, drafts, logical_prefix)?;
+                    if let Some(scope) = cleanup_scope {
+                        if !self.pending_append_identity_cleanup.contains(&scope) {
+                            self.pending_append_identity_cleanup.push(scope);
+                        }
+                    }
+                    if let Some(owner) = owner {
+                        if let Some(state) = self.timelines.get_mut(&timeline) {
+                            state.timeline.meta.owner = Some(owner);
+                        }
+                    }
+                    Ok(Some(events))
+                } else {
+                    Ok(None)
+                }
+            })
+    }
+
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
     fn fork_chain(&self, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
         let mut chain = Vec::new();
@@ -1009,7 +1085,14 @@ impl MemoryStore {
             });
         }
 
-        let meta = TimelineMeta::forked_from(parent, at_seq, name);
+        let meta = self
+            .timelines
+            .get(&parent)
+            .and_then(|state| state.timeline.meta.owner)
+            .map_or_else(
+                || TimelineMeta::forked_from(parent, at_seq, name),
+                |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+            );
         let child = Timeline::new(meta);
         let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
         self.timelines
@@ -1072,6 +1155,10 @@ impl OwnTracksIngressStore for MemoryStore {
 }
 
 impl GeoLocationAdmissionStore for MemoryStore {
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        self.logical_head_unchecked(timeline)
+    }
+
     fn admit_geo_location(
         &mut self,
         request: GeoLocationAdmissionRequestV1,
@@ -1500,7 +1587,34 @@ impl GeographicReplayVerifier for MemoryStore {
     }
 }
 
+impl MemoryStore {
+    fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        let chain = self.fork_chain(id)?;
+        let mut logical_head = 0_u64;
+        for (index, timeline) in chain.timelines.iter().enumerate() {
+            let length = chain.segment_length(self, index, *timeline)?;
+            logical_head = logical_head
+                .checked_add(length)
+                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
+        }
+        Ok(Seq::from_u64(logical_head))
+    }
+}
+
 impl EventStore for MemoryStore {
+    fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
+        match self.consent_authority_permit {
+            Some(existing) if existing != permit => Err(CoreError::Storage(
+                "Gateway consent authority is already bound".to_owned(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.consent_authority_permit = Some(permit);
+                Ok(())
+            }
+        }
+    }
+
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
@@ -1527,28 +1641,43 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
         max_owned_events: u64,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        crate::ensure_non_geographic_drafts(drafts, timeline)
-            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| {
-                // Visibility checked this key immediately above and no mutation
-                // occurs between the check and this read.
-                let timeline_state = &self.timelines[&timeline].timeline;
-                let owned_head = timeline_state.head.as_u64();
-                let logical_prefix = timeline_state
-                    .meta
-                    .fork_point
-                    .map_or(0, |(_, fork)| fork.as_u64());
-                let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
-                if let Some(next_head) =
-                    crate::bounded_owned_head(owned_head, batch_len, max_owned_events)?
-                {
-                    crate::checked_logical_head(logical_prefix, next_head)?;
-                    self.append_visible_with_prefix(timeline, drafts, logical_prefix)
-                        .map(Some)
-                } else {
-                    Ok(None)
-                }
-            })
+        self.append_bounded_with_boundary(timeline, drafts, max_owned_events, false, None, None)
+    }
+
+    fn append_consent_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        self.append_bounded_with_boundary(
+            timeline,
+            drafts,
+            max_owned_events,
+            true,
+            Some(permit),
+            None,
+        )
+    }
+
+    fn append_consent_revocation_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        max_owned_events: u64,
+        cleanup_scope: AppendDedupScope,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_gateway_consent_revocation(drafts, timeline)?;
+        self.append_bounded_with_boundary(
+            timeline,
+            drafts,
+            max_owned_events,
+            true,
+            Some(permit),
+            Some(cleanup_scope),
+        )
     }
 
     fn append_or_duplicate(
@@ -1559,7 +1688,7 @@ impl EventStore for MemoryStore {
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
-            .and_then(unbounded_append_outcome)
+            .and_then(crate::unbounded_append_outcome)
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -1635,7 +1764,44 @@ impl EventStore for MemoryStore {
         let before = self.append_identities.len();
         self.append_identities
             .retain(|_, record| record.scope != scope);
+        self.pending_append_identity_cleanup
+            .retain(|pending| *pending != scope);
         Ok(before.saturating_sub(self.append_identities.len()))
+    }
+
+    fn remove_append_identities_bounded(
+        &mut self,
+        scope: AppendDedupScope,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        let mut matching: Vec<_> = self
+            .append_identities
+            .iter()
+            .filter(|(_, record)| record.scope == scope)
+            .map(|(key, record)| (record.expires_at, *key))
+            .collect();
+        matching.sort_unstable_by_key(|(expires_at, key)| (*expires_at, key.as_bytes()));
+        let more_may_remain = matching.len() > limit.get();
+        let removed = matching.len().min(limit.get());
+        for (_, key) in matching.into_iter().take(removed) {
+            self.append_identities.remove(&key);
+        }
+        if more_may_remain {
+            if !self.pending_append_identity_cleanup.contains(&scope) {
+                self.pending_append_identity_cleanup.push(scope);
+            }
+        } else {
+            self.pending_append_identity_cleanup
+                .retain(|pending| *pending != scope);
+        }
+        Ok(PurgeOutcome {
+            removed,
+            more_may_remain,
+        })
+    }
+
+    fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
+        Ok(self.pending_append_identity_cleanup.last().copied())
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -1701,15 +1867,7 @@ impl EventStore for MemoryStore {
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
         self.ensure_generic_timeline_visibility(id)?;
-        let chain = self.fork_chain(id)?;
-        let mut logical_head = 0_u64;
-        for (index, timeline) in chain.timelines.iter().enumerate() {
-            let length = chain.segment_length(self, index, *timeline)?;
-            logical_head = logical_head
-                .checked_add(length)
-                .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
-        }
-        Ok(Seq::from_u64(logical_head))
+        self.logical_head_unchecked(id)
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
@@ -4051,6 +4209,7 @@ mod tests {
             id: TimelineId::new(),
             mode: pos_core::timeline::TimelineMode::Historical,
             name: Some("child".to_owned()),
+            owner: None,
             fork_point: Some((root.id(), Seq::from_u64(1))),
         };
         let child = store.create_timeline_with_meta(child_meta).test_ok();
@@ -4359,7 +4518,6 @@ mod tests {
         let mut store = MemoryStore::new();
         assert!(mutable_state(&mut store.timelines, TimelineId::new()).is_err());
         assert!(store.state_mut(TimelineId::new()).is_err());
-        assert!(unbounded_append_outcome(None).is_err());
     }
 
     #[test]
@@ -4699,6 +4857,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
+    use pos_core::ConsentAuthority;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
@@ -4721,6 +4880,14 @@ mod coverage_entrypoints {
             pos_core::EntityId::new(),
             Kind::new("coverage.event"),
             pos_core::CanonicalBytes::from_static(payload),
+        )
+    }
+
+    fn keyed_draft(key: u8) -> EventDraft {
+        EventDraft::new(
+            pos_core::EntityId::new(),
+            Kind::new("coverage.event"),
+            pos_core::CanonicalBytes::from_vec(vec![key]),
         )
     }
 
@@ -4828,5 +4995,72 @@ mod coverage_entrypoints {
         let bounds = EventReadBounds::new(1024, usize::MAX, usize::MAX, 1_000_000);
         let _ = ok(store.read_bounded(timeline.id(), SeqRange::all(), bounds));
         let _ = ok(store.append_bounded(timeline.id(), &[draft(b"too-many")], 1));
+    }
+
+    #[test]
+    fn consent_append_rejects_a_missing_permit_after_authority_binding() {
+        let mut store = MemoryStore::new();
+        let timeline = ok(store.create_timeline("coverage-missing-permit"));
+        let authority = ConsentAuthority::new();
+        ok(store.bind_consent_authority(authority.append_permit()));
+        expect_err(store.append_bounded_with_boundary(timeline.id(), &[], 10, true, None, None));
+    }
+
+    #[test]
+    fn consent_revocation_and_cleanup_boundaries_are_instrumented() {
+        let mut store = MemoryStore::new();
+        let timeline = ok(store.create_timeline("coverage-revocation"));
+        let subject = pos_core::EntityId::new();
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: pos_core::EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 1,
+        };
+        let draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok(revocation.encode()),
+        );
+        let authority = ConsentAuthority::new();
+        let permit = authority.append_permit();
+        ok(store.bind_consent_authority(permit));
+        let consent_scope = AppendDedupScope::from_keyed_hash([101; 32]);
+        let appended = ok(store.append_consent_revocation_bounded(
+            timeline.id(),
+            std::slice::from_ref(&draft),
+            permit,
+            1,
+            consent_scope,
+        ));
+        assert_eq!(appended.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            ok(store.pending_append_identity_cleanup()),
+            Some(consent_scope)
+        );
+        assert_eq!(ok(store.remove_append_identities(consent_scope)), 0);
+        assert_eq!(ok(store.pending_append_identity_cleanup()), None);
+
+        let ordinary = ok(store.create_timeline("coverage-cleanup"));
+        let identity_scope = AppendDedupScope::from_keyed_hash([102; 32]);
+        for key in [103, 104] {
+            ok(store.append_or_duplicate(
+                ordinary.id(),
+                AppendIdentity::new(AppendDedupKey::from_keyed_hash([key; 32]), identity_scope),
+                WallTime::from_micros(1),
+                keyed_draft(key),
+            ));
+        }
+        let first =
+            ok(store.remove_append_identities_bounded(identity_scope, std::num::NonZeroUsize::MIN));
+        assert!(first.more_may_remain);
+        assert_eq!(
+            ok(store.pending_append_identity_cleanup()),
+            Some(identity_scope)
+        );
+        let second =
+            ok(store.remove_append_identities_bounded(identity_scope, std::num::NonZeroUsize::MIN));
+        assert!(!second.more_may_remain);
+        assert_eq!(ok(store.pending_append_identity_cleanup()), None);
     }
 }

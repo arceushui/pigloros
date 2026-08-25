@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{clock::Seq, ids::TimelineId};
+use crate::{
+    clock::Seq,
+    ids::{EntityId, TimelineId},
+};
 
 /// Whether a timeline runs in the past, present, or future.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +22,10 @@ pub struct TimelineMeta {
     pub id: TimelineId,
     pub mode: TimelineMode,
     pub name: Option<String>,
+    /// Durable owner of a subject-owned Timeline. `None` means the Timeline is
+    /// unassigned: generic callers cannot append consent Events, while the
+    /// Gateway may claim it on the first canonical consent grant.
+    pub owner: Option<EntityId>,
     /// If this is a forked timeline, the parent id and the seq at which the fork happened.
     pub fork_point: Option<(TimelineId, Seq)>,
 }
@@ -29,6 +36,19 @@ impl TimelineMeta {
             id: TimelineId::new(),
             mode: TimelineMode::Live,
             name: Some(name.into()),
+            owner: None,
+            fork_point: None,
+        }
+    }
+
+    /// Create a root Timeline owned by one subject for consent contracts.
+    #[must_use]
+    pub fn root_owned(name: impl Into<String>, owner: EntityId) -> Self {
+        Self {
+            id: TimelineId::new(),
+            mode: TimelineMode::Live,
+            name: Some(name.into()),
+            owner: Some(owner),
             fork_point: None,
         }
     }
@@ -38,6 +58,24 @@ impl TimelineMeta {
             id: TimelineId::new(),
             mode: TimelineMode::Historical,
             name: Some(name.into()),
+            owner: None,
+            fork_point: Some((parent, at_seq)),
+        }
+    }
+
+    /// Create an owned Fork while preserving the subject owner.
+    #[must_use]
+    pub fn forked_from_owned(
+        parent: TimelineId,
+        at_seq: Seq,
+        name: impl Into<String>,
+        owner: EntityId,
+    ) -> Self {
+        Self {
+            id: TimelineId::new(),
+            mode: TimelineMode::Historical,
+            name: Some(name.into()),
+            owner: Some(owner),
             fork_point: Some((parent, at_seq)),
         }
     }
@@ -87,6 +125,21 @@ mod tests {
         let meta = TimelineMeta::root("main");
         assert!(meta.is_root());
         assert!(meta.fork_point.is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn owned_root_and_fork_preserve_subject_owner() {
+        let parent = TimelineId::new();
+        let owner = EntityId::new();
+        let root = TimelineMeta::root_owned("owned", owner);
+        assert_eq!(root.owner, Some(owner));
+        assert!(root.is_root());
+
+        let fork = TimelineMeta::forked_from_owned(parent, Seq::from_u64(7), "owned-fork", owner);
+        assert_eq!(fork.owner, Some(owner));
+        assert_eq!(fork.fork_point, Some((parent, Seq::from_u64(7))));
+        assert!(!fork.is_root());
     }
 
     #[test]

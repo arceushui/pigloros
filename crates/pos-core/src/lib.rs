@@ -11,6 +11,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod clock;
+pub mod consent;
 pub mod crypto;
 pub mod entity;
 pub mod erasure;
@@ -34,6 +35,14 @@ pub mod world_transform;
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
 };
+pub use consent::{
+    is_consent_event_type, required_modality_for_event, ConsentAppendPermit, ConsentAuthority,
+    ConsentCapabilityToken, ConsentCodecError, ConsentError, ConsentGate, ConsentGrantedV1,
+    ConsentRevocationFoldListener, ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1,
+    EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE,
+    MAX_CONSENT_HISTORY_EVENTS, MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT,
+    MODALITY_PERSONA,
+};
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
@@ -50,7 +59,7 @@ pub use erasure::{
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
 pub use geo_access::{is_geographic_event_type, GEOGRAPHIC_CELL_EVENT_TYPE, GEOGRAPHIC_EVENT_TYPE};
-pub use geo_admission::GeoLocationAdmissionFenceV1;
+pub use geo_admission::{GeoLocationAdmissionFenceV1, GEO_LOCATION_V1_RESOLUTION};
 pub use geo_cell_admission::{
     hash_admission_consent_record_bytes, hash_admission_snapshot_bytes, AdmissionConsentRecordV1,
     AdmissionEntitlementDraftV1, AdmissionEntitlementSnapshotV1, AdmissionSnapshotHash,

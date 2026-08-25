@@ -20,6 +20,7 @@
 
 use crate::{
     clock::{Seq, WallTime},
+    consent::ConsentAppendPermit,
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft},
@@ -323,6 +324,20 @@ pub struct TimelineExport {
 /// Export/import helpers live as free functions alongside the trait so callers can
 /// hold `Box<dyn EventStore>` and swap backends without changing call sites.
 pub trait EventStore: Send {
+    /// Bind this adapter to the Gateway consent authority that owns protected
+    /// appends for its lifetime.
+    ///
+    /// Concrete adapters should reject a second, different binding and reject
+    /// consent appends until one is installed.  The default keeps third-party
+    /// adapters source-compatible; such adapters must still enforce their own
+    /// host boundary before overriding [`Self::append_consent_bounded`].
+    ///
+    /// # Errors
+    /// Returns a binding error when the adapter rejects the supplied authority.
+    fn bind_consent_authority(&mut self, _permit: ConsentAppendPermit) -> Result<(), CoreError> {
+        Ok(())
+    }
+
     /// Create a new root timeline with the given name.
     ///
     /// # Errors
@@ -357,6 +372,54 @@ pub trait EventStore: Send {
     ) -> Result<Option<Vec<Event>>, CoreError> {
         Err(CoreError::Storage(
             "atomic bounded append is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Append Gateway-owned V1 consent Events through the dedicated host seam.
+    ///
+    /// Generic [`Self::append`] and [`Self::append_bounded`] paths reject
+    /// `consent.*` drafts. Only the Gateway executor should use this method;
+    /// adapters must still validate that every draft is a known V1 consent
+    /// contract before bypassing the generic boundary.
+    ///
+    /// # Errors
+    ///
+    /// The default rejects the operation. Protected adapters must override it
+    /// and validate the V1 contract before bypassing the generic boundary; a
+    /// third-party adapter cannot accidentally turn generic append authority
+    /// into Gateway-owned consent authority.
+    fn append_consent_bounded(
+        &mut self,
+        _timeline: TimelineId,
+        _drafts: &[EventDraft],
+        _permit: ConsentAppendPermit,
+        _max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        Err(CoreError::Storage(
+            "Gateway-owned consent append is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Atomically append one Gateway-owned V1 consent revocation and persist
+    /// its bounded append-identity cleanup marker in the same adapter commit.
+    ///
+    /// The separate grant seam remains available above; revocations use this
+    /// stronger operation so a committed revocation is always restart-visible
+    /// to cleanup recovery.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement the
+    /// atomic revocation-and-marker boundary.
+    fn append_consent_revocation_bounded(
+        &mut self,
+        _timeline: TimelineId,
+        _drafts: &[EventDraft],
+        _permit: ConsentAppendPermit,
+        _max_owned_events: u64,
+        _cleanup_scope: AppendDedupScope,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        Err(CoreError::Storage(
+            "atomic consent revocation cleanup is unsupported by this EventStore".to_owned(),
         ))
     }
 
@@ -472,6 +535,38 @@ pub trait EventStore: Send {
         Err(CoreError::Storage(
             "append identity withdrawal cleanup is unsupported by this EventStore".to_owned(),
         ))
+    }
+
+    /// Remove at most `limit` append identities owned by one revocable scope.
+    ///
+    /// The bounded form is the consent-revocation invalidation seam. Callers
+    /// must schedule another pass when `more_may_remain` is true; a revocation
+    /// never performs an unbounded scan on the write path.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement
+    /// bounded append identity withdrawal cleanup.
+    fn remove_append_identities_bounded(
+        &mut self,
+        _scope: AppendDedupScope,
+        _limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        Err(CoreError::Storage(
+            "bounded append identity withdrawal cleanup is unsupported by this EventStore"
+                .to_owned(),
+        ))
+    }
+
+    /// Return one durable revocation-cleanup scope, if the adapter has one.
+    ///
+    /// Adapters may persist this marker when a bounded scope cleanup reports
+    /// remaining identities. Returning the marker without consuming it keeps
+    /// retries safe across process restarts and transient store failures.
+    ///
+    /// # Errors
+    /// Returns a storage error when the adapter cannot inspect its pending cleanup marker.
+    fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
+        Ok(None)
     }
 
     /// Read events from a timeline in a seq range.
@@ -1019,6 +1114,7 @@ mod tests {
     use super::*;
     use crate::{
         clock::{Seq, WallTime},
+        consent::ConsentAuthority,
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
@@ -1194,6 +1290,17 @@ mod tests {
             Ok(events)
         }
 
+        fn append_bounded(
+            &mut self,
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
+            _max_owned_events: u64,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            Err(CoreError::Storage(
+                "generic bounded adapter rejects consent drafts".to_owned(),
+            ))
+        }
+
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             Ok(Vec::new())
         }
@@ -1267,6 +1374,30 @@ mod tests {
             .remove_append_identities(AppendDedupScope::from_keyed_hash([2; 32]))
             .test_err()?;
         assert!(withdrawal_error.to_string().contains("withdrawal"));
+        let bounded_withdrawal_error = store
+            .remove_append_identities_bounded(
+                AppendDedupScope::from_keyed_hash([2; 32]),
+                std::num::NonZeroUsize::new(1).test_ok()?,
+            )
+            .test_err()?;
+        assert!(bounded_withdrawal_error.to_string().contains("bounded"));
+
+        let consent_draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("consent.granted.v1"),
+            CanonicalBytes::from_static(b"bounded-default"),
+        );
+        let default_error = store
+            .append_consent_bounded(
+                TimelineId::new(),
+                &[consent_draft],
+                crate::ConsentAuthority::new().append_permit(),
+                1,
+            )
+            .test_err()?;
+        assert!(default_error
+            .to_string()
+            .contains("Gateway-owned consent append is unsupported"));
 
         Ok(())
     }
@@ -1330,7 +1461,7 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_store_defaults_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-        let mut store = TrivialStore::new();
+        let mut store = FlakyStore::new(FlakyMode::Healthy);
         let id = TimelineId::new();
         let result = store.append_bounded(
             TimelineId::new(),
@@ -1345,6 +1476,18 @@ mod tests {
             .test_err()?
             .to_string()
             .contains("atomic bounded append"));
+        let err = store
+            .append_consent_revocation_bounded(
+                id,
+                &[],
+                ConsentAuthority::new().append_permit(),
+                1,
+                AppendDedupScope::from_keyed_hash([8; 32]),
+            )
+            .test_err()?;
+        assert!(matches!(err, CoreError::Storage(_)));
+        let pending = store.pending_append_identity_cleanup().test_ok()?;
+        assert!(pending.is_none());
         let err = store.logical_head(id).test_err()?;
         assert!(matches!(err, CoreError::Storage(_)));
         assert!(store.read_own(id, SeqRange::all()).is_ok());

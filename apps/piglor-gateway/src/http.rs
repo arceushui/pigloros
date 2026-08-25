@@ -355,7 +355,10 @@ impl IntoResponse for GatewayError {
             Self::InvalidId(_)
             | Self::UnsupportedAction(_)
             | Self::InvalidPageLimit { .. }
-            | Self::InvalidEventsQuery(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidEventsQuery(_)
+            | Self::ConsentCodec(_)
+            | Self::ConsentGrantSequenceMismatch
+            | Self::ConsentRevocationFenceMismatch => StatusCode::BAD_REQUEST,
             Self::ActionRejected(ar) => match ar {
                 ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
                 ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
@@ -363,6 +366,7 @@ impl IntoResponse for GatewayError {
                 | ActionRejected::DomainValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
                 ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             },
+            Self::Consent(_) | Self::LedgerWriteDisabled => StatusCode::FORBIDDEN,
             Self::TimelineLimitReached { .. }
             | Self::EventLimitReached { .. }
             | Self::StoreExecutorSaturated => StatusCode::TOO_MANY_REQUESTS,
@@ -376,7 +380,6 @@ impl IntoResponse for GatewayError {
                 StatusCode::NOT_FOUND
             }
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::LedgerWriteDisabled => StatusCode::FORBIDDEN,
             Self::ActionAuthorizationUnavailable => StatusCode::UNAUTHORIZED,
             Self::StoreExecutorClosed
             | Self::StoreExecutorDeadlineExceeded
@@ -1276,6 +1279,9 @@ osf_link = \"https://osf.io/example\"\n";
                     bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
                     limits: crate::GatewayLimits::LOCAL_DEFAULT,
                     owntracks_enabled: false,
+                    consent_authority: pos_core::ConsentAuthority::new(),
+                    consent_history_locks: crate::new_consent_history_locks(),
+                    pending_consent_cleanup: crate::new_pending_consent_cleanup(),
                     action_registry: crate::gateway_action_registry(),
                     action_principal: None,
                 },
@@ -1345,6 +1351,8 @@ osf_link = \"https://osf.io/example\"\n";
         .into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::InvalidEventsQuery("bad".into()).into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let r = GatewayError::ConsentRevocationFenceMismatch.into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         let r = GatewayError::TimelineLimitReached { maximum: 1 }.into_response();
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);

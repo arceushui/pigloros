@@ -888,7 +888,23 @@ mod tests {
         ]);
         let entity = EntityId::new();
 
-        let mut registry = PluginRegistry::new();
+        let mut store = open_store(StoreConfig::Memory).test_ok();
+        let tl = store.create_timeline("loop").test_ok();
+        let authority = pos_core::ConsentAuthority::new();
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: entity,
+            grantee_id: pos_core::EntityId::new(),
+            purpose: "persona-eval-test".to_owned(),
+            modalities: pos_core::MODALITY_PERSONA,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(tl.id(), &grant);
+        let mut registry = PluginRegistry::new().with_consent_authority(authority);
         let persona = PersonaPlugin::new();
         registry
             .register(
@@ -905,13 +921,13 @@ mod tests {
         registry
             .register(&eval, Some(Box::new(EvalReducer)), None)
             .test_ok();
-
-        let mut store = open_store(StoreConfig::Memory).test_ok();
-        let tl = store.create_timeline("loop").test_ok();
         for _ in 0..5 {
-            let drafts = registry.step_all(tl.id()).test_ok();
+            let drafts = registry
+                .step_all_anchored_protected(tl.id(), Seq::ZERO, token.clone(), 0, &[])
+                .test_ok();
             registry.schemas.validate_batch(&drafts).test_ok();
             store.append(tl.id(), &drafts).test_ok();
+            registry.commit_step_at(Seq::ZERO, 0).test_ok();
         }
 
         let report = compute_report(store.as_ref(), tl.id()).test_ok();

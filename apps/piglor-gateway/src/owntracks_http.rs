@@ -211,8 +211,8 @@ mod tests {
         http::{header, HeaderMap, HeaderValue, StatusCode},
     };
     use pos_core::{
-        CoreError, EntityId, EventStore, GeoLocationAdmissionFenceV1, OwnTracksEnrollmentRequestV1,
-        OwnTracksEnrollmentStore,
+        ConsentGrantedV1, CoreError, EntityId, EventStore, GeoLocationAdmissionFenceV1,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, TimelineId,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use tokio::sync::mpsc;
@@ -313,7 +313,8 @@ mod tests {
         Body::from(&br#"{"_type":"location","lat":37.7749,"lon":-122.4194,"tst":1}"#[..])
     }
 
-    fn enrolled_store() -> Result<MemoryStore, Box<dyn std::error::Error + Send + Sync>> {
+    fn enrolled_store(
+    ) -> Result<(MemoryStore, TimelineId, EntityId), Box<dyn std::error::Error + Send + Sync>> {
         const OWNER_KEY: [u8; 32] = [7; 32];
         let handle = [0; 32];
         let secret = [17; 32];
@@ -323,15 +324,31 @@ mod tests {
         material.extend_from_slice(&secret);
         let mut store = MemoryStore::new();
         let timeline = store.create_timeline("owntracks-http-test").test_ok()?;
+        let entity = EntityId::new();
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
-                EntityId::new(),
+                entity,
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
             .test_ok()?;
-        Ok(store)
+        Ok((store, timeline.id(), entity))
+    }
+
+    fn consent_grant(subject_id: EntityId) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "owntracks-http-test".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        }
     }
 
     #[test]
@@ -627,15 +644,20 @@ mod tests {
         material.extend_from_slice(&secret);
         let mut store = pos_store::memory::MemoryStore::new();
         let timeline = store.create_timeline("owntracks-http").test_ok()?;
+        let entity = EntityId::new();
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
-                EntityId::new(),
+                entity,
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
             .test_ok()?;
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity))
+            .await
+            .test_ok()?;
         let mut notices = gateway.subscribe();
         let response = post_owntracks(
             gateway.clone(),
@@ -681,7 +703,12 @@ mod tests {
     async fn duplicate_is_successful_without_a_second_notice_and_revocation_denies_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         const OWNER_KEY: [u8; 32] = [7; 32];
-        let gateway = Gateway::new_with_owntracks_ingress_for_test(enrolled_store()?, OWNER_KEY);
+        let (store, timeline, entity) = enrolled_store()?;
+        let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        gateway
+            .issue_consent_grant(&timeline.to_string(), consent_grant(entity))
+            .await
+            .test_ok()?;
         let mut notices = gateway.subscribe();
         let response = post_owntracks(
             gateway.clone(),
@@ -701,14 +728,20 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(notices.try_recv().is_err());
 
-        let mut revoked_store = enrolled_store()?;
+        let (mut revoked_store, revoked_timeline, revoked_entity) = enrolled_store()?;
         revoked_store.revoke_owntracks_enrollment().test_ok()?;
+        let revoked_gateway =
+            Gateway::new_with_owntracks_ingress_for_test(revoked_store, OWNER_KEY);
+        let _revoked_token = revoked_gateway
+            .consent_authority
+            .record_grant_on_timeline(revoked_timeline, &consent_grant(revoked_entity));
         let response = post_owntracks(
-            Gateway::new_with_owntracks_ingress_for_test(revoked_store, OWNER_KEY),
+            revoked_gateway.clone(),
             authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
+        drop(revoked_gateway);
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         drop(gateway);
@@ -736,15 +769,20 @@ mod tests {
         material.extend_from_slice(&secret);
         let mut store = pos_store::memory::MemoryStore::new();
         let timeline = store.create_timeline("owntracks-rate-http").test_ok()?;
+        let entity = EntityId::new();
         store
             .pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
                 timeline.id(),
-                EntityId::new(),
+                entity,
                 GeoLocationAdmissionFenceV1::new(1, ([1; 32], 2, [2; 32]), (1, false, 3)),
                 *blake3::keyed_hash(&OWNER_KEY, &material).as_bytes(),
             ))
             .test_ok()?;
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity))
+            .await
+            .test_ok()?;
 
         for _ in 0..5 {
             let response = post_owntracks(

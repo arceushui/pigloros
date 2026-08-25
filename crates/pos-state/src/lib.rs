@@ -14,7 +14,10 @@
 
 use std::collections::HashMap;
 
-use pos_core::{EntityId, Event, Reducer, Relationship, State, StateRegistry};
+use pos_core::{
+    ConsentRevocationFoldListener, ConsentRevokedV1, EntityId, Event, Reducer, Relationship, State,
+    StateRegistry, EVENT_TYPE_CONSENT_REVOKED_V1,
+};
 
 // ---------------------------------------------------------------------------
 // EntityStateProjection
@@ -105,6 +108,17 @@ impl ProjectionRegistry {
 
     /// Apply a single event to every registered reducer.
     pub fn apply_event(&mut self, event: &Event) {
+        if event.event_type.as_str() == EVENT_TYPE_CONSENT_REVOKED_V1 {
+            if let Ok(revocation) = ConsentRevokedV1::decode(&event.payload) {
+                self.on_consent_revoked(revocation.subject_id, revocation.fence_seq);
+            }
+            return;
+        }
+        // Consent is host control-plane state.  It is never reducer input and
+        // therefore cannot become a Plugin-visible projection or snapshot.
+        if pos_core::is_consent_event_type(&event.event_type) {
+            return;
+        }
         if pos_core::is_geographic_event_type(&event.event_type) {
             return;
         }
@@ -158,6 +172,13 @@ impl ProjectionRegistry {
     pub fn clear_state(&mut self) {
         for (_, slot) in &mut self.slots {
             slot.registry = StateRegistry::new();
+        }
+    }
+
+    /// Retain only one subject's accumulated state in every reducer.
+    pub fn retain_subject(&mut self, subject: &EntityId) {
+        for (_, slot) in &mut self.slots {
+            slot.registry.retain_only(subject);
         }
     }
 
@@ -217,6 +238,14 @@ impl ProjectionRegistry {
             }
         }
         None
+    }
+}
+
+impl ConsentRevocationFoldListener for ProjectionRegistry {
+    fn on_consent_revoked(&mut self, subject_id: EntityId, _fence_seq: u64) {
+        for (_, slot) in &mut self.slots {
+            slot.registry.remove(&subject_id);
+        }
     }
 }
 
@@ -359,6 +388,24 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn projection_registry_retain_subject_filters_every_reducer() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("a", Box::new(EntityStateProjection));
+        registry.register("b", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        let unrelated = EntityId::new();
+        registry.fold_events(&[make_event(subject), make_event(unrelated)]);
+
+        registry.retain_subject(&subject);
+
+        for name in ["a", "b"] {
+            assert!(registry.state_for_reducer(name, &subject).is_some());
+            assert!(registry.state_for_reducer(name, &unrelated).is_none());
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn projection_registry_fold_events() {
         let mut registry = ProjectionRegistry::new();
         registry.register("main", Box::new(EntityStateProjection));
@@ -375,6 +422,71 @@ mod tests {
                 std::panic::resume_unwind(Box::new("event_count should be present"))
             });
         assert_eq!(count, 5);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn valid_consent_revocation_evicts_each_subject_projection_cache() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("a", Box::new(EntityStateProjection));
+        registry.register("b", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        let other = EntityId::new();
+        registry.apply_event(&make_event(subject));
+        registry.apply_event(&make_event(other));
+
+        let revocation = ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 2,
+        };
+        let mut event = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        event.payload = revocation.encode().unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("invalid revocation fixture: {error:?}")))
+        });
+        registry.apply_event(&event);
+
+        assert!(registry.state_for(&subject).is_none());
+        assert!(registry.state_for_reducer("b", &subject).is_none());
+        assert!(registry.state_for(&other).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn malformed_consent_revocation_does_not_evict_projection_cache() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("events", Box::new(EntityStateProjection));
+        let subject = EntityId::new();
+        registry.apply_event(&make_event(subject));
+
+        let malformed = make_event_typed(subject, EVENT_TYPE_CONSENT_REVOKED_V1);
+        registry.apply_event(&malformed);
+
+        assert!(registry.state_for(&subject).is_some());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reducers_never_observe_reserved_consent_namespace_events() {
+        let mut registry = ProjectionRegistry::new();
+        registry.register("events", Box::new(EntityStateProjection));
+        let entity = EntityId::new();
+        let consent_event = Event {
+            id: EventId::new(),
+            entity,
+            event_type: Kind::new("consent.future.v2"),
+            payload: CanonicalBytes::from_static(b"host-only"),
+            seq: pos_core::clock::Seq::from_u64(1),
+            wall_time: WallTime::now(),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        registry.apply_event(&consent_event);
+        assert!(registry.state_for(&entity).is_none());
     }
 
     #[test]

@@ -289,19 +289,35 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
     registry.register(&plugin, None, None).test_ok();
     registry.register_driver(Box::new(DefaultRecoveryDriver));
     registry.step_all_anchored(timeline, Seq::ZERO).test_ok();
-    registry.commit_step();
-    registry.commit_step();
+    registry.commit_step_at(Seq::ZERO, 0).test_ok();
+    registry.commit_step_at(Seq::ZERO, 0).test_ok();
 
     let mut cadenced = PluginRegistry::new();
+    let key = ProjectionKey::new(EntityId::new());
+    let authority = pos_core::ConsentAuthority::new();
+    let grant = pos_core::ConsentGrantedV1 {
+        subject_id: key.entity_id().to_owned(),
+        grantee_id: EntityId::new(),
+        purpose: "cadence-overflow-test".to_owned(),
+        modalities: 0,
+        min_geo_resolution: 0,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 0,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+    let token = authority.record_grant_on_timeline(timeline, &grant);
+    cadenced = cadenced.with_consent_authority(authority);
     cadenced.register_driver(Box::new(CadencedDriver {
-        subscriptions: vec![ProjectionKey::new(EntityId::new())],
+        subscriptions: vec![key],
     }));
     cadenced
-        .tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO)
+        .tick_cadenced_anchored_protected(timeline, u128::MAX, Seq::ZERO, token.clone(), 0, &[])
         .test_ok();
-    cadenced.commit_step();
+    cadenced.commit_step_at(Seq::ZERO, 0).test_ok();
     assert!(matches!(
-        cadenced.tick_cadenced_anchored(timeline, u128::MAX, Seq::ZERO),
+        cadenced.tick_cadenced_anchored_protected(timeline, u128::MAX, Seq::ZERO, token, 0, &[]),
         Err(RuntimeError::CadenceOverflow { .. })
     ));
 }

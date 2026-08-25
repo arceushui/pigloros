@@ -85,7 +85,7 @@ pub(crate) fn generic_timeline_is_visible(
     }
 }
 
-/// Refuse geographic drafts before a generic adapter evaluates Timeline visibility.
+/// Refuse protected drafts before a generic adapter evaluates Timeline visibility.
 ///
 /// This preserves the public boundary's `TimelineNotFound` response and, importantly,
 /// avoids querying a possibly unavailable presence marker for an already-forbidden
@@ -94,7 +94,9 @@ pub(crate) fn ensure_non_geographic_draft(
     draft: &EventDraft,
     timeline: TimelineId,
 ) -> Result<(), CoreError> {
-    if pos_core::is_geographic_event_type(&draft.event_type) {
+    if pos_core::is_geographic_event_type(&draft.event_type)
+        || pos_core::is_consent_event_type(&draft.event_type)
+    {
         Err(CoreError::TimelineNotFound(timeline))
     } else {
         Ok(())
@@ -106,27 +108,110 @@ pub(crate) fn ensure_non_geographic_drafts(
     drafts: &[EventDraft],
     timeline: TimelineId,
 ) -> Result<(), CoreError> {
-    match drafts
-        .iter()
-        .find(|draft| pos_core::is_geographic_event_type(&draft.event_type))
-    {
+    match drafts.iter().find(|draft| {
+        pos_core::is_geographic_event_type(&draft.event_type)
+            || pos_core::is_consent_event_type(&draft.event_type)
+    }) {
         Some(_) => Err(CoreError::TimelineNotFound(timeline)),
         None => Ok(()),
     }
 }
 
+/// Validate that a batch is restricted to the dedicated V1 consent types.
+pub(crate) fn ensure_gateway_consent_types(
+    drafts: &[EventDraft],
+    timeline: TimelineId,
+) -> Result<(), CoreError> {
+    if drafts.is_empty()
+        || drafts.iter().any(|draft| {
+            !matches!(
+                draft.event_type.as_str(),
+                pos_core::EVENT_TYPE_CONSENT_GRANTED_V1 | pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
+            )
+        })
+    {
+        Err(CoreError::TimelineNotFound(timeline))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate the single-revocation batch required by the atomic revocation seam.
+pub(crate) fn ensure_gateway_consent_revocation(
+    drafts: &[EventDraft],
+    timeline: TimelineId,
+) -> Result<(), CoreError> {
+    if drafts.len() != 1 || drafts[0].event_type.as_str() != pos_core::EVENT_TYPE_CONSENT_REVOKED_V1
+    {
+        Err(CoreError::TimelineNotFound(timeline))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate the dedicated Gateway-owned V1 consent append seam, including the
+/// canonical payload and logical Timeline coordinates.
+pub(crate) fn ensure_gateway_consent_drafts(
+    drafts: &[EventDraft],
+    timeline: TimelineId,
+    existing_owner: Option<pos_core::EntityId>,
+    expected_first_seq: u64,
+) -> Result<pos_core::EntityId, CoreError> {
+    ensure_gateway_consent_types(drafts, timeline)?;
+    let mut owner = existing_owner;
+    for (index, draft) in drafts.iter().enumerate() {
+        let expected_seq =
+            expected_first_seq.saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
+        if draft.event_type.as_str() == pos_core::EVENT_TYPE_CONSENT_GRANTED_V1 {
+            let grant = pos_core::ConsentGrantedV1::decode(&draft.payload)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if draft.entity != grant.subject_id || grant.grant_seq != expected_seq {
+                return Err(CoreError::Storage(
+                    "consent grant coordinate mismatch".to_owned(),
+                ));
+            }
+            owner = match owner {
+                Some(owner) if owner != grant.subject_id => {
+                    return Err(CoreError::Storage(
+                        "consent Timeline owner mismatch".to_owned(),
+                    ));
+                }
+                Some(owner) => Some(owner),
+                None => Some(grant.subject_id),
+            };
+        } else {
+            let revocation = pos_core::ConsentRevokedV1::decode(&draft.payload)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if draft.entity != revocation.subject_id || revocation.fence_seq != expected_seq {
+                return Err(CoreError::Storage(
+                    "consent revocation coordinate mismatch".to_owned(),
+                ));
+            }
+            owner = match owner {
+                Some(owner) if owner != revocation.subject_id => {
+                    return Err(CoreError::Storage(
+                        "consent Timeline owner mismatch".to_owned(),
+                    ));
+                }
+                Some(owner) => Some(owner),
+                None => Some(revocation.subject_id),
+            };
+        }
+    }
+    owner.ok_or_else(|| CoreError::Storage("consent Timeline owner is missing".to_owned()))
+}
+
 /// Refuse committed sensitive Events before a generic import or append path can
-/// mutate a Timeline. `geo.cell` admission is available only through the
-/// dedicated core-owned capability seam; generic import and append remain
-/// closed even though the backend transaction is implemented.
+/// mutate a Timeline. Geographic admission and Gateway-owned consent both use
+/// dedicated host seams; generic import and append remain closed.
 pub(crate) fn ensure_non_geographic_events(
     events: &[Event],
     timeline: TimelineId,
 ) -> Result<(), CoreError> {
-    match events
-        .iter()
-        .find(|event| pos_core::is_geographic_event_type(&event.event_type))
-    {
+    match events.iter().find(|event| {
+        pos_core::is_geographic_event_type(&event.event_type)
+            || pos_core::is_consent_event_type(&event.event_type)
+    }) {
         Some(_) => Err(CoreError::TimelineNotFound(timeline)),
         None => Ok(()),
     }
@@ -152,6 +237,15 @@ pub(crate) fn checked_logical_head(logical_prefix: u64, owned_head: u64) -> Resu
     logical_prefix
         .checked_add(owned_head)
         .ok_or_else(|| CoreError::Storage("logical Timeline sequence overflow".to_owned()))
+}
+
+/// Convert the optional result of a bounded append helper for an unbounded call.
+pub(crate) fn unbounded_append_outcome(
+    outcome: Option<AppendOrDuplicateOutcome>,
+) -> Result<AppendOrDuplicateOutcome, CoreError> {
+    outcome.ok_or_else(|| {
+        CoreError::Storage("unbounded append unexpectedly hit an event limit".to_owned())
+    })
 }
 
 /// Selects which backend [`open_store`] constructs.
@@ -351,6 +445,117 @@ mod tests {
             checked_logical_head(u64::MAX, 1),
             Err(CoreError::Storage(_))
         ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_draft_guards_cover_revocation_and_owner_failures() {
+        let timeline = pos_core::TimelineId::new();
+        let subject = pos_core::EntityId::new();
+        let other = pos_core::EntityId::new();
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: pos_core::EntityId::new(),
+            purpose: "store-guard".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let grant_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            grant.encode().test_ok(),
+        );
+        assert!(ensure_gateway_consent_revocation(&[], timeline).is_err());
+        let grant_owner_error = ensure_gateway_consent_drafts(
+            std::slice::from_ref(&grant_draft),
+            timeline,
+            Some(other),
+            1,
+        )
+        .test_err();
+        assert!(grant_owner_error.to_string().contains("owner mismatch"));
+
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let revocation_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            revocation.encode().test_ok(),
+        );
+        let revocation_owner_error = ensure_gateway_consent_drafts(
+            std::slice::from_ref(&revocation_draft),
+            timeline,
+            Some(other),
+            1,
+        )
+        .test_err();
+        assert!(revocation_owner_error
+            .to_string()
+            .contains("owner mismatch"));
+    }
+
+    fn assert_consent_store_authority_boundary(store: &mut dyn EventStore) {
+        let timeline = store.create_timeline("consent-authority").test_ok();
+        let subject = EntityId::new();
+        let draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"grant"),
+        );
+        let authority = pos_core::ConsentAuthority::new();
+        let permit = authority.append_permit();
+        let missing = store
+            .append_consent_bounded(timeline.id(), &[draft], permit, 1)
+            .test_err();
+        assert!(missing.to_string().contains("not bound"));
+
+        store.bind_consent_authority(permit).test_ok();
+        store.bind_consent_authority(permit).test_ok();
+        let foreign = pos_core::ConsentAuthority::new().append_permit();
+        assert!(store.bind_consent_authority(foreign).is_err());
+
+        let owned = store
+            .create_timeline_with_meta(pos_core::timeline::TimelineMeta::root_owned(
+                "owned-authority",
+                subject,
+            ))
+            .test_ok();
+        let fetched = store.get_timeline(owned.id()).test_ok().test_ok();
+        assert_eq!(fetched.meta.owner, Some(subject));
+        let child = store
+            .fork(owned.id(), pos_core::Seq::ZERO, "owned-child")
+            .test_ok();
+        assert_eq!(child.meta.owner, Some(subject));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn consent_store_authority_boundary_is_shared_by_backends() {
+        let mut memory = open_store(StoreConfig::Memory).test_ok();
+        assert_consent_store_authority_boundary(memory.as_mut());
+        #[cfg(feature = "sqlite")]
+        {
+            let mut sqlite = open_store(StoreConfig::SqliteInMemory).test_ok();
+            assert_consent_store_authority_boundary(sqlite.as_mut());
+        }
+    }
+
+    #[test]
+    fn unbounded_append_outcome_maps_both_optional_states() {
+        assert!(matches!(
+            unbounded_append_outcome(Some(AppendOrDuplicateOutcome::Conflict)),
+            Ok(AppendOrDuplicateOutcome::Conflict)
+        ));
+        assert!(unbounded_append_outcome(None).is_err());
     }
 
     #[cfg(feature = "sqlite")]
@@ -996,5 +1201,66 @@ mod tests {
             }
         );
         assert_ne!(event_id, second_event_id);
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected consent guard fixture error: {error:?}"
+            )))
+        })
+    }
+
+    #[test]
+    fn consent_guard_boundaries_are_instrumented() {
+        let timeline = TimelineId::new();
+        assert!(ensure_gateway_consent_types(&[], timeline).is_err());
+        let invalid = EventDraft::new(
+            EntityId::new(),
+            Kind::new("not-consent"),
+            CanonicalBytes::from_static(b"invalid"),
+        );
+        assert!(ensure_gateway_consent_types(&[invalid], timeline).is_err());
+
+        let subject = EntityId::new();
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "coverage".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let grant_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            ok(grant.encode()),
+        );
+        assert!(ensure_gateway_consent_drafts(&[grant_draft], timeline, None, 1).is_ok());
+
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 2,
+        };
+        let revocation_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok(revocation.encode()),
+        );
+        assert!(
+            ensure_gateway_consent_drafts(&[revocation_draft], timeline, Some(subject), 2).is_ok()
+        );
     }
 }

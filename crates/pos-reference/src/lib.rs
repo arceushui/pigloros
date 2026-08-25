@@ -453,7 +453,7 @@ pub fn compare_json(left: &str, right: &str) -> Result<ReferenceComparisonV1, Re
         "uncertainty",
         "participant_views",
         "plugin_failures",
-        "consent_audit",
+        "host_closure",
         "contract",
     ]
     .iter()
@@ -485,7 +485,7 @@ fn parse(value: &str) -> Result<serde_json::Map<String, serde_json::Value>, Refe
         "uncertainty",
         "participant_views",
         "plugin_failures",
-        "consent_audit",
+        "host_closure",
         "contract",
     ];
     for field in required {
@@ -825,7 +825,7 @@ mod tests {
             "uncertainty": [],
             "participant_views": [],
             "plugin_failures": [],
-            "consent_audit": {"subject": "s"},
+            "host_closure": {"subject": "s"},
             "contract": {
                 "scenario_room": {},
                 "plugin_boundary": {
@@ -1177,7 +1177,7 @@ mod tests {
             "uncertainty": [],
             "participant_views": [],
             "plugin_failures": [],
-            "consent_audit": {"subject": "s"},
+            "host_closure": {"subject": "s"},
             "contract": {
                 "scenario_room": {},
                 "plugin_boundary": {

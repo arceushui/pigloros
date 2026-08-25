@@ -27,13 +27,16 @@ use pos_core::{
         EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
-    ActionRejected, Capability, CoreError, Plugin, ProposedAction,
+    ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
+    ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, Plugin, ProposedAction,
 };
 use pos_plugin_society::{draft_signal, SocietyDimension, SocietySignal, EVENT_TYPE_SIGNAL};
 use pos_plugin_world::{WorldPlugin, EVENT_TYPE_ACTION};
 use pos_runtime::PluginRegistry;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
@@ -99,11 +102,26 @@ mod coverage_tests {
         geo_admission::{
             GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
         },
-        CanonicalBytes, EntityId, EventDraft, EventStore, Kind, OwnTracksEnrollmentRequestV1,
-        OwnTracksEnrollmentStore, Seq,
+        CanonicalBytes, ConsentGrantedV1, EntityId, EventDraft, EventStore, Kind,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Seq,
     };
     use pos_store::{memory::MemoryStore, open_store, StoreConfig};
     use std::path::Path;
+
+    fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "coverage-contract".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq,
+        }
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -309,6 +327,10 @@ mod coverage_tests {
             .test_ok();
         let gateway = Gateway::new_with_geo_location_admission(store);
         let mut notices = gateway.subscribe();
+        let (_, token) = gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity, 1))
+            .await
+            .test_ok();
         let request = || {
             GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
                 timeline.id(),
@@ -322,13 +344,13 @@ mod coverage_tests {
         };
 
         assert!(gateway
-            .admit_geo_location_from_core(request())
+            .admit_geo_location_with_consent(request(), &token, 0)
             .await
             .test_ok()
             .is_accepted());
         assert_eq!(notices.recv().await.test_ok().event_type, "geo.location");
         assert!(gateway
-            .admit_geo_location_from_core(request())
+            .admit_geo_location_with_consent(request(), &token, 0)
             .await
             .test_ok()
             .is_duplicate());
@@ -362,6 +384,10 @@ mod coverage_tests {
             ))
             .test_ok();
         let gateway = Gateway::new_with_owntracks_ingress_for_test(store, OWNER_KEY);
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(entity, 1))
+            .await
+            .test_ok();
         gateway
             .create_timeline("owntracks-generic-event-store")
             .await
@@ -480,6 +506,28 @@ pub const MAX_EVENTS_PER_TIMELINE: u64 = 10_000;
 /// Default broadcast channel capacity for live event fan-out.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
+const CONSENT_LOCK_STRIPES: usize = 64;
+const CONSENT_LOCK_STRIPES_U64: u64 = 64;
+const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize = match NonZeroUsize::new(256) {
+    Some(value) => value,
+    None => NonZeroUsize::MIN,
+};
+const CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS: u64 = 50;
+
+type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
+
+fn new_consent_history_locks() -> Arc<ConsentHistoryLocks> {
+    Arc::new(
+        (0..CONSENT_LOCK_STRIPES)
+            .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+            .collect(),
+    )
+}
+
+fn new_pending_consent_cleanup() -> Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>> {
+    Arc::new(tokio::sync::Mutex::new(Vec::new()))
+}
+
 /// Shared Gateway handle (bounded `StoreExecutor` + live Event bus).
 ///
 /// The supported local-first write boundary permits Gateway and experiment-host
@@ -492,6 +540,9 @@ pub struct Gateway {
     bus: broadcast::Sender<EventNotice>,
     limits: GatewayLimits,
     owntracks_enabled: bool,
+    consent_authority: ConsentAuthority,
+    consent_history_locks: Arc<ConsentHistoryLocks>,
+    pending_consent_cleanup: Arc<tokio::sync::Mutex<Vec<AppendDedupScope>>>,
     action_registry: Arc<PluginRegistry>,
     action_principal: Option<ActionPrincipal>,
 }
@@ -549,12 +600,21 @@ impl Plugin for GatewayActionPlugin {
     }
 }
 
+#[cfg(test)]
 fn gateway_action_registry() -> Arc<PluginRegistry> {
     gateway_action_registry_with_bodies(std::iter::empty())
 }
 
+#[cfg(test)]
 fn gateway_action_registry_with_bodies(
     bodies: impl IntoIterator<Item = EntityId>,
+) -> Arc<PluginRegistry> {
+    gateway_action_registry_with_authority(bodies, None)
+}
+
+fn gateway_action_registry_with_authority(
+    bodies: impl IntoIterator<Item = EntityId>,
+    authority: Option<ConsentAuthority>,
 ) -> Arc<PluginRegistry> {
     let mut registry = PluginRegistry::new();
     let descriptor = GatewayActionPlugin {
@@ -569,6 +629,9 @@ fn gateway_action_registry_with_bodies(
     );
     if registration.is_err() {
         return Arc::new(PluginRegistry::new());
+    }
+    if let Some(authority) = authority {
+        registry = registry.with_consent_authority(authority);
     }
     Arc::new(registry)
 }
@@ -674,6 +737,9 @@ pub enum GatewayError {
     /// Underlying store failure.
     #[error(transparent)]
     Store(#[from] CoreError),
+    /// Host consent fence rejected the protected operation.
+    #[error(transparent)]
+    Consent(#[from] ConsentError),
     /// Ledger domain error.
     #[error(transparent)]
     Ledger(#[from] pos_plugin_ledger::LedgerError),
@@ -692,6 +758,15 @@ pub enum GatewayError {
     /// Human action submission requires an authenticated action principal.
     #[error("human action authorization is unavailable")]
     ActionAuthorizationUnavailable,
+    /// Consent payload did not meet its closed V1 contract.
+    #[error(transparent)]
+    ConsentCodec(#[from] ConsentCodecError),
+    /// A host grant must bind the sequence it is about to commit.
+    #[error("consent grant sequence does not match the current Timeline position")]
+    ConsentGrantSequenceMismatch,
+    /// A host revocation must bind the sequence it is about to commit.
+    #[error("consent revocation fence does not match the current Timeline position")]
+    ConsentRevocationFenceMismatch,
 }
 
 /// An existing, owner-only `OwnTracks` activation key loaded from disk.
@@ -839,6 +914,141 @@ fn checked_event_coordinates(
 }
 
 impl Gateway {
+    async fn enqueue_consent_cleanup(&self, scope: AppendDedupScope) {
+        let mut pending = self.pending_consent_cleanup.lock().await;
+        if !pending.contains(&scope) {
+            pending.push(scope);
+        }
+    }
+
+    async fn run_pending_consent_cleanup_worker(&self) {
+        loop {
+            match self.process_pending_consent_cleanup().await {
+                Ok(Some(_)) => {
+                    tokio::task::yield_now().await;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS,
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    fn schedule_pending_consent_cleanup(&self) {
+        let gateway = self.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                gateway.run_pending_consent_cleanup_worker().await;
+            });
+        } else {
+            drop(
+                std::thread::Builder::new()
+                    .name("piglor-consent-cleanup".to_owned())
+                    .spawn(move || {
+                        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        else {
+                            return;
+                        };
+                        runtime.block_on(gateway.run_pending_consent_cleanup_worker());
+                    }),
+            );
+        }
+    }
+
+    #[cfg(test)]
+    const fn schedule_startup_consent_cleanup(self) -> Self {
+        self
+    }
+
+    #[cfg(not(test))]
+    fn schedule_startup_consent_cleanup(self) -> Self {
+        self.schedule_pending_consent_cleanup();
+        self
+    }
+
+    /// Run one bounded consent-revocation cleanup pass.
+    ///
+    /// The Gateway schedules this method after a revocation when a continuation
+    /// is required. Hosts may also call it from their maintenance scheduler;
+    /// each invocation removes at most the adapter batch limit.
+    ///
+    /// # Errors
+    /// Returns the underlying bounded store error. A failed scope remains
+    /// queued for the scheduler's persistent retry loop or a later maintenance
+    /// invocation.
+    pub async fn process_pending_consent_cleanup(
+        &self,
+    ) -> Result<Option<PurgeOutcome>, GatewayError> {
+        let queued_scope = self.pending_consent_cleanup.lock().await.pop();
+        let scope = match queued_scope {
+            Some(scope) => Some(scope),
+            None => self
+                .store
+                .pending_append_identity_cleanup()
+                .await
+                .map_err(GatewayError::from)?,
+        };
+        let Some(scope) = scope else {
+            return Ok(None);
+        };
+        match self
+            .store
+            .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
+            .await
+        {
+            Ok(outcome) => {
+                if outcome.more_may_remain {
+                    self.enqueue_consent_cleanup(scope).await;
+                }
+                Ok(Some(outcome))
+            }
+            Err(error) => {
+                self.enqueue_consent_cleanup(scope).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    async fn lock_consent_timeline(
+        &self,
+        timeline: TimelineId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let mut hasher = DefaultHasher::new();
+        timeline.hash(&mut hasher);
+        let stripe =
+            usize::try_from(hasher.finish() % CONSENT_LOCK_STRIPES_U64).unwrap_or_default();
+        let lock = Arc::clone(&self.consent_history_locks[stripe]);
+        lock.lock_owned().await
+    }
+
+    async fn restore_consent_history_locked(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<(), GatewayError> {
+        let events = self
+            .store
+            .read(
+                timeline,
+                SeqRange::from_seq(Seq::from_u64(1)),
+                EventReadBounds::new(
+                    MAX_EVENT_PAYLOAD_BYTES,
+                    MAX_EVENT_TYPE_BYTES,
+                    MAX_FORK_DEPTH,
+                    usize::try_from(MAX_EVENTS_PER_TIMELINE).unwrap_or(usize::MAX),
+                ),
+            )
+            .await?;
+        self.consent_authority
+            .restore_from_history(timeline, &events)
+            .map_err(GatewayError::ConsentCodec)
+    }
+
     /// Wrap an existing store backend.
     ///
     /// Human action submission is intentionally disabled until the host supplies
@@ -846,14 +1056,25 @@ impl Gateway {
     #[must_use]
     pub fn new(store: Box<dyn EventStore>) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Wrap a store and configure the World body catalogue used for actions.
@@ -863,14 +1084,25 @@ impl Gateway {
         bodies: impl IntoIterator<Item = EntityId>,
     ) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_bodies(bodies),
+            action_registry: gateway_action_registry_with_authority(
+                bodies,
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Wrap a store with World bodies and an authenticated action principal.
@@ -881,14 +1113,25 @@ impl Gateway {
         principal: ActionPrincipal,
     ) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry_with_bodies(bodies),
+            action_registry: gateway_action_registry_with_authority(
+                bodies,
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: Some(principal),
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Construct the only Gateway shape that can submit core geographic admission.
@@ -901,14 +1144,25 @@ impl Gateway {
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new_with_geo_location_admission(store),
+            store: executor::StoreExecutor::new_with_geo_location_admission(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Construct the Gateway shape that accepts authenticated local `OwnTracks` ingress.
@@ -921,14 +1175,26 @@ impl Gateway {
         owner_key: &OwnTracksOwnerKey,
     ) -> Self {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key.0),
+            store: executor::StoreExecutor::new_with_owntracks_ingress(
+                store,
+                owner_key.0,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     #[cfg(test)]
@@ -937,14 +1203,26 @@ impl Gateway {
         S: EventStore + GeoLocationAdmissionStore + pos_core::OwnTracksIngressStore + 'static,
     {
         let (bus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new_with_owntracks_ingress(store, owner_key),
+            store: executor::StoreExecutor::new_with_owntracks_ingress(
+                store,
+                owner_key,
+                consent_authority.append_permit(),
+            ),
             bus,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: true,
-            action_registry: gateway_action_registry(),
+            action_registry: gateway_action_registry_with_authority(
+                std::iter::empty(),
+                Some(consent_authority.clone()),
+            ),
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_principal: None,
         }
+        .schedule_startup_consent_cleanup()
     }
 
     /// Submit one already-authorized core geographic admission request.
@@ -955,7 +1233,7 @@ impl Gateway {
     /// # Errors
     /// Returns a bounded executor or store error when admission cannot run.
     ///
-    pub async fn admit_geo_location_from_core(
+    async fn admit_geo_location_from_core(
         &self,
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
@@ -967,6 +1245,40 @@ impl Gateway {
             self.publish_geographic_notice(timeline, event_id, entity, seq);
         }
         Ok(outcome)
+    }
+
+    /// Admit one geographic request after applying the host consent fence.
+    ///
+    /// The host reads the authoritative logical head while holding the same
+    /// per-Timeline lock used by grant and revocation writes. The token is
+    /// checked against that head and the grant's ADR-026 geographic floor
+    /// before the dedicated geographic store capability is invoked.
+    ///
+    /// # Errors
+    /// Returns [`GatewayError::Consent`] when the capability is stale,
+    /// expired, or does not cover the requested resolution.
+    pub async fn admit_geo_location_with_consent(
+        &self,
+        request: GeoLocationAdmissionRequestV1,
+        token: &ConsentCapabilityToken,
+        now_secs: u64,
+    ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
+        let consent_timeline_guard = self.lock_consent_timeline(request.timeline()).await;
+        let timeline_head = self
+            .store
+            .protected_logical_head(request.timeline())
+            .await?;
+        self.consent_authority.validate_on_timeline(
+            request.timeline(),
+            token,
+            timeline_head.as_u64(),
+            now_secs,
+        )?;
+        token.authorize_event_type(&Kind::new("geo.location"))?;
+        token.authorize_geo_resolution(pos_core::GEO_LOCATION_V1_RESOLUTION)?;
+        let admission = self.admit_geo_location_from_core(request).await;
+        drop(consent_timeline_guard);
+        admission
     }
 
     /// Authenticate, rate-limit, and admit one minimized `OwnTracks` update.
@@ -983,27 +1295,27 @@ impl Gateway {
         basic_secret: [u8; 32],
         payload: CanonicalBytes,
     ) -> Result<OwnTracksIngressResult, GatewayError> {
-        let outcome = self
+        let prepared = self
             .store
-            .admit_owntracks_ingress(basic_handle, basic_secret, payload)
+            .prepare_owntracks_ingress(basic_handle, basic_secret, payload)
             .await?;
-        match outcome {
-            executor::OwnTracksIngressOutcome::RateLimited => {
-                Ok(OwnTracksIngressResult::RateLimited)
-            }
-            executor::OwnTracksIngressOutcome::Admitted {
-                outcome: admission,
-                timeline,
-                entity,
-            } => {
-                let result = classify_owntracks_admission(&admission)?;
-                if matches!(result, OwnTracksIngressResult::Accepted) {
-                    let (event_id, seq) = accepted_event_coordinates(&admission)?;
-                    self.publish_geographic_notice(timeline, event_id, entity, seq);
-                }
-                Ok(result)
-            }
+        let executor::PreparedOwnTracksIngressOutcome::Prepared(prepared) = prepared else {
+            return Ok(OwnTracksIngressResult::RateLimited);
+        };
+        let request = (*prepared).into_admission_request();
+        let timeline = request.timeline();
+        let entity = request.entity();
+        let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
+        let timeline_head = self.store.protected_logical_head(timeline).await?;
+        self.consent_authority
+            .validate_location_subject_on_timeline(timeline, entity, timeline_head.as_u64(), 0)?;
+        let admission = self.store.admit_geo_location(request).await?;
+        let result = classify_owntracks_admission(&admission)?;
+        if matches!(result, OwnTracksIngressResult::Accepted) {
+            let (event_id, seq) = accepted_event_coordinates(&admission)?;
+            self.publish_geographic_notice(timeline, event_id, entity, seq);
         }
+        Ok(result)
     }
 
     /// Subscribe to live append notices (WebSocket / tests).
@@ -1058,6 +1370,138 @@ impl Gateway {
             });
         }
         Ok(self.store.create(name.to_owned()).await?)
+    }
+
+    /// Append one Gateway-owned consent grant and issue its enforcement token.
+    ///
+    /// No Plugin or HTTP action route can construct this event type.
+    ///
+    /// # Errors
+    /// Returns a closed codec, Timeline, or grant-sequence error.
+    pub async fn issue_consent_grant(
+        &self,
+        timeline_id: &str,
+        grant: ConsentGrantedV1,
+    ) -> Result<(Event, ConsentCapabilityToken), GatewayError> {
+        let timeline = match parse_timeline_id(timeline_id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
+        grant.encode()?;
+        let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
+        let event = match self
+            .store
+            .append_consent_grant(
+                timeline,
+                grant.clone(),
+                self.consent_authority.append_permit(),
+                self.limits.max_events_per_timeline,
+            )
+            .await
+        {
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "consent grant sequence mismatch" =>
+            {
+                return Err(GatewayError::ConsentGrantSequenceMismatch)
+            }
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "event limit reached" =>
+            {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                })
+            }
+            Err(error) => return Err(error.into()),
+            Ok(event) => event,
+        };
+        let token = self
+            .consent_authority
+            .record_grant_on_timeline(timeline, &grant);
+        Ok((event, token))
+    }
+
+    /// Append one Gateway-owned consent revocation at its durable fence.
+    ///
+    /// The executor atomically verifies that the supplied fence matches the
+    /// logical sequence committed by this revocation.
+    ///
+    /// # Errors
+    /// Returns a closed Timeline, fence, or bounded append error.
+    pub async fn issue_consent_revocation(
+        &self,
+        timeline_id: &str,
+        revocation: ConsentRevokedV1,
+    ) -> Result<Event, GatewayError> {
+        let timeline = match parse_timeline_id(timeline_id) {
+            Ok(timeline) => timeline,
+            Err(error) => return Err(error),
+        };
+        revocation.encode()?;
+        let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
+        let reservation = match self
+            .consent_authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+        {
+            Ok(reservation) => reservation,
+            Err(pos_core::ConsentError::NoConsent) => {
+                self.restore_consent_history_locked(timeline).await?;
+                self.consent_authority
+                    .begin_revocation_on_timeline(timeline, &revocation)
+                    .map_err(|_| {
+                        GatewayError::Store(CoreError::Storage(
+                            "consent revocation did not name an active grant".to_owned(),
+                        ))
+                    })?
+            }
+            Err(pos_core::ConsentError::Revoked) => {
+                return Err(GatewayError::Store(CoreError::Storage(
+                    "consent revocation was already fenced".to_owned(),
+                )))
+            }
+            Err(error) => return Err(GatewayError::Store(CoreError::Storage(error.to_string()))),
+        };
+        let scope = ingress_dedup_scope(revocation.subject_id);
+        let event = match self
+            .store
+            .append_consent_revocation(
+                timeline,
+                revocation.clone(),
+                scope,
+                self.consent_authority.append_permit(),
+                self.limits.max_events_per_timeline,
+                reservation,
+            )
+            .await
+        {
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "consent revocation fence mismatch" =>
+            {
+                return Err(GatewayError::ConsentRevocationFenceMismatch)
+            }
+            Err(executor::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "event limit reached" =>
+            {
+                return Err(GatewayError::EventLimitReached {
+                    maximum: self.limits.max_events_per_timeline,
+                })
+            }
+            Ok(event) => event,
+            Err(error) => {
+                return Err(error.into());
+            }
+        };
+        self.enqueue_consent_cleanup(scope).await;
+        #[cfg(not(test))]
+        self.schedule_pending_consent_cleanup();
+        let cleanup = self
+            .store
+            .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
+            .await
+            .map_err(GatewayError::from)?;
+        if cleanup.more_may_remain {
+            self.enqueue_consent_cleanup(scope).await;
+        }
+        Ok(event)
     }
 
     /// Poll one bounded page of Timeline events, starting at `from_seq` (inclusive).
@@ -1140,10 +1584,10 @@ impl Gateway {
             }
             Err(error) => return Err(error.into()),
         };
-        if events
-            .iter()
-            .any(|event| pos_core::is_geographic_event_type(&event.event_type))
-        {
+        if events.iter().any(|event| {
+            pos_core::is_geographic_event_type(&event.event_type)
+                || pos_core::is_consent_event_type(&event.event_type)
+        }) {
             return Err(GatewayError::ResourceUnavailable);
         }
         let next_from_seq = events
@@ -1385,9 +1829,17 @@ impl Gateway {
             }
             AppendOrDuplicateOutcome::Conflict => return Err(GatewayError::IngressConflict),
         };
-        if !duplicate {
-            self.publish_notice(timeline, &event);
+        if duplicate {
+            return Ok(IdentifiedAppend { event, duplicate });
         }
+        let notice = EventNotice {
+            timeline_id: timeline.to_string(),
+            event_id: event.id.to_string(),
+            entity_id: event.entity.to_string(),
+            event_type: event.event_type.as_str().to_owned(),
+            seq: event.seq.as_u64(),
+        };
+        drop(self.bus.send(notice));
         Ok(IdentifiedAppend { event, duplicate })
     }
 
@@ -1457,11 +1909,9 @@ impl Gateway {
                 }
             }
         };
-        self.publish_notice(timeline, &event);
-        Ok(event)
-    }
-
-    fn publish_notice(&self, timeline: TimelineId, event: &Event) {
+        if pos_core::is_consent_event_type(&event.event_type) {
+            return Ok(event);
+        }
         let notice = EventNotice {
             timeline_id: timeline.to_string(),
             event_id: event.id.to_string(),
@@ -1470,6 +1920,7 @@ impl Gateway {
             seq: event.seq.as_u64(),
         };
         drop(self.bus.send(notice));
+        Ok(event)
     }
 
     fn publish_geographic_notice(
@@ -1505,11 +1956,18 @@ impl Gateway {
 
     #[cfg(test)]
     fn with_bus_capacity(store: Box<dyn EventStore>, capacity: usize) -> Self {
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus: broadcast::channel(capacity).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1522,6 +1980,9 @@ impl Gateway {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1529,11 +1990,18 @@ impl Gateway {
 
     #[cfg(test)]
     fn with_limits(store: Box<dyn EventStore>, limits: GatewayLimits) -> Self {
+        let consent_authority = ConsentAuthority::new();
         Self {
-            store: executor::StoreExecutor::new(store),
+            store: executor::StoreExecutor::new_with_consent_authority(
+                store,
+                consent_authority.append_permit(),
+            ),
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits,
             owntracks_enabled: false,
+            consent_authority,
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         }
@@ -1552,13 +2020,17 @@ fn ingress_identity(timeline: TimelineId, entity: EntityId, ingress_id: &str) ->
     key.update(entity.to_string().as_bytes());
     key.update(b"\ningress:");
     key.update(ingress_id.as_bytes());
+    AppendIdentity::new(
+        AppendDedupKey::from_keyed_hash(*key.finalize().as_bytes()),
+        ingress_dedup_scope(entity),
+    )
+}
+
+fn ingress_dedup_scope(entity: EntityId) -> AppendDedupScope {
     let mut scope = blake3::Hasher::new_derive_key("pigloros ingress dedup scope v1");
     scope.update(b"entity:");
     scope.update(entity.to_string().as_bytes());
-    AppendIdentity::new(
-        AppendDedupKey::from_keyed_hash(*key.finalize().as_bytes()),
-        AppendDedupScope::from_keyed_hash(*scope.finalize().as_bytes()),
-    )
+    AppendDedupScope::from_keyed_hash(*scope.finalize().as_bytes())
 }
 
 const fn event_seq(event: &Event) -> u64 {
@@ -1694,7 +2166,9 @@ impl TryFrom<&Event> for EventView {
     type Error = GatewayError;
 
     fn try_from(event: &Event) -> Result<Self, Self::Error> {
-        if pos_core::is_geographic_event_type(&event.event_type) {
+        if pos_core::is_geographic_event_type(&event.event_type)
+            || pos_core::is_consent_event_type(&event.event_type)
+        {
             return Err(GatewayError::ResourceUnavailable);
         }
         let bytes = event.payload.as_slice();
@@ -1806,6 +2280,7 @@ mod tests {
         ids::EventId,
         store::{export_timeline_own, import_timeline_with_id},
         timeline::TimelineMeta,
+        EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
     };
     use pos_store::{open_store, StoreConfig};
     use std::{
@@ -1819,6 +2294,52 @@ mod tests {
 
     fn memory_gw() -> Gateway {
         Gateway::new(open_store(StoreConfig::Memory).test_ok())
+    }
+
+    fn consent_grant(subject_id: EntityId, grant_seq: u64) -> ConsentGrantedV1 {
+        ConsentGrantedV1 {
+            subject_id,
+            grantee_id: EntityId::new(),
+            purpose: "contract-test".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq,
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_consent_operations_reject_invalid_timeline_ids() {
+        let gateway = memory_gw();
+        let grant_error = gateway
+            .issue_consent_grant("not-a-timeline", consent_grant(EntityId::new(), 1))
+            .await
+            .test_err();
+        assert!(matches!(grant_error, GatewayError::InvalidId(_)));
+
+        let revocation_error = gateway
+            .issue_consent_revocation(
+                "not-a-timeline",
+                ConsentRevokedV1 {
+                    subject_id: EntityId::new(),
+                    grantee_id: EntityId::new(),
+                    grant_seq: 1,
+                    fence_seq: 1,
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(revocation_error, GatewayError::InvalidId(_)));
+        drop(gateway);
+    }
+
+    #[test]
+    fn gateway_action_registry_exposes_the_host_action_schema() {
+        let registry = gateway_action_registry();
+        assert!(registry.schemas.contains(EVENT_TYPE_ACTION));
     }
 
     #[test]
@@ -2001,6 +2522,9 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry_with_bodies([body]),
             action_principal: Some(ActionPrincipal::new(
                 actor,
@@ -2090,6 +2614,7 @@ mod tests {
         FailGetTimeline,
         EmptyAppend,
         FailAppend,
+        FailConsentRevocationAppend,
         FailRead,
         ReadPayloadTooLarge,
         ReadMetadataTooLarge,
@@ -2100,6 +2625,7 @@ mod tests {
         Duplicate,
         DuplicateReadError,
         GeographicRead(&'static str),
+        ConsentRead(&'static str),
         MissingTimeline,
     }
 
@@ -2122,6 +2648,13 @@ mod tests {
         ) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailAppend) {
                 return Err(CoreError::Storage("append failed".into()));
+            }
+            if matches!(self.mode, ScriptMode::FailConsentRevocationAppend)
+                && drafts
+                    .iter()
+                    .any(|draft| draft.event_type == Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1))
+            {
+                return Err(CoreError::Storage("revocation append failed".into()));
             }
             if matches!(self.mode, ScriptMode::EmptyAppend) {
                 return Ok(Vec::new());
@@ -2157,6 +2690,27 @@ mod tests {
             self.append(timeline, drafts).map(Some)
         }
 
+        fn append_consent_bounded(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+            _permit: pos_core::ConsentAppendPermit,
+            max_owned_events: u64,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            self.append_bounded(timeline, drafts, max_owned_events)
+        }
+
+        fn append_consent_revocation_bounded(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+            permit: pos_core::ConsentAppendPermit,
+            max_owned_events: u64,
+            _cleanup_scope: AppendDedupScope,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            self.append_consent_bounded(timeline, drafts, permit, max_owned_events)
+        }
+
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailRead) {
                 return Err(CoreError::Storage("read failed".into()));
@@ -2179,7 +2733,9 @@ mod tests {
             if let Some(error) = bounded_error {
                 return Err(error);
             }
-            if let ScriptMode::GeographicRead(event_type) = self.mode {
+            if let ScriptMode::GeographicRead(event_type) | ScriptMode::ConsentRead(event_type) =
+                self.mode
+            {
                 let payload = CanonicalBytes::from_vec(b"protected".to_vec());
                 return Ok(vec![Event {
                     id: EventId::new(),
@@ -2242,6 +2798,10 @@ mod tests {
                 return Ok(None);
             }
             Ok(Some(Timeline::new(TimelineMeta::root("scripted"))))
+        }
+
+        fn logical_head(&self, _id: TimelineId) -> Result<Seq, CoreError> {
+            Ok(Seq::ZERO)
         }
 
         fn append_intent_or_duplicate_bounded(
@@ -2342,6 +2902,15 @@ mod tests {
 
         assert!(matches!(
             gateway.create_timeline("closed").await,
+            Err(GatewayError::StoreExecutorClosed)
+        ));
+        assert!(matches!(
+            gateway
+                .issue_consent_grant(
+                    &TimelineId::new().to_string(),
+                    consent_grant(EntityId::new(), 1)
+                )
+                .await,
             Err(GatewayError::StoreExecutorClosed)
         ));
         drop(gateway);
@@ -2453,6 +3022,499 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_issues_only_canonical_consent_events_at_the_bound_sequence() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("consent-host").await.test_ok();
+        let mut notices = gateway.subscribe();
+        let grant = consent_grant(EntityId::new(), 1);
+
+        let (grant_event, token) = gateway
+            .issue_consent_grant(&timeline.id().to_string(), grant.clone())
+            .await
+            .test_ok();
+        assert_eq!(
+            grant_event.event_type.as_str(),
+            pos_core::EVENT_TYPE_CONSENT_GRANTED_V1
+        );
+        assert_eq!(
+            ConsentGrantedV1::decode(&grant_event.payload).test_ok(),
+            grant
+        );
+        assert_eq!(token.grant_seq(), 1);
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        let revocation = ConsentRevokedV1 {
+            subject_id: token.subject_id(),
+            grantee_id: token.grantee_id(),
+            grant_seq: token.grant_seq(),
+            fence_seq: 2,
+        };
+        let revocation_event = gateway
+            .issue_consent_revocation(&timeline.id().to_string(), revocation.clone())
+            .await
+            .test_ok();
+        assert_eq!(
+            revocation_event.event_type.as_str(),
+            EVENT_TYPE_CONSENT_REVOKED_V1
+        );
+        assert_eq!(
+            ConsentRevokedV1::decode(&revocation_event.payload).test_ok(),
+            revocation
+        );
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        let already_fenced = gateway
+            .issue_consent_revocation(&timeline.id().to_string(), revocation)
+            .await
+            .test_err();
+        assert!(matches!(
+            already_fenced,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "consent revocation was already fenced"
+        ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn consent_revocation_removes_subject_ingress_dedup_identities() {
+        let gateway = memory_gw();
+        let timeline = gateway
+            .create_timeline("consent-dedup-cleanup")
+            .await
+            .test_ok();
+        let subject = EntityId::new();
+        let subject_text = subject.to_string();
+        let (_grant_event, token) = gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(subject, 1))
+            .await
+            .test_ok();
+
+        let first = gateway
+            .append_identified_action(
+                &timeline.id().to_string(),
+                &subject_text,
+                EVENT_TYPE_ACTION,
+                &serde_json::json!({"dx": 1.0}),
+                "device-1:42",
+            )
+            .await
+            .test_ok();
+        assert!(!first.duplicate);
+
+        for index in 0..CONSENT_DEDUP_CLEANUP_BATCH.get().saturating_mul(2) {
+            let result = gateway
+                .append_identified_action(
+                    &timeline.id().to_string(),
+                    &subject_text,
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({"dx": index}),
+                    &format!("bulk-device:{index}"),
+                )
+                .await
+                .test_ok();
+            assert!(!result.duplicate);
+        }
+
+        let fence_seq = gateway
+            .store
+            .protected_logical_head(timeline.id())
+            .await
+            .test_ok()
+            .as_u64()
+            .saturating_add(1);
+        gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq,
+                },
+            )
+            .await
+            .test_ok();
+
+        gateway.run_pending_consent_cleanup_worker().await;
+
+        let mut retried = None;
+        for _ in 0..32 {
+            let _ = gateway.process_pending_consent_cleanup().await.test_ok();
+            let result = gateway
+                .append_identified_action(
+                    &timeline.id().to_string(),
+                    &subject_text,
+                    EVENT_TYPE_ACTION,
+                    &serde_json::json!({"dx": 1.0}),
+                    "device-1:42",
+                )
+                .await
+                .test_ok();
+            if !result.duplicate {
+                retried = Some(result);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(retried.is_some());
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn scheduled_consent_cleanup_retries_bounded_store_failures() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailList,
+        }));
+        gateway
+            .enqueue_consent_cleanup(ingress_dedup_scope(EntityId::new()))
+            .await;
+        gateway.schedule_pending_consent_cleanup();
+        tokio::time::sleep(Duration::from_millis(
+            CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS * 2,
+        ))
+        .await;
+        assert!(gateway.process_pending_consent_cleanup().await.is_err());
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn scheduled_consent_cleanup_drains_queued_work() {
+        let gateway = memory_gw();
+        gateway
+            .enqueue_consent_cleanup(ingress_dedup_scope(EntityId::new()))
+            .await;
+        gateway.schedule_pending_consent_cleanup();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if gateway.pending_consent_cleanup.lock().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .test_ok();
+        drop(gateway);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn scheduled_consent_cleanup_uses_fallback_runtime_without_tokio() {
+        let gateway = memory_gw();
+        std::thread::spawn({
+            let gateway = gateway.clone();
+            move || gateway.schedule_pending_consent_cleanup()
+        })
+        .join()
+        .test_ok();
+        std::thread::sleep(Duration::from_millis(10));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn append_draft_suppresses_consent_event_notice() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailList,
+        }));
+        let mut notices = gateway.subscribe();
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"scripted-consent"),
+        );
+        let event = gateway
+            .append_draft(TimelineId::new(), draft)
+            .await
+            .test_ok();
+        assert_eq!(event.event_type.as_str(), EVENT_TYPE_CONSENT_GRANTED_V1);
+        assert!(matches!(
+            notices.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_rejects_a_consent_grant_with_a_stale_sequence_before_append() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("consent-sequence").await.test_ok();
+        let error = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 0),
+            )
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::ConsentGrantSequenceMismatch));
+        let page = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok();
+        assert!(page.events.is_empty());
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn gateway_preserves_an_unclassified_consent_grant_append_error() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailAppend,
+        }));
+        let timeline = gateway
+            .create_timeline("consent-grant-append-error")
+            .await
+            .test_ok();
+        let error = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "append failed"
+        ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_consent_grant_preserves_codec_and_event_ceiling_errors() {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Memory).test_ok(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway
+            .create_timeline("consent-grant-errors")
+            .await
+            .test_ok();
+        let subject = EntityId::new();
+        let mut invalid = consent_grant(EntityId::new(), 1);
+        invalid.modalities = 0x10;
+        let codec_error = gateway
+            .issue_consent_grant(&timeline.id().to_string(), invalid)
+            .await
+            .test_err();
+        assert!(matches!(
+            codec_error,
+            GatewayError::ConsentCodec(ConsentCodecError::FieldOutOfBounds)
+        ));
+
+        gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(subject, 1))
+            .await
+            .test_ok();
+        let ceiling_error = gateway
+            .issue_consent_grant(&timeline.id().to_string(), consent_grant(subject, 2))
+            .await
+            .test_err();
+        assert!(matches!(
+            ceiling_error,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        drop(gateway);
+    }
+
+    async fn gateway_with_consent_grant() -> (Gateway, Timeline, Event, ConsentCapabilityToken) {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Memory).test_ok(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway
+            .create_timeline("consent-revocation-test")
+            .await
+            .test_ok();
+        let (grant_event, token) = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
+            .await
+            .test_ok();
+        (gateway, timeline, grant_event, token)
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_rejects_unknown_session_before_append() {
+        let gateway = Gateway::with_limits(
+            open_store(StoreConfig::Memory).test_ok(),
+            GatewayLimits {
+                max_timelines: 1,
+                max_events_per_timeline: 1,
+            },
+        );
+        let timeline = gateway
+            .create_timeline("consent-revocation-unknown")
+            .await
+            .test_ok();
+        let unknown = ConsentRevokedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
+            fence_seq: 1,
+        };
+        let unknown_error = gateway
+            .issue_consent_revocation(&timeline.id().to_string(), unknown)
+            .await
+            .test_err();
+        assert!(matches!(
+            unknown_error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "consent revocation did not name an active grant"
+        ));
+        assert!(gateway
+            .read_events_page(&timeline.id().to_string(), 0, 1)
+            .await
+            .test_ok()
+            .events
+            .is_empty());
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_rejects_stale_fence_before_append() {
+        let (gateway, timeline, grant_event, token) = gateway_with_consent_grant().await;
+        let fence_error = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant_event.seq.as_u64(),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            fence_error,
+            GatewayError::ConsentRevocationFenceMismatch
+        ));
+        let page_error = gateway
+            .read_events_page(&timeline.id().to_string(), 0, 2)
+            .await
+            .test_err();
+        assert!(matches!(page_error, GatewayError::ResourceUnavailable));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_rejects_event_ceiling_after_fence_validation() {
+        let (gateway, timeline, grant_event, token) = gateway_with_consent_grant().await;
+        let stale_fence = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant_event.seq.as_u64(),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            stale_fence,
+            GatewayError::ConsentRevocationFenceMismatch
+        ));
+        let ceiling_error = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: grant_event.seq.as_u64().saturating_add(1),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            ceiling_error,
+            GatewayError::EventLimitReached { maximum: 1 }
+        ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn consent_history_lock_is_shared_by_gateway_clones() {
+        let gateway = memory_gw();
+        let timeline = gateway.create_timeline("consent-lock").await.test_ok().id();
+        let guard = gateway.lock_consent_timeline(timeline).await;
+        let clone = gateway.clone();
+        let grant_task = tokio::spawn(async move {
+            clone
+                .issue_consent_grant(&timeline.to_string(), consent_grant(EntityId::new(), 1))
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!grant_task.is_finished());
+        drop(guard);
+        let (event, _) = grant_task.await.test_ok().test_ok();
+        assert_eq!(event.event_type.as_str(), EVENT_TYPE_CONSENT_GRANTED_V1);
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn gateway_revocation_preserves_unclassified_append_errors() {
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::FailConsentRevocationAppend,
+        }));
+        let timeline = gateway
+            .create_timeline("consent-revocation-append-error")
+            .await
+            .test_ok();
+        let (_, token) = gateway
+            .issue_consent_grant(
+                &timeline.id().to_string(),
+                consent_grant(EntityId::new(), 1),
+            )
+            .await
+            .test_ok();
+        let error = gateway
+            .issue_consent_revocation(
+                &timeline.id().to_string(),
+                ConsentRevokedV1 {
+                    subject_id: token.subject_id(),
+                    grantee_id: token.grantee_id(),
+                    grant_seq: token.grant_seq(),
+                    fence_seq: Seq::ZERO.as_u64().saturating_add(1),
+                },
+            )
+            .await
+            .test_err();
+        assert!(matches!(
+            error,
+            GatewayError::Store(CoreError::Storage(message))
+                if message == "revocation append failed"
+        ));
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn public_gateway_read_rejects_geographic_events_from_an_adapter() {
         for event_type in [
             pos_core::GEOGRAPHIC_EVENT_TYPE,
@@ -2468,6 +3530,15 @@ mod tests {
             assert!(matches!(error, GatewayError::ResourceUnavailable));
             drop(gateway);
         }
+        let gateway = Gateway::new(Box::new(ScriptedStore {
+            mode: ScriptMode::ConsentRead(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+        }));
+        let error = gateway
+            .read_events_page(&TimelineId::new().to_string(), 0, 1)
+            .await
+            .test_err();
+        assert!(matches!(error, GatewayError::ResourceUnavailable));
+        drop(gateway);
     }
 
     #[tokio::test]
@@ -3091,13 +4162,16 @@ mod tests {
                 .read_events_page(&timeline.id().to_string(), 0, 1)
                 .await
                 .test_err();
-            assert!(matches!(
-                error,
-                GatewayError::EventMetadataTooLarge {
-                    field: "event_type",
-                    maximum: MAX_EVENT_TYPE_BYTES
-                }
-            ));
+            assert!(
+                matches!(
+                    error,
+                    GatewayError::EventMetadataTooLarge {
+                        field: "event_type",
+                        maximum: MAX_EVENT_TYPE_BYTES
+                    }
+                ),
+                "unexpected imported oversized-event error: {error:?}"
+            );
         }
     }
 
@@ -3577,6 +4651,9 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3592,6 +4669,9 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3613,6 +4693,9 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3635,6 +4718,9 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3656,6 +4742,9 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3678,6 +4767,9 @@ mod tests {
             bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
             limits: GatewayLimits::LOCAL_DEFAULT,
             owntracks_enabled: false,
+            consent_authority: ConsentAuthority::new(),
+            consent_history_locks: new_consent_history_locks(),
+            pending_consent_cleanup: new_pending_consent_cleanup(),
             action_registry: gateway_action_registry(),
             action_principal: None,
         };
@@ -3734,6 +4826,9 @@ mod tests {
                 bus: broadcast::channel(EVENT_BUS_CAPACITY).0,
                 limits: GatewayLimits::LOCAL_DEFAULT,
                 owntracks_enabled: false,
+                consent_authority: ConsentAuthority::new(),
+                consent_history_locks: new_consent_history_locks(),
+                pending_consent_cleanup: new_pending_consent_cleanup(),
                 action_registry: gateway_action_registry(),
                 action_principal: None,
             };
@@ -3770,6 +4865,12 @@ mod tests {
         geographic.event_type = Kind::new(pos_core::GEOGRAPHIC_EVENT_TYPE);
         let error = EventView::try_from(&geographic).test_err();
         assert!(error.to_string().contains("not found"));
+        let mut consent = geographic;
+        consent.event_type = Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1);
+        assert!(matches!(
+            EventView::try_from(&consent),
+            Err(GatewayError::ResourceUnavailable)
+        ));
         drop(gw);
     }
 
@@ -3934,5 +5035,15 @@ mod tests {
             .test_err();
         assert!(err.to_string().contains("malformed world.action payload"));
         drop(gw);
+    }
+}
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[test]
+    fn action_registry_entrypoint_builds_the_gateway_registry() {
+        assert_eq!(gateway_action_registry().driver_count(), 0);
     }
 }

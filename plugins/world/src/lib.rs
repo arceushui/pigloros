@@ -2585,7 +2585,7 @@ mod tests {
         let mut reduced = WorldReducer.initial();
         WorldReducer.apply(&mut reduced, &events[2]);
         assert_eq!(reduced.get("last_x"), Some(&serde_json::json!(1.0)));
-        registry.commit_step();
+        registry.commit_step_at(Seq::ZERO, 0).test_ok();
     }
 
     fn assert_malformed_recovery_events(

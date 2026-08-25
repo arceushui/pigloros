@@ -3614,3 +3614,24 @@ fn history_predecessor_mismatches(
     }
     Ok(())
 }
+
+#[test]
+fn coordinator_rejects_storage_and_lifecycle_seams() -> Result<(), ErasureErrorV1> {
+    let mut load_failed =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, Vec::new()), reference(2));
+    load_failed.submit(request()?, reference(3))?;
+    load_failed.port.load_error = Some(ErasureErrorV1::KeyRegistryUnavailable);
+    assert_eq!(
+        load_failed.authorize(reference(1), reference(9)),
+        Err(ErasureErrorV1::KeyRegistryUnavailable)
+    );
+
+    let mut invalid_dispatch =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, Vec::new()), reference(2));
+    invalid_dispatch.submit(request()?, reference(3))?;
+    assert_eq!(
+        invalid_dispatch.dispatch_destruction(reference(1), reference(9)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}

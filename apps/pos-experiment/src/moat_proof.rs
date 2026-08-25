@@ -10,10 +10,10 @@ use pos_conformance::{
     compare, compare_authoritative_outputs, schema_id_for_event_type, verify_counterfactual_fork,
     verify_evidence, wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
     AuthorizationDecisionV1, CapabilityGrantV1, CaseOutcomeStatusV1, CaseOutcomeV1,
-    CausalTraceEntryV1, ClaimLayerV1, ComparisonV1, ConformanceReportV1, ConsentAuditV1,
-    CounterfactualContractV1, DependencyClassV1, DependencyNodeV1, DivergenceClassV1,
-    ExecutionModeV1, ImplementationIdentityV1, IndependenceEvidenceV1, InputDependencyV1,
-    InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
+    CausalTraceEntryV1, ClaimLayerV1, ComparisonV1, ConformanceReportV1, CounterfactualContractV1,
+    DependencyClassV1, DependencyNodeV1, DivergenceClassV1, ExecutionModeV1, HostClosureAuditV1,
+    ImplementationIdentityV1, IndependenceEvidenceV1, InputDependencyV1, InterventionV1,
+    InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
     ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1, PrincipalRefV1,
     ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
     ReproManifestV1, ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
@@ -62,7 +62,7 @@ pub struct MoatProofReport {
     pub prefix_identical_through_fork: GateStatus,
     pub suffix_recomputed: GateStatus,
     pub failure_probes: Vec<PluginFailureV1>,
-    pub consent_audit: ConsentAuditV1,
+    pub host_closure: HostClosureAuditV1,
 }
 
 impl MoatProofReport {
@@ -78,9 +78,9 @@ impl MoatProofReport {
             && !self.counterfactual.causal_trace.is_empty()
             && self.failure_probes.iter().all(|failure| !failure.committed)
             && self.failure_probes.len() == 2
-            && self.consent_audit.halted_at_tick_boundary
-            && self.consent_audit.effective_after_seq > self.consent_audit.requested_after_seq
-            && self.consent_audit.revocation_event_seq == self.consent_audit.effective_after_seq
+            && self.host_closure.halted_at_tick_boundary
+            && self.host_closure.effective_after_seq > self.host_closure.requested_after_seq
+            && self.host_closure.closure_event_seq == self.host_closure.effective_after_seq
     }
 }
 
@@ -153,7 +153,7 @@ impl MoatProofRun {
         let mut parent = experiment.start()?;
         parent.step_tick()?;
         let fork_cut_seq = parent
-            .source_events()?
+            .source_events_with_control()?
             .last()
             .map(|event| event.seq.as_u64())
             .ok_or(MoatProofError::MissingForkCut)?;
@@ -162,37 +162,39 @@ impl MoatProofRun {
         child.submit_action(&proposal)?;
         finish(&mut parent)?;
         finish(&mut child)?;
-        let consent_audit = commit_consent_boundary(&mut parent, "proof-subject")?;
-        let counterfactual_consent_audit = commit_consent_boundary(&mut child, "proof-subject")?;
-        let baseline_events = parent.source_events()?;
-        let counterfactual_events = child.source_events()?;
+        let host_closure = commit_host_closure(&mut parent, "proof-subject")?;
+        let counterfactual_host_closure = commit_host_closure(&mut child, "proof-subject")?;
+        let baseline_events = parent.source_events_with_control()?;
+        let counterfactual_events = child.source_events_with_control()?;
+        let parent_result = parent.run_to_completion()?;
+        let child_result = child.run_to_completion()?;
         let (prefix_identical_through_fork, suffix_recomputed) =
             suffix_audit(&baseline_events, &counterfactual_events, fork_cut_seq);
         let baseline = evidence(&EvidenceContext {
             input: &input,
             mode,
-            timeline_id: parent.timeline().id(),
+            timeline_id: parent_result.timeline_id,
             fork_cut_seq: Some(fork_cut_seq),
             events: baseline_events.as_slice(),
             factual_events: baseline_events.as_slice(),
-            projections: parent.projections()?,
+            projections: &parent_result.projections,
             topology: &topology,
             plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
-            consent_audit: &consent_audit,
+            host_closure: &host_closure,
         })?;
         let counterfactual = evidence(&EvidenceContext {
             input: &input,
             mode,
-            timeline_id: child.timeline().id(),
+            timeline_id: child_result.timeline_id,
             fork_cut_seq: Some(fork_cut_seq),
             events: counterfactual_events.as_slice(),
             factual_events: baseline_events.as_slice(),
-            projections: child.projections()?,
+            projections: &child_result.projections,
             topology: &topology,
             plugin_versions: &plugin_versions,
             failure_probes: &failure_probes,
-            consent_audit: &counterfactual_consent_audit,
+            host_closure: &counterfactual_host_closure,
         })?;
         verify_evidence(&baseline)?;
         verify_evidence(&counterfactual)?;
@@ -224,7 +226,7 @@ impl MoatProofRun {
             prefix_identical_through_fork: prefix_identical_through_fork.into(),
             suffix_recomputed: suffix_recomputed.into(),
             failure_probes,
-            consent_audit,
+            host_closure,
         };
         if !report.passes_reaction_gates() {
             return Err(MoatProofError::ReactionGatesFailed);
@@ -299,7 +301,7 @@ pub enum MoatProofError {
     ReactionGatesFailed,
     #[error("consent-revoked session accepted a post-revocation append")]
     ConsentAppendAccepted,
-    #[error("consent probe did not commit its host-owned revocation marker")]
+    #[error("consent probe did not commit its host-owned closure marker")]
     ConsentMarkerMissing,
 }
 
@@ -544,7 +546,7 @@ struct EvidenceContext<'a> {
     topology: &'a ProofTopology,
     plugin_versions: &'a BTreeMap<String, String>,
     failure_probes: &'a [PluginFailureV1],
-    consent_audit: &'a ConsentAuditV1,
+    host_closure: &'a HostClosureAuditV1,
 }
 
 fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatProofError> {
@@ -557,7 +559,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
     let topology = context.topology;
     let plugin_versions = context.plugin_versions;
     let failure_probes = context.failure_probes;
-    let consent_audit = context.consent_audit;
+    let host_closure = context.host_closure;
     let ids = events
         .iter()
         .map(|event| (event.id, event.seq.as_u64()))
@@ -618,7 +620,7 @@ fn evidence(context: &EvidenceContext<'_>) -> Result<MoatProofEvidenceV1, MoatPr
         uncertainty,
         participant_views,
         plugin_failures: failure_probes.to_vec(),
-        consent_audit: consent_audit.clone(),
+        host_closure: host_closure.clone(),
         contract,
     })
 }
@@ -871,11 +873,11 @@ fn build_room_parts(
     input: &MoatProofInputV1,
     input_digest: [u8; 32],
     participant_views: &[ParticipantViewV1],
-    consent_audit: &ConsentAuditV1,
+    host_closure: &HostClosureAuditV1,
     policy_digest: [u8; 32],
 ) -> ContractRoomParts {
     let consent_epoch =
-        u64::from(consent_audit.revocation_event_seq > consent_audit.requested_after_seq);
+        u64::from(host_closure.closure_event_seq > host_closure.requested_after_seq);
     let exogenous_digest = digest_domain(
         b"PiglorOS.ScenarioRoom.Exogenous.v1",
         &input
@@ -901,8 +903,7 @@ fn build_room_parts(
             principal_id: principal.principal_id.clone(),
             capability: "observe:authorized-snapshot".to_owned(),
             resource: "scenario-room".to_owned(),
-            consent_epoch: if principal.subject_id.as_deref()
-                == Some(consent_audit.subject.as_str())
+            consent_epoch: if principal.subject_id.as_deref() == Some(host_closure.subject.as_str())
             {
                 consent_epoch
             } else {
@@ -1360,7 +1361,7 @@ fn build_wave8_contract(
         context.input,
         context.topology.input_digest,
         participant_views,
-        context.consent_audit,
+        context.host_closure,
         policy_digest,
     );
     let (knowledge_snapshots, authorization_decisions) = build_knowledge_snapshots(
@@ -1579,9 +1580,9 @@ fn failure_probe(
         })),
     )?;
     let mut session = experiment.start()?;
-    let before = session.source_events()?;
+    let before = session.source_events_with_control()?;
     let step_failed = session.step_tick().is_err();
-    let after = session.source_events()?;
+    let after = session.source_events_with_control()?;
     let failure_class = match class {
         "resource_exhaustion" => PluginFailureClassV1::ResourceExhaustion,
         _ => PluginFailureClassV1::PluginCrash,
@@ -1599,15 +1600,15 @@ fn failure_probe(
     })
 }
 
-fn commit_consent_boundary(
+fn commit_host_closure(
     session: &mut ExperimentSession,
     subject: &str,
-) -> Result<ConsentAuditV1, MoatProofError> {
+) -> Result<HostClosureAuditV1, MoatProofError> {
     let boundary_seq = session
-        .source_events()?
+        .source_events_with_control()?
         .last()
         .map_or(0, |event| event.seq.as_u64());
-    session.revoke_consent_for_subject_at_boundary(subject);
+    session.close_session_at_boundary();
     let post_revocation_append = session.append_events(&[EventDraft::new(
         fixed_id(5),
         Kind::new("proof.consent.tick"),
@@ -1623,25 +1624,23 @@ fn commit_consent_boundary(
             ..
         }
     );
-    let marker_events = session.source_events()?;
+    let marker_events = session.source_events_with_control()?;
     let marker = marker_events
         .last()
-        .filter(|event| {
-            event.event_type.as_str() == pos_runtime::HOST_CONSENT_REVOCATION_EVENT_TYPE
-        })
+        .filter(|event| event.event_type.as_str() == crate::EXPERIMENT_CONSENT_CLOSED_EVENT_TYPE)
         .ok_or(MoatProofError::ConsentMarkerMissing)?;
     let halted = marker_committed && matches!(session.step_tick()?, crate::TickOutcome::Stopped);
     let after_seq = session
-        .source_events()?
+        .source_events_with_control()?
         .last()
         .map_or(0, |event| event.seq.as_u64());
-    Ok(ConsentAuditV1 {
+    Ok(HostClosureAuditV1 {
         subject: subject.to_owned(),
         requested_after_seq: boundary_seq,
         effective_after_seq: after_seq,
-        revocation_event_seq: after_seq,
-        revocation_event_type: marker.event_type.as_str().to_owned(),
-        revocation_payload_digest: *blake3::hash(marker.payload.as_slice()).as_bytes(),
+        closure_event_seq: after_seq,
+        closure_event_type: marker.event_type.as_str().to_owned(),
+        closure_payload_digest: *blake3::hash(marker.payload.as_slice()).as_bytes(),
         halted_at_tick_boundary: halted,
     })
 }
@@ -2431,13 +2430,13 @@ mod tests {
         let topology = ProofTopology::new(input.clone()).test_ok();
         let projections = pos_state::ProjectionRegistry::new();
         let versions = BTreeMap::new();
-        let consent_audit = ConsentAuditV1 {
+        let host_closure = HostClosureAuditV1 {
             subject: "subject".to_owned(),
             requested_after_seq: 0,
             effective_after_seq: 1,
-            revocation_event_seq: 1,
-            revocation_event_type: "proof.consent.tick".to_owned(),
-            revocation_payload_digest: [0; 32],
+            closure_event_seq: 1,
+            closure_event_type: "proof.consent.tick".to_owned(),
+            closure_payload_digest: [0; 32],
             halted_at_tick_boundary: true,
         };
         let evidence = evidence(&EvidenceContext {
@@ -2451,7 +2450,7 @@ mod tests {
             topology: &topology,
             plugin_versions: &versions,
             failure_probes: &[],
-            consent_audit: &consent_audit,
+            host_closure: &host_closure,
         })
         .test_ok();
         assert!(evidence.projections.is_empty());
@@ -2634,13 +2633,13 @@ mod coverage_entrypoints {
         let topology = test_ok(ProofTopology::new(input.clone()));
         let projections = pos_state::ProjectionRegistry::new();
         let plugin_versions = BTreeMap::new();
-        let consent_audit = ConsentAuditV1 {
+        let host_closure = HostClosureAuditV1 {
             subject: "subject".to_owned(),
             requested_after_seq: 0,
             effective_after_seq: 1,
-            revocation_event_seq: 1,
-            revocation_event_type: "proof.consent.tick".to_owned(),
-            revocation_payload_digest: [0; 32],
+            closure_event_seq: 1,
+            closure_event_type: "proof.consent.tick".to_owned(),
+            closure_payload_digest: [0; 32],
             halted_at_tick_boundary: true,
         };
         let empty = test_ok(evidence(&EvidenceContext {
@@ -2654,7 +2653,7 @@ mod coverage_entrypoints {
             topology: &topology,
             plugin_versions: &plugin_versions,
             failure_probes: &[],
-            consent_audit: &consent_audit,
+            host_closure: &host_closure,
         }));
         assert!(empty.projections.is_empty());
 
@@ -2675,7 +2674,7 @@ mod coverage_entrypoints {
             prefix_identical_through_fork: GateStatus::Passed,
             suffix_recomputed: GateStatus::Passed,
             failure_probes: Vec::new(),
-            consent_audit,
+            host_closure,
         };
         assert!(!failed.passes_reaction_gates());
         failed.failure_probes = vec![PluginFailureV1 {
@@ -2758,13 +2757,14 @@ mod run_coverage_entrypoints {
         let failure_probes = std::mem::take(&mut local.failure_probes);
         assert!(!local.passes_reaction_gates());
         local.failure_probes = failure_probes;
-        local.consent_audit.halted_at_tick_boundary = false;
+        local.host_closure.halted_at_tick_boundary = false;
         assert!(!local.passes_reaction_gates());
-        local.consent_audit.halted_at_tick_boundary = true;
-        local.consent_audit.effective_after_seq = local.consent_audit.requested_after_seq;
+        local.host_closure.halted_at_tick_boundary = true;
+        local.host_closure.effective_after_seq = local.host_closure.requested_after_seq;
+        local.host_closure.closure_event_seq = local.host_closure.effective_after_seq;
         assert!(!local.passes_reaction_gates());
-        local.consent_audit.effective_after_seq = local.consent_audit.requested_after_seq + 1;
-        local.consent_audit.revocation_event_seq = local.consent_audit.effective_after_seq - 1;
+        local.host_closure.effective_after_seq = local.host_closure.requested_after_seq + 1;
+        local.host_closure.closure_event_seq = local.host_closure.effective_after_seq - 1;
         assert!(!local.passes_reaction_gates());
 
         let mut network = proof_input();
@@ -2774,6 +2774,53 @@ mod run_coverage_entrypoints {
         let mut invalid_ticks = proof_input();
         invalid_ticks.ticks = 0;
         assert!(MoatProofRun::new(invalid_ticks, ExecutionModeV1::Local).is_err());
+    }
+
+    #[test]
+    fn consent_epoch_boundary_and_subject_binding_are_observable() {
+        let participant_views = [
+            ParticipantViewV1 {
+                participant: "proof-agent".to_owned(),
+                visible_event_types: Vec::new(),
+                hidden_event_types: Vec::new(),
+                visible_events: Vec::new(),
+            },
+            ParticipantViewV1 {
+                participant: "other-agent".to_owned(),
+                visible_event_types: Vec::new(),
+                hidden_event_types: Vec::new(),
+                visible_events: Vec::new(),
+            },
+        ];
+        let mut closure = HostClosureAuditV1 {
+            subject: "proof-subject".to_owned(),
+            requested_after_seq: 5,
+            effective_after_seq: 5,
+            closure_event_seq: 5,
+            closure_event_type: "proof.consent.tick".to_owned(),
+            closure_payload_digest: [0; 32],
+            halted_at_tick_boundary: true,
+        };
+        let no_revocation = build_room_parts(
+            &proof_input(),
+            [0; 32],
+            &participant_views,
+            &closure,
+            [1; 32],
+        );
+        assert_eq!(no_revocation.grants[0].consent_epoch, 0);
+        assert_eq!(no_revocation.grants[1].consent_epoch, 0);
+
+        closure.closure_event_seq = 6;
+        let revocation = build_room_parts(
+            &proof_input(),
+            [0; 32],
+            &participant_views,
+            &closure,
+            [1; 32],
+        );
+        assert_eq!(revocation.grants[0].consent_epoch, 1);
+        assert_eq!(revocation.grants[1].consent_epoch, 0);
     }
 
     #[test]

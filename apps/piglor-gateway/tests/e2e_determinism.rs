@@ -1,6 +1,10 @@
-use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, LedgerWriteMode};
+use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, GatewayError, LedgerWriteMode};
 use piglor_ledger::LedgerView;
-use pos_core::{Capability, EntityId, Kind, Plugin, PluginId, TimelineId, WallTime};
+use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
+use pos_core::{
+    CanonicalBytes, Capability, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
+    Kind, Plugin, PluginId, TimelineId, WallTime,
+};
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
     AgentAction, AgentContext, AgentDriver, AgentPlugin, AgentPolicy, AgentReducer,
@@ -296,16 +300,10 @@ fn snapshot_json(
 }
 
 fn state_u64(
-    registry: &ProjectionRegistry,
-    reducer: &str,
-    entity: EntityId,
+    state: &pos_core::State,
     key: &str,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    registry
-        .state_for_reducer(reducer, &entity)
-        .and_then(|state| state.get(key))
-        .and_then(Value::as_u64)
-        .test_ok()
+    state.get(key).and_then(Value::as_u64).test_ok()
 }
 
 struct MultiRateScenario {
@@ -411,7 +409,14 @@ async fn create_scenario() -> Result<MultiRateScenario, Box<dyn std::error::Erro
 
 fn register_experiment(
     scenario: &mut MultiRateScenario,
-) -> Result<Experiment, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (
+        Experiment,
+        pos_core::ConsentCapabilityToken,
+        ConsentAuthority,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let observation = FixturePlugin::new("observation", false, true);
     let society = SocietyPlugin::new();
     let fast = AgentPlugin::new();
@@ -473,7 +478,25 @@ fn register_experiment(
             )),
         )
         .test_ok()?;
-    Ok(experiment)
+    let authority = ConsentAuthority::new();
+    let grant = ConsentGrantedV1 {
+        subject_id: scenario.human_entity,
+        grantee_id: EntityId::new(),
+        purpose: "multi-rate-projection-observation".to_owned(),
+        modalities: 0,
+        min_geo_resolution: 0,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 0,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+    let token = authority.record_grant_on_timeline(scenario.timeline, &grant);
+    Ok((
+        experiment.with_consent_authority(authority.clone()),
+        token,
+        authority,
+    ))
 }
 
 async fn run_tick_boundaries(
@@ -645,55 +668,61 @@ fn assert_event_order(
 fn assert_projection_state(
     scenario: &MultiRateScenario,
     session: &pos_experiment::ExperimentSession,
+    authority: &ConsentAuthority,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let live = session.projections().test_ok()?;
+    let read_state = |reducer: &str, subject: EntityId| {
+        let token = authority.record_grant_on_timeline(
+            scenario.timeline,
+            &ConsentGrantedV1 {
+                subject_id: subject,
+                grantee_id: EntityId::new(),
+                purpose: "multi-rate-projection-read".to_owned(),
+                modalities: 0,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: false,
+                retention_days: 0,
+                expiry_secs: 0,
+                grant_seq: 2,
+            },
+        );
+        session
+            .projection_state_for_reducer(reducer, subject, &token, 0)
+            .test_ok()?
+            .test_ok()
+    };
+    let observation_human = read_state("observation", scenario.human_entity)?;
+    let observation_fast = read_state("observation", scenario.fast_entity)?;
+    let observation_slow = read_state("observation", scenario.slow_entity)?;
+    let society = read_state("society", scenario.society_entity)?;
+    let society_fast = read_state("society", scenario.fast_entity)?;
+    let agent_fast = read_state("agent", scenario.fast_entity)?;
+    let agent_slow = read_state("agent", scenario.slow_entity)?;
+    assert_eq!(state_u64(&observation_human, "event_count")?, 1);
+    assert_eq!(state_u64(&observation_fast, "event_count")?, 4);
+    assert_eq!(state_u64(&observation_slow, "event_count")?, 2);
+    assert_eq!(state_u64(&society, "signals")?, 1);
+    assert_eq!(state_u64(&society_fast, "signals")?, 1);
+    assert_eq!(state_u64(&agent_fast, "action_count")?, 3);
+    assert_eq!(state_u64(&agent_slow, "action_count")?, 2);
     assert_eq!(
-        state_u64(live, "observation", scenario.human_entity, "event_count")?,
-        1
-    );
-    assert_eq!(
-        state_u64(live, "observation", scenario.fast_entity, "event_count")?,
-        4
-    );
-    assert_eq!(
-        state_u64(live, "observation", scenario.slow_entity, "event_count")?,
-        2
-    );
-    assert_eq!(
-        state_u64(live, "society", scenario.society_entity, "signals")?,
-        1
-    );
-    assert_eq!(
-        state_u64(live, "society", scenario.fast_entity, "signals")?,
-        1
-    );
-    assert_eq!(
-        state_u64(live, "agent", scenario.fast_entity, "action_count")?,
-        3
-    );
-    assert_eq!(
-        state_u64(live, "agent", scenario.slow_entity, "action_count")?,
-        2
-    );
-    assert_eq!(
-        live.state_for_reducer("society", &scenario.society_entity)
-            .and_then(|state| state.get("mean.trust"))
-            .and_then(Value::as_f64),
+        society.get("mean.trust").and_then(Value::as_f64),
         Some(0.75)
     );
     assert_eq!(
-        live.state_for_reducer("society", &scenario.fast_entity)
-            .and_then(|state| state.get("mean.trust"))
-            .and_then(Value::as_f64),
+        society_fast.get("mean.trust").and_then(Value::as_f64),
         Some(0.25)
     );
     assert_eq!(
-        live.state_for_reducer("observation", &scenario.fast_entity)
-            .and_then(|state| state.get("last_event_type"))
+        observation_fast
+            .get("last_event_type")
             .and_then(Value::as_str),
         Some(EVENT_TYPE_ACTION)
     );
-    snapshot_json(live)
+    let events = session.source_events().test_ok()?;
+    let mut replayed = replay_registry();
+    replayed.fold_events(&events);
+    snapshot_json(&replayed)
 }
 
 fn assert_replay(
@@ -738,8 +767,11 @@ async fn multi_rate_human_ai_replay_is_deterministic() {
 async fn multi_rate_human_ai_replay_is_deterministic_impl(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut scenario = create_scenario().await?;
-    let experiment = register_experiment(&mut scenario)?;
-    let session = experiment.resume(scenario.timeline).test_ok()?;
+    let (experiment, token, authority) = register_experiment(&mut scenario)?;
+    let session = experiment
+        .resume(scenario.timeline)
+        .test_ok()?
+        .with_protected_token(token.clone());
     let (session, pinned_wall_time) = run_tick_boundaries(&mut scenario, session).await?;
     let polled = poll_events(scenario.address, scenario.timeline).await?;
     assert_event_order(
@@ -749,11 +781,146 @@ async fn multi_rate_human_ai_replay_is_deterministic_impl(
         &polled,
     )?;
 
-    let live_snapshot = assert_projection_state(&scenario, &session)?;
+    let live_snapshot = assert_projection_state(&scenario, &session, &authority)?;
     assert_eq!(*scenario.probe_log.lock().test_ok()?, vec![0, 0, 1]);
     assert_eq!(scenario.fast_decisions.load(Ordering::SeqCst), 3);
     assert_eq!(scenario.slow_decisions.load(Ordering::SeqCst), 2);
     assert_replay(&scenario, &live_snapshot, pinned_wall_time)?;
     scenario.guard.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_reloads_durable_consent_before_revocation(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let database = tempfile::NamedTempFile::new().test_ok()?;
+    let path = database.path().to_str().test_ok()?.to_owned();
+    let first_gateway =
+        Gateway::new(open_store(StoreConfig::Sqlite { path: path.clone() }).test_ok()?);
+    let timeline = first_gateway
+        .create_timeline("consent-recovery")
+        .await
+        .test_ok()?;
+    let subject_id = EntityId::new();
+    let grant = ConsentGrantedV1 {
+        subject_id,
+        grantee_id: EntityId::new(),
+        purpose: "gateway-recovery".to_owned(),
+        modalities: pos_core::MODALITY_LOCATION,
+        min_geo_resolution: 1,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 0,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+    let (grant_event, token) = first_gateway
+        .issue_consent_grant(&timeline.id().to_string(), grant)
+        .await
+        .test_ok()?;
+    drop(first_gateway);
+
+    let recovered_gateway = Gateway::new(open_store(StoreConfig::Sqlite { path }).test_ok()?);
+    let unknown_error = recovered_gateway
+        .issue_consent_revocation(
+            &timeline.id().to_string(),
+            ConsentRevokedV1 {
+                subject_id: EntityId::new(),
+                grantee_id: token.grantee_id(),
+                grant_seq: token.grant_seq(),
+                fence_seq: grant_event.seq.as_u64().saturating_add(1),
+            },
+        )
+        .await;
+    assert!(matches!(
+        unknown_error,
+        Err(GatewayError::Store(pos_core::CoreError::Storage(message)))
+            if message == "consent revocation did not name an active grant"
+    ));
+
+    let revocation = recovered_gateway
+        .issue_consent_revocation(
+            &timeline.id().to_string(),
+            ConsentRevokedV1 {
+                subject_id,
+                grantee_id: token.grantee_id(),
+                grant_seq: token.grant_seq(),
+                fence_seq: grant_event.seq.as_u64().saturating_add(1),
+            },
+        )
+        .await
+        .test_ok()?;
+    assert_eq!(
+        revocation.seq.as_u64(),
+        grant_event.seq.as_u64().saturating_add(1)
+    );
+    drop(recovered_gateway);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_rejects_geo_admission_after_consent_revocation(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let gateway =
+        Gateway::new_with_geo_location_admission(pos_store::memory::MemoryStore::default());
+    let timeline = gateway
+        .create_timeline("geo-revocation-fence")
+        .await
+        .test_ok()?;
+    let subject = EntityId::new();
+    let grant = ConsentGrantedV1 {
+        subject_id: subject,
+        grantee_id: EntityId::new(),
+        purpose: "geo-revocation-fence".to_owned(),
+        modalities: pos_core::MODALITY_LOCATION,
+        min_geo_resolution: 1,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 1,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+    let (grant_event, token) = gateway
+        .issue_consent_grant(&timeline.id().to_string(), grant)
+        .await
+        .test_ok()?;
+    gateway
+        .issue_consent_revocation(
+            &timeline.id().to_string(),
+            ConsentRevokedV1 {
+                subject_id: subject,
+                grantee_id: token.grantee_id(),
+                grant_seq: token.grant_seq(),
+                fence_seq: grant_event.seq.as_u64().saturating_add(1),
+            },
+        )
+        .await
+        .test_ok()?;
+    let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+        timeline.id(),
+        subject,
+        CanonicalBytes::from_static(b"revoked-geo-payload"),
+        1,
+        ([1; 32], 1, [2; 32]),
+        (1, false, 0),
+        ([4; 32], [5; 32]),
+    ));
+    assert!(matches!(
+        gateway
+            .admit_geo_location_with_consent(request, &token, 0)
+            .await,
+        Err(GatewayError::Consent(pos_core::ConsentError::Revoked))
+    ));
+    gateway.shutdown().await.test_ok()?;
+    drop(gateway);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_shutdown_drains_an_empty_executor(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let gateway = Gateway::new(open_store(StoreConfig::Memory).test_ok()?);
+    gateway.shutdown().await.test_ok()?;
+    drop(gateway);
     Ok(())
 }

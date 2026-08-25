@@ -1,4 +1,5 @@
 use pos_core::ids::{PluginId, TimelineId};
+use pos_core::ConsentError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -44,6 +45,18 @@ pub enum RuntimeError {
 
     #[error("driver emitted core-owned geographic event type '{event_type}'")]
     GeographicDraft { event_type: String },
+
+    #[error("plugin '{name}' cannot claim Gateway-owned consent event type '{event_type}'")]
+    ReservedConsentEventType { name: String, event_type: String },
+
+    #[error("driver emitted Gateway-owned consent event type '{event_type}'")]
+    ConsentDraft { event_type: String },
+
+    #[error("protected operation requires a host-bound consent authority")]
+    ConsentOperationUnavailable,
+
+    #[error("protected operation failed its consent fence: {0}")]
+    Consent(ConsentError),
 
     #[error(
         "driver '{driver}' cadence overflow: previous={previous_ns}ns, interval={interval_ns}ns"

@@ -20,6 +20,17 @@ macro_rules! output_stdout {
     }};
 }
 
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[test]
+    fn builtin_reference_runner_registers_both_reference_plugins() {
+        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 0).is_ok());
+        assert!(run_builtin_reference_experiment(StoreConfig::Memory, 1).is_ok());
+    }
+}
+
 macro_rules! output_stderr {
     ($($arg:tt)*) => {{
         let mut output = std::io::stderr().lock();
@@ -584,7 +595,7 @@ fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::
             let completed_ticks = result.ticks;
             let total_events = result.total_events;
             let timeline_id = result.timeline_id;
-            let reproduction = result.into_reproduction_manifest(cli_reproduction_recipe(ticks));
+            let reproduction = result.into_reproduction_manifest(cli_reproduction_recipe(ticks))?;
             let manifest_path = path.replace(".db", "-manifest.json");
 
             save_run_manifest(&manifest_path, &reproduction).map(|()| {

@@ -40,7 +40,7 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -93,6 +93,7 @@ pub struct SqliteStore {
     conn: Connection,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
+    consent_authority_permit: Option<ConsentAppendPermit>,
 }
 
 impl SqliteStore {
@@ -111,33 +112,39 @@ impl SqliteStore {
                     i64::try_from(consent_revision).unwrap_or(i64::MAX)
                 ],
                 |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
+                    row.get::<_, i64>(0).and_then(|revision| {
+                        row.get::<_, Vec<u8>>(1).and_then(|hash| {
+                            row.get::<_, Vec<u8>>(2)
+                                .map(|bytes| (revision, hash, bytes))
+                        })
+                    })
                 },
             )
             .optional()
             .map_err(|error| CoreError::Storage(error.to_string()))?
             .ok_or(CoreError::GeographicAdmissionValidationFailed)?;
         let stored_revision =
-            u64::try_from(row.0).map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-        let stored_hash: [u8; 32] = row
+            u64::try_from(row.0).map_err(|_| CoreError::GeographicAdmissionValidationFailed);
+        let stored_hash: Result<[u8; 32], CoreError> = row
             .1
             .try_into()
-            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-        let record = AdmissionConsentRecordV1::from_persistence_parts(
-            consent_record_id.clone(),
-            stored_revision,
-            CanonicalBytes::from_vec(row.2),
-        );
-        if stored_revision != consent_revision
-            || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
-        {
-            return Err(CoreError::GeographicAdmissionValidationFailed);
-        }
-        Ok(record)
+            .map_err(|_| CoreError::GeographicAdmissionValidationFailed);
+        stored_revision.and_then(|stored_revision| {
+            stored_hash.and_then(|stored_hash| {
+                let record = AdmissionConsentRecordV1::from_persistence_parts(
+                    consent_record_id.clone(),
+                    stored_revision,
+                    CanonicalBytes::from_vec(row.2),
+                );
+                if stored_revision != consent_revision
+                    || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
+                {
+                    Err(CoreError::GeographicAdmissionValidationFailed)
+                } else {
+                    Ok(record)
+                }
+            })
+        })
     }
 
     fn append_one_in_transaction(
@@ -290,17 +297,19 @@ impl SqliteStore {
         .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-
-        Self::require_utf8_encoding(&conn)?;
-        let store = Self {
-            conn,
-            hasher,
-            clock: Box::new(SystemAdmissionClock),
-        };
-        store.init_schema()?;
-        store.validate_event_sequence_invariant()?;
-        Ok(store)
+            .map_err(|e| CoreError::Storage(e.to_string()))
+            .and_then(|()| Self::require_utf8_encoding(&conn))
+            .and_then(|()| {
+                let store = Self {
+                    conn,
+                    hasher,
+                    clock: Box::new(SystemAdmissionClock),
+                    consent_authority_permit: None,
+                };
+                store
+                    .init_schema()
+                    .and_then(|()| store.validate_event_sequence_invariant().map(|()| store))
+            })
     }
 
     /// Open a `SQLite` store with a trusted admission clock.
@@ -393,6 +402,10 @@ impl SqliteStore {
                  head_seq    INTEGER NOT NULL DEFAULT 0,
                  chain_head  BLOB NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS timeline_owners (
+                 timeline_id TEXT PRIMARY KEY,
+                 owner_id    TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS events (
                  timeline_id TEXT NOT NULL,
                  seq         INTEGER NOT NULL,
@@ -419,6 +432,9 @@ impl SqliteStore {
              ON append_identities(expires_at);
              CREATE INDEX IF NOT EXISTS idx_append_identities_scope
              ON append_identities(scope_key);
+             CREATE TABLE IF NOT EXISTS pending_append_identity_cleanup (
+                 scope_key BLOB PRIMARY KEY CHECK (length(scope_key) = 32)
+             );
              CREATE TABLE IF NOT EXISTS geographic_presence (
                  timeline_id TEXT PRIMARY KEY,
                  has_evidence INTEGER NOT NULL CHECK (has_evidence = 1)
@@ -1446,6 +1462,7 @@ fn timeline_fields_to_timeline(
         id,
         mode,
         name,
+        owner: None,
         fork_point,
     };
     let mut tl = Timeline::new(meta);
@@ -1484,65 +1501,73 @@ impl SqliteStore {
         max_owned_events: Option<u64>,
     ) -> Result<Option<AppendOrDuplicateOutcome>, CoreError> {
         let logical_prefix = self.logical_prefix(timeline)?;
-        let head_seq = self.get_head_seq(timeline)?.as_u64();
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(Self::into_storage_error)?;
-        let existing = tx.query_row(
-            "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
-            params![identity.dedup_key.as_bytes().as_slice()],
-            |row| {
-                row.get::<_, String>(0)
-                    .and_then(|event_id| row.get::<_, i64>(1).map(|expires| (event_id, expires)))
-            },
-        );
-        match existing {
-            Ok((event_id, expires_at))
-                if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
-            {
-                return Self::retained_event_matches_draft(&tx, &event_id, timeline, draft)
-                    .and_then(|matches| {
-                        if matches {
-                            parse_event_id(&event_id).map(|id| {
-                                Some(AppendOrDuplicateOutcome::Duplicate { event_id: id })
-                            })
-                        } else {
-                            Ok(Some(AppendOrDuplicateOutcome::Conflict))
-                        }
-                    });
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {}
-            Err(error) => return Err(CoreError::Storage(error.to_string())),
-            Ok(_) => {
-                tx.execute(
-                    "DELETE FROM append_identities WHERE dedup_key = ?1",
+        self.get_head_seq(timeline)
+            .map(Seq::as_u64)
+            .and_then(|head_seq| {
+                let tx = self
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(Self::into_storage_error)?;
+                let existing = tx.query_row(
+                    "SELECT event_id, expires_at FROM append_identities WHERE dedup_key = ?1",
                     params![identity.dedup_key.as_bytes().as_slice()],
+                    |row| {
+                        row.get::<_, String>(0).and_then(|event_id| {
+                            row.get::<_, i64>(1).map(|expires| (event_id, expires))
+                        })
+                    },
+                );
+                match existing {
+                    Ok((event_id, expires_at))
+                        if u64::try_from(expires_at).unwrap_or(0) > admitted_at.as_micros() =>
+                    {
+                        return Self::retained_event_matches_draft(&tx, &event_id, timeline, draft)
+                            .and_then(|matches| {
+                                if matches {
+                                    parse_event_id(&event_id).map(|id| {
+                                        Some(AppendOrDuplicateOutcome::Duplicate { event_id: id })
+                                    })
+                                } else {
+                                    Ok(Some(AppendOrDuplicateOutcome::Conflict))
+                                }
+                            });
+                    }
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                    Err(error) => return Err(CoreError::Storage(error.to_string())),
+                    Ok(_) => {
+                        tx.execute(
+                            "DELETE FROM append_identities WHERE dedup_key = ?1",
+                            params![identity.dedup_key.as_bytes().as_slice()],
+                        )
+                        .map_err(|error| CoreError::Storage(error.to_string()))?;
+                    }
+                }
+                if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
+                    return Ok(None);
+                }
+                let expires_at = checked_append_identity_expires_at(admitted_at)?;
+                let event = Self::append_one_in_transaction(
+                    &tx,
+                    self.hasher.as_ref(),
+                    timeline,
+                    draft.clone(),
+                )?;
+                tx.execute(
+                    "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        identity.dedup_key.as_bytes().as_slice(),
+                        identity.scope.as_bytes().as_slice(),
+                        event.id.to_string(),
+                        i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
+                    ],
                 )
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
-            }
-        }
-        if max_owned_events.is_some_and(|maximum| head_seq >= maximum) {
-            return Ok(None);
-        }
-        let expires_at = checked_append_identity_expires_at(admitted_at)?;
-        let event =
-            Self::append_one_in_transaction(&tx, self.hasher.as_ref(), timeline, draft.clone())?;
-        tx.execute(
-            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                identity.dedup_key.as_bytes().as_slice(),
-                identity.scope.as_bytes().as_slice(),
-                event.id.to_string(),
-                i64::try_from(expires_at.as_micros()).unwrap_or(i64::MAX),
-            ],
-        )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Self::logical_event(logical_prefix, event)
-            .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+                tx.commit()
+                    .map_err(|error| CoreError::Storage(error.to_string()))?;
+                Self::logical_event(logical_prefix, event)
+                    .map(|event| Some(AppendOrDuplicateOutcome::Appended(Box::new(event))))
+            })
     }
 }
 
@@ -1628,7 +1653,23 @@ impl SqliteStore {
         timeline: TimelineId,
         drafts: &[EventDraft],
         max_owned_events: u64,
+        gateway_consent: bool,
+        permit: Option<ConsentAppendPermit>,
+        cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
+        if gateway_consent {
+            let bound_permit = self.consent_authority_permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent authority is not bound".to_owned())
+            })?;
+            let permit = permit.ok_or_else(|| {
+                CoreError::Storage("Gateway consent append permit is missing".to_owned())
+            })?;
+            if permit != bound_permit {
+                return Err(CoreError::Storage(
+                    "Gateway consent append permit does not match the bound authority".to_owned(),
+                ));
+            }
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1638,6 +1679,16 @@ impl SqliteStore {
             .last()
             .and_then(|(_, fork)| *fork)
             .map_or(0, Seq::as_u64);
+        let owner = if gateway_consent {
+            Some(crate::ensure_gateway_consent_drafts(
+                drafts,
+                timeline,
+                Self::timeline_owner_in_transaction(&tx, timeline)?,
+                logical_prefix.saturating_add(owned_head).saturating_add(1),
+            )?)
+        } else {
+            None
+        };
         let batch_len = u64::try_from(drafts.len()).unwrap_or(u64::MAX);
         let next_head = owned_head.saturating_add(batch_len);
         if next_head > max_owned_events {
@@ -1652,16 +1703,37 @@ impl SqliteStore {
                 draft.clone(),
             )?);
         }
-        tx.commit().map_err(Self::into_storage_error)?;
-        Ok(Some(
-            committed
-                .into_iter()
-                .map(|mut event| {
-                    event.seq = Seq::from_u64(logical_prefix + event.seq.as_u64());
-                    event
+        if let Some(scope) = cleanup_scope {
+            tx.execute(
+                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        let owner_result = owner.map_or_else(
+            || Ok(()),
+            |owner| {
+                Self::timeline_owner_in_transaction(&tx, timeline).and_then(|current| {
+                    current.map_or_else(
+                        || Self::persist_timeline_owner(&tx, timeline, owner),
+                        |_| Ok(()),
+                    )
                 })
-                .collect(),
-        ))
+            },
+        );
+        owner_result
+            .and_then(|()| tx.commit().map_err(Self::into_storage_error))
+            .map(|()| {
+                Some(
+                    committed
+                        .into_iter()
+                        .map(|mut event| {
+                            event.seq = Seq::from_u64(logical_prefix + event.seq.as_u64());
+                            event
+                        })
+                        .collect(),
+                )
+            })
     }
 
     fn logical_prefix(&self, timeline: TimelineId) -> Result<u64, CoreError> {
@@ -1752,8 +1824,8 @@ impl OwnTracksIngressStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let enrollment = Self::enrollment_state_in_transaction(&tx)?;
         tx.commit()
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        enrollment.prepare_owntracks_ingress(&input)
+            .map_err(Self::into_storage_error)
+            .and_then(|()| enrollment.prepare_owntracks_ingress(&input))
     }
 }
 
@@ -1777,13 +1849,15 @@ impl SqliteStore {
         tx: &rusqlite::Transaction<'_>,
         state: &OwnTracksEnrollmentStateV1,
     ) -> Result<(), CoreError> {
-        tx.execute(
-            "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, ?1)
-             ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
-            params![state.persistence_bytes()?],
-        )
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-        Ok(())
+        state.persistence_bytes().and_then(|bytes| {
+            tx.execute(
+                "INSERT INTO owntracks_enrollment (singleton, state_cbor) VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
+                params![bytes],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map(|_| ())
+        })
     }
 
     fn transition_enrollment_state(
@@ -2175,11 +2249,12 @@ impl GeographicAdmissionConsentResolver for SqliteStore {
                     i64::try_from(consent_revision).unwrap_or(i64::MAX)
                 ],
                 |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                    ))
+                    row.get::<_, i64>(0).and_then(|revision| {
+                        row.get::<_, Vec<u8>>(1).and_then(|hash| {
+                            row.get::<_, Vec<u8>>(2)
+                                .map(|bytes| (revision, hash, bytes))
+                        })
+                    })
                 },
             )
             .map_err(|error| match error {
@@ -2189,22 +2264,26 @@ impl GeographicAdmissionConsentResolver for SqliteStore {
                 other => CoreError::Storage(other.to_string()),
             })
             .and_then(|(revision, hash, bytes)| {
-                let revision = u64::try_from(revision)
-                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-                let stored_hash: [u8; 32] = hash
-                    .try_into()
-                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)?;
-                let record = AdmissionConsentRecordV1::from_persistence_parts(
-                    consent_record_id.clone(),
-                    revision,
-                    CanonicalBytes::from_vec(bytes),
-                );
-                if revision != consent_revision
-                    || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
-                {
-                    return Err(CoreError::GeographicAdmissionValidationFailed);
-                }
-                Ok(record)
+                u64::try_from(revision)
+                    .map_err(|_| CoreError::GeographicAdmissionValidationFailed)
+                    .and_then(|revision| {
+                        hash.try_into()
+                            .map_err(|_| CoreError::GeographicAdmissionValidationFailed)
+                            .and_then(|stored_hash| {
+                                let record = AdmissionConsentRecordV1::from_persistence_parts(
+                                    consent_record_id.clone(),
+                                    revision,
+                                    CanonicalBytes::from_vec(bytes),
+                                );
+                                if revision != consent_revision
+                                    || record.hash() != ConsentRecordHash::from_bytes(stored_hash)
+                                {
+                                    Err(CoreError::GeographicAdmissionValidationFailed)
+                                } else {
+                                    Ok(record)
+                                }
+                            })
+                    })
             })
     }
 }
@@ -2490,6 +2569,10 @@ impl GeographicReplayVerifier for SqliteStore {
 }
 
 impl GeoLocationAdmissionStore for SqliteStore {
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        self.logical_head_unchecked(timeline)
+    }
+
     fn admit_geo_location(
         &mut self,
         request: GeoLocationAdmissionRequestV1,
@@ -2649,7 +2732,75 @@ impl GeoLocationReplayVerifier for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    fn timeline_owner(&self, timeline: TimelineId) -> Result<Option<EntityId>, CoreError> {
+        self.conn
+            .query_row(
+                "SELECT owner_id FROM timeline_owners WHERE timeline_id = ?1",
+                params![timeline.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            .map(|owner| parse_entity_id(&owner))
+            .transpose()
+    }
+
+    fn timeline_owner_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        timeline: TimelineId,
+    ) -> Result<Option<EntityId>, CoreError> {
+        tx.query_row(
+            "SELECT owner_id FROM timeline_owners WHERE timeline_id = ?1",
+            params![timeline.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| CoreError::Storage(error.to_string()))?
+        .map(|owner| parse_entity_id(&owner))
+        .transpose()
+    }
+
+    fn persist_timeline_owner(
+        tx: &rusqlite::Transaction<'_>,
+        timeline: TimelineId,
+        owner: EntityId,
+    ) -> Result<(), CoreError> {
+        tx.execute(
+            "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+            params![timeline.to_string(), owner.to_string()],
+        )
+        .map(|_| ())
+        .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    fn logical_head_unchecked(&self, id: TimelineId) -> Result<Seq, CoreError> {
+        let chain = self.fork_chain(id)?;
+        chain
+            .iter()
+            .enumerate()
+            .try_fold(0_u64, |logical_head, (index, (timeline, _))| {
+                self.logical_segment_length(&chain, index, *timeline)
+                    .and_then(|segment| Self::add_logical_segment(logical_head, segment))
+            })
+            .map(Seq::from_u64)
+    }
+}
+
 impl EventStore for SqliteStore {
+    fn bind_consent_authority(&mut self, permit: ConsentAppendPermit) -> Result<(), CoreError> {
+        match self.consent_authority_permit {
+            Some(existing) if existing != permit => Err(CoreError::Storage(
+                "Gateway consent authority is already bound".to_owned(),
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.consent_authority_permit = Some(permit);
+                Ok(())
+            }
+        }
+    }
+
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         let meta = TimelineMeta::root(name);
         let timeline = Timeline::new(meta);
@@ -2687,7 +2838,50 @@ impl EventStore for SqliteStore {
     ) -> Result<Option<Vec<Event>>, CoreError> {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
-            .and_then(|()| self.append_bounded_visible(timeline, drafts, max_owned_events))
+            .and_then(|()| {
+                self.append_bounded_visible(timeline, drafts, max_owned_events, false, None, None)
+            })
+    }
+
+    fn append_consent_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        max_owned_events: u64,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_gateway_consent_types(drafts, timeline).and_then(|()| {
+            self.append_bounded_visible(
+                timeline,
+                drafts,
+                max_owned_events,
+                true,
+                Some(permit),
+                None,
+            )
+        })
+    }
+
+    fn append_consent_revocation_bounded(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+        permit: ConsentAppendPermit,
+        max_owned_events: u64,
+        cleanup_scope: AppendDedupScope,
+    ) -> Result<Option<Vec<Event>>, CoreError> {
+        crate::ensure_gateway_consent_revocation(drafts, timeline)
+            .and_then(|()| crate::ensure_gateway_consent_types(drafts, timeline))
+            .and_then(|()| {
+                self.append_bounded_visible(
+                    timeline,
+                    drafts,
+                    max_owned_events,
+                    true,
+                    Some(permit),
+                    Some(cleanup_scope),
+                )
+            })
     }
 
     fn append_or_duplicate(
@@ -2698,13 +2892,7 @@ impl EventStore for SqliteStore {
         draft: EventDraft,
     ) -> Result<AppendOrDuplicateOutcome, CoreError> {
         self.append_or_duplicate_with_limit(timeline, identity, admitted_at, &draft, None)
-            .and_then(|outcome| {
-                outcome.ok_or_else(|| {
-                    CoreError::Storage(
-                        "unbounded append unexpectedly hit an event limit".to_owned(),
-                    )
-                })
-            })
+            .and_then(crate::unbounded_append_outcome)
     }
 
     fn purge_expired_append_identities(&mut self, now: WallTime) -> Result<usize, CoreError> {
@@ -2836,12 +3024,103 @@ impl EventStore for SqliteStore {
     }
 
     fn remove_append_identities(&mut self, scope: AppendDedupScope) -> Result<usize, CoreError> {
-        self.conn
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let removed = tx
             .execute(
                 "DELETE FROM append_identities WHERE scope_key = ?1",
                 params![scope.as_bytes().as_slice()],
             )
-            .map_err(|error| CoreError::Storage(error.to_string()))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.execute(
+            "DELETE FROM pending_append_identity_cleanup WHERE scope_key = ?1",
+            params![scope.as_bytes().as_slice()],
+        )
+        .map_err(|error| CoreError::Storage(error.to_string()))?;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(removed)
+    }
+
+    fn remove_append_identities_bounded(
+        &mut self,
+        scope: AppendDedupScope,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut stmt = tx
+            .prepare("SELECT dedup_key FROM append_identities WHERE scope_key = ?1 ORDER BY expires_at, dedup_key LIMIT ?2")
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let keys: Result<Vec<Vec<u8>>, _> = stmt
+            .query_map(
+                params![
+                    scope.as_bytes().as_slice(),
+                    i64::try_from(limit.get()).unwrap_or(i64::MAX)
+                ],
+                |row| row.get(0),
+            )
+            .and_then(Iterator::collect);
+        let keys = keys.map_err(|error| CoreError::Storage(error.to_string()))?;
+        drop(stmt);
+        for key in &keys {
+            tx.execute(
+                "DELETE FROM append_identities WHERE scope_key = ?1 AND dedup_key = ?2",
+                params![scope.as_bytes().as_slice(), key],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        let more_may_remain = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM append_identities WHERE scope_key = ?1)",
+                params![scope.as_bytes().as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            != 0;
+        if more_may_remain {
+            tx.execute(
+                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        } else {
+            tx.execute(
+                "DELETE FROM pending_append_identity_cleanup WHERE scope_key = ?1",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(PurgeOutcome {
+            removed: keys.len(),
+            more_may_remain,
+        })
+    }
+
+    fn pending_append_identity_cleanup(&mut self) -> Result<Option<AppendDedupScope>, CoreError> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT scope_key FROM pending_append_identity_cleanup ORDER BY scope_key LIMIT 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        bytes
+            .map(|bytes| {
+                let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+                    CoreError::Storage("invalid pending cleanup scope length".to_owned())
+                })?;
+                Ok(AppendDedupScope::from_keyed_hash(bytes))
+            })
+            .transpose()
     }
 
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
@@ -2853,28 +3132,33 @@ impl EventStore for SqliteStore {
                 for (i, &(tid, _)) in chain.iter().enumerate() {
                     let logical_prefix = chain[i].1.map_or(0, Seq::as_u64);
                     if i + 1 < chain.len() {
-                        let logical_fork = chain[i + 1].1.ok_or_else(|| {
-                            CoreError::Storage(
+                        let Some(logical_fork) = chain[i + 1].1 else {
+                            return Err(CoreError::Storage(
                                 "non-root chain entry is missing its fork sequence".to_owned(),
-                            )
-                        })?;
+                            ));
+                        };
+                        let fork_point_error = CoreError::Storage(format!(
+                            "Fork point precedes inherited history for timeline {tid}"
+                        ));
                         let local_limit = logical_fork
                             .as_u64()
                             .checked_sub(logical_prefix)
-                            .ok_or_else(|| {
-                                CoreError::Storage(format!(
-                                    "Fork point precedes inherited history for timeline {tid}"
-                                ))
+                            .ok_or(fork_point_error)?;
+                        self.get_head_seq(tid)
+                            .map(Seq::as_u64)
+                            .and_then(|local_head| {
+                                if local_limit > local_head {
+                                    return Err(CoreError::Storage(format!(
+                                        "Fork point exceeds parent logical Event head for timeline {tid}"
+                                    )));
+                                }
+                                self.read_own_events(
+                                    tid,
+                                    Seq::ZERO,
+                                    Some(Seq::from_u64(local_limit)),
+                                )
+                                .map(|events| all.extend(events))
                             })?;
-                        let local_head = self.get_head_seq(tid)?.as_u64();
-                        if local_limit > local_head {
-                            return Err(CoreError::Storage(format!(
-                                "Fork point exceeds parent logical Event head for timeline {tid}"
-                            )));
-                        }
-                        let events =
-                            self.read_own_events(tid, Seq::ZERO, Some(Seq::from_u64(local_limit)))?;
-                        all.extend(events);
                     } else {
                         // Leaf: all own events; range applied after logical renumber.
                         let events = self.read_own_events(tid, Seq::ZERO, None)?;
@@ -2925,7 +3209,10 @@ impl EventStore for SqliteStore {
                 // Compute chain hash at the fork point
                 let fork_hash = self.compute_chain_hash_at(parent, at_seq)?;
 
-                let meta = TimelineMeta::forked_from(parent, at_seq, name);
+                let meta = self.timeline_owner(parent)?.map_or_else(
+                    || TimelineMeta::forked_from(parent, at_seq, name),
+                    |owner| TimelineMeta::forked_from_owned(parent, at_seq, name, owner),
+                );
                 let child = Timeline::new(meta);
 
                 let tx = match self
@@ -2948,6 +3235,10 @@ impl EventStore for SqliteStore {
             ],
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+                if let Some(owner) = child.meta.owner {
+                    Self::persist_timeline_owner(&tx, child.id(), owner)?;
+                }
 
                 if let Err(error) = tx.commit() {
                     return Err(CoreError::Storage(error.to_string()));
@@ -2991,6 +3282,8 @@ impl EventStore for SqliteStore {
                 timeline_row.fork_seq,
                 timeline_row.head_seq,
             )?;
+            let mut timeline = timeline;
+            timeline.meta.owner = self.timeline_owner(timeline.id())?;
             if !crate::generic_timeline_is_visible(
                 self.timeline_contains_geographic_evidence(timeline.id()),
             )? {
@@ -3054,6 +3347,8 @@ impl EventStore for SqliteStore {
                     timeline_row.fork_seq,
                     timeline_row.head_seq,
                 )?;
+                let mut timeline = timeline;
+                timeline.meta.owner = self.timeline_owner(timeline.id())?;
                 crate::generic_timeline_is_visible(
                     self.timeline_contains_geographic_evidence(timeline.id()),
                 )
@@ -3064,15 +3359,7 @@ impl EventStore for SqliteStore {
 
     fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
         self.ensure_generic_timeline_visibility(id)?;
-        let chain = self.fork_chain(id)?;
-        let mut logical_head = 0_u64;
-        for (index, (timeline, _)) in chain.iter().enumerate() {
-            logical_head = Self::add_logical_segment(
-                logical_head,
-                self.logical_segment_length(&chain, index, *timeline)?,
-            )?;
-        }
-        Ok(Seq::from_u64(logical_head))
+        self.logical_head_unchecked(id)
     }
 
     fn create_timeline_with_meta(&mut self, meta: TimelineMeta) -> Result<Timeline, CoreError> {
@@ -3100,20 +3387,40 @@ impl EventStore for SqliteStore {
             None => (None, None),
         };
         let timeline = Timeline::new(meta);
-        self.conn
-            .execute(
+        let insert_rows = |conn: &Connection| -> Result<(), CoreError> {
+            conn.execute(
                 "INSERT INTO timelines (id, name, mode, parent_id, fork_seq, head_seq, chain_head)
                  VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
                 params![
                     timeline.id().to_string(),
                     timeline.meta.name.as_deref(),
                     mode_str(timeline.mode()),
-                    parent_id,
+                    parent_id.as_deref(),
                     fork_seq,
                     chain_head.as_bytes().as_slice(),
                 ],
             )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+            if let Some(owner) = timeline.meta.owner {
+                conn.execute(
+                    "INSERT INTO timeline_owners (timeline_id, owner_id) VALUES (?1, ?2)",
+                    params![timeline.id().to_string(), owner.to_string()],
+                )
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            }
+            Ok(())
+        };
+        if self.conn.is_autocommit() {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            insert_rows(&tx)?;
+            tx.commit()
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+        } else {
+            insert_rows(&self.conn)?;
+        }
         Ok(timeline)
     }
 
@@ -3257,24 +3564,34 @@ impl EventStore for SqliteStore {
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
             let enrollment = Self::enrollment_state_in_transaction(&tx)?;
-            if enrollment.permits_geographic_admission_target(id) {
-                Self::write_enrollment_state(&tx, &enrollment.revoke()?)?;
-            }
-            tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
+            let enrollment_result = if enrollment.permits_geographic_admission_target(id) {
+                enrollment
+                    .revoke()
+                    .and_then(|revoked| Self::write_enrollment_state(&tx, &revoked))
+            } else {
+                Ok(())
+            };
+            enrollment_result.and_then(|()| {
+                tx.execute("DELETE FROM events WHERE timeline_id = ?1", params![id_str])
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
+                tx.execute(
+                    "DELETE FROM geographic_presence WHERE timeline_id = ?1",
+                    params![id_str],
+                )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
-            tx.execute(
-                "DELETE FROM geographic_presence WHERE timeline_id = ?1",
-                params![id_str],
-            )
-            .map_err(|e| CoreError::Storage(e.to_string()))?;
-            let deleted = tx
-                .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
+                tx.execute(
+                    "DELETE FROM timeline_owners WHERE timeline_id = ?1",
+                    params![id_str],
+                )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
-            if deleted == 0 {
-                return Err(CoreError::TimelineNotFound(id));
-            }
-            tx.commit().map_err(|e| CoreError::Storage(e.to_string()))?;
-            Ok(())
+                let deleted = tx
+                    .execute("DELETE FROM timelines WHERE id = ?1", params![id_str])
+                    .map_err(|e| CoreError::Storage(e.to_string()))?;
+                if deleted == 0 {
+                    return Err(CoreError::TimelineNotFound(id));
+                }
+                tx.commit().map_err(|e| CoreError::Storage(e.to_string()))
+            })
         })
     }
 
@@ -6589,6 +6906,31 @@ mod tests {
         assert!(child_error
             .to_string()
             .contains("missing its Fork sequence"));
+
+        let mut nested_store = new_store();
+        let root = nested_store.create_timeline("nested-root").test_ok();
+        nested_store
+            .append(root.id(), &[make_draft(EntityId::new(), b"root")])
+            .test_ok();
+        let child = nested_store
+            .fork(root.id(), Seq::from_u64(1), "nested-child")
+            .test_ok();
+        let grandchild = nested_store
+            .fork(child.id(), Seq::from_u64(1), "nested-grandchild")
+            .test_ok();
+        nested_store
+            .conn
+            .execute(
+                "UPDATE timelines SET fork_seq = 0 WHERE id = ?1",
+                params![grandchild.id().to_string()],
+            )
+            .test_ok();
+        let error = nested_store
+            .read(grandchild.id(), SeqRange::all())
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("Fork point precedes inherited history"));
     }
 
     #[test]
@@ -8150,6 +8492,7 @@ mod tests {
             id: TimelineId::new(),
             mode: child_meta.mode,
             name: child_meta.name,
+            owner: child_meta.owner,
             fork_point: child_meta.fork_point,
         };
         let chosen_id = chosen.id;
@@ -8530,6 +8873,48 @@ mod tests {
             .test_err();
         drop(store.conn.execute_batch("ROLLBACK"));
         assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pending_cleanup_scope_decodes_and_rejects_invalid_bytes() {
+        let mut store = new_store();
+        let scope = AppendDedupScope::from_keyed_hash([7; 32]);
+        store
+            .conn
+            .execute(
+                "INSERT INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                rusqlite::params![scope.as_bytes().as_slice()],
+            )
+            .test_ok();
+        assert_eq!(
+            store.pending_append_identity_cleanup().test_ok(),
+            Some(scope)
+        );
+
+        store
+            .conn
+            .execute("DELETE FROM pending_append_identity_cleanup", [])
+            .test_ok();
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "INSERT INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                rusqlite::params![vec![1_u8; 31]],
+            )
+            .test_ok();
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")
+            .test_ok();
+        let error = store.pending_append_identity_cleanup().test_err();
+        assert!(error
+            .to_string()
+            .contains("invalid pending cleanup scope length"));
     }
 
     #[test]
@@ -9098,6 +9483,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
+    use pos_core::ConsentAuthority;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
@@ -9106,6 +9492,11 @@ mod coverage_entrypoints {
                 "unexpected coverage fixture error: {error:?}"
             )))
         })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn some<T>(value: Option<T>) -> T {
+        value.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected coverage value")))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -9127,6 +9518,18 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn read_rejects_missing_intermediate_fork_sequence_at_public_boundary() {
+        let mut store = tests::new_store();
+        let root = ok(store.create_timeline("coverage-root"));
+        let child = ok(store.fork(root.id(), Seq::ZERO, "coverage-child"));
+        ok(store.conn.execute(
+            "UPDATE timelines SET fork_seq = NULL WHERE id = ?1",
+            rusqlite::params![child.id().to_string()],
+        ));
+        expect_err(store.read(child.id(), SeqRange::all()));
+    }
+
+    #[test]
     fn malformed_durable_rows_are_rejected_by_instrumented_seams() {
         let consent_id = ok(AdmissionSnapshotId::from_canonical(
             "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
@@ -9134,7 +9537,7 @@ mod coverage_entrypoints {
         for statement in [
             "INSERT INTO geographic_cell_admission_consent_records
              (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
-             VALUES (?1, 'bad', zeroblob(32), zeroblob(1))",
+             VALUES (?1, X'01', zeroblob(32), zeroblob(1))",
             "INSERT INTO geographic_cell_admission_consent_records
              (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
              VALUES (?1, 12, 'bad', zeroblob(1))",
@@ -9257,6 +9660,27 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn bounded_metadata_rejects_a_non_text_payload_type() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("metadata-type-error"));
+        ok(store.append(
+            timeline.id(),
+            &[tests::make_draft(EntityId::new(), b"metadata")],
+        ));
+        ok(store.conn.create_scalar_function(
+            "typeof",
+            1,
+            rusqlite::functions::FunctionFlags::default(),
+            |_context| Ok(1_i64),
+        ));
+        expect_err(store.read_bounded(
+            timeline.id(),
+            SeqRange::all(),
+            EventReadBounds::new(1024, 1024, 1024, 8),
+        ));
+    }
+
+    #[test]
     fn bounded_chain_and_logical_segments_fail_closed_on_limits_and_storage_errors() {
         let mut store = tests::new_store();
         let root = ok(store.create_timeline("logical-root"));
@@ -9291,6 +9715,670 @@ mod coverage_entrypoints {
             SqliteStore::fork_chain_bounded_on(&store.conn, timeline.id(), 4, Instant::now(), 0);
         BOUNDED_READ_DELAY_PHASE.with(|phase| phase.set(0));
         expect_err(timeout);
+
+        let mut store = tests::new_store();
+        let root = ok(store.create_timeline("logical-head-error-root"));
+        ok(store.append(
+            root.id(),
+            &[tests::make_draft(EntityId::new(), b"root-event")],
+        ));
+        let child = ok(store.fork(root.id(), Seq::from_u64(1), "logical-head-error-child"));
+        ok(store.conn.execute(
+            "UPDATE timelines SET fork_seq = 2 WHERE id = ?1",
+            rusqlite::params![child.id().to_string()],
+        ));
+        expect_err(store.logical_head(child.id()));
+        expect_err(store.logical_head_unchecked(child.id()));
+
+        let mut missing_fork = tests::new_store();
+        let root = ok(missing_fork.create_timeline("read-missing-fork-root"));
+        let child = ok(missing_fork.fork(root.id(), Seq::ZERO, "read-missing-fork-child"));
+        ok(missing_fork.conn.execute(
+            "UPDATE timelines SET fork_seq = NULL WHERE id = ?1",
+            rusqlite::params![child.id().to_string()],
+        ));
+        expect_err(missing_fork.read(child.id(), SeqRange::all()));
+    }
+
+    #[test]
+    fn consent_append_rejects_a_missing_permit_after_authority_binding() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("sqlite-missing-permit"));
+        let authority = ConsentAuthority::new();
+        ok(store.bind_consent_authority(authority.append_permit()));
+        expect_err(store.append_bounded_visible(timeline.id(), &[], 10, true, None, None));
+    }
+
+    #[test]
+    fn bounded_append_and_identity_cleanup_cover_success_and_continuation_paths() {
+        let mut store = tests::new_store();
+        let ordinary = ok(store.create_timeline("sqlite-bounded-ordinary"));
+        let draft = tests::make_draft(EntityId::new(), b"bounded");
+        let committed = ok(store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1));
+        assert_eq!(committed.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            ok(store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1)),
+            None
+        );
+
+        let consent = ok(store.create_timeline("sqlite-bounded-consent"));
+        let subject = EntityId::new();
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "bounded-consent".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let grant_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            ok(grant.encode()),
+        );
+        let authority = ConsentAuthority::new();
+        let permit = authority.append_permit();
+        ok(store.bind_consent_authority(permit));
+        let consent_event = ok(store.append_consent_bounded(
+            consent.id(),
+            std::slice::from_ref(&grant_draft),
+            permit,
+            1,
+        ));
+        assert_eq!(some(consent_event).len(), 1);
+
+        let scope = AppendDedupScope::from_keyed_hash([91; 32]);
+        let identity = |key: u8| {
+            AppendIdentity::new(pos_core::AppendDedupKey::from_keyed_hash([key; 32]), scope)
+        };
+        for key in [92, 93] {
+            ok(store.append_or_duplicate(
+                ordinary.id(),
+                identity(key),
+                WallTime::from_micros(1),
+                tests::make_draft(EntityId::new(), &[key]),
+            ));
+        }
+        let first =
+            ok(store.remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))));
+        assert!(first.more_may_remain);
+        assert_eq!(ok(store.pending_append_identity_cleanup()), Some(scope));
+        let second =
+            ok(store.remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))));
+        assert!(!second.more_may_remain);
+        assert_eq!(ok(store.pending_append_identity_cleanup()), None);
+        assert_eq!(ok(store.remove_append_identities(scope)), 0);
+
+        ok(store.append_or_duplicate(
+            ordinary.id(),
+            AppendIdentity::new(
+                pos_core::AppendDedupKey::from_keyed_hash([94; 32]),
+                AppendDedupScope::from_keyed_hash([94; 32]),
+            ),
+            WallTime::from_micros(0),
+            tests::make_draft(EntityId::new(), b"expired"),
+        ));
+        let purged =
+            ok(store.purge_expired_append_identities_bounded(some(std::num::NonZeroUsize::new(1))));
+        assert_eq!(purged.removed, 1);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn grant_draft(subject: EntityId, grantee: EntityId, grant_seq: u64) -> EventDraft {
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: grantee,
+            purpose: "owner-boundary".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq,
+        };
+        EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            ok(grant.encode()),
+        )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revocation_draft(subject: EntityId, grantee: EntityId) -> EventDraft {
+        let revocation = pos_core::ConsentRevokedV1 {
+            subject_id: subject,
+            grantee_id: grantee,
+            grant_seq: 1,
+            fence_seq: 1,
+        };
+        EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok(revocation.encode()),
+        )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn insert_identity(store: &SqliteStore, key: u8, scope: AppendDedupScope, expires_at: i64) {
+        ok(store.conn.execute(
+            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                vec![key; 32],
+                scope.as_bytes().as_slice(),
+                EventId::new().to_string(),
+                expires_at,
+            ],
+        ));
+    }
+
+    #[test]
+    fn consent_owner_and_cleanup_success_paths_are_persisted() {
+        let subject = EntityId::new();
+        let grantee = EntityId::new();
+        let permit = ConsentAuthority::new().append_permit();
+        let mut owner_store = tests::new_store();
+        ok(owner_store.bind_consent_authority(permit));
+        let owned = ok(owner_store.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("owner-root", subject),
+        ));
+        let child = ok(owner_store.fork(owned.id(), Seq::ZERO, "owner-child"));
+        assert_eq!(
+            some(ok(owner_store.get_timeline(child.id()))).meta.owner,
+            Some(subject)
+        );
+        ok(owner_store.delete_timeline(child.id()));
+        ok(owner_store.delete_timeline(owned.id()));
+
+        let mut append_store = tests::new_store();
+        ok(append_store.bind_consent_authority(permit));
+        let timeline = ok(append_store.create_timeline("owner-append"));
+        let scope = AppendDedupScope::from_keyed_hash([121; 32]);
+        let revocation_draft = revocation_draft(subject, grantee);
+        let committed = ok(append_store.append_consent_revocation_bounded(
+            timeline.id(),
+            std::slice::from_ref(&revocation_draft),
+            permit,
+            1,
+            scope,
+        ));
+        assert_eq!(some(committed).len(), 1);
+        assert_eq!(
+            some(ok(append_store.get_timeline(timeline.id())))
+                .meta
+                .owner,
+            Some(subject)
+        );
+        assert_eq!(
+            ok(append_store.pending_append_identity_cleanup()),
+            Some(scope)
+        );
+
+        let mut existing_owner = tests::new_store();
+        ok(existing_owner.bind_consent_authority(permit));
+        let existing_timeline = ok(existing_owner.create_timeline("existing-owner"));
+        ok(existing_owner.append_consent_bounded(
+            existing_timeline.id(),
+            std::slice::from_ref(&grant_draft(subject, grantee, 1)),
+            permit,
+            2,
+        ));
+        ok(existing_owner.append_consent_bounded(
+            existing_timeline.id(),
+            std::slice::from_ref(&grant_draft(subject, grantee, 2)),
+            permit,
+            2,
+        ));
+    }
+
+    #[test]
+    fn consent_owner_storage_failures_fail_closed() {
+        let subject = EntityId::new();
+        let permit = ConsentAuthority::new().append_permit();
+        let grant = grant_draft(subject, EntityId::new(), 1);
+
+        let mut owner_query_error = tests::new_store();
+        let owner_query_timeline = ok(owner_query_error.create_timeline("owner-query-error"));
+        ok(owner_query_error
+            .conn
+            .execute_batch("DROP TABLE timeline_owners"));
+        expect_err(owner_query_error.get_timeline(owner_query_timeline.id()));
+
+        let mut owner_tx_error = tests::new_store();
+        ok(owner_tx_error.bind_consent_authority(permit));
+        let owner_tx_timeline = ok(owner_tx_error.create_timeline("owner-tx-error"));
+        ok(owner_tx_error
+            .conn
+            .execute_batch("DROP TABLE timeline_owners"));
+        expect_err(owner_tx_error.append_consent_bounded(
+            owner_tx_timeline.id(),
+            std::slice::from_ref(&grant),
+            permit,
+            1,
+        ));
+
+        let mut owner_write_error = tests::new_store();
+        ok(owner_write_error.bind_consent_authority(permit));
+        let owner_write_timeline = ok(owner_write_error.create_timeline("owner-write-error"));
+        ok(owner_write_error.conn.execute_batch(
+            "CREATE TRIGGER deny_timeline_owner BEFORE INSERT ON timeline_owners
+             BEGIN SELECT RAISE(ABORT, 'owner write denied'); END",
+        ));
+        expect_err(owner_write_error.append_consent_bounded(
+            owner_write_timeline.id(),
+            std::slice::from_ref(&grant),
+            permit,
+            1,
+        ));
+    }
+
+    #[test]
+    fn owner_lifecycle_storage_failures_fail_closed() {
+        let subject = EntityId::new();
+        let mut fork_query_error = tests::new_store();
+        let parent = ok(fork_query_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("fork-query", subject),
+        ));
+        ok(fork_query_error
+            .conn
+            .execute_batch("DROP TABLE timeline_owners"));
+        expect_err(fork_query_error.fork(parent.id(), Seq::ZERO, "child"));
+
+        let mut fork_write_error = tests::new_store();
+        let parent = ok(fork_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("fork-write", subject),
+        ));
+        ok(fork_write_error.conn.execute_batch(
+            "CREATE TRIGGER deny_fork_owner BEFORE INSERT ON timeline_owners
+             BEGIN SELECT RAISE(ABORT, 'fork owner denied'); END",
+        ));
+        expect_err(fork_write_error.fork(parent.id(), Seq::ZERO, "child"));
+
+        let mut list_error = tests::new_store();
+        ok(list_error.create_timeline("list-owner-error"));
+        ok(list_error.conn.execute_batch("DROP TABLE timeline_owners"));
+        expect_err(list_error.list_timelines());
+
+        let mut create_write_error = tests::new_store();
+        ok(create_write_error.conn.execute_batch(
+            "CREATE TRIGGER deny_create_owner BEFORE INSERT ON timeline_owners
+             BEGIN SELECT RAISE(ABORT, 'create owner denied'); END",
+        ));
+        expect_err(create_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("create-owner", subject),
+        ));
+
+        let mut delete_write_error = tests::new_store();
+        let owned = ok(delete_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("delete-owner", subject),
+        ));
+        ok(delete_write_error.conn.execute_batch(
+            "CREATE TRIGGER deny_delete_owner BEFORE DELETE ON timeline_owners
+             BEGIN SELECT RAISE(ABORT, 'delete owner denied'); END",
+        ));
+        expect_err(delete_write_error.delete_timeline(owned.id()));
+    }
+
+    #[test]
+    fn owned_timeline_transaction_boundaries_are_fail_closed() {
+        let subject = EntityId::new();
+        let mut nested = tests::new_store();
+        ok(nested.conn.execute_batch("BEGIN IMMEDIATE"));
+        let nested_timeline = ok(nested.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("nested-owner", subject),
+        ));
+        assert_eq!(
+            some(ok(nested.get_timeline(nested_timeline.id())))
+                .meta
+                .owner,
+            Some(subject)
+        );
+        ok(nested.conn.execute_batch("ROLLBACK"));
+
+        let mut commit_error = tests::new_store();
+        ok(commit_error.conn.commit_hook(Some(|| true)));
+        expect_err(commit_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("commit-owner", subject),
+        ));
+        ok(commit_error.conn.commit_hook::<fn() -> bool>(None));
+    }
+
+    #[test]
+    fn cleanup_transaction_boundaries_fail_closed() {
+        let scope = AppendDedupScope::from_keyed_hash([124; 32]);
+        let mut remove_begin = tests::new_store();
+        ok(remove_begin.conn.execute_batch("BEGIN IMMEDIATE"));
+        expect_err(remove_begin.remove_append_identities(scope));
+        ok(remove_begin.conn.execute_batch("ROLLBACK"));
+
+        let mut bounded_begin = tests::new_store();
+        ok(bounded_begin.conn.execute_batch("BEGIN IMMEDIATE"));
+        expect_err(
+            bounded_begin
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+        ok(bounded_begin.conn.execute_batch("ROLLBACK"));
+
+        let mut remove_pending_error = tests::new_store();
+        ok(remove_pending_error
+            .conn
+            .execute_batch("DROP TABLE pending_append_identity_cleanup"));
+        expect_err(remove_pending_error.remove_append_identities(scope));
+
+        let mut remove_commit_error = tests::new_store();
+        ok(remove_commit_error.conn.commit_hook(Some(|| true)));
+        expect_err(remove_commit_error.remove_append_identities(scope));
+        ok(remove_commit_error.conn.commit_hook::<fn() -> bool>(None));
+
+        let mut bounded_commit_error = tests::new_store();
+        ok(bounded_commit_error.conn.commit_hook(Some(|| true)));
+        expect_err(
+            bounded_commit_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+        ok(bounded_commit_error.conn.commit_hook::<fn() -> bool>(None));
+    }
+
+    #[test]
+    fn bounded_cleanup_query_and_write_failures_fail_closed() {
+        let scope = AppendDedupScope::from_keyed_hash([125; 32]);
+        let mut malformed = tests::new_store();
+        ok(malformed
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON"));
+        ok(malformed.conn.execute(
+            "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
+             VALUES (1, ?1, ?2, 1)",
+            rusqlite::params![scope.as_bytes().as_slice(), EventId::new().to_string()],
+        ));
+        ok(malformed
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF"));
+        expect_err(
+            malformed.remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+
+        let mut delete_error = tests::new_store();
+        insert_identity(&delete_error, 126, scope, 1);
+        ok(delete_error.conn.execute_batch(
+            "CREATE TRIGGER deny_identity_delete BEFORE DELETE ON append_identities
+             BEGIN SELECT RAISE(ABORT, 'identity delete denied'); END",
+        ));
+        expect_err(
+            delete_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+
+        let mut marker_insert_error = tests::new_store();
+        insert_identity(&marker_insert_error, 127, scope, 1);
+        insert_identity(&marker_insert_error, 128, scope, 1);
+        ok(marker_insert_error.conn.execute_batch(
+            "CREATE TRIGGER deny_cleanup_insert BEFORE INSERT ON pending_append_identity_cleanup
+             BEGIN SELECT RAISE(ABORT, 'cleanup insert denied'); END",
+        ));
+        expect_err(
+            marker_insert_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+
+        let mut marker_delete_error = tests::new_store();
+        ok(marker_delete_error.conn.execute(
+            "INSERT INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+            rusqlite::params![scope.as_bytes().as_slice()],
+        ));
+        ok(marker_delete_error.conn.execute_batch(
+            "CREATE TRIGGER deny_cleanup_delete BEFORE DELETE ON pending_append_identity_cleanup
+             BEGIN SELECT RAISE(ABORT, 'cleanup delete denied'); END",
+        ));
+        expect_err(
+            marker_delete_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+    }
+
+    #[test]
+    fn cleanup_storage_failures_fail_closed() {
+        let subject = EntityId::new();
+        let permit = ConsentAuthority::new().append_permit();
+        let revocation = revocation_draft(subject, EntityId::new());
+        let mut cleanup_write_error = tests::new_store();
+        ok(cleanup_write_error.bind_consent_authority(permit));
+        let cleanup_timeline = ok(cleanup_write_error.create_timeline("cleanup-write-error"));
+        ok(cleanup_write_error
+            .conn
+            .execute_batch("DROP TABLE pending_append_identity_cleanup"));
+        expect_err(cleanup_write_error.append_consent_revocation_bounded(
+            cleanup_timeline.id(),
+            std::slice::from_ref(&revocation),
+            permit,
+            1,
+            AppendDedupScope::from_keyed_hash([122; 32]),
+        ));
+
+        let scope = AppendDedupScope::from_keyed_hash([123; 32]);
+        let mut remove_error = tests::new_store();
+        ok(remove_error
+            .conn
+            .execute_batch("DROP TABLE append_identities"));
+        expect_err(remove_error.remove_append_identities(scope));
+
+        let mut bounded_remove_error = tests::new_store();
+        ok(bounded_remove_error
+            .conn
+            .execute_batch("DROP TABLE append_identities"));
+        expect_err(
+            bounded_remove_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+
+        let mut pending_error = tests::new_store();
+        ok(pending_error
+            .conn
+            .execute_batch("DROP TABLE pending_append_identity_cleanup"));
+        expect_err(pending_error.pending_append_identity_cleanup());
+
+        let scope = AppendDedupScope::from_keyed_hash([129; 32]);
+        let mut query_error = tests::new_store();
+        insert_identity(&query_error, 130, scope, 1);
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads_for_authorizer = std::sync::Arc::clone(&reads);
+        ok(query_error
+            .conn
+            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Read {
+                        table_name: "append_identities",
+                        column_name: "scope_key"
+                    }
+                ) && reads_for_authorizer.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0
+                {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            })));
+        expect_err(
+            query_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+        ok(query_error.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        ));
+
+        let scope = AppendDedupScope::from_keyed_hash([131; 32]);
+        let mut view_error = tests::new_store();
+        insert_identity(&view_error, 132, scope, 1);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_function = std::sync::Arc::clone(&calls);
+        ok(view_error.conn.create_scalar_function(
+            "scope_for_test",
+            0,
+            rusqlite::functions::FunctionFlags::default(),
+            move |_context| {
+                if calls_for_function.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    Ok(vec![0_u8; 32])
+                } else {
+                    Err(rusqlite::Error::UserFunctionError(Box::new(
+                        std::io::Error::other("scope query denied"),
+                    )))
+                }
+            },
+        ));
+        ok(view_error
+            .conn
+            .execute_batch("ALTER TABLE append_identities RENAME TO append_identities_real"));
+        ok(view_error.conn.execute_batch(
+            "CREATE VIEW append_identities AS
+             SELECT dedup_key, scope_for_test() AS scope_key, event_id, expires_at
+             FROM append_identities_real",
+        ));
+        expect_err(
+            view_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+    }
+
+    #[test]
+    fn consent_owner_and_timeline_transaction_authorizers_fail_closed() {
+        let subject = EntityId::new();
+        let permit = ConsentAuthority::new().append_permit();
+
+        let mut owned = tests::new_store();
+        let timeline = ok(owned.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("pre-owned-consent", subject),
+        ));
+        ok(owned.bind_consent_authority(permit));
+        ok(owned.append_consent_bounded(
+            timeline.id(),
+            std::slice::from_ref(&grant_draft(subject, EntityId::new(), 1)),
+            permit,
+            1,
+        ));
+
+        let mut begin_error = tests::new_store();
+        ok(begin_error
+            .conn
+            .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Begin
+                    }
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            })));
+        expect_err(begin_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("begin-authorizer", subject),
+        ));
+        ok(begin_error.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        ));
+
+        let mut nested_write_error = tests::new_store();
+        ok(nested_write_error.conn.execute_batch("BEGIN IMMEDIATE"));
+        ok(nested_write_error.conn.authorizer(Some(
+            |context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Insert {
+                        table_name: "timeline_owners"
+                    }
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            },
+        )));
+        expect_err(nested_write_error.create_timeline_with_meta(
+            pos_core::timeline::TimelineMeta::root_owned("nested-authorizer", subject),
+        ));
+        ok(nested_write_error.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        ));
+        ok(nested_write_error.conn.execute_batch("ROLLBACK"));
+    }
+
+    #[test]
+    fn consent_resolver_rejects_durable_type_and_revision_errors() {
+        let id = ok(AdmissionSnapshotId::from_canonical(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+        ));
+        let malformed_type = tests::new_store();
+        ok(malformed_type
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON"));
+        ok(malformed_type.conn.execute(
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+            VALUES (?1, X'01', zeroblob(32), zeroblob(1))",
+            rusqlite::params![id.as_str()],
+        ));
+        expect_err(malformed_type.resolve_admission_consent(&id, 12));
+
+        let id = ok(AdmissionSnapshotId::from_canonical(
+            "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        ));
+        let malformed_revision = tests::new_store();
+        ok(malformed_revision
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON"));
+        ok(malformed_revision.conn.execute(
+            "INSERT INTO geographic_cell_admission_consent_records
+             (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
+             VALUES (?1, -1, zeroblob(32), zeroblob(1))",
+            rusqlite::params![id.as_str()],
+        ));
+        expect_err(malformed_revision.resolve_admission_consent(&id, 12));
+    }
+
+    #[test]
+    fn deleting_an_enrolled_timeline_revokes_enrollment_state() {
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("delete-enrolled"));
+        let request = OwnTracksEnrollmentRequestV1::new(
+            timeline.id(),
+            EntityId::new(),
+            pos_core::geo_admission::GeoLocationAdmissionFenceV1::new(
+                7,
+                ([1; 32], 8, [2; 32]),
+                (1, false, 9),
+            ),
+            [42; 32],
+        );
+        ok(store.pair_owntracks_enrollment(request));
+        ok(store.delete_timeline(timeline.id()));
+        std::mem::drop(store.owntracks_enrollment_status());
+    }
+
+    #[test]
+    fn fork_hashing_fails_closed_when_parent_event_identity_is_corrupt() {
+        let mut store = tests::new_store();
+        let parent = ok(store.create_timeline("corrupt-fork-parent"));
+        let event = ok(store.append(
+            parent.id(),
+            &[tests::make_draft(EntityId::new(), b"fork-event")],
+        ));
+        ok(store.conn.execute(
+            "UPDATE events SET event_id = 'bad' WHERE event_id = ?1",
+            rusqlite::params![event[0].id.to_string()],
+        ));
+        expect_err(
+            store.create_timeline_with_meta(pos_core::timeline::TimelineMeta::forked_from(
+                parent.id(),
+                Seq::from_u64(1),
+                "corrupt-fork-child",
+            )),
+        );
     }
 
     #[test]
@@ -9477,6 +10565,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_cell_dedup_verification_rejects_tampered_sidecars() {
         let mut store = tests::new_store();
         let timeline = ok(store.create_timeline("geo-cell-consent-tamper"));
@@ -9514,6 +10603,26 @@ mod coverage_entrypoints {
         assert!(
             matches!(outcome, Ok(GeographicAdmissionOutcome::OutcomeUnknown)),
             "link tamper outcome: {outcome:?}"
+        );
+
+        let mut store = tests::new_store();
+        let timeline = ok(store.create_timeline("geo-cell-consent-linkage-tamper"));
+        let entity = EntityId::new();
+        let (consent, fence, request) = tests::geo_cell_request(timeline.id(), entity);
+        ok(store.set_geo_cell_admission_consent_record(consent));
+        ok(store.set_geo_cell_admission_fence(timeline.id(), entity, fence));
+        ok(store.conn.execute_batch(
+            "CREATE TRIGGER tamper_geo_cell_consent_linkage AFTER INSERT ON geographic_cell_admission_dedup
+             BEGIN
+                 UPDATE geographic_cell_admission_consent_records
+                 SET consent_record_cbor = X'74616d70657265642d636f6e73656e74',
+                     consent_record_hash = X'41cde6d9f404d9e85ae9d3b323464cb9afe96288b380e05d4a48f0590f8caf4a';
+             END",
+        ));
+        let outcome = store.admit(request);
+        assert!(
+            matches!(outcome, Ok(GeographicAdmissionOutcome::OutcomeUnknown)),
+            "consent linkage tamper outcome: {outcome:?}"
         );
     }
 

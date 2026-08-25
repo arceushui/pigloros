@@ -61,7 +61,9 @@ impl StateRegistry {
         // generic StateRegistry must never hand it to a plugin reducer, even
         // when a caller bypasses ProjectionRegistry and uses this low-level
         // seam directly.
-        if is_geographic_event_type(&event.event_type) {
+        if is_geographic_event_type(&event.event_type)
+            || crate::is_consent_event_type(&event.event_type)
+        {
             return;
         }
         let state = self
@@ -69,6 +71,16 @@ impl StateRegistry {
             .entry(event.entity)
             .or_insert_with(|| reducer.initial());
         reducer.apply(state, event);
+    }
+
+    /// Forget cached projection state for one subject without touching Timeline history.
+    pub fn remove(&mut self, id: &EntityId) {
+        self.states.remove(id);
+    }
+
+    /// Retain only the state for one subject.
+    pub fn retain_only(&mut self, id: &EntityId) {
+        self.states.retain(|entity, _| entity == id);
     }
 }
 
@@ -158,6 +170,34 @@ mod tests {
         let mut event = make_event(entity);
         event.event_type = crate::Kind::new(crate::GEOGRAPHIC_EVENT_TYPE);
         registry.apply(&reducer, &event);
+        assert!(registry.get(&entity).is_none());
+    }
+
+    #[test]
+    fn state_registry_retain_only_keeps_the_requested_subject() {
+        let reducer = CountReducer;
+        let retained = EntityId::new();
+        let removed = EntityId::new();
+        let mut registry = StateRegistry::new();
+        registry.apply(&reducer, &make_event(retained));
+        registry.apply(&reducer, &make_event(removed));
+
+        registry.retain_only(&retained);
+
+        assert!(registry.get(&retained).is_some());
+        assert!(registry.get(&removed).is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn state_registry_remove_forgets_existing_subject_state() {
+        let reducer = CountReducer;
+        let entity = EntityId::new();
+        let mut registry = StateRegistry::new();
+        registry.apply(&reducer, &make_event(entity));
+
+        registry.remove(&entity);
+
         assert!(registry.get(&entity).is_none());
     }
 

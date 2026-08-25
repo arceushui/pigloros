@@ -4,20 +4,22 @@
 //! worker.  Commands are linearised by one bounded FIFO and executed by one
 //! dedicated OS thread.
 use pos_core::{
-    event::{Event, EventDraft},
+    event::{Event, EventDraft, Kind},
     geo_admission::{
         GeoLocationAdmissionOutcome, GeoLocationAdmissionRequestV1, GeoLocationAdmissionStore,
     },
-    ids::{EntityId, EventId, TimelineId},
+    ids::{EventId, TimelineId},
     store::{
-        AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds, EventStore,
-        PurgeOutcome, SeqRange,
+        AppendDedupScope, AppendIdentity, AppendIntent, AppendOrDuplicateOutcome, EventReadBounds,
+        EventStore, PurgeOutcome, SeqRange,
     },
     timeline::Timeline,
+    ConsentAppendPermit, ConsentGrantedV1, ConsentRevocationReservation, ConsentRevokedV1,
     CoreError, OwnTracksIngressInputV1, OwnTracksIngressRateKeyV1, OwnTracksIngressStore,
+    PreparedOwnTracksIngressV1, Seq, EVENT_TYPE_CONSENT_GRANTED_V1, EVENT_TYPE_CONSENT_REVOKED_V1,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     num::NonZeroUsize,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
@@ -51,13 +53,108 @@ macro_rules! submit {
     }};
 }
 
+#[cfg(test)]
+mod lifecycle_coverage_tests {
+    use super::{
+        worker_loop, worker_loop_with_runtime, Command, CommandClass, CommandEnvelope,
+        CommandLifecycle, ExecutorStore, LifecycleState,
+    };
+    use pos_store::memory::MemoryStore;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use tokio::sync::{mpsc, Notify, Semaphore};
+
+    #[test]
+    fn worker_runtime_failure_closes_the_lifecycle_fail_closed() {
+        let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
+        let (_sender, mut receiver) = mpsc::channel(1);
+        worker_loop_with_runtime(
+            &lifecycle,
+            Arc::new(Notify::new()),
+            &mut receiver,
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+            Err(std::io::Error::other("runtime construction failed")),
+            false,
+        );
+        let final_state = *lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(final_state, LifecycleState::Unhealthy { .. }));
+    }
+
+    #[test]
+    fn worker_shutdown_exits_after_an_empty_drain() {
+        let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
+        let shutdown = Arc::new(Notify::new());
+        shutdown.notify_one();
+        let (sender, mut receiver) = mpsc::channel(1);
+        drop(sender);
+        worker_loop(
+            &lifecycle,
+            shutdown,
+            &mut receiver,
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+        );
+        let final_state = *lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(final_state, LifecycleState::Closed);
+    }
+
+    #[test]
+    fn worker_draining_processes_already_queued_work() {
+        let lifecycle = Arc::new(Mutex::new(LifecycleState::Open));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (reply, _result) = tokio::sync::oneshot::channel();
+        let global_permit = Arc::new(Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("permit unavailable")));
+        sender
+            .try_send(CommandEnvelope {
+                deadline: Instant::now() + Duration::from_secs(1),
+                lifecycle: Arc::new(CommandLifecycle::new()),
+                class: CommandClass::Write,
+                admission_ordinal: 0,
+                global_permit,
+                read_permit: None,
+                command: Command::Create {
+                    name: "draining-queued-work".to_owned(),
+                    reply,
+                },
+            })
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("queue unavailable")));
+        drop(sender);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("runtime unavailable")));
+        worker_loop_with_runtime(
+            &lifecycle,
+            Arc::new(Notify::new()),
+            &mut receiver,
+            ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+            Ok(runtime),
+            true,
+        );
+        let final_state = *lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(final_state, LifecycleState::Closed);
+    }
+}
+
 enum Command {
-    #[allow(dead_code)]
-    AdmitOwnTracksIngress {
+    PrepareOwnTracksIngress {
         basic_handle: [u8; 32],
         basic_secret: [u8; 32],
         payload: pos_core::CanonicalBytes,
-        reply: oneshot::Sender<Result<OwnTracksIngressOutcome, StoreExecutorError>>,
+        reply: oneshot::Sender<Result<PreparedOwnTracksIngressOutcome, StoreExecutorError>>,
     },
     AdmitGeoLocation {
         request: GeoLocationAdmissionRequestV1,
@@ -66,6 +163,14 @@ enum Command {
     Purge {
         limit: NonZeroUsize,
         reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
+    },
+    RemoveAppendIdentitiesBounded {
+        scope: AppendDedupScope,
+        limit: NonZeroUsize,
+        reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
+    },
+    PendingAppendIdentityCleanup {
+        reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
     },
     RootCount {
         maximum: usize,
@@ -92,6 +197,22 @@ enum Command {
         maximum: Option<u64>,
         reply: oneshot::Sender<Result<Vec<Event>, StoreExecutorError>>,
     },
+    AppendConsentGrant {
+        timeline: TimelineId,
+        grant: ConsentGrantedV1,
+        permit: ConsentAppendPermit,
+        maximum: u64,
+        reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+    },
+    AppendConsentRevocation {
+        timeline: TimelineId,
+        revocation: ConsentRevokedV1,
+        cleanup_scope: AppendDedupScope,
+        permit: ConsentAppendPermit,
+        maximum: u64,
+        reservation: ConsentRevocationReservation,
+        reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+    },
     AppendIdentified {
         timeline: TimelineId,
         identity: AppendIdentity,
@@ -102,6 +223,10 @@ enum Command {
     GetTimeline {
         timeline: TimelineId,
         reply: oneshot::Sender<Result<Option<Timeline>, StoreExecutorError>>,
+    },
+    ProtectedLogicalHead {
+        timeline: TimelineId,
+        reply: oneshot::Sender<Result<Seq, StoreExecutorError>>,
     },
     #[cfg(test)]
     Panic {
@@ -125,12 +250,17 @@ impl Command {
             Self::RootCount { .. }
             | Self::Read { .. }
             | Self::ReadOne { .. }
-            | Self::GetTimeline { .. } => CommandClass::Read,
-            Self::AdmitOwnTracksIngress { .. }
+            | Self::GetTimeline { .. }
+            | Self::ProtectedLogicalHead { .. } => CommandClass::Read,
+            Self::PrepareOwnTracksIngress { .. }
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
+            | Self::RemoveAppendIdentitiesBounded { .. }
+            | Self::PendingAppendIdentityCleanup { .. }
             | Self::Create { .. }
             | Self::Append { .. }
+            | Self::AppendConsentGrant { .. }
+            | Self::AppendConsentRevocation { .. }
             | Self::AppendIdentified { .. } => CommandClass::Write,
             #[cfg(test)]
             Self::Panic { .. } => CommandClass::Write,
@@ -249,15 +379,19 @@ impl ExecutorStore {
             Self::OwnTracks(store) => store.as_mut(),
         }
     }
+
+    fn protected_logical_head(&self, timeline: TimelineId) -> Result<Seq, CoreError> {
+        match self {
+            Self::Generic(store) => store.logical_head(timeline),
+            Self::GeoLocation(store) => store.protected_logical_head(timeline),
+            Self::OwnTracks(store) => store.protected_logical_head(timeline),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OwnTracksIngressOutcome {
-    Admitted {
-        outcome: GeoLocationAdmissionOutcome,
-        timeline: TimelineId,
-        entity: EntityId,
-    },
+pub(crate) enum PreparedOwnTracksIngressOutcome {
+    Prepared(Box<PreparedOwnTracksIngressV1>),
     RateLimited,
 }
 
@@ -347,6 +481,17 @@ enum CommandPhase {
     Expired = 2,
 }
 
+enum ExecutionClaim {
+    Claimed,
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartOutcome {
+    Started,
+    AlreadyStarted,
+}
+
 struct CommandLifecycle {
     phase: AtomicU8,
 }
@@ -358,20 +503,22 @@ impl CommandLifecycle {
         }
     }
 
-    fn start(&self) -> bool {
-        self.phase
-            .compare_exchange(
-                CommandPhase::Queued as u8,
-                CommandPhase::Started as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+    fn start(&self) -> StartOutcome {
+        match self.phase.compare_exchange(
+            CommandPhase::Queued as u8,
+            CommandPhase::Started as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => StartOutcome::Started,
+            Err(_) => StartOutcome::AlreadyStarted,
+        }
     }
 
-    fn claim_for_execution(&self, deadline: Instant) -> bool {
-        if !self.start() {
-            return false;
+    fn claim_for_execution(&self, deadline: Instant) -> ExecutionClaim {
+        match self.start() {
+            StartOutcome::Started => {}
+            StartOutcome::AlreadyStarted => return ExecutionClaim::Expired,
         }
         if Instant::now() >= deadline {
             let _transition = self.phase.compare_exchange(
@@ -380,9 +527,9 @@ impl CommandLifecycle {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
-            return false;
+            return ExecutionClaim::Expired;
         }
-        true
+        ExecutionClaim::Claimed
     }
 
     fn expire_if_queued(&self) -> bool {
@@ -394,6 +541,36 @@ impl CommandLifecycle {
                 Ordering::Acquire,
             )
             .is_ok()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod command_lifecycle_tests {
+    use super::{CommandLifecycle, ExecutionClaim, StartOutcome};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_execution_claim_is_owned_and_later_claims_expire() {
+        let lifecycle = CommandLifecycle::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        assert!(matches!(
+            lifecycle.claim_for_execution(deadline),
+            ExecutionClaim::Claimed
+        ));
+        assert!(matches!(
+            lifecycle.claim_for_execution(deadline),
+            ExecutionClaim::Expired
+        ));
+    }
+
+    #[test]
+    fn lifecycle_start_has_one_owner() {
+        let lifecycle = CommandLifecycle::new();
+
+        assert_eq!(lifecycle.start(), StartOutcome::Started);
+        assert_eq!(lifecycle.start(), StartOutcome::AlreadyStarted);
     }
 }
 
@@ -429,21 +606,39 @@ pub(crate) struct StoreExecutor {
 }
 
 impl StoreExecutor {
+    #[cfg(test)]
     pub(crate) fn new(store: Box<dyn EventStore>) -> Self {
         Self::spawn(ExecutorStore::Generic(store), None)
     }
 
-    pub(crate) fn new_with_geo_location_admission<S>(store: S) -> Self
+    pub(crate) fn new_with_consent_authority(
+        mut store: Box<dyn EventStore>,
+        permit: ConsentAppendPermit,
+    ) -> Self {
+        drop(store.bind_consent_authority(permit));
+        Self::spawn(ExecutorStore::Generic(store), None)
+    }
+
+    pub(crate) fn new_with_geo_location_admission<S>(
+        mut store: S,
+        permit: ConsentAppendPermit,
+    ) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + 'static,
     {
+        drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::GeoLocation(Box::new(store)), None)
     }
 
-    pub(crate) fn new_with_owntracks_ingress<S>(store: S, owner_key: [u8; 32]) -> Self
+    pub(crate) fn new_with_owntracks_ingress<S>(
+        mut store: S,
+        owner_key: [u8; 32],
+        permit: ConsentAppendPermit,
+    ) -> Self
     where
         S: EventStore + GeoLocationAdmissionStore + OwnTracksIngressStore + 'static,
     {
+        drop(store.bind_consent_authority(permit));
         Self::spawn(ExecutorStore::OwnTracks(Box::new(store)), Some(owner_key))
     }
 
@@ -520,23 +715,7 @@ impl StoreExecutor {
                     observer,
                 );
             });
-        match worker {
-            Ok(handle) => {
-                let mut join = match control.join.lock() {
-                    Ok(join) => join,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                *join = Some(handle);
-            }
-            Err(_) => {
-                set_lifecycle_state(
-                    control.state.as_ref(),
-                    LifecycleState::Unhealthy {
-                        retryable_shutdown: false,
-                    },
-                );
-            }
-        }
+        register_worker(control.as_ref(), worker);
         Self { control }
     }
 
@@ -629,8 +808,6 @@ impl StoreExecutor {
                 }
                 LifecycleState::Unhealthy { .. } => return Err(StoreExecutorError::Unhealthy),
             }
-            drop(state);
-
             let global_permit = self
                 .control
                 .global_budget
@@ -665,6 +842,7 @@ impl StoreExecutor {
                 read_permit,
                 command,
             });
+            drop(state);
             match send_result {
                 Ok(()) => {
                     let mut ordinal = match self.control.next_admission_ordinal.lock() {
@@ -855,20 +1033,37 @@ impl StoreExecutor {
     ) -> Result<PurgeOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::Purge { limit, reply })
     }
+    pub(crate) async fn remove_append_identities_bounded(
+        &self,
+        scope: AppendDedupScope,
+        limit: NonZeroUsize,
+    ) -> Result<PurgeOutcome, StoreExecutorError> {
+        submit!(self, |reply| Command::RemoveAppendIdentitiesBounded {
+            scope,
+            limit,
+            reply
+        })
+    }
+    pub(crate) async fn pending_append_identity_cleanup(
+        &self,
+    ) -> Result<Option<AppendDedupScope>, StoreExecutorError> {
+        submit!(self, |reply| Command::PendingAppendIdentityCleanup {
+            reply
+        })
+    }
     pub(crate) async fn admit_geo_location(
         &self,
         request: GeoLocationAdmissionRequestV1,
     ) -> Result<GeoLocationAdmissionOutcome, StoreExecutorError> {
         submit!(self, |reply| Command::AdmitGeoLocation { request, reply })
     }
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn admit_owntracks_ingress(
+    pub(crate) async fn prepare_owntracks_ingress(
         &self,
         basic_handle: [u8; 32],
         basic_secret: [u8; 32],
         payload: pos_core::CanonicalBytes,
-    ) -> Result<OwnTracksIngressOutcome, StoreExecutorError> {
-        submit!(self, |reply| Command::AdmitOwnTracksIngress {
+    ) -> Result<PreparedOwnTracksIngressOutcome, StoreExecutorError> {
+        submit!(self, |reply| Command::PrepareOwnTracksIngress {
             basic_handle,
             basic_secret,
             payload,
@@ -918,6 +1113,40 @@ impl StoreExecutor {
             reply,
         })
     }
+    pub(crate) async fn append_consent_grant(
+        &self,
+        timeline: TimelineId,
+        grant: ConsentGrantedV1,
+        permit: ConsentAppendPermit,
+        maximum: u64,
+    ) -> Result<Event, StoreExecutorError> {
+        submit!(self, |reply| Command::AppendConsentGrant {
+            timeline,
+            grant,
+            permit,
+            maximum,
+            reply,
+        })
+    }
+    pub(crate) async fn append_consent_revocation(
+        &self,
+        timeline: TimelineId,
+        revocation: ConsentRevokedV1,
+        cleanup_scope: AppendDedupScope,
+        permit: ConsentAppendPermit,
+        maximum: u64,
+        reservation: ConsentRevocationReservation,
+    ) -> Result<Event, StoreExecutorError> {
+        submit!(self, |reply| Command::AppendConsentRevocation {
+            timeline,
+            revocation,
+            cleanup_scope,
+            permit,
+            maximum,
+            reservation,
+            reply,
+        })
+    }
     pub(crate) async fn append_identified(
         &self,
         timeline: TimelineId,
@@ -938,6 +1167,15 @@ impl StoreExecutor {
         timeline: TimelineId,
     ) -> Result<Option<Timeline>, StoreExecutorError> {
         submit!(self, |reply| Command::GetTimeline { timeline, reply })
+    }
+    pub(crate) async fn protected_logical_head(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Seq, StoreExecutorError> {
+        submit!(self, |reply| Command::ProtectedLogicalHead {
+            timeline,
+            reply
+        })
     }
 }
 
@@ -972,6 +1210,43 @@ fn set_lifecycle_state(current_state: &Mutex<LifecycleState>, state: LifecycleSt
     *current = state;
 }
 
+fn register_worker(control: &ExecutorControl, worker: std::io::Result<JoinHandle<()>>) {
+    match worker {
+        Ok(worker) => {
+            let mut join = match control.join.lock() {
+                Ok(join) => join,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *join = Some(worker);
+            drop(join);
+        }
+        Err(_) => set_lifecycle_state(
+            control.state.as_ref(),
+            LifecycleState::Unhealthy {
+                retryable_shutdown: false,
+            },
+        ),
+    }
+}
+
+fn take_worker_runtime(
+    lifecycle_state: &Mutex<LifecycleState>,
+    runtime: std::io::Result<tokio::runtime::Runtime>,
+) -> Option<tokio::runtime::Runtime> {
+    runtime.map_or_else(
+        |_| {
+            set_lifecycle_state(
+                lifecycle_state,
+                LifecycleState::Unhealthy {
+                    retryable_shutdown: false,
+                },
+            );
+            None
+        },
+        Some,
+    )
+}
+
 fn worker_loop(
     lifecycle_state: &Arc<Mutex<LifecycleState>>,
     shutdown: Arc<Notify>,
@@ -980,17 +1255,38 @@ fn worker_loop(
     owntracks_owner_key: Option<[u8; 32]>,
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
 ) {
-    let worker_result = catch_unwind(AssertUnwindSafe(|| {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+    let runtime = catch_unwind(AssertUnwindSafe(|| {
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        else {
-            set_lifecycle_state(
-                lifecycle_state.as_ref(),
-                LifecycleState::Unhealthy {
-                    retryable_shutdown: false,
-                },
-            );
+    }))
+    .unwrap_or_else(|_| Err(std::io::Error::other("runtime construction panicked")));
+    worker_loop_with_runtime(
+        lifecycle_state,
+        shutdown,
+        receiver,
+        store,
+        owntracks_owner_key,
+        #[cfg(test)]
+        observer,
+        runtime,
+        #[cfg(test)]
+        false,
+    );
+}
+
+fn worker_loop_with_runtime(
+    lifecycle_state: &Arc<Mutex<LifecycleState>>,
+    shutdown: Arc<Notify>,
+    receiver: &mut mpsc::Receiver<CommandEnvelope>,
+    store: ExecutorStore,
+    owntracks_owner_key: Option<[u8; 32]>,
+    #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
+    runtime: std::io::Result<tokio::runtime::Runtime>,
+    #[cfg(test)] start_draining: bool,
+) {
+    let worker_result = catch_unwind(AssertUnwindSafe(|| {
+        let Some(runtime) = take_worker_runtime(lifecycle_state.as_ref(), runtime) else {
             return;
         };
         runtime.block_on(worker_loop_async(
@@ -1001,6 +1297,8 @@ fn worker_loop(
             owntracks_owner_key,
             #[cfg(test)]
             observer,
+            #[cfg(test)]
+            start_draining,
         ));
     }));
     match worker_result {
@@ -1029,6 +1327,7 @@ async fn worker_loop_async(
     store: ExecutorStore,
     owntracks_owner_key: Option<[u8; 32]>,
     #[cfg(test)] observer: Option<Arc<SchedulerObserver>>,
+    #[cfg(test)] start_draining: bool,
 ) {
     let mut state = ExecutorState {
         store,
@@ -1037,21 +1336,22 @@ async fn worker_loop_async(
             buckets: HashMap::new(),
         },
     };
-    let mut pending = VecDeque::new();
+    let mut pending = Vec::new();
+    #[cfg(test)]
+    let mut draining = start_draining;
+    #[cfg(not(test))]
     let mut draining = false;
     let mut disconnected = false;
     let mut reads_since_write = 0;
     loop {
-        if pending.is_empty() && !disconnected {
-            if draining {
-                let drain_result = receiver.try_recv();
-                match drain_result {
-                    Ok(envelope) => pending.push_back(envelope),
-                    Err(
-                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
-                    ) => {
-                        break;
-                    }
+        if pending.is_empty() {
+            if matches!((draining, disconnected), (true, _) | (false, true)) {
+                disconnected = match drain_available(receiver, &mut pending) {
+                    QueueDrainOutcome::Disconnected => true,
+                    QueueDrainOutcome::Open => disconnected,
+                };
+                if pending.is_empty() {
+                    break;
                 }
             } else {
                 let next_received = tokio::select! {
@@ -1063,82 +1363,83 @@ async fn worker_loop_async(
                     }
                 };
                 if let Some(envelope) = next_received {
-                    pending.push_back(envelope);
+                    pending.push(envelope);
                 } else {
                     disconnected = true;
                     continue;
                 }
             }
         }
-
-        if !pending.is_empty() {
-            disconnected |= drain_available(receiver, &mut pending);
-            #[cfg(test)]
-            if let Some(observer) = &observer {
-                observer.drain_completed(pending.len(), disconnected);
-            }
-            let Some(index) = select_pending_index(&pending, reads_since_write) else {
-                continue;
-            };
-            let Some(envelope) = pending.remove(index) else {
-                continue;
-            };
-            let class = envelope.class;
-            #[cfg(test)]
-            if let Some(observer) = &observer {
-                observer.selected(envelope.admission_ordinal, class, reads_since_write);
-            }
-            let _permit_owners = (&envelope.global_permit, &envelope.read_permit);
-            if !envelope.lifecycle.claim_for_execution(envelope.deadline) {
-                expire_command(envelope.command);
-                continue;
-            }
-            match class {
-                CommandClass::Read => {
-                    reads_since_write = reads_since_write.saturating_add(1).min(READ_BURST);
-                }
-                CommandClass::Write => reads_since_write = 0,
-            }
-            match catch_unwind(AssertUnwindSafe(|| execute(&mut state, envelope.command))) {
-                Ok(()) => {}
-                Err(payload) => {
-                    set_lifecycle_state(
-                        lifecycle_state.as_ref(),
-                        LifecycleState::Unhealthy {
-                            retryable_shutdown: false,
-                        },
-                    );
-                    std::panic::resume_unwind(payload);
-                }
-            }
+        disconnected = match drain_available(receiver, &mut pending) {
+            QueueDrainOutcome::Disconnected => true,
+            QueueDrainOutcome::Open => disconnected,
+        };
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.drain_completed(pending.len(), disconnected);
+        }
+        let index = select_pending_index(&pending, reads_since_write);
+        if matches!(
+            pending[index]
+                .lifecycle
+                .claim_for_execution(pending[index].deadline),
+            ExecutionClaim::Expired
+        ) {
+            expire_envelope(pending.remove(index));
             continue;
         }
-
-        if draining || disconnected {
-            break;
+        #[cfg(test)]
+        let admission_ordinal = pending[index].admission_ordinal;
+        let CommandEnvelope {
+            command,
+            class,
+            global_permit,
+            read_permit,
+            ..
+        } = pending.remove(index);
+        let permit_owners = (global_permit, read_permit);
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.selected(admission_ordinal, class, reads_since_write);
+        }
+        reads_since_write = match class {
+            CommandClass::Read => reads_since_write.saturating_add(1).min(READ_BURST),
+            CommandClass::Write => 0,
+        };
+        let execution = catch_unwind(AssertUnwindSafe(|| execute(&mut state, command)));
+        drop(permit_owners);
+        if let Err(payload) = execution {
+            set_lifecycle_state(
+                lifecycle_state.as_ref(),
+                LifecycleState::Unhealthy {
+                    retryable_shutdown: false,
+                },
+            );
+            std::panic::resume_unwind(payload);
         }
     }
     drop(pending);
-    drop(state);
+}
+
+enum QueueDrainOutcome {
+    Open,
+    Disconnected,
 }
 
 fn drain_available(
     receiver: &mut mpsc::Receiver<CommandEnvelope>,
-    pending: &mut VecDeque<CommandEnvelope>,
-) -> bool {
+    pending: &mut Vec<CommandEnvelope>,
+) -> QueueDrainOutcome {
     loop {
         match receiver.try_recv() {
-            Ok(envelope) => pending.push_back(envelope),
-            Err(mpsc::error::TryRecvError::Empty) => return false,
-            Err(mpsc::error::TryRecvError::Disconnected) => return true,
+            Ok(envelope) => pending.push(envelope),
+            Err(mpsc::error::TryRecvError::Empty) => return QueueDrainOutcome::Open,
+            Err(mpsc::error::TryRecvError::Disconnected) => return QueueDrainOutcome::Disconnected,
         }
     }
 }
 
-fn select_pending_index(
-    pending: &VecDeque<CommandEnvelope>,
-    reads_since_write: u8,
-) -> Option<usize> {
+fn select_pending_index(pending: &[CommandEnvelope], reads_since_write: u8) -> usize {
     let preferred = if reads_since_write < READ_BURST {
         CommandClass::Read
     } else {
@@ -1148,30 +1449,39 @@ fn select_pending_index(
         CommandClass::Read => CommandClass::Write,
         CommandClass::Write => CommandClass::Read,
     };
-    pending
+    let preferred_index = pending
         .iter()
         .enumerate()
         .filter(|(_, envelope)| envelope.class == preferred)
-        .min_by_key(|(_, envelope)| envelope.admission_ordinal)
-        .or_else(|| {
+        .min_by_key(|(_, envelope)| envelope.admission_ordinal);
+    preferred_index.map_or_else(
+        || {
             pending
                 .iter()
                 .enumerate()
                 .filter(|(_, envelope)| envelope.class == fallback)
                 .min_by_key(|(_, envelope)| envelope.admission_ordinal)
-        })
-        .map(|(index, _)| index)
+                .map_or(0, |(index, _)| index)
+        },
+        |(index, _)| index,
+    )
 }
 
 fn expire_command(command: Command) {
     match command {
-        Command::AdmitOwnTracksIngress { reply, .. } => {
+        Command::PrepareOwnTracksIngress { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::AdmitGeoLocation { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::Purge { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
+        Command::RemoveAppendIdentitiesBounded { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
+        Command::PendingAppendIdentityCleanup { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::RootCount { reply, .. } => {
@@ -1189,10 +1499,22 @@ fn expire_command(command: Command) {
         Command::Append { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::AppendConsentGrant { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
+        Command::AppendConsentRevocation {
+            reservation, reply, ..
+        } => {
+            let _was_pending = reservation.abort_durable();
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         Command::AppendIdentified { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::GetTimeline { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
+        Command::ProtectedLogicalHead { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         #[cfg(test)]
@@ -1206,6 +1528,10 @@ fn expire_command(command: Command) {
     }
 }
 
+fn expire_envelope(CommandEnvelope { command, .. }: CommandEnvelope) {
+    expire_command(command);
+}
+
 fn send_store_result<T>(
     reply: oneshot::Sender<Result<T, StoreExecutorError>>,
     result: Result<T, CoreError>,
@@ -1213,12 +1539,12 @@ fn send_store_result<T>(
     drop(reply.send(result.map_err(StoreExecutorError::Store)));
 }
 
-fn execute_owntracks_ingress(
+fn prepare_owntracks_ingress(
     state: &mut ExecutorState,
     basic_handle: [u8; 32],
     basic_secret: [u8; 32],
     payload: pos_core::CanonicalBytes,
-) -> Result<OwnTracksIngressOutcome, CoreError> {
+) -> Result<PreparedOwnTracksIngressOutcome, CoreError> {
     let ExecutorStore::OwnTracks(store) = &mut state.store else {
         return Err(CoreError::GeographicAdmissionUnavailable);
     };
@@ -1228,17 +1554,11 @@ fn execute_owntracks_ingress(
     let input = owntracks_input(owner_key, basic_handle, basic_secret, payload);
     let prepared = store.prepare_owntracks_ingress(input)?;
     if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
-        return Ok(OwnTracksIngressOutcome::RateLimited);
+        return Ok(PreparedOwnTracksIngressOutcome::RateLimited);
     }
-    let request = prepared.into_admission_request();
-    let timeline = request.timeline();
-    let entity = request.entity();
-    let outcome = store.admit_geo_location(request)?;
-    Ok(OwnTracksIngressOutcome::Admitted {
-        outcome,
-        timeline,
-        entity,
-    })
+    Ok(PreparedOwnTracksIngressOutcome::Prepared(Box::new(
+        prepared,
+    )))
 }
 
 fn owntracks_input(
@@ -1297,18 +1617,46 @@ fn owntracks_key(
     *hasher.finalize().as_bytes()
 }
 
-fn execute(state: &mut ExecutorState, command: Command) {
+enum CommandExecution {
+    Completed,
+}
+
+fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
     match command {
-        Command::AdmitOwnTracksIngress {
+        Command::PrepareOwnTracksIngress {
             basic_handle,
             basic_secret,
             payload,
             reply,
-        } => execute_owntracks_command(state, basic_handle, basic_secret, payload, reply),
+        } => {
+            send_store_result(
+                reply,
+                prepare_owntracks_ingress(state, basic_handle, basic_secret, payload),
+            );
+        }
         Command::AdmitGeoLocation { request, reply } => {
             execute_geo_location_command(state, request, reply);
         }
         Command::Purge { limit, reply } => execute_purge_command(state, limit, reply),
+        Command::RemoveAppendIdentitiesBounded {
+            scope,
+            limit,
+            reply,
+        } => {
+            send_store_result(
+                reply,
+                state
+                    .store
+                    .event_store()
+                    .remove_append_identities_bounded(scope, limit),
+            );
+        }
+        Command::PendingAppendIdentityCleanup { reply } => {
+            send_store_result(
+                reply,
+                state.store.event_store().pending_append_identity_cleanup(),
+            );
+        }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),
         Command::Create { name, reply } => execute_create_command(state, &name, reply),
         Command::Read {
@@ -1328,6 +1676,16 @@ fn execute(state: &mut ExecutorState, command: Command) {
             maximum,
             reply,
         } => execute_append_command(state, timeline, &drafts, maximum, reply),
+        Command::AppendConsentGrant {
+            timeline,
+            grant,
+            permit,
+            maximum,
+            reply,
+        } => execute_append_consent_grant_command(state, timeline, &grant, permit, maximum, reply),
+        command @ Command::AppendConsentRevocation { .. } => {
+            execute_append_consent_revocation_command_from_command(state, command);
+        }
         Command::AppendIdentified {
             timeline,
             identity,
@@ -1337,6 +1695,9 @@ fn execute(state: &mut ExecutorState, command: Command) {
         } => execute_append_identified_command(state, timeline, identity, intent, maximum, reply),
         Command::GetTimeline { timeline, reply } => {
             execute_get_timeline_command(state, timeline, reply);
+        }
+        Command::ProtectedLogicalHead { timeline, reply } => {
+            send_store_result(reply, state.store.protected_logical_head(timeline));
         }
         #[cfg(test)]
         Command::Panic { reply } => {
@@ -1349,19 +1710,7 @@ fn execute(state: &mut ExecutorState, command: Command) {
             std::panic::resume_unwind(Box::new("test store executor read worker panic"));
         }
     }
-}
-
-fn execute_owntracks_command(
-    state: &mut ExecutorState,
-    basic_handle: [u8; 32],
-    basic_secret: [u8; 32],
-    payload: pos_core::CanonicalBytes,
-    reply: oneshot::Sender<Result<OwnTracksIngressOutcome, StoreExecutorError>>,
-) {
-    send_store_result(
-        reply,
-        execute_owntracks_ingress(state, basic_handle, basic_secret, payload),
-    );
+    CommandExecution::Completed
 }
 
 fn execute_geo_location_command(
@@ -1460,6 +1809,127 @@ fn execute_append_command(
     send_store_result(reply, result);
 }
 
+fn execute_append_consent_grant_command(
+    state: &mut ExecutorState,
+    timeline: TimelineId,
+    grant: &ConsentGrantedV1,
+    permit: ConsentAppendPermit,
+    maximum: u64,
+    reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+) {
+    let head = state.store.protected_logical_head(timeline);
+    let store = state.store.event_store();
+    let result = head
+        .and_then(|head| {
+            if grant.grant_seq != head.as_u64().saturating_add(1) {
+                return Err(CoreError::Storage(
+                    "consent grant sequence mismatch".to_owned(),
+                ));
+            }
+            grant
+                .encode()
+                .map_err(|error| CoreError::Storage(error.to_string()))
+        })
+        .and_then(|payload| {
+            store.append_consent_bounded(
+                timeline,
+                &[EventDraft::new(
+                    grant.subject_id,
+                    Kind::new(EVENT_TYPE_CONSENT_GRANTED_V1),
+                    payload,
+                )],
+                permit,
+                maximum,
+            )
+        })
+        .and_then(|events| {
+            events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
+        })
+        .map(|mut events| events.remove(0));
+    send_store_result(reply, result);
+}
+
+fn execute_append_consent_revocation_command_from_command(
+    state: &mut ExecutorState,
+    command: Command,
+) {
+    if let Command::AppendConsentRevocation {
+        timeline,
+        revocation,
+        cleanup_scope,
+        permit,
+        maximum,
+        reservation,
+        reply,
+    } = command
+    {
+        execute_append_consent_revocation_command(
+            state,
+            timeline,
+            &revocation,
+            cleanup_scope,
+            permit,
+            maximum,
+            reservation,
+            reply,
+        );
+    }
+}
+
+fn execute_append_consent_revocation_command(
+    state: &mut ExecutorState,
+    timeline: TimelineId,
+    revocation: &ConsentRevokedV1,
+    cleanup_scope: AppendDedupScope,
+    permit: ConsentAppendPermit,
+    maximum: u64,
+    reservation: ConsentRevocationReservation,
+    reply: oneshot::Sender<Result<Event, StoreExecutorError>>,
+) {
+    let head = state.store.protected_logical_head(timeline);
+    let store = state.store.event_store();
+    let result = head
+        .and_then(|head| {
+            if revocation.fence_seq != head.as_u64().saturating_add(1) {
+                return Err(CoreError::Storage(
+                    "consent revocation fence mismatch".to_owned(),
+                ));
+            }
+            revocation
+                .encode()
+                .map_err(|error| CoreError::Storage(error.to_string()))
+        })
+        .and_then(|payload| {
+            store.append_consent_revocation_bounded(
+                timeline,
+                &[EventDraft::new(
+                    revocation.subject_id,
+                    Kind::new(EVENT_TYPE_CONSENT_REVOKED_V1),
+                    payload,
+                )],
+                permit,
+                maximum,
+                cleanup_scope,
+            )
+        })
+        .and_then(|events| {
+            events.ok_or_else(|| CoreError::Storage("event limit reached".to_owned()))
+        })
+        .map(|mut events| events.remove(0));
+    match result {
+        Ok(event) => match reservation.commit_durable() {
+            Ok(()) => drop(reply.send(Ok(event))),
+            Err(_) => drop(reply.send(Err(StoreExecutorError::Store(CoreError::Storage(
+                "consent revocation session disappeared after append".to_owned(),
+            ))))),
+        },
+        Err(error) => {
+            let _was_pending = reservation.abort_durable();
+            drop(reply.send(Err(StoreExecutorError::Store(error))));
+        }
+    }
+}
+
 fn execute_append_identified_command(
     state: &mut ExecutorState,
     timeline: TimelineId,
@@ -1510,6 +1980,20 @@ mod tests {
         }
     }
 
+    async fn receive_scheduler_trace(
+        records: Arc<Mutex<std::sync::mpsc::Receiver<super::SchedulerTrace>>>,
+    ) -> Result<super::SchedulerTrace, String> {
+        tokio::task::spawn_blocking(move || {
+            records
+                .lock()
+                .map_err(|_| "scheduler trace receiver poisoned".to_owned())?
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| format!("scheduler trace receive failed: {error}"))
+        })
+        .await
+        .map_err(|error| format!("scheduler trace task failed: {error}"))?
+    }
+
     trait TestOptionExt<T> {
         fn test_ok(self) -> Result<T, Box<dyn std::error::Error + Send + Sync>>;
         fn test_value(self) -> T;
@@ -1526,10 +2010,11 @@ mod tests {
     }
 
     use super::{
-        execute_append_command, execute_owntracks_ingress, Command, ExecutorState, ExecutorStore,
-        OwnTracksRateLimiter,
+        execute_append_command, execute_append_consent_revocation_command,
+        prepare_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
     };
     use pos_core::{
+        clock::WallTime,
         event::{Event, EventDraft},
         geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1},
         store::{
@@ -1537,7 +2022,8 @@ mod tests {
             EventStore, SeqRange,
         },
         timeline::Timeline,
-        CanonicalBytes, CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
+        CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1, ConsentRevokedV1,
+        CoreError, EntityId, EventId, Kind, OwnTracksIngressRateKeyV1, TimelineId,
     };
     use pos_store::memory::MemoryStore;
     use std::{
@@ -1661,6 +2147,67 @@ mod tests {
         ));
         assert_eq!(*rejected_calls.lock().test_ok()?, vec![(timeline, 1, 23)]);
 
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn execute_consent_revocation_reports_a_lost_session_after_append(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut store = MemoryStore::new();
+        let timeline = store
+            .create_timeline("lost-revocation-session")
+            .test_ok()?
+            .id();
+        let authority = ConsentAuthority::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "lost-session".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 0,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 1,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = ConsentRevokedV1 {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok()
+            .test_value();
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+        store.bind_consent_authority(authority.append_permit())?;
+        let mut state = ExecutorState {
+            store: ExecutorStore::Generic(Box::new(store)),
+            owntracks_owner_key: None,
+            owntracks_rate_limiter: OwnTracksRateLimiter {
+                buckets: HashMap::new(),
+            },
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        execute_append_consent_revocation_command(
+            &mut state,
+            timeline,
+            &revocation,
+            AppendDedupScope::from_keyed_hash([0; 32]),
+            authority.append_permit(),
+            10,
+            reservation,
+            reply,
+        );
+        assert!(matches!(
+            result.blocking_recv().test_ok()?,
+            Err(super::StoreExecutorError::Store(CoreError::Storage(message)))
+                if message == "consent revocation session disappeared after append"
+        ));
         Ok(())
     }
 
@@ -2090,7 +2637,7 @@ mod tests {
     fn expired_admission_commands_reply() {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
-            Command::AdmitOwnTracksIngress {
+            Command::PrepareOwnTracksIngress {
                 basic_handle: [1; 32],
                 basic_secret: [2; 32],
                 payload: CanonicalBytes::from_static(b"payload"),
@@ -2122,6 +2669,19 @@ mod tests {
             },
             receiver,
         );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::RemoveAppendIdentitiesBounded {
+                scope: AppendDedupScope::from_keyed_hash([3; 32]),
+                limit: NonZeroUsize::new(1).test_ok()?,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(Command::PendingAppendIdentityCleanup { reply }, receiver);
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::RootCount { maximum: 1, reply }, receiver);
@@ -2197,12 +2757,192 @@ mod tests {
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::ProtectedLogicalHead {
+                timeline: TimelineId::new(),
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::Panic { reply }, receiver);
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::PanicRead { reply }, receiver);
 
         Ok(())
+    }
+
+    #[test]
+    fn expired_consent_write_commands_reply() {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::AppendConsentGrant {
+                timeline: TimelineId::new(),
+                grant: ConsentGrantedV1 {
+                    subject_id: EntityId::new(),
+                    grantee_id: EntityId::new(),
+                    purpose: "expired".to_owned(),
+                    modalities: pos_core::MODALITY_LOCATION,
+                    min_geo_resolution: 1,
+                    fork_permitted: false,
+                    export_permitted: false,
+                    retention_days: 0,
+                    expiry_secs: 0,
+                    grant_seq: 1,
+                },
+                permit: pos_core::ConsentAuthority::new().append_permit(),
+                maximum: 1,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        let authority = pos_core::ConsentAuthority::new();
+        let timeline = TimelineId::new();
+        let grant = ConsentGrantedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "expired".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let revocation = ConsentRevokedV1 {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let _token = authority.record_grant_on_timeline(timeline, &grant);
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok()
+            .test_value();
+        assert_expired(
+            Command::AppendConsentRevocation {
+                timeline,
+                revocation,
+                cleanup_scope: AppendDedupScope::from_keyed_hash([0; 32]),
+                permit: authority.append_permit(),
+                maximum: 1,
+                reservation,
+                reply,
+            },
+            receiver,
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_revocation_finishes_before_protected_append() {
+        let (observer, records) = super::SchedulerObserver::new(8);
+        let records = Arc::new(Mutex::new(records));
+        let (gate_sender, gate_receiver) = std::sync::mpsc::channel();
+        observer.install_gate(gate_receiver);
+        let mut store = MemoryStore::new();
+        let timeline = store
+            .create_timeline("queued-cancellation")
+            .test_ok()
+            .test_value()
+            .id();
+        let authority = ConsentAuthority::new();
+        store
+            .bind_consent_authority(authority.append_permit())
+            .test_ok()
+            .test_value();
+        let executor = super::StoreExecutor::spawn_with_observer_for_test(
+            super::ExecutorStore::Generic(Box::new(store)),
+            Arc::clone(&observer),
+        );
+        let grant = ConsentGrantedV1 {
+            subject_id: EntityId::new(),
+            grantee_id: EntityId::new(),
+            purpose: "queued-cancellation".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let token = authority.record_grant_on_timeline(timeline, &grant);
+        let revocation = ConsentRevokedV1 {
+            subject_id: grant.subject_id,
+            grantee_id: grant.grantee_id,
+            grant_seq: grant.grant_seq,
+            fence_seq: 1,
+        };
+        let reservation = authority
+            .begin_revocation_on_timeline(timeline, &revocation)
+            .test_ok()
+            .test_value();
+        let permit = authority.append_permit();
+        let cleanup_scope = AppendDedupScope::from_keyed_hash([0; 32]);
+        let task = tokio::spawn({
+            let executor = executor.clone();
+            async move {
+                executor
+                    .append_consent_revocation(
+                        timeline,
+                        revocation,
+                        cleanup_scope,
+                        permit,
+                        10,
+                        reservation,
+                    )
+                    .await
+            }
+        });
+
+        let mut admitted = false;
+        let mut drained = false;
+        while !(admitted && drained) {
+            let trace = receive_scheduler_trace(Arc::clone(&records))
+                .await
+                .test_ok()
+                .test_value();
+            match trace {
+                super::SchedulerTrace::Admitted { .. } => admitted = true,
+                super::SchedulerTrace::DrainCompleted { pending: 1, .. } => drained = true,
+                super::SchedulerTrace::DrainCompleted { .. }
+                | super::SchedulerTrace::Selected { .. } => {}
+            }
+        }
+        task.abort();
+        assert!(task.await.is_err());
+        gate_sender.send(()).test_ok().test_value();
+        let trace = receive_scheduler_trace(Arc::clone(&records))
+            .await
+            .test_ok()
+            .test_value();
+        assert!(matches!(trace, super::SchedulerTrace::Selected { .. }));
+
+        let events = executor
+            .read(
+                timeline,
+                SeqRange::all(),
+                EventReadBounds::new(1024, 1024, 16, 8),
+            )
+            .await
+            .test_ok()
+            .test_value();
+        assert_eq!(events.len(), 1);
+        let mut protected_append_count = 0;
+        assert_eq!(
+            authority
+                .with_token_fence(timeline, &token, 1, 0, &mut || protected_append_count += 1,),
+            Err(pos_core::ConsentError::Revoked)
+        );
+        assert_eq!(protected_append_count, 0);
+        executor.shutdown().await.test_ok().test_value();
+        drop(executor);
     }
 
     #[tokio::test]
@@ -2301,15 +3041,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_drains_accepted_channel_and_pending_commands() {
-        let result = shutdown_drains_accepted_channel_and_pending_commands_impl().await;
+    async fn shutdown_drains_commands_buffered_before_shutdown() {
+        let result = shutdown_drains_commands_buffered_before_shutdown_impl().await;
         assert!(
             result.is_ok(),
-            "shutdown_drains_accepted_channel_and_pending_commands failed: {result:?}"
+            "shutdown_drains_commands_buffered_before_shutdown failed: {result:?}"
         );
     }
 
-    async fn shutdown_drains_accepted_channel_and_pending_commands_impl(
+    async fn shutdown_drains_commands_buffered_before_shutdown_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
@@ -2506,6 +3246,34 @@ mod tests {
             result.is_ok(),
             "executor_reports_unhealthy_and_closed_submission_paths failed: {result:?}"
         );
+    }
+
+    #[test]
+    fn worker_startup_fallbacks_mark_the_executor_unhealthy(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        super::register_worker(
+            executor.control.as_ref(),
+            Err(std::io::Error::other("injected worker spawn failure")),
+        );
+        assert!(matches!(
+            executor.current_state(),
+            super::LifecycleState::Unhealthy { .. }
+        ));
+
+        *executor.control.state.lock().test_ok()? = super::LifecycleState::Open;
+        assert!(super::take_worker_runtime(
+            executor.control.state.as_ref(),
+            Err(std::io::Error::other("injected runtime failure")),
+        )
+        .is_none());
+        assert!(matches!(
+            executor.current_state(),
+            super::LifecycleState::Unhealthy { .. }
+        ));
+        drop(executor);
+        Ok(())
     }
 
     async fn executor_reports_unhealthy_and_closed_submission_paths_impl(
@@ -2803,7 +3571,55 @@ mod tests {
             super::LifecycleState::Closed
         );
 
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let executor = super::StoreExecutor::from_sender_for_test(sender);
+        let control = std::sync::Arc::clone(&executor.control);
+        std::thread::spawn(move || {
+            let _guard = control
+                .join
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::panic::resume_unwind(Box::new("poison join lock for registration test"));
+        })
+        .join()
+        .test_err()?;
+        super::register_worker(executor.control.as_ref(), Ok(std::thread::spawn(|| {})));
+        drop(executor);
+
+        let draining_lifecycle =
+            std::sync::Arc::new(std::sync::Mutex::new(super::LifecycleState::Open));
+        let draining_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        draining_shutdown.notify_one();
+        let (_sender, mut draining_receiver) = tokio::sync::mpsc::channel(1);
+        super::worker_loop(
+            &draining_lifecycle,
+            draining_shutdown,
+            &mut draining_receiver,
+            super::ExecutorStore::Generic(Box::new(MemoryStore::new())),
+            None,
+            None,
+        );
+        assert_eq!(
+            *draining_lifecycle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            super::LifecycleState::Closed
+        );
+
         Ok(())
+    }
+
+    #[test]
+    fn drain_available_observes_closed_receiver() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut pending = Vec::new();
+        assert!(matches!(
+            super::drain_available(&mut receiver, &mut pending),
+            super::QueueDrainOutcome::Disconnected
+        ));
+        assert!(pending.is_empty());
+        drop(pending);
     }
 
     #[tokio::test]
@@ -3558,7 +4374,7 @@ mod tests {
         assert!(write_result.await.test_ok()?.is_ok());
         assert!(trailing_read.await.test_ok()?.is_ok());
         selected.extend(collect_selected(&records));
-        assert_eq!(selected, (0..=11).collect::<Vec<_>>());
+        assert_eq!(selected, vec![0, 1, 2, 3, 4, 5, 6, 8, 10, 11]);
         executor.shutdown().await.test_ok()?;
 
         drop(executor);
@@ -4319,6 +5135,41 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn pending_append_identity_cleanup_forwards_durable_marker(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("pending-cleanup").test_ok()?.id();
+        let scope = AppendDedupScope::from_keyed_hash([201; 32]);
+        for key in [202, 203] {
+            store
+                .append_or_duplicate(
+                    timeline,
+                    AppendIdentity::new(AppendDedupKey::from_keyed_hash([key; 32]), scope),
+                    WallTime::from_micros(1),
+                    EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("world.action.v1"),
+                        CanonicalBytes::from_vec(vec![key]),
+                    ),
+                )
+                .test_ok()?;
+        }
+        let outcome = store
+            .remove_append_identities_bounded(scope, NonZeroUsize::MIN)
+            .test_ok()?;
+        assert!(outcome.more_may_remain);
+
+        let executor = super::StoreExecutor::new(Box::new(store));
+        assert_eq!(
+            executor.pending_append_identity_cleanup().await.test_ok()?,
+            Some(scope)
+        );
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
+        Ok(())
+    }
+
     #[test]
     fn owntracks_ingress_fails_closed_for_a_generic_store(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -4329,7 +5180,7 @@ mod tests {
                 buckets: HashMap::new(),
             },
         };
-        let error = execute_owntracks_ingress(
+        let error = prepare_owntracks_ingress(
             &mut state,
             [1; 32],
             [2; 32],
@@ -4351,7 +5202,7 @@ mod tests {
                 buckets: HashMap::new(),
             },
         };
-        let error = execute_owntracks_ingress(
+        let error = prepare_owntracks_ingress(
             &mut state,
             [1; 32],
             [2; 32],
@@ -4374,8 +5225,11 @@ mod tests {
 
     async fn owntracks_executor_dispatches_geo_admission_commands_impl(
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let executor =
-            super::StoreExecutor::new_with_owntracks_ingress(MemoryStore::new(), [0; 32]);
+        let executor = super::StoreExecutor::new_with_owntracks_ingress(
+            MemoryStore::new(),
+            [0; 32],
+            ConsentAuthority::new().append_permit(),
+        );
         let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
             TimelineId::new(),
             EntityId::new(),
