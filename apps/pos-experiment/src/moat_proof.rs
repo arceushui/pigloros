@@ -2761,6 +2761,7 @@ mod run_coverage_entrypoints {
         assert!(!local.passes_reaction_gates());
         local.host_closure.halted_at_tick_boundary = true;
         local.host_closure.effective_after_seq = local.host_closure.requested_after_seq;
+        local.host_closure.closure_event_seq = local.host_closure.effective_after_seq;
         assert!(!local.passes_reaction_gates());
         local.host_closure.effective_after_seq = local.host_closure.requested_after_seq + 1;
         local.host_closure.closure_event_seq = local.host_closure.effective_after_seq - 1;
@@ -2773,6 +2774,43 @@ mod run_coverage_entrypoints {
         let mut invalid_ticks = proof_input();
         invalid_ticks.ticks = 0;
         assert!(MoatProofRun::new(invalid_ticks, ExecutionModeV1::Local).is_err());
+    }
+
+    #[test]
+    fn consent_epoch_boundary_and_subject_binding_are_observable() {
+        let participant_views = [ParticipantViewV1 {
+            participant: "proof-agent".to_owned(),
+            visible_event_types: Vec::new(),
+            hidden_event_types: Vec::new(),
+            visible_events: Vec::new(),
+        }];
+        let mut closure = HostClosureAuditV1 {
+            subject: "proof-subject".to_owned(),
+            requested_after_seq: 5,
+            effective_after_seq: 5,
+            closure_event_seq: 5,
+            closure_event_type: "proof.consent.tick".to_owned(),
+            closure_payload_digest: [0; 32],
+            halted_at_tick_boundary: true,
+        };
+        let no_revocation = build_room_parts(
+            &proof_input(),
+            [0; 32],
+            &participant_views,
+            &closure,
+            [1; 32],
+        );
+        assert_eq!(no_revocation.grants[0].consent_epoch, 0);
+
+        closure.closure_event_seq = 6;
+        let revocation = build_room_parts(
+            &proof_input(),
+            [0; 32],
+            &participant_views,
+            &closure,
+            [1; 32],
+        );
+        assert_eq!(revocation.grants[0].consent_epoch, 1);
     }
 
     #[test]
