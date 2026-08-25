@@ -2519,6 +2519,15 @@ mod tests {
             self.append(timeline, drafts).map(Some)
         }
 
+        fn append_consent_bounded(
+            &mut self,
+            timeline: TimelineId,
+            drafts: &[EventDraft],
+            max_owned_events: u64,
+        ) -> Result<Option<Vec<Event>>, CoreError> {
+            self.append_bounded(timeline, drafts, max_owned_events)
+        }
+
         fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
             if matches!(self.mode, ScriptMode::FailRead) {
                 return Err(CoreError::Storage("read failed".into()));
