@@ -6720,6 +6720,31 @@ pub mod tests {
         assert_eq!(verify_consent_audit(&audit, &events), Ok(()));
     }
 
+    #[test]
+    fn consent_audit_verifier_rejects_a_noncanonical_event_type() {
+        let audit = ConsentAuditV1 {
+            subject: "subject-1".to_owned(),
+            requested_after_seq: 4,
+            effective_after_seq: 5,
+            revocation_event_seq: 5,
+            revocation_event_type: "consent.granted.v1".to_owned(),
+            revocation_payload_digest: [7; 32],
+            halted_at_tick_boundary: true,
+        };
+        let events = [AuthoritativeEventV1 {
+            seq: 5,
+            tick: 2,
+            entity: "subject-1".to_owned(),
+            event_type: "consent.granted.v1".to_owned(),
+            payload_digest: [7; 32],
+            causation_seq: None,
+        }];
+        assert_eq!(
+            verify_consent_audit(&audit, &events),
+            Err(EvidenceError::InvalidConsentAudit)
+        );
+    }
+
     fn test_authorization_fixtures() -> (PrincipalRefV1, CapabilityGrantV1, AuthorizationDecisionV1)
     {
         let principal = PrincipalRefV1 {

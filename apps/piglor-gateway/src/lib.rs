@@ -924,10 +924,9 @@ impl Gateway {
     async fn run_pending_consent_cleanup_worker(&self) {
         loop {
             match self.process_pending_consent_cleanup().await {
-                Ok(Some(outcome)) if outcome.more_may_remain => {
+                Ok(Some(_)) => {
                     tokio::task::yield_now().await;
                 }
-                Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(_) => {
                     tokio::time::sleep(std::time::Duration::from_millis(
@@ -3182,6 +3181,27 @@ mod tests {
         ))
         .await;
         assert!(gateway.process_pending_consent_cleanup().await.is_err());
+        drop(gateway);
+    }
+
+    #[tokio::test]
+    async fn scheduled_consent_cleanup_drains_queued_work() {
+        let gateway = memory_gw();
+        gateway
+            .enqueue_consent_cleanup(ingress_dedup_scope(EntityId::new()))
+            .await;
+        gateway.schedule_pending_consent_cleanup();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if gateway.pending_consent_cleanup.lock().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .test_ok();
         drop(gateway);
     }
 

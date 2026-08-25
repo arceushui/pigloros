@@ -1696,6 +1696,32 @@ mod tests {
     }
 
     #[test]
+    fn location_validation_matches_timeline_and_subject() {
+        let authority = ConsentAuthority::new();
+        let grant = sample_granted();
+        let timeline = TimelineId::new();
+        authority.record_grant_on_timeline(timeline, &grant);
+
+        assert_eq!(
+            authority.validate_location_subject_on_timeline(timeline, grant.subject_id, 0, 0,),
+            Ok(())
+        );
+        assert_eq!(
+            authority.validate_location_subject_on_timeline(
+                TimelineId::new(),
+                grant.subject_id,
+                0,
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+        assert_eq!(
+            authority.validate_location_subject_on_timeline(timeline, EntityId::new(), 0, 0,),
+            Err(ConsentError::NoConsent)
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_entire_gateway_consent_namespace_is_reserved() {
         assert!(is_consent_event_type(&Kind::new(

@@ -2014,6 +2014,7 @@ mod tests {
         prepare_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
     };
     use pos_core::{
+        clock::WallTime,
         event::{Event, EventDraft},
         geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1},
         store::{
@@ -5131,6 +5132,41 @@ mod tests {
 
         drop(executor);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_append_identity_cleanup_forwards_durable_marker(
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut store = MemoryStore::new();
+        let timeline = store.create_timeline("pending-cleanup").test_ok()?.id();
+        let scope = AppendDedupScope::from_keyed_hash([201; 32]);
+        for key in [202, 203] {
+            store
+                .append_or_duplicate(
+                    timeline,
+                    AppendIdentity::new(AppendDedupKey::from_keyed_hash([key; 32]), scope),
+                    WallTime::from_micros(1),
+                    EventDraft::new(
+                        EntityId::new(),
+                        Kind::new("world.action.v1"),
+                        CanonicalBytes::from_vec(vec![key]),
+                    ),
+                )
+                .test_ok()?;
+        }
+        let outcome = store
+            .remove_append_identities_bounded(scope, NonZeroUsize::MIN)
+            .test_ok()?;
+        assert!(outcome.more_may_remain);
+
+        let executor = super::StoreExecutor::new(Box::new(store));
+        assert_eq!(
+            executor.pending_append_identity_cleanup().await.test_ok()?,
+            Some(scope)
+        );
+        executor.shutdown().await.test_ok()?;
+        drop(executor);
         Ok(())
     }
 
