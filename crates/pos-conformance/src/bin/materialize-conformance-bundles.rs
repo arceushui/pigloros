@@ -70,6 +70,7 @@ fn run(
     )
 }
 
+#[cfg(test)]
 fn run_with_inventory(
     arguments: &mut impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
@@ -198,6 +199,7 @@ fn materialize_profile_with_inventory(
     )
 }
 
+#[cfg(test)]
 fn materialize_profile_from_profile(
     output_root: &Path,
     signing_key: &SigningKey,
@@ -637,6 +639,7 @@ fn evaluator_protocol(profile_record_digest: [u8; 32]) -> EvaluatorProtocolV1 {
     }
 }
 
+#[cfg(test)]
 fn bundle_inputs(
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
