@@ -2,10 +2,10 @@
 
 use pos_core::{
     CanonicalBytes, CoreError, EntityId, Event, EventDraft, EventId, EventStore, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionPortV1, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryEncryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1, KeyRegistryStateV1,
-    KeyRoleV1, Kind, PublicKey, SchemaVersion, Seq, SeqRange, Timeline, TimelineId, TimelineMeta,
-    WallTime,
+    KeyDestructionOutcomeV1, KeyDestructionPortV1, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1,
+    KeyRegistryStateV1, KeyRoleV1, Kind, PublicKey, SchemaVersion, Seq, SeqRange, Timeline,
+    TimelineId, TimelineMeta, WallTime,
 };
 
 struct RegistryStore {
