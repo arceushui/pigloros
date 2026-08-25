@@ -1314,6 +1314,11 @@ fn validate_supporting_members(
         Err(BundleContractErrorV1::MemberMissing)
     } else if members
         .iter()
+        .any(|member| member.role.is_supporting() && member.bytes.is_empty())
+    {
+        Err(BundleContractErrorV1::MemberDigestMismatch)
+    } else if members
+        .iter()
         .filter(|member| member.role.is_supporting())
         .any(|member| !support_digest_is_bound(profile, member.role, &member.digest))
     {
@@ -4286,6 +4291,16 @@ mod coverage_entrypoints {
         assert_eq!(
             validate_supporting_members(&profile, &missing_support),
             Err(BundleContractErrorV1::MemberMissing)
+        );
+        let mut empty_support = bundle.members.clone();
+        let support_index = empty_support
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Schema)
+            .ok_or("missing schema support member")?;
+        empty_support[support_index].bytes.clear();
+        assert_eq!(
+            validate_supporting_members(&profile, &empty_support),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         let mut invalid_expected = bundle.manifest.clone();
         invalid_expected.expected_results[0].digest = [0; 32];
