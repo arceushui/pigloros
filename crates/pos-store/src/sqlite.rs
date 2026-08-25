@@ -11469,6 +11469,7 @@ mod key_registry_coverage {
         store.destroy_key_registry(request)
     }
 
+    #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn changed_tombstone_digest(
         registry: &KeyRegistryStateV1,
