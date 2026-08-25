@@ -9666,10 +9666,10 @@ mod coverage_entrypoints {
         let draft = tests::make_draft(EntityId::new(), b"bounded");
         let committed = ok(store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1));
         assert_eq!(committed.as_ref().map(Vec::len), Some(1));
-        assert!(store
-            .append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1)
-            .test_ok()
-            .is_none());
+        assert!(matches!(
+            store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1),
+            Ok(None)
+        ));
 
         let consent = ok(store.create_timeline("sqlite-bounded-consent"));
         let subject = EntityId::new();
@@ -9688,7 +9688,7 @@ mod coverage_entrypoints {
         let grant_draft = EventDraft::new(
             subject,
             Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
-            grant.encode().test_ok(),
+            ok(grant.encode()),
         );
         let authority = ConsentAuthority::new();
         let permit = authority.append_permit();
@@ -9699,41 +9699,51 @@ mod coverage_entrypoints {
             permit,
             1,
         ));
-        assert_eq!(consent_event.test_ok().len(), 1);
+        assert_eq!(
+            consent_event
+                .unwrap_or_else(|| panic!("expected consent event"))
+                .len(),
+            1
+        );
 
         let scope = AppendDedupScope::from_keyed_hash([91; 32]);
+        let identity = |key: u8| {
+            AppendIdentity::new(pos_core::AppendDedupKey::from_keyed_hash([key; 32]), scope)
+        };
         for key in [92, 93] {
             ok(store.append_or_duplicate(
                 ordinary.id(),
-                tests::append_identity(key, 91),
+                identity(key),
                 WallTime::from_micros(1),
                 tests::make_draft(EntityId::new(), &[key]),
             ));
         }
-        let first =
-            ok(store
-                .remove_append_identities_bounded(scope, std::num::NonZeroUsize::new(1).test_ok()));
+        let first = ok(store.remove_append_identities_bounded(
+            scope,
+            std::num::NonZeroUsize::new(1).unwrap_or_else(|| panic!("nonzero")),
+        ));
         assert!(first.more_may_remain);
-        assert_eq!(
-            store.pending_append_identity_cleanup().test_ok(),
-            Some(scope)
-        );
-        let second =
-            ok(store
-                .remove_append_identities_bounded(scope, std::num::NonZeroUsize::new(1).test_ok()));
+        assert_eq!(ok(store.pending_append_identity_cleanup()), Some(scope));
+        let second = ok(store.remove_append_identities_bounded(
+            scope,
+            std::num::NonZeroUsize::new(1).unwrap_or_else(|| panic!("nonzero")),
+        ));
         assert!(!second.more_may_remain);
-        assert_eq!(store.pending_append_identity_cleanup().test_ok(), None);
-        assert_eq!(store.remove_append_identities(scope).test_ok(), 0);
+        assert_eq!(ok(store.pending_append_identity_cleanup()), None);
+        assert_eq!(ok(store.remove_append_identities(scope)), 0);
 
         ok(store.append_or_duplicate(
             ordinary.id(),
-            tests::append_identity(94, 94),
+            AppendIdentity::new(
+                pos_core::AppendDedupKey::from_keyed_hash([94; 32]),
+                AppendDedupScope::from_keyed_hash([94; 32]),
+            ),
             WallTime::from_micros(0),
             tests::make_draft(EntityId::new(), b"expired"),
         ));
-        let purged =
-            ok(store
-                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok()));
+        let purged = ok(store.purge_expired_append_identities_bounded(
+            std::num::NonZeroUsize::new(1).unwrap_or_else(|| panic!("nonzero")),
+        ));
         assert_eq!(purged.removed, 1);
     }
 
