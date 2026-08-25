@@ -264,6 +264,16 @@ fn indexed_reference(index: usize) -> ErasureReferenceV1 {
     digest[32 - index.len()..].copy_from_slice(&index);
     ErasureReferenceV1::from_digest(digest)
 }
+fn indexed_target(index: usize) -> ErasureRequiredTargetV1 {
+    ErasureRequiredTargetV1 {
+        artifact_class: ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: indexed_reference(index),
+        key_role: ErasureKeyRoleV1::DataEncryption,
+        key_digest: indexed_reference(index + 1),
+        replica_set: reference(30),
+        replica_id: indexed_reference(index + 2),
+    }
+}
 fn references(count: usize) -> Vec<ErasureReferenceV1> {
     (0..count).map(indexed_reference).collect()
 }
@@ -564,6 +574,69 @@ fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     record
 }
 
+fn completed_coordinator(
+) -> Result<ErasureCoordinatorStateMachineV1<TestCoordinatorPort>, ErasureErrorV1> {
+    let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let port = test_port(true, vec![ack.target]);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    coordinator.acknowledge(reference(1), ack)?;
+    let awaiting = coordinator
+        .existing(reference(1))
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let mut terminal_change = change(
+        ErasureLifecycleV1::Complete,
+        awaiting.freeze_position(),
+        Vec::new(),
+        Vec::new(),
+    );
+    terminal_change.acknowledged_targets = vec![ack.target];
+    terminal_change.provenance = reference(4);
+    let terminal = awaiting.transition(terminal_change)?;
+    let mut input = receipt_input(
+        ErasureLifecycleV1::Complete,
+        vec![ack],
+        Vec::new(),
+        Vec::new(),
+    );
+    input.terminal_state = terminal.state_digest();
+    input.inventories.artifacts = vec![inventory_result(ack.target)];
+    coordinator.finalize(reference(1), input)?;
+    Ok(coordinator)
+}
+
+fn assert_conflicting_receipt_retry(
+    mutate: impl FnOnce(&mut ErasureReceiptInputV1),
+) -> Result<(), ErasureErrorV1> {
+    let mut coordinator = completed_coordinator()?;
+    let mut input = coordinator
+        .port
+        .records
+        .borrow()
+        .first()
+        .and_then(ErasureCoordinatorRecordV1::receipt_input)
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    mutate(&mut input);
+    assert_eq!(
+        coordinator.finalize(reference(1), input),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
 fn reject_terminal_receipt_mutation(
     record: &ErasureCoordinatorRecordV1,
     mutate: impl FnOnce(&mut ErasureReceiptV1),
@@ -820,6 +893,55 @@ fn durable_record_scope_checks_reject_independent_closure_conflicts() -> Result<
     outside_closure.acknowledgements = vec![foreign];
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(outside_closure, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_authorized_record_bounds_reserved_targets() -> Result<(), ErasureErrorV1> {
+    let submitted = record_after_submit()?;
+    let authorized_state = submitted.state().transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut parts = record_parts(&submitted);
+    parts.state = authorized_state;
+    parts.authorize_provenance = Some(reference(9));
+    parts.reserved_targets = (0..ERASURE_MAX_INVENTORY_RESULTS)
+        .map(indexed_target)
+        .collect();
+    assert!(ErasureCoordinatorRecordV1::from_parts(parts.clone(), reference(2)).is_ok());
+    parts
+        .reserved_targets
+        .push(indexed_target(ERASURE_MAX_INVENTORY_RESULTS));
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_frozen_record_bounds_required_targets() -> Result<(), ErasureErrorV1> {
+    let targets = (0..ERASURE_MAX_INVENTORY_RESULTS)
+        .map(indexed_target)
+        .collect::<Vec<_>>();
+    let frozen = record_after_freeze(targets)?;
+    assert_eq!(frozen.targets().len(), ERASURE_MAX_INVENTORY_RESULTS);
+    let mut parts = record_parts(&frozen);
+    parts
+        .targets
+        .push(indexed_target(ERASURE_MAX_INVENTORY_RESULTS));
+    parts.freeze_admission = Some(ErasureFreezeAdmissionV1 {
+        freeze_position: 10,
+        provenance: reference(9),
+        target_closure: target_closure_digest(&parts.targets),
+    });
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
         Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
@@ -1670,6 +1792,20 @@ fn coordinator_normalizes_core_derived_finalize_fields_and_retries() -> Result<(
     );
     Ok(())
 }
+
+#[test]
+fn coordinator_rejects_each_conflicting_receipt_evidence_retry() -> Result<(), ErasureErrorV1> {
+    assert_conflicting_receipt_retry(|input| {
+        input.inventories.artifacts[0].transition.reason = reference(99);
+    })?;
+    assert_conflicting_receipt_retry(|input| input.policy = reference(99))?;
+    assert_conflicting_receipt_retry(|input| input.trust = reference(99))?;
+    assert_conflicting_receipt_retry(|input| input.provenance = reference(99))?;
+    assert_conflicting_receipt_retry(|input| input.issue_position = 99)?;
+    assert_conflicting_receipt_retry(|input| input.signature = reference(99))?;
+    Ok(())
+}
+
 #[test]
 fn coordinator_derives_partial_failure_for_a_missing_frozen_target() -> Result<(), ErasureErrorV1> {
     let missing = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);

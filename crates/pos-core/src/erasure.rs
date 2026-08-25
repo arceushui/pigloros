@@ -1537,21 +1537,35 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_scope(&self) -> Result<(), ErasureErrorV1> {
-        if self.reserved_targets.len() > ERASURE_MAX_INVENTORY_RESULTS
-            || self.targets.len() > ERASURE_MAX_INVENTORY_RESULTS
-            || self.acknowledgements.len() > ERASURE_MAX_INVENTORY_RESULTS
-            || !self
-                .reserved_targets
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
-            || !self.targets.windows(2).all(|pair| pair[0] < pair[1])
-            || has_duplicate_by_target(&self.acknowledgements)
-            || self
-                .acknowledgements
-                .iter()
-                .any(|ack| ack.owner != ack.target.replica_id)
-            || !acknowledgements_are_closure_subset(&self.targets, &self.acknowledgements)
+        if self.reserved_targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if self.targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        // Acknowledgements are unique members of the bounded target closure;
+        // the closure-subset check below therefore bounds their count too.
+        if !self
+            .reserved_targets
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
         {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if !self.targets.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if has_duplicate_by_target(&self.acknowledgements) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if self
+            .acknowledgements
+            .iter()
+            .any(|ack| ack.owner != ack.target.replica_id)
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if !acknowledgements_are_closure_subset(&self.targets, &self.acknowledgements) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         Ok(())
@@ -1687,13 +1701,22 @@ impl ErasureCoordinatorRecordV1 {
         }
         let mut acknowledgements = self.acknowledgements.clone();
         acknowledgements.sort_unstable();
-        if receipt.terminal_state() != self.state.state_digest()
-            || receipt.lifecycle() != lifecycle
-            || receipt.coordinator() != coordinator
-            || receipt.0.request != self.request.reference()
-            || receipt.required_targets() != self.targets.as_slice()
-            || receipt.acknowledgements() != acknowledgements.as_slice()
-        {
+        if receipt.terminal_state().ne(&self.state.state_digest()) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if receipt.lifecycle().ne(&lifecycle) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if receipt.coordinator().ne(&coordinator) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if receipt.0.request.ne(&self.request.reference()) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if receipt.required_targets().ne(self.targets.as_slice()) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if receipt.acknowledgements().ne(acknowledgements.as_slice()) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let complete = acknowledgements_match_closure(&self.targets, &self.acknowledgements)
@@ -2150,13 +2173,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     &record,
                     authority_input.clone(),
                 )?;
-                return if record.receipt_input.as_ref() == Some(&normalized)
-                    && Self::receipt_input_matches_evidence(&authority_input, &normalized)
-                {
-                    Ok(stored)
-                } else {
-                    Err(ErasureErrorV1::PolicyConflict)
-                };
+                if record.receipt_input.as_ref() != Some(&normalized) {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
+                return Self::validate_receipt_input_evidence(&authority_input, &normalized)
+                    .map(|()| stored);
             }
             if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
                 let freeze_position = record.state.freeze_position();
@@ -2213,16 +2234,29 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         Ok(input)
     }
 
-    fn receipt_input_matches_evidence(
+    fn validate_receipt_input_evidence(
         input: &ErasureReceiptInputV1,
         normalized: &ErasureReceiptInputV1,
-    ) -> bool {
-        input.inventories == normalized.inventories
-            && input.policy == normalized.policy
-            && input.trust == normalized.trust
-            && input.provenance == normalized.provenance
-            && input.issue_position == normalized.issue_position
-            && input.signature == normalized.signature
+    ) -> Result<(), ErasureErrorV1> {
+        if input.inventories != normalized.inventories {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if input.policy != normalized.policy {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if input.trust != normalized.trust {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if input.provenance != normalized.provenance {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if input.issue_position != normalized.issue_position {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if input.signature != normalized.signature {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(())
     }
 
     fn finalize_record(
@@ -2298,12 +2332,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 record.state = terminal;
                 Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
                     .and_then(|normalized| {
-                        if Self::receipt_input_matches_evidence(input, &normalized) {
+                        Self::validate_receipt_input_evidence(input, &normalized).map(|()| {
                             record.receipt_input = Some(normalized.clone());
-                            Ok(normalized)
-                        } else {
-                            Err(ErasureErrorV1::PolicyConflict)
-                        }
+                            normalized
+                        })
                     })
             })
             .and_then(|normalized| self.port.admit_receipt(&normalized).map(|()| normalized))
