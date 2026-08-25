@@ -14,7 +14,7 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
-fn target() -> ErasureRequiredTargetV1 {
+const fn target() -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
         artifact_digest: reference(10),
@@ -40,7 +40,7 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
-fn transition(lifecycle: ErasureLifecycleV1) -> ErasureStateTransitionV1 {
+const fn transition(lifecycle: ErasureLifecycleV1) -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle,
         freeze_position: Some(10),
@@ -52,7 +52,7 @@ fn transition(lifecycle: ErasureLifecycleV1) -> ErasureStateTransitionV1 {
     }
 }
 
-fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 {
+const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 {
     ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::Artifact,
         target,

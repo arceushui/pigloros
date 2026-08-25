@@ -1599,7 +1599,7 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
 }
 
 #[test]
-fn coordinator_rejects_conflicting_first_finalize_and_retries() -> Result<(), ErasureErrorV1> {
+fn coordinator_normalizes_core_derived_finalize_fields_and_retries() -> Result<(), ErasureErrorV1> {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let mut coordinator =
         ErasureCoordinatorStateMachineV1::new(test_port(true, vec![ack.target]), reference(2));
@@ -1640,11 +1640,7 @@ fn coordinator_rejects_conflicting_first_finalize_and_retries() -> Result<(), Er
     complete_input.replay_claim = ErasureReplayClaimV1::Exact;
     let mut conflicting_first_finalize = complete_input.clone();
     conflicting_first_finalize.required_targets.clear();
-    assert_eq!(
-        coordinator.finalize(reference(1), conflicting_first_finalize),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    let committed = coordinator.finalize(reference(1), complete_input.clone())?;
+    let committed = coordinator.finalize(reference(1), conflicting_first_finalize)?;
     assert_eq!(committed.lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(
         committed.replay_claim(),
@@ -1663,7 +1659,7 @@ fn coordinator_rejects_conflicting_first_finalize_and_retries() -> Result<(), Er
     assert_eq!(coordinator.acknowledge(reference(1), ack)?, terminal_state);
     assert_eq!(
         coordinator.finalize(reference(1), conflicting_identity),
-        Err(ErasureErrorV1::PolicyConflict)
+        committed
     );
     assert_eq!(
         coordinator

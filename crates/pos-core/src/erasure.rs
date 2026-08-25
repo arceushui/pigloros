@@ -844,6 +844,13 @@ impl ErasureAcknowledgementOutcomeV1 {
 }
 
 /// Structural evidence used to construct an ERC1 terminal receipt.
+///
+/// Request identity, terminal state, lifecycle, freeze position, target and
+/// acknowledgement closures, owner sets, replay claim, and the receipt digest
+/// are descriptive at this boundary. The coordinator replaces them with the
+/// durable ERS1-derived values before host admission. Caller-owned inventories,
+/// policy, trust, provenance, issue position, and signature remain part of the
+/// admitted retry identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureReceiptInputV1 {
     /// Request and terminal state.
@@ -2119,11 +2126,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 })
         })
     }
-    /// Commit a receipt only when its closure and acknowledgement evidence match this record.
+    /// Commit a receipt after normalizing core-derived fields against this record.
     ///
-    /// A terminal retry must reproduce the exact input admitted for that
-    /// receipt.  Core-derived ERC1 fields are normalized only on the first
-    /// commit; changing them on a retry is a conflicting operation.
+    /// A terminal retry must reproduce the exact caller-owned evidence admitted
+    /// for that receipt. Request identity, terminal state, lifecycle, freeze
+    /// position, closure, acknowledgements, owner sets, replay claim, and the
+    /// derived receipt digest are normalized from durable coordinator state.
     ///
     /// # Errors
     ///
@@ -2143,7 +2151,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     authority_input.clone(),
                 )?;
                 return if record.receipt_input.as_ref() == Some(&normalized)
-                    && Self::receipt_input_matches_authority(&authority_input, &normalized)
+                    && Self::receipt_input_matches_evidence(&authority_input, &normalized)
                 {
                     Ok(stored)
                 } else {
@@ -2200,23 +2208,21 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         input.acknowledgements.clone_from(&record.acknowledgements);
         input.pending_owners = record.state.pending_owners().to_vec();
         input.failed_owners = record.state.failed_owners().to_vec();
+        input.replay_claim = weakest_inventory_claim(&input.inventories);
         input.receipt_digest = reference_zero();
         Ok(input)
     }
 
-    fn receipt_input_matches_authority(
+    fn receipt_input_matches_evidence(
         input: &ErasureReceiptInputV1,
         normalized: &ErasureReceiptInputV1,
     ) -> bool {
-        input.request == normalized.request
-            && input.coordinator == normalized.coordinator
-            && input.terminal_state == normalized.terminal_state
-            && input.lifecycle == normalized.lifecycle
-            && input.freeze_position == normalized.freeze_position
-            && input.required_targets == normalized.required_targets
-            && input.acknowledgements == normalized.acknowledgements
-            && input.pending_owners == normalized.pending_owners
-            && input.failed_owners == normalized.failed_owners
+        input.inventories == normalized.inventories
+            && input.policy == normalized.policy
+            && input.trust == normalized.trust
+            && input.provenance == normalized.provenance
+            && input.issue_position == normalized.issue_position
+            && input.signature == normalized.signature
     }
 
     fn finalize_record(
@@ -2292,7 +2298,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 record.state = terminal;
                 Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
                     .and_then(|normalized| {
-                        if Self::receipt_input_matches_authority(input, &normalized) {
+                        if Self::receipt_input_matches_evidence(input, &normalized) {
                             record.receipt_input = Some(normalized.clone());
                             Ok(normalized)
                         } else {
