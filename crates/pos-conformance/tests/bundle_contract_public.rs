@@ -338,6 +338,12 @@ pub mod fixtures {
         (members, expected_result)
     }
 
+    /// Construct the Candidate bundle used by the public materialization test.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checked-in fixture data cannot be decoded or
+    /// serialized into the test bundle.
     pub fn candidate_bundle() -> Result<
         Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
         Box<dyn std::error::Error>,
