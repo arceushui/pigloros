@@ -781,7 +781,7 @@ fn public_unsigned_bundle_contract_edges_fail_closed() -> Result<(), Box<dyn std
     invalid_expected_flag.members[fixture_index].expected_result = true;
     assert_eq!(
         invalid_expected_flag.validate(),
-        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
     );
 
     let mut missing_expected_reference = bundle.clone();
