@@ -1,8 +1,9 @@
 use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, GatewayError, LedgerWriteMode};
 use piglor_ledger::LedgerView;
 use pos_core::{
-    Capability, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId, Kind, Plugin,
-    PluginId, TimelineId, WallTime,
+    CanonicalBytes, Capability, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
+    GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1, Kind, Plugin, PluginId, TimelineId,
+    WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
@@ -854,6 +855,63 @@ async fn gateway_reloads_durable_consent_before_revocation(
         grant_event.seq.as_u64().saturating_add(1)
     );
     drop(recovered_gateway);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_rejects_geo_admission_after_consent_revocation(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let gateway =
+        Gateway::new_with_geo_location_admission(pos_store::memory::MemoryStore::default());
+    let timeline = gateway
+        .create_timeline("geo-revocation-fence")
+        .await
+        .test_ok()?;
+    let subject = EntityId::new();
+    let grant = ConsentGrantedV1 {
+        subject_id: subject,
+        grantee_id: EntityId::new(),
+        purpose: "geo-revocation-fence".to_owned(),
+        modalities: pos_core::MODALITY_LOCATION,
+        min_geo_resolution: 1,
+        fork_permitted: false,
+        export_permitted: false,
+        retention_days: 1,
+        expiry_secs: 0,
+        grant_seq: 1,
+    };
+    let (grant_event, token) = gateway
+        .issue_consent_grant(&timeline.id().to_string(), grant)
+        .await
+        .test_ok()?;
+    gateway
+        .issue_consent_revocation(
+            &timeline.id().to_string(),
+            ConsentRevokedV1 {
+                subject_id: subject,
+                grantee_id: token.grantee_id(),
+                grant_seq: token.grant_seq(),
+                fence_seq: grant_event.seq.as_u64().saturating_add(1),
+            },
+        )
+        .await
+        .test_ok()?;
+    let request = GeoLocationAdmissionRequestV1::from_input(GeoLocationAdmissionInputV1::new(
+        timeline.id(),
+        subject,
+        CanonicalBytes::from_static(b"revoked-geo-payload"),
+        1,
+        ([1; 32], 1, [2; 32]),
+        (1, false, 0),
+        ([4; 32], [5; 32]),
+    ));
+    assert!(matches!(
+        gateway
+            .admit_geo_location_with_consent(request, &token, 0)
+            .await,
+        Err(GatewayError::Consent(pos_core::ConsentError::Revoked))
+    ));
+    gateway.shutdown().await.test_ok()?;
     Ok(())
 }
 

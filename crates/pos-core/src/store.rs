@@ -1322,6 +1322,13 @@ mod tests {
             .remove_append_identities(AppendDedupScope::from_keyed_hash([2; 32]))
             .test_err()?;
         assert!(withdrawal_error.to_string().contains("withdrawal"));
+        let bounded_withdrawal_error = store
+            .remove_append_identities_bounded(
+                AppendDedupScope::from_keyed_hash([2; 32]),
+                std::num::NonZeroUsize::new(1).test_ok()?,
+            )
+            .test_err()?;
+        assert!(bounded_withdrawal_error.to_string().contains("bounded"));
 
         let consent_draft = EventDraft::new(
             EntityId::new(),

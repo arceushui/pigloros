@@ -2599,6 +2599,16 @@ mod tests {
         );
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::RemoveAppendIdentitiesBounded {
+                scope: AppendDedupScope::from_keyed_hash([3; 32]),
+                limit: NonZeroUsize::new(1).test_ok()?,
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(Command::RootCount { maximum: 1, reply }, receiver);
 
         let (reply, receiver) = tokio::sync::oneshot::channel();
@@ -2665,6 +2675,15 @@ mod tests {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         assert_expired(
             Command::GetTimeline {
+                timeline: TimelineId::new(),
+                reply,
+            },
+            receiver,
+        );
+
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        assert_expired(
+            Command::ProtectedLogicalHead {
                 timeline: TimelineId::new(),
                 reply,
             },

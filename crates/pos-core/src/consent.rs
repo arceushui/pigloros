@@ -1662,6 +1662,20 @@ mod tests {
     }
 
     #[test]
+    fn location_validation_requires_a_subject_session() {
+        let authority = ConsentAuthority::new();
+        assert_eq!(
+            authority.validate_location_subject_on_timeline(
+                TimelineId::new(),
+                EntityId::new(),
+                0,
+                0,
+            ),
+            Err(ConsentError::NoConsent)
+        );
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_entire_gateway_consent_namespace_is_reserved() {
         assert!(is_consent_event_type(&Kind::new(
