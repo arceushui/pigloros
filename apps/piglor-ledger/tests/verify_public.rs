@@ -66,6 +66,53 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
 }
 
 #[test]
+fn public_store_verification_rejects_an_invalid_registry_public_key(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let database_path = database.path().to_path_buf();
+    let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
+        path: database_path.to_string_lossy().into_owned(),
+    })?;
+    let timeline = store.create_timeline("ledger")?;
+    let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        identity,
+        pos_crypto::key_roles::key_material_digest(&[3; 32]),
+        Some(pos_core::PublicKey::from_bytes([0xff; 32])),
+    ))?;
+    store.save_key_registry(&registry)?;
+    let payload = CanonicalBytes::from_static(b"invalid registry public key");
+    store.append_committed(
+        timeline.id(),
+        &[Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
+            payload: payload.clone(),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: Some(pos_core::Signature::from_bytes([0; 64])),
+            signature_identity: Some(identity),
+            payload_hash: pos_crypto::chain::hash_payload(&payload),
+        }],
+    )?;
+    drop(store);
+
+    let error = match verify_source(&Source::Store(database_path), None, None) {
+        Ok(report) => {
+            return Err(format!("invalid registry key produced a report: {report}").into())
+        }
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("public key"));
+    Ok(())
+}
+
+#[test]
 fn public_store_verification_accepts_a_registry_bound_signature(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
