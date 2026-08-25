@@ -2119,7 +2119,20 @@ mod tests {
 
     fn profile_for_claim_layer(index: usize, claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
         let mut profile = profile();
-        profile.profile_id = format!("pigloros.w8.{}.1.0.0", claim_layer_code(claim_layer));
+        profile.profile_id = match claim_layer {
+            ClaimLayerV1::ArtifactIntegrity => "pigloros.w8.artifact-integrity.1.0.0",
+            ClaimLayerV1::ReplayConformance => "pigloros.w8.replay-conformance.1.0.0",
+            ClaimLayerV1::KnowledgeNonInterference => {
+                "pigloros.w8.knowledge-non-interference.1.0.0"
+            }
+            ClaimLayerV1::GatewayClientConformance => {
+                "pigloros.w8.gateway-client-conformance.1.0.0"
+            }
+            ClaimLayerV1::PluginConformance => "pigloros.w8.plugin-conformance.1.0.0",
+            ClaimLayerV1::MetricConformance => "pigloros.w8.metric-conformance.1.0.0",
+            ClaimLayerV1::EmpiricalEvaluation => "pigloros.w8.empirical-evaluation.1.0.0",
+        }
+        .to_owned();
         profile.fixtures = vec![profile.fixtures[index].clone()];
         profile.profile_digest = profile.digest();
         profile
