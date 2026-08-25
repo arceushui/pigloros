@@ -1,7 +1,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg(feature = "sqlite")]
 
-use pos_core::{CoreError, EventStore, Seq};
+use pos_core::{CoreError, EventReadBounds, EventStore, Seq};
 use pos_store::sqlite::SqliteStore;
 use rusqlite::params;
 
@@ -27,9 +27,10 @@ fn sqlite_public_read_rejects_a_fork_without_a_fork_sequence(
     drop(connection);
 
     let store = SqliteStore::open(path)?;
+    let bounds = EventReadBounds::new(1, usize::MAX, 1, 1);
     assert!(matches!(
-        store.read(child.id(), pos_core::SeqRange::all()),
-        Err(CoreError::Storage(message)) if message.contains("missing its fork sequence")
+        store.read_bounded(child.id(), pos_core::SeqRange::all(), bounds),
+        Err(CoreError::Storage(message)) if message.contains("missing its Fork sequence")
     ));
     Ok(())
 }
