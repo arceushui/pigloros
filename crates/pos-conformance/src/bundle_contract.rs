@@ -4171,25 +4171,25 @@ mod tests {
         invalid_status["entries"][0]["materialization_status"] =
             JsonValue::String("pending".to_owned());
         assert_eq!(
-            validate_authority_inventory(&invalid_status, &members),
+            validate_authority_inventory(&invalid_status, members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut missing_fixture = members.clone();
+        let mut missing_fixture = members.to_vec();
         missing_fixture.retain(|member| member.role != BundleMemberRoleV1::AuthorityFixture);
         assert_eq!(
             validate_authority_inventory(&candidate_inventory, &missing_fixture),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
-        let mut missing_result = members.clone();
+        let mut missing_result = members.to_vec();
         missing_result.retain(|member| member.role != BundleMemberRoleV1::AuthorityExpectedResult);
         assert_eq!(
             validate_authority_inventory(&candidate_inventory, &missing_result),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
-        let mut invalid_fixture_digest = members.clone();
+        let mut invalid_fixture_digest = members.to_vec();
         invalid_fixture_digest
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::AuthorityFixture)
@@ -4200,7 +4200,7 @@ mod tests {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut invalid_fixture_id = members.clone();
+        let mut invalid_fixture_id = members.to_vec();
         let fixture_member = invalid_fixture_id
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::AuthorityFixture)
@@ -4224,7 +4224,7 @@ mod tests {
         invalid_fixture_path["entries"][0]["fixture_bytes_path"] =
             JsonValue::String("fixtures/missing.json".to_owned());
         assert_eq!(
-            validate_authority_inventory(&invalid_fixture_path, &members),
+            validate_authority_inventory(&invalid_fixture_path, members),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
@@ -4232,7 +4232,7 @@ mod tests {
         invalid_result_path["entries"][0]["expected_result_path"] =
             JsonValue::String("results/missing.json".to_owned());
         assert_eq!(
-            validate_authority_inventory(&invalid_result_path, &members),
+            validate_authority_inventory(&invalid_result_path, members),
             Err(BundleContractErrorV1::MemberMissing)
         );
 
@@ -4240,7 +4240,7 @@ mod tests {
         invalid_digest_length["entries"][0]["fixture_bytes_digest"] =
             JsonValue::String("00".to_owned());
         assert_eq!(
-            validate_authority_inventory(&invalid_digest_length, &members),
+            validate_authority_inventory(&invalid_digest_length, members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
@@ -4248,7 +4248,7 @@ mod tests {
         invalid_digest_nibble["entries"][0]["fixture_bytes_digest"] =
             JsonValue::String("gg".repeat(32));
         assert_eq!(
-            validate_authority_inventory(&invalid_digest_nibble, &members),
+            validate_authority_inventory(&invalid_digest_nibble, members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
