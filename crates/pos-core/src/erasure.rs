@@ -2168,7 +2168,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     )
                 });
             }
-            Self::finalize_record(self, request, &mut record, input)
+            Self::finalize_record(self, request, &mut record, &input)
         })
     }
 
@@ -2216,7 +2216,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         request: ErasureReferenceV1,
         record: &mut ErasureCoordinatorRecordV1,
-        input: ErasureReceiptInputV1,
+        input: &ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         Self::prepare_finalization(self, request, record, &input)
             .and_then(|(terminal_record, receipt)| self.commit(terminal_record).map(|()| receipt))
@@ -2285,7 +2285,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 record.state = terminal;
                 Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
                     .and_then(|normalized| {
-                        if Self::receipt_input_matches_authority(&input, &normalized) {
+                        if Self::receipt_input_matches_authority(input, &normalized) {
                             record.receipt_input = Some(normalized.clone());
                             Ok(normalized)
                         } else {
