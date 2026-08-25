@@ -1700,7 +1700,7 @@ mod tests {
         let authority = ConsentAuthority::new();
         let grant = sample_granted();
         let timeline = TimelineId::new();
-        authority.record_grant_on_timeline(timeline, &grant);
+        let _ = authority.record_grant_on_timeline(timeline, &grant);
 
         assert_eq!(
             authority.validate_location_subject_on_timeline(timeline, grant.subject_id, 0, 0,),
