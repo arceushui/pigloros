@@ -21,6 +21,15 @@ const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
     "LIVE-001", "ERA-001", "SEC-001",
 ];
+const MATERIALIZED_LAYERS: [&str; 7] = [
+    "artifact-integrity",
+    "replay-conformance",
+    "knowledge-non-interference",
+    "gateway-client-conformance",
+    "plugin-conformance",
+    "metric-conformance",
+    "empirical-evaluation",
+];
 
 fn top_fields(value: &mut Value) -> Result<&mut Vec<Value>, Box<dyn std::error::Error>> {
     match value {
@@ -738,6 +747,13 @@ fn archive_paths(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>
     Ok(archives)
 }
 
+fn contains_archive_kind(archives: &[PathBuf], kind: &str) -> bool {
+    archives.iter().any(|path| {
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(kind))
+    })
+}
+
 struct TemporaryOutput(PathBuf);
 
 impl Drop for TemporaryOutput {
@@ -770,7 +786,13 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
     assert!(materializer_status.success());
 
     let archives = archive_paths(&output_root)?;
-    assert_eq!(archives.len(), 7);
+    assert_eq!(archives.len(), 14);
+    for layer in MATERIALIZED_LAYERS {
+        let layer_archives = archive_paths(&output_root.join(layer).join("draft"))?;
+        assert_eq!(layer_archives.len(), 2);
+        assert!(contains_archive_kind(&layer_archives, "bundle-local-"));
+        assert!(contains_archive_kind(&layer_archives, "bundle-air-gapped-"));
+    }
     let verifier_binary = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
         .ok_or("verifier binary path is unavailable")?;
     let verifier_status = Command::new(verifier_binary).args(&archives).status()?;
