@@ -1237,6 +1237,14 @@ mod tests {
             &invalid_matrix_digest
         )
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn helper_validation_seams_reject_invalid_fixture_records() -> Result<(), Box<dyn Error>> {
+        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
+        let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
+        let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
         let mut invalid_fixtures = canonical_record;
         invalid_fixtures["fixtures"] = JsonValue::Array(Vec::new());
         assert!(fixtures_from_profile_record(&invalid_fixtures, &context).is_err());
