@@ -1,12 +1,12 @@
 use piglor_ledger::{verify_source, Source};
 use pos_core::{
     CanonicalBytes, EntityId, Event, EventId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
-    KeyRoleV1, Kind, SchemaVersion, Seq, Signature, WallTime,
+    KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
 };
 use rusqlite::params;
 
 #[test]
-fn public_store_verification_rejects_a_non_timeline_signature_role(
+fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
@@ -37,8 +37,8 @@ fn public_store_verification_rejects_a_non_timeline_signature_role(
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,
-            signature: Some(Signature::from_bytes([0; 64])),
-            signature_identity: Some(identity),
+            signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         }],
     )?;
@@ -46,16 +46,18 @@ fn public_store_verification_rejects_a_non_timeline_signature_role(
 
     let connection = rusqlite::Connection::open(&database_path)?;
     connection.execute(
-        "UPDATE events SET signature_role = ?1 WHERE event_id = ?2",
+        "UPDATE events SET signature = zeroblob(64), signature_role = ?1,
+         signature_epoch = 1 WHERE event_id = ?2",
         params![
             i64::from(KeyRoleV1::SubjectDataEncryption.code()),
             event_id.to_string(),
         ],
     )?;
 
-    let report = verify_source(&Source::Store(database_path), None, None)?;
-    let rendered = report.to_string();
-    assert!(rendered.contains("FAIL: store tier — seq=1"));
-    assert!(rendered.contains("TimelineIntegritySigning"));
+    let error = verify_source(&Source::Store(database_path), None, None)
+        .expect_err("malformed persisted signature identity must fail closed");
+    assert!(error
+        .to_string()
+        .contains("signed event must carry a TimelineIntegritySigning role/epoch identity"));
     Ok(())
 }
