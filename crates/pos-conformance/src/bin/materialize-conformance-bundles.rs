@@ -183,18 +183,29 @@ fn materialize_profile_from_profile(
         (BundleModeV1::AirGapped, "air-gapped"),
     ] {
         let (members, expected_results) = bundle_inputs(&profile, mode)?;
-        let bundle = ConformanceBundleV1::materialize(&profile, mode, members, expected_results)?
-            .sign(signing_key)?;
-        let bundle_digest = bundle.bundle_digest()?;
+        let (bundle, bundle_digest) =
+            ConformanceBundleV1::materialize(&profile, mode, members, expected_results)
+                .and_then(|bundle| bundle.sign(signing_key))
+                .and_then(|bundle| {
+                    bundle
+                        .bundle_digest()
+                        .map(|bundle_digest| (bundle, bundle_digest))
+                })?;
+        let (manifest_bytes, bundle_bytes) =
+            bundle.manifest_bytes().and_then(|manifest_bytes| {
+                bundle
+                    .to_canonical_cbor()
+                    .map(|bundle_bytes| (manifest_bytes, bundle_bytes))
+            })?;
         write_materialized_file(
             output_root,
             format!("{prefix}/manifest-{mode_name}-{}.cbor", hex(&bundle_digest)),
-            &bundle.manifest_bytes()?,
+            &manifest_bytes,
         )?;
         write_materialized_file(
             output_root,
             format!("{prefix}/bundle-{mode_name}-{}.cfb1", hex(&bundle_digest)),
-            &bundle.to_canonical_cbor()?,
+            &bundle_bytes,
         )?;
     }
     Ok(())
@@ -696,6 +707,11 @@ mod tests {
         assert!(std::fs::create_dir_all(output.join("directory")).is_ok());
         assert!(write_materialized_file(&output, "directory", b"bytes").is_err());
         assert!(std::fs::remove_dir_all(output).is_ok());
+
+        let blocker = output_root("create-dir-error");
+        assert!(std::fs::write(&blocker, b"not a directory").is_ok());
+        assert!(write_materialized_file(&blocker, "nested/file", b"bytes").is_err());
+        assert!(std::fs::remove_file(blocker).is_ok());
     }
 
     #[test]
