@@ -1459,6 +1459,7 @@ impl Gateway {
                     "consent revocation was already fenced".to_owned(),
                 )))
             }
+            Err(error) => return Err(GatewayError::Store(CoreError::Storage(error.to_string()))),
         };
         let scope = ingress_dedup_scope(revocation.subject_id);
         let event = match self
