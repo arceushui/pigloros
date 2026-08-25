@@ -6878,7 +6878,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_rejects_malformed_fork_chain_metadata() {
         let mut root_store = new_store();
         let root = root_store.create_timeline("root").test_ok();
