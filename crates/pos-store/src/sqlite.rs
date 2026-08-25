@@ -9671,10 +9671,10 @@ mod coverage_entrypoints {
         let draft = tests::make_draft(EntityId::new(), b"bounded");
         let committed = ok(store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1));
         assert_eq!(committed.as_ref().map(Vec::len), Some(1));
-        assert!(matches!(
-            store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1),
-            Ok(None)
-        ));
+        assert_eq!(
+            ok(store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1)),
+            None
+        );
 
         let consent = ok(store.create_timeline("sqlite-bounded-consent"));
         let subject = EntityId::new();
