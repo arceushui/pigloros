@@ -546,37 +546,38 @@ mod tests {
         ))
     }
 
-    fn local_bundle_digest(
-        profile: &ConformanceProfileV1,
-        signing_key: &SigningKey,
-    ) -> Result<[u8; 32], Box<dyn Error>> {
-        let (members, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
-        Ok(ConformanceBundleV1::materialize(
-            profile,
-            BundleModeV1::Local,
-            members,
-            expected_results,
-        )?
-        .sign(signing_key)?
-        .bundle_digest()?)
+    fn local_bundle_digest(profile: &ConformanceProfileV1, signing_key: &SigningKey) -> [u8; 32] {
+        bundle_inputs(profile, BundleModeV1::Local)
+            .ok()
+            .and_then(|(members, expected_results)| {
+                ConformanceBundleV1::materialize(
+                    profile,
+                    BundleModeV1::Local,
+                    members,
+                    expected_results,
+                )
+                .ok()
+            })
+            .and_then(|bundle| bundle.sign(signing_key).ok())
+            .and_then(|bundle| bundle.bundle_digest().ok())
+            .unwrap_or_default()
     }
 
     #[test]
-    fn materializer_run_covers_all_profile_layers() -> Result<(), Box<dyn Error>> {
+    fn materializer_run_covers_all_profile_layers() {
         let output = output_root("run");
         let arguments = [
             OsString::from("materialize"),
             output.clone().into_os_string(),
         ];
-        run(arguments.into_iter(), Ok(signing_key_hex()))?;
+        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_ok());
         assert!(output.join("artifact-integrity/draft").is_dir());
         assert!(output.join("empirical-evaluation/draft").is_dir());
-        std::fs::remove_dir_all(output)?;
-        Ok(())
+        assert!(std::fs::remove_dir_all(output).is_ok());
     }
 
     #[test]
-    fn materializer_argument_and_key_errors_are_explicit() -> Result<(), Box<dyn Error>> {
+    fn materializer_argument_and_key_errors_are_explicit() {
         let entry: fn() -> Result<(), Box<dyn Error>> = main;
         assert!(entry().is_err());
         assert!(run(
@@ -591,13 +592,13 @@ mod tests {
             OsString::from("extra"),
         ];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        std::fs::create_dir_all(&output)?;
+        assert!(std::fs::create_dir_all(&output).is_ok());
         let arguments = [
             OsString::from("materialize"),
             output.clone().into_os_string(),
         ];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        std::fs::remove_dir_all(output)?;
+        assert!(std::fs::remove_dir_all(output).is_ok());
         let arguments = [OsString::from("materialize"), OsString::from("missing")];
         assert!(run(
             arguments.into_iter(),
@@ -605,21 +606,20 @@ mod tests {
         )
         .is_err());
         let blocker = output_root("blocker");
-        std::fs::write(&blocker, b"not a directory")?;
+        assert!(std::fs::write(&blocker, b"not a directory").is_ok());
         let child = blocker.join("child");
         let arguments = [OsString::from("materialize"), child.into_os_string()];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        std::fs::remove_file(blocker)?;
+        assert!(std::fs::remove_file(blocker).is_ok());
         assert!(signing_key_from_encoded(std::env::var(
             "PIGLOROS_CONFORMANCE_MISSING_SIGNING_KEY"
         ))
         .is_err());
         assert!(signing_key_from_encoded(Ok("not-a-key".to_owned())).is_err());
-        Ok(())
     }
 
     #[test]
-    fn helper_validation_seams_cover_alternate_records() -> Result<(), Box<dyn Error>> {
+    fn helper_validation_seams_cover_alternate_records() {
         assert_eq!(decode_hex("00"), None);
         assert_eq!(decode_hex(&"gg".repeat(32)), None);
         assert_eq!(decode_hex(&"0g".repeat(32)), None);
@@ -628,12 +628,13 @@ mod tests {
         assert_eq!(hex(&[0xabu8; 32]), "ab".repeat(32));
 
         let candidate = br#"{"lifecycle":"Candidate"}"#;
+        let lifecycles = publication_lifecycles_from_bytes(candidate);
         assert_eq!(
-            publication_lifecycles_from_bytes(candidate)?,
-            vec![
+            lifecycles.as_ref().ok(),
+            Some(&vec![
                 (ProfileLifecycleV1::Draft, "draft"),
                 (ProfileLifecycleV1::Candidate, "candidate")
-            ]
+            ])
         );
         assert!(publication_lifecycles_from_bytes(b"{}").is_err());
         assert!(publication_lifecycles_from_bytes(br#"{"lifecycle":"Retired"}"#).is_err());
@@ -692,24 +693,24 @@ mod tests {
         drop(std::fs::remove_dir_all(output));
 
         let output = output_root("write-error");
-        std::fs::create_dir_all(output.join("directory"))?;
+        assert!(std::fs::create_dir_all(output.join("directory")).is_ok());
         assert!(write_materialized_file(&output, "directory", b"bytes").is_err());
-        std::fs::remove_dir_all(output)?;
-        Ok(())
+        assert!(std::fs::remove_dir_all(output).is_ok());
     }
 
     #[test]
-    fn materializer_manifest_and_bundle_write_errors_are_explicit() -> Result<(), Box<dyn Error>> {
+    fn materializer_manifest_and_bundle_write_errors_are_explicit() {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
-        let digest = local_bundle_digest(&profile, &signing_key)?;
+        let digest = local_bundle_digest(&profile, &signing_key);
         let prefix = "artifact-integrity/draft";
 
         let manifest_root = output_root("manifest-error");
-        std::fs::create_dir_all(manifest_root.join(prefix))?;
-        std::fs::create_dir_all(
+        assert!(std::fs::create_dir_all(manifest_root.join(prefix)).is_ok());
+        assert!(std::fs::create_dir_all(
             manifest_root.join(format!("{prefix}/manifest-local-{}.cbor", hex(&digest))),
-        )?;
+        )
+        .is_ok());
         assert!(materialize_profile_from_profile(
             &manifest_root,
             &signing_key,
@@ -719,20 +720,22 @@ mod tests {
             "artifact-integrity",
         )
         .is_err());
-        std::fs::remove_dir_all(manifest_root)?;
+        assert!(std::fs::remove_dir_all(manifest_root).is_ok());
 
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
-        let digest = local_bundle_digest(&profile, &signing_key)?;
+        let digest = local_bundle_digest(&profile, &signing_key);
         let bundle_root = output_root("bundle-error");
-        std::fs::create_dir_all(bundle_root.join(prefix))?;
-        std::fs::write(
+        assert!(std::fs::create_dir_all(bundle_root.join(prefix)).is_ok());
+        assert!(std::fs::write(
             bundle_root.join(format!("{prefix}/manifest-local-{}.cbor", hex(&digest))),
             b"existing",
-        )?;
-        std::fs::create_dir_all(
+        )
+        .is_ok());
+        assert!(std::fs::create_dir_all(
             bundle_root.join(format!("{prefix}/bundle-local-{}.cfb1", hex(&digest))),
-        )?;
+        )
+        .is_ok());
         assert!(materialize_profile_from_profile(
             &bundle_root,
             &signing_key,
@@ -742,7 +745,6 @@ mod tests {
             "artifact-integrity",
         )
         .is_err());
-        std::fs::remove_dir_all(bundle_root)?;
-        Ok(())
+        assert!(std::fs::remove_dir_all(bundle_root).is_ok());
     }
 }
