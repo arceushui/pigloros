@@ -1015,9 +1015,6 @@ fn validate_fixture(
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
-    if fixture.modes.len() != 1 {
-        return Err(ConformanceContractError::FieldOutOfBounds);
-    }
     fixture
         .inputs
         .iter()
@@ -4899,12 +4896,10 @@ mod tests {
             |value| value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::Local],
             ConformanceContractError::NonCanonicalOrder,
         );
-        reject_profile_change(
-            |value| {
-                value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped];
-            },
-            ConformanceContractError::FieldOutOfBounds,
-        );
+        let mut multi_mode = profile();
+        multi_mode.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped];
+        multi_mode.profile_digest = multi_mode.digest();
+        assert_eq!(multi_mode.validate(), Ok(()));
     }
 
     #[test]

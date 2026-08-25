@@ -315,11 +315,14 @@ fn validate_profile_record_bindings(
     claim_layer: ClaimLayerV1,
     profile_record: &JsonValue,
 ) -> Result<(), Box<dyn Error>> {
+    let matrix = include_bytes!("../../../../fixtures/conformance/matrix/adr-059-complete.json");
+    let matrix_json: JsonValue = serde_json::from_slice(matrix)?;
+    let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
     if json_text(profile_record, "profile_id")? != profile_id(claim_layer)
         || json_text(profile_record, "claim_layer")? != claim_layer_name(claim_layer)
         || json_text(profile_record, "authority_inventory")? != "expected-authority/inventory.json"
         || json_text(profile_record, "adr_059_execution_matrix")? != "matrix/adr-059-complete.json"
-        || json_text(profile_record, "adr_059_execution_matrix_status")? != "Draft"
+        || json_text(profile_record, "adr_059_execution_matrix_status")? != matrix_lifecycle
         || json_string_array(profile_record, "execution_profiles")?
             != vec!["deterministic-local-v1", "deterministic-air-gapped-v1"]
         || json_string_array(profile_record, "bundle_modes")? != vec!["local", "air-gapped"]
@@ -328,7 +331,6 @@ fn validate_profile_record_bindings(
     }
     let inventory =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
-    let matrix = include_bytes!("../../../../fixtures/conformance/matrix/adr-059-complete.json");
     if decode_hex(json_text(
         profile_record,
         "authority_inventory_sha256_digest",
@@ -491,6 +493,18 @@ const fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
     }
 }
 
+const fn subject_adapter(claim_layer: ClaimLayerV1) -> SubjectAdapterKindV1 {
+    match claim_layer {
+        ClaimLayerV1::GatewayClientConformance => SubjectAdapterKindV1::PublicGatewayProtocol,
+        ClaimLayerV1::PluginConformance => SubjectAdapterKindV1::PublicPluginProtocol,
+        ClaimLayerV1::ArtifactIntegrity
+        | ClaimLayerV1::ReplayConformance
+        | ClaimLayerV1::KnowledgeNonInterference
+        | ClaimLayerV1::MetricConformance
+        | ClaimLayerV1::EmpiricalEvaluation => SubjectAdapterKindV1::ExportedArtifact,
+    }
+}
+
 fn fixture(
     record: &JsonValue,
     context: &FixtureContext,
@@ -524,7 +538,7 @@ fn fixture(
         execution_profile_digest,
         public_schema_digest: context.schema_digest,
         modes: vec![mode],
-        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+        subject_adapter: subject_adapter(context.claim_layer),
         inputs: vec![FixtureInputMemberV1 {
             member_id: input_path.to_owned(),
             size_bytes: input.len() as u64,
@@ -1598,6 +1612,10 @@ mod tests {
                     .first()
                     .is_some_and(|input| input.member_id.starts_with("inputs/"))
             }));
+            assert!(profile
+                .fixtures
+                .iter()
+                .all(|fixture| fixture.subject_adapter == subject_adapter(claim_layer)));
         }
         Ok(())
     }

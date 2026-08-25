@@ -49,8 +49,9 @@ Every emitted Draft Local/Air-Gapped bundle includes the pending authority
 inventory and the Draft execution matrix, but not nonexistent authority
 fixture/result members. Candidate bundles are enabled only after the inventory
 becomes Candidate and all concrete authority members are independently
-verified. Materialized bytes are retained below `published/<git-sha>/`; that
-directory is immutable per source revision and includes its own `SHA256SUMS`.
+verified. Materialized bytes are retained below
+`published/<source-inventory-sha256>/`; that directory is immutable per source
+inventory and includes its own `SHA256SUMS`.
 
 Candidate materialization reads the eleven inventory fixture/result paths from
 `PIGLOROS_CONFORMANCE_AUTHORITY_ROOT`, rejects traversal or digest mismatches,
