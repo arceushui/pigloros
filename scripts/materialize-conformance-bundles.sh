@@ -21,7 +21,9 @@ if [[ -e "${output_root}" ]]; then
   echo "refusing to overwrite retained conformance publication: ${output_root}" >&2
   exit 1
 fi
-temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/pigloros-conformance.XXXXXX")"
+publication_parent="$(dirname "${output_root}")"
+mkdir -p "${publication_parent}"
+temporary_root="$(mktemp -d "${publication_parent}/.pigloros-conformance.XXXXXX")"
 first_output="${temporary_root}/first"
 second_output="${temporary_root}/second"
 trap 'rm -rf "${temporary_root}"' EXIT
@@ -56,7 +58,6 @@ cp "${source_inventory}" "${first_output}/SOURCE-SHA256SUMS"
   printf 'source_sha256=%s\n' "${source_digest}"
   printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
 } > "${first_output}/SOURCE-BINDING"
-mkdir -p "$(dirname "${output_root}")"
 mv --no-clobber --no-target-directory "${first_output}" "${output_root}"
 if [[ -e "${first_output}" ]]; then
   echo "retained conformance publication appeared during materialization: ${output_root}" >&2
