@@ -912,6 +912,7 @@ async fn gateway_rejects_geo_admission_after_consent_revocation(
         Err(GatewayError::Consent(pos_core::ConsentError::Revoked))
     ));
     gateway.shutdown().await.test_ok()?;
+    drop(gateway);
     Ok(())
 }
 
