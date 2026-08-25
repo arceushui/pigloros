@@ -458,9 +458,7 @@ impl ConformanceBundleV1 {
     /// Returns [`BundleContractErrorV1::EncodingFailed`] when the manifest
     /// cannot be canonically encoded.
     pub fn manifest_bytes(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
-        canonical::encode(&manifest_value(&self.manifest))
-            .map(|bytes| bytes.as_slice().to_vec())
-            .map_err(|_| BundleContractErrorV1::EncodingFailed)
+        encode_archive_value(&manifest_value(&self.manifest))
     }
 
     /// Encode the complete immutable bundle as canonical public archive bytes.
@@ -2085,9 +2083,7 @@ mod tests {
         let manifest_bytes = bundle.manifest_bytes()?;
         assert_eq!(
             manifest_bytes,
-            canonical::encode(&manifest_value(&bundle.manifest))
-                .map(|bytes| bytes.as_slice().to_vec())
-                .map_err(|_| BundleContractErrorV1::EncodingFailed)?
+            encode_archive_value(&manifest_value(&bundle.manifest))?
         );
         let mut digest_input = b"PiglorOS.ConformanceBundle.v1\0".to_vec();
         digest_input.extend_from_slice(&manifest_bytes);
@@ -3188,7 +3184,7 @@ mod tests {
             Err(BundleContractErrorV1::MemberMissing)
         );
 
-        let mut duplicate_case_profile = profile.clone();
+        let mut duplicate_case_profile = profile;
         let mut duplicate_case_fixture = duplicate_case_profile.fixtures[0].clone();
         duplicate_case_fixture.claim_layer = ClaimLayerV1::ReplayConformance;
         duplicate_case_profile.fixtures.push(duplicate_case_fixture);
