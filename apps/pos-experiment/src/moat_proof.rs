@@ -2778,12 +2778,20 @@ mod run_coverage_entrypoints {
 
     #[test]
     fn consent_epoch_boundary_and_subject_binding_are_observable() {
-        let participant_views = [ParticipantViewV1 {
-            participant: "proof-agent".to_owned(),
-            visible_event_types: Vec::new(),
-            hidden_event_types: Vec::new(),
-            visible_events: Vec::new(),
-        }];
+        let participant_views = [
+            ParticipantViewV1 {
+                participant: "proof-agent".to_owned(),
+                visible_event_types: Vec::new(),
+                hidden_event_types: Vec::new(),
+                visible_events: Vec::new(),
+            },
+            ParticipantViewV1 {
+                participant: "other-agent".to_owned(),
+                visible_event_types: Vec::new(),
+                hidden_event_types: Vec::new(),
+                visible_events: Vec::new(),
+            },
+        ];
         let mut closure = HostClosureAuditV1 {
             subject: "proof-subject".to_owned(),
             requested_after_seq: 5,
@@ -2801,6 +2809,7 @@ mod run_coverage_entrypoints {
             [1; 32],
         );
         assert_eq!(no_revocation.grants[0].consent_epoch, 0);
+        assert_eq!(no_revocation.grants[1].consent_epoch, 0);
 
         closure.closure_event_seq = 6;
         let revocation = build_room_parts(
@@ -2811,6 +2820,7 @@ mod run_coverage_entrypoints {
             [1; 32],
         );
         assert_eq!(revocation.grants[0].consent_epoch, 1);
+        assert_eq!(revocation.grants[1].consent_epoch, 0);
     }
 
     #[test]
