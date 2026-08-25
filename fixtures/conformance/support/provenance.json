@@ -5,7 +5,7 @@
   "authority_inventory": {
     "digest_algorithm": "SHA-256",
     "path": "expected-authority/inventory.json",
-    "sha256_digest": "4e12e356f931dc7767922c4e1e519136c4859169940f9b87fc88018682780787",
+    "sha256_digest": "5f60065a0cc39dd43e74eb0a373424006e4d23db8affa60a22bfa7ed12ab20c8",
     "status": "Draft"
   },
   "adr_059_execution_matrix": {
