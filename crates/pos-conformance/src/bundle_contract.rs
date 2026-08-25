@@ -3999,7 +3999,7 @@ mod tests {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut malformed_matrix = members.to_vec();
+        let mut malformed_matrix = members;
         malformed_matrix
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
@@ -4136,7 +4136,7 @@ mod tests {
             validate_provenance_authority_binding(&provenance, "Draft"),
             Ok(())
         );
-        let mut missing_matrix = provenance.clone();
+        let mut missing_matrix = provenance;
         missing_matrix["adr_059_execution_matrix"] = JsonValue::Null;
         assert_eq!(
             validate_provenance_authority_binding(&missing_matrix, "Draft"),
@@ -4165,7 +4165,7 @@ mod tests {
             validate_authority_inventory(&wrong_id, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
-        let mut wrong_pending_field = inventory.clone();
+        let mut wrong_pending_field = inventory;
         wrong_pending_field["entries"][0]["fixture_bytes_digest"] =
             JsonValue::String("00".repeat(32));
         assert_eq!(
