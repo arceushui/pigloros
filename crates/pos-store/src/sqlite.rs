@@ -519,6 +519,39 @@ impl SqliteStore {
              );",
             )
             .map_err(|error| Self::storage_error(&error))
+            .and_then(|()| self.ensure_event_signature_columns())
+    }
+
+    fn ensure_event_signature_columns(&self) -> Result<(), CoreError> {
+        let mut statement = match self.conn.prepare("PRAGMA table_info(events)") {
+            Ok(statement) => statement,
+            Err(error) => return Err(Self::storage_error(&error)),
+        };
+        let rows = match statement.query_map([], |row| row.get::<_, String>(1)) {
+            Ok(rows) => rows,
+            Err(error) => return Err(Self::storage_error(&error)),
+        };
+        let mut columns = HashSet::new();
+        for row in rows {
+            match row {
+                Ok(column) => {
+                    columns.insert(column);
+                }
+                Err(error) => return Err(Self::storage_error(&error)),
+            }
+        }
+        drop(statement);
+        if !columns.contains("signature_role") {
+            self.conn
+                .execute("ALTER TABLE events ADD COLUMN signature_role INTEGER", [])
+                .map_err(|error| Self::storage_error(&error))?;
+        }
+        if !columns.contains("signature_epoch") {
+            self.conn
+                .execute("ALTER TABLE events ADD COLUMN signature_epoch INTEGER", [])
+                .map_err(|error| Self::storage_error(&error))?;
+        }
+        Ok(())
     }
 
     fn geographic_fence_permits(
@@ -6426,6 +6459,45 @@ mod tests {
 
         let result = SqliteStore::open(file.path().to_str().test_ok());
         let _ = result.err().test_ok();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_adds_role_columns_to_a_legacy_events_table() {
+        let file = tempfile::NamedTempFile::new().test_ok();
+        {
+            let conn = Connection::open(file.path()).test_ok();
+            conn.execute_batch(
+                "CREATE TABLE events (
+                    timeline_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    event_id TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    wall_time INTEGER NOT NULL,
+                    causation_id TEXT,
+                    correlation_id TEXT,
+                    schema_version INTEGER NOT NULL,
+                    payload_hash BLOB NOT NULL,
+                    signature BLOB,
+                    PRIMARY KEY (timeline_id, seq)
+                );",
+            )
+            .test_ok();
+        }
+
+        let store = SqliteStore::open(file.path().to_str().test_ok()).test_ok();
+        let mut columns = HashSet::new();
+        let mut statement = store.conn.prepare("PRAGMA table_info(events)").test_ok();
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .test_ok();
+        for row in rows {
+            columns.insert(row.test_ok());
+        }
+        assert!(columns.contains("signature_role"));
+        assert!(columns.contains("signature_epoch"));
     }
 
     #[test]

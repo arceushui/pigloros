@@ -1152,10 +1152,10 @@ pub fn validate_committed_batch(
 
 /// Validate the role/epoch binding of a committed event signature.
 ///
-/// An unsigned event has neither field. A signed event must carry both a
-/// signature and a non-zero identity for one of the signing roles; accepting
-/// either half independently would let a durable store retain an event whose
-/// signer cannot be identified.
+/// An unsigned event has neither field. A current role-bound event must carry
+/// a non-zero Timeline-integrity identity. A signature without an identity is
+/// retained only for the explicit ADR-065 legacy verify-only disposition; an
+/// identity without a signature is never valid.
 ///
 /// # Errors
 ///
@@ -1164,16 +1164,21 @@ pub fn validate_committed_batch(
 pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
     match (event.signature.as_ref(), event.signature_identity) {
         (None, None) => Ok(()),
+        // ADR-065 legacy signatures predate role metadata. They may be
+        // verified by an explicit legacy verifier, but cannot authorize a new
+        // role-bound operation.
+        (Some(_), None) => Ok(()),
         (Some(_), Some(identity)) => {
-            if identity.epoch == 0 || !identity.role.is_signing() {
+            if identity.epoch == 0 || identity.role != crate::KeyRoleV1::TimelineIntegritySigning {
                 return Err(CoreError::Storage(
-                    "signed event must carry a signing role/epoch identity".to_owned(),
+                    "signed event must carry a TimelineIntegritySigning role/epoch identity"
+                        .to_owned(),
                 ));
             }
             Ok(())
         }
-        _ => Err(CoreError::Storage(
-            "signed event must carry a signing role/epoch identity".to_owned(),
+        (None, Some(_)) => Err(CoreError::Storage(
+            "signed event must carry a signature for its role/epoch identity".to_owned(),
         )),
     }
 }
@@ -2303,14 +2308,14 @@ mod tests {
         let match_hasher = ValidationTestHasher { should_match: true };
         let mut signature_without_identity = validation_test_event(1, crate::ids::EventId::new());
         signature_without_identity.signature = Some(crate::Signature::from_bytes([1; 64]));
-        let err = validate_committed_batch(
+        let legacy = validate_committed_batch(
             Seq::ZERO,
             &[signature_without_identity],
             &mut |_| false,
             &match_hasher,
         )
-        .test_err()?;
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+        .test_ok()?;
+        assert_eq!(legacy.len(), 1);
 
         let mut identity_without_signature = validation_test_event(1, crate::ids::EventId::new());
         identity_without_signature.signature_identity = Some(crate::KeyIdentityV1::new(
@@ -2324,7 +2329,7 @@ mod tests {
             &match_hasher,
         )
         .test_err()?;
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("signature for its")));
 
         let mut zero_epoch_signature = validation_test_event(1, crate::ids::EventId::new());
         zero_epoch_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
@@ -2339,7 +2344,7 @@ mod tests {
             &match_hasher,
         )
         .test_err()?;
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("TimelineIntegritySigning")));
 
         let mut encryption_signature = validation_test_event(1, crate::ids::EventId::new());
         encryption_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
@@ -2354,7 +2359,7 @@ mod tests {
             &match_hasher,
         )
         .test_err()?;
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("TimelineIntegritySigning")));
 
         let ok =
             validate_committed_batch(Seq::ZERO, &[], &mut |_| false, &match_hasher).test_ok()?;

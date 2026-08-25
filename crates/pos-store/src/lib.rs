@@ -370,9 +370,11 @@ pub fn open_store_with_hasher(
 
 /// Cryptographically verify signed events in `export`, then identity-import.
 ///
-/// Every event must carry a signature and role/epoch identity that verifies under
-/// `public_key` against the role/epoch domain and its **payload bytes only** (event
-/// metadata is not covered). An empty event list is allowed.
+/// Every event must carry a signature and a `TimelineIntegritySigning`
+/// role/epoch identity that is present in the destination registry and whose
+/// retained public key matches `public_key`. Verification uses the role/epoch
+/// domain and **payload bytes only** (event metadata is not covered). An empty
+/// event list is allowed.
 ///
 /// Use this when the export is uniformly signed by one key. For mixed unsigned events
 /// or multiple signers, apply the appropriate role-bound verifier per event (or filter)
@@ -387,6 +389,16 @@ pub fn import_timeline_with_verified_signatures(
     public_key: &pos_core::PublicKey,
 ) -> Result<pos_core::Timeline, CoreError> {
     let vk = pos_crypto::signing::verifying_key_from_public_key(public_key)?;
+    let registry = if export.events.is_empty() {
+        None
+    } else {
+        Some(store.load_key_registry()?.ok_or_else(|| {
+            CoreError::Storage(
+                "verified Timeline import requires a persisted key registry".to_owned(),
+            )
+        })?)
+    };
+    let mut verified_identity = None;
     for event in &export.events {
         let Some(signature) = &event.signature else {
             return Err(CoreError::SignatureVerificationFailed);
@@ -394,6 +406,22 @@ pub fn import_timeline_with_verified_signatures(
         let Some(identity) = event.signature_identity else {
             return Err(CoreError::SignatureVerificationFailed);
         };
+        if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        if verified_identity.is_some_and(|expected| expected != identity) {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        let Some(record) = registry
+            .as_ref()
+            .and_then(|value| value.key_record(identity))
+        else {
+            return Err(CoreError::SignatureVerificationFailed);
+        };
+        if record.public_verification_key != Some(*public_key) {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        verified_identity = Some(identity);
         pos_crypto::key_roles::verify_for_role(
             &vk,
             identity.role,
@@ -1075,11 +1103,13 @@ mod tests {
         };
 
         let mut ok_store = open_store(StoreConfig::Memory).test_ok();
+        ok_store.save_key_registry(&registry).test_ok();
         import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).test_ok();
 
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
         let mut bad_store = open_store(StoreConfig::Memory).test_ok();
+        bad_store.save_key_registry(&registry).test_ok();
         let err = import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
             .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));

@@ -259,6 +259,9 @@ pub enum KeyRegistryErrorV1 {
     /// A signing operation was requested for an encryption role.
     #[error("only signing roles may create role-bound signatures")]
     SigningRoleRequired,
+    /// An encryption operation was requested for a signing role.
+    #[error("only encryption roles may authorize protected material use")]
+    EncryptionRoleRequired,
     /// The identity is permanently tombstoned.
     #[error("key identity has been irreversibly destroyed")]
     Destroyed,
@@ -271,6 +274,9 @@ pub enum KeyRegistryErrorV1 {
     /// The supplied signer does not match the registered key material.
     #[error("signing key does not match the registered identity")]
     SigningKeyMismatch,
+    /// The supplied encryption material does not match the registered identity.
+    #[error("encryption key does not match the registered identity")]
+    EncryptionKeyMismatch,
     /// The registry adapter could not provide its atomic signing boundary.
     #[error("key registry is unavailable for authorized signing")]
     RegistryUnavailable,
@@ -326,6 +332,30 @@ pub trait KeyRegistrySigningPortV1 {
         identity: KeyIdentityV1,
         private_material_digest: Hash,
         public_verification_key: PublicKey,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T;
+}
+
+/// Atomic protected-material boundary for encryption-role adapters.
+///
+/// The core never receives private bytes. An adapter supplies the digest and
+/// keeps its transaction/lock through the non-escaping callback, just as the
+/// signing boundary does. Encryption and signing therefore share no
+/// authorization path or role identity.
+pub trait KeyRegistryEncryptionPortV1 {
+    /// Run one operation while an encryption identity is authorized.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is absent,
+    /// destroyed, inactive, mismatched, or the adapter cannot provide the
+    /// authorization boundary.
+    fn with_encryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
         operation: F,
     ) -> Result<T, KeyRegistryErrorV1>
     where
@@ -641,6 +671,50 @@ impl KeyRegistryStateV1 {
         Ok(operation())
     }
 
+    /// Run one protected-material operation under an active encryption key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed [`KeyRegistryErrorV1`] when the identity is invalid,
+    /// inactive, destroyed, absent, or does not match the registered
+    /// encryption material.
+    pub fn with_encryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        self.validate()
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
+        if identity.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
+        if !identity.role.is_encryption() {
+            return Err(KeyRegistryErrorV1::EncryptionRoleRequired);
+        }
+        let record = self
+            .records
+            .get(&identity)
+            .copied()
+            .ok_or(KeyRegistryErrorV1::NotFound)?;
+        if self.tombstones.contains_key(&identity) {
+            return Err(KeyRegistryErrorV1::Destroyed);
+        }
+        let Some(active) = self.active_key(identity.role) else {
+            return Err(KeyRegistryErrorV1::InactiveKey);
+        };
+        if active.identity != identity {
+            return Err(KeyRegistryErrorV1::InactiveKey);
+        }
+        if record.private_material_digest != Some(private_material_digest) {
+            return Err(KeyRegistryErrorV1::EncryptionKeyMismatch);
+        }
+        Ok(operation())
+    }
+
     /// Destroy private material and retain the public record plus tombstone.
     ///
     /// # Errors
@@ -741,6 +815,20 @@ impl KeyRegistrySigningPortV1 for KeyRegistryStateV1 {
             public_verification_key,
             operation,
         )
+    }
+}
+
+impl KeyRegistryEncryptionPortV1 for KeyRegistryStateV1 {
+    fn with_encryption_authorization<T, F>(
+        &mut self,
+        identity: KeyIdentityV1,
+        private_material_digest: Hash,
+        operation: F,
+    ) -> Result<T, KeyRegistryErrorV1>
+    where
+        F: FnOnce() -> T,
+    {
+        Self::with_encryption_authorization(self, identity, private_material_digest, operation)
     }
 }
 

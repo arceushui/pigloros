@@ -2,8 +2,8 @@
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
-    CanonicalBytes, Hash, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1,
-    Signature,
+    CanonicalBytes, Hash, KeyIdentityV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
+    KeyRegistrySigningPortV1, KeyRoleV1, Signature,
 };
 
 const KEY_MATERIAL_DOMAIN: &[u8] = b"pigloros/key-material/v1";
@@ -64,6 +64,39 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     registry.with_signing_authorization(identity, material_digest, public_verification_key, || {
         sign_for_role_unchecked(signing_key, identity.role, identity.epoch, payload)
     })
+}
+
+/// Authorize one encryption operation under an active registry identity.
+///
+/// The callback is the adapter-owned encryption operation; it may capture
+/// private bytes without moving them through `pos-core`. Destruction and the
+/// callback are ordered by the registry adapter's serialization boundary.
+///
+/// # Errors
+///
+/// Returns a closed [`KeyRegistryErrorV1`] when the identity is invalid,
+/// inactive, destroyed, absent, or is a signing role.
+pub fn with_registered_encryption_authorization<R, T, F>(
+    registry: &mut R,
+    private_material: &[u8; 32],
+    identity: KeyIdentityV1,
+    operation: F,
+) -> Result<T, KeyRegistryErrorV1>
+where
+    R: KeyRegistryEncryptionPortV1,
+    F: FnOnce() -> T,
+{
+    if identity.epoch == 0 {
+        return Err(KeyRegistryErrorV1::InvalidEpoch);
+    }
+    if !identity.role.is_encryption() {
+        return Err(KeyRegistryErrorV1::EncryptionRoleRequired);
+    }
+    registry.with_encryption_authorization(
+        identity,
+        key_material_digest(private_material),
+        operation,
+    )
 }
 
 /// Verify a role/epoch-bound signature.
@@ -250,6 +283,51 @@ mod tests {
                 .key_record(identity)
                 .and_then(|record| record.public_verification_key),
             Some(public_key_from_verifying_key(&verifying_key))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_authorization_is_role_separated_and_destroyable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let material = [11u8; 32];
+        let identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+        let material_digest = key_material_digest(&material);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(identity, material_digest, None))?;
+
+        let mut callbacks = 0;
+        assert_eq!(
+            with_registered_encryption_authorization(&mut registry, &material, identity, || {
+                callbacks += 1;
+                7u8
+            },)?,
+            7
+        );
+        assert_eq!(callbacks, 1);
+        registry.destroy_key(KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            Hash::from_bytes([12; 32]),
+        ))?;
+        assert_eq!(
+            with_registered_encryption_authorization(&mut registry, &material, identity, || {
+                callbacks += 1;
+                8u8
+            },),
+            Err(KeyRegistryErrorV1::Destroyed)
+        );
+        assert_eq!(callbacks, 1);
+
+        let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        assert_eq!(
+            with_registered_encryption_authorization(
+                &mut registry,
+                &material,
+                signing_identity,
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::EncryptionRoleRequired)
         );
         Ok(())
     }

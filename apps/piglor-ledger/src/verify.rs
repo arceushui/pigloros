@@ -10,7 +10,10 @@
 use std::path::Path;
 
 use pos_core::{event::Event, store::SeqRange, KeyRegistryStateV1, KeyRoleV1};
-use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
+use pos_crypto::{
+    key_roles::verify_for_role,
+    signing::{verify, verifying_key_from_public_key},
+};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
 
 use crate::{cli::Source, export::ExportManifest, hex::hex_decode, CliError};
@@ -231,10 +234,18 @@ fn verify_store_event(
         return Ok(Some((which, "event is unsigned".to_owned())));
     };
     let Some(identity) = event.signature_identity else {
-        return Ok(Some((
-            which,
-            "event signature identity is missing".to_owned(),
-        )));
+        let Some(public_key) = supplied_public_key else {
+            return Ok(Some((
+                which,
+                "legacy event signature requires --pubkey for verify-only validation".to_owned(),
+            )));
+        };
+        let verifying_key = verifying_key_from_public_key(&public_key)
+            .map_err(|error| CliError::BadKey(error.to_string()))?;
+        if let Err(error) = verify(&verifying_key, &event.payload, signature) {
+            return Ok(Some((which, error.to_string())));
+        }
+        return Ok(None);
     };
     if identity.role != KeyRoleV1::TimelineIntegritySigning {
         return Ok(Some((
@@ -1128,7 +1139,9 @@ mod tests {
 
         let missing_identity =
             run_store_event(event(), &KeyRegistryStateV1::new(), None, None, true)?.test_err()?;
-        assert!(missing_identity.to_string().contains("signed event"));
+        assert!(missing_identity
+            .to_string()
+            .contains("legacy event signature"));
 
         let wrong_role = run_store_event(
             event(),
