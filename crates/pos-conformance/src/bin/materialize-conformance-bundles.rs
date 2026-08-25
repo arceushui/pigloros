@@ -292,18 +292,14 @@ fn materialize_profile_from_profile_with_authority(
     Ok(())
 }
 
-fn profile_record_bytes(claim_layer: ClaimLayerV1) -> Result<&'static [u8], Box<dyn Error>> {
-    PROFILE_RECORDS
-        .iter()
-        .find(|(_, record_claim_layer)| *record_claim_layer == claim_layer)
-        .map(|(bytes, _)| *bytes)
-        .ok_or_else(|| "canonical profile record is missing".into())
+fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
+    PROFILE_RECORDS[usize::from(claim_layer_code(claim_layer))].0
 }
 
 fn validated_profile_record(
     claim_layer: ClaimLayerV1,
 ) -> Result<(&'static [u8], JsonValue), Box<dyn Error>> {
-    let profile_record_bytes = profile_record_bytes(claim_layer)?;
+    let profile_record_bytes = profile_record_bytes(claim_layer);
     let profile_record: JsonValue = serde_json::from_slice(profile_record_bytes)?;
     validate_profile_record_bindings(claim_layer, &profile_record)?;
     Ok((profile_record_bytes, profile_record))
@@ -1117,7 +1113,7 @@ mod tests {
         assert!(json_string_array(&JsonValue::Null, "missing").is_err());
         assert!(json_string_array(&serde_json::json!({"values": ["ok", 7]}), "values").is_err());
 
-        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity)?;
+        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
         let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
         assert!(validate_profile_record_bindings(
@@ -1125,19 +1121,44 @@ mod tests {
             &canonical_record
         )
         .is_ok());
-        let mut invalid_metadata = canonical_record.clone();
-        invalid_metadata["profile_id"] = JsonValue::String("invalid".to_owned());
-        assert!(validate_profile_record_bindings(
-            ClaimLayerV1::ArtifactIntegrity,
-            &invalid_metadata
-        )
-        .is_err());
+        for field in [
+            "profile_id",
+            "claim_layer",
+            "authority_inventory",
+            "adr_059_execution_matrix",
+            "adr_059_execution_matrix_status",
+        ] {
+            let mut invalid_metadata = canonical_record.clone();
+            invalid_metadata[field] = JsonValue::String("invalid".to_owned());
+            assert!(validate_profile_record_bindings(
+                ClaimLayerV1::ArtifactIntegrity,
+                &invalid_metadata
+            )
+            .is_err());
+        }
+        for field in ["execution_profiles", "bundle_modes"] {
+            let mut invalid_metadata = canonical_record.clone();
+            invalid_metadata[field] = JsonValue::Array(vec![JsonValue::String("invalid".into())]);
+            assert!(validate_profile_record_bindings(
+                ClaimLayerV1::ArtifactIntegrity,
+                &invalid_metadata
+            )
+            .is_err());
+        }
         let mut invalid_digest = canonical_record.clone();
         invalid_digest["authority_inventory_sha256_digest"] = JsonValue::String("00".repeat(32));
         assert!(
             validate_profile_record_bindings(ClaimLayerV1::ArtifactIntegrity, &invalid_digest)
                 .is_err()
         );
+        let mut invalid_matrix_digest = canonical_record.clone();
+        invalid_matrix_digest["adr_059_execution_matrix_blake3_digest"] =
+            JsonValue::String("00".repeat(32));
+        assert!(validate_profile_record_bindings(
+            ClaimLayerV1::ArtifactIntegrity,
+            &invalid_matrix_digest
+        )
+        .is_err());
         let mut invalid_fixtures = canonical_record;
         invalid_fixtures["fixtures"] = JsonValue::Array(Vec::new());
         assert!(fixtures_from_profile_record(&invalid_fixtures, &context).is_err());
@@ -1149,7 +1170,24 @@ mod tests {
             "input": "inputs/replay-negative.json",
             "expected": "expected/replay-negative.json"
         });
+        let mut invalid_collection = serde_json::json!({"fixtures": [invalid_fixture.clone()]});
+        assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
+        invalid_collection["fixtures"] = JsonValue::Array(vec![JsonValue::Null]);
+        assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         assert!(fixture(&invalid_fixture, &context).is_err());
+        for invalid_fixture in [
+            serde_json::json!({}),
+            serde_json::json!({"case_id": "artifact-positive"}),
+            serde_json::json!({"case_id": "artifact-positive", "family": "positive"}),
+            serde_json::json!({
+                "case_id": "artifact-positive",
+                "family": "positive",
+                "input": "inputs/artifact-positive.json"
+            }),
+        ] {
+            assert!(fixture(&invalid_fixture, &context).is_err());
+        }
+        assert_eq!(family_for_path("unknown", "unknown"), None);
         assert!(canonical_fixture_bytes("unknown", "unknown").is_err());
         assert!(canonical_fixture_input("unknown", "unknown").is_err());
         Ok(())
@@ -1173,6 +1211,8 @@ mod tests {
             std::fs::create_dir_all(authority_path.parent().ok_or("authority parent")?).is_ok()
         );
         assert!(std::fs::write(&authority_path, br#"{"fixture_id":"INV-001"}"#).is_ok());
+        let authority_bytes = br#"{"fixture_id":"INV-001"}"#;
+        let authority_digest = hex(blake3::hash(authority_bytes).as_bytes());
         let invalid_authority_entry = serde_json::json!({
             "fixture_id": "INV-001",
             "fixture_bytes_path": "fixtures/INV-001.json",
@@ -1183,9 +1223,77 @@ mod tests {
             append_authority_artifacts(&mut members, &serde_json::json!({}), &authority_root)
                 .is_err()
         );
+        assert!(append_authority_artifacts(
+            &mut members,
+            &serde_json::json!({"entries": [{}]}),
+            &authority_root
+        )
+        .is_err());
+        let missing_expected_result = serde_json::json!({
+            "entries": [{
+                "fixture_id": "INV-001",
+                "fixture_bytes_path": "fixtures/INV-001.json",
+                "fixture_bytes_digest": authority_digest,
+                "expected_result_path": "results/missing.json",
+                "expected_result_digest": "00".repeat(32)
+            }]
+        });
+        assert!(append_authority_artifacts(
+            &mut members,
+            &missing_expected_result,
+            &authority_root
+        )
+        .is_err());
         assert!(append_authority_artifact(
             &mut members,
             &invalid_authority_entry,
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            BundleMemberRoleV1::AuthorityFixture,
+            &authority_root
+        )
+        .is_err());
+        assert!(append_authority_artifact(
+            &mut members,
+            &serde_json::json!({}),
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            BundleMemberRoleV1::AuthorityFixture,
+            &authority_root
+        )
+        .is_err());
+        assert!(append_authority_artifact(
+            &mut members,
+            &serde_json::json!({
+                "fixture_id": "INV-001",
+                "fixture_bytes_path": "../escape.json",
+                "fixture_bytes_digest": "00".repeat(32)
+            }),
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            BundleMemberRoleV1::AuthorityFixture,
+            &authority_root
+        )
+        .is_err());
+        assert!(append_authority_artifact(
+            &mut members,
+            &serde_json::json!({
+                "fixture_id": "INV-001",
+                "fixture_bytes_path": "fixtures/missing.json",
+                "fixture_bytes_digest": "00".repeat(32)
+            }),
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            BundleMemberRoleV1::AuthorityFixture,
+            &authority_root
+        )
+        .is_err());
+        assert!(append_authority_artifact(
+            &mut members,
+            &serde_json::json!({
+                "fixture_id": "INV-001",
+                "fixture_bytes_path": "fixtures/INV-001.json"
+            }),
             "fixture_bytes_path",
             "fixture_bytes_digest",
             BundleMemberRoleV1::AuthorityFixture,
@@ -1216,6 +1324,12 @@ mod tests {
         ]
         .into_iter();
         assert!(run_with_inventory(&mut invalid_inventory, Ok(signing_key_hex()), b"{}").is_err());
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        assert!(bundle_inputs_with_authority(&profile, BundleModeV1::Local, b"{", None,).is_err());
+        assert!(bundle_inputs_with_authority(&profile, BundleModeV1::Local, b"{}", None,).is_err());
+        let mut invalid_input_profile = profile;
+        invalid_input_profile.fixtures[0].case_id = "unknown".to_owned();
+        assert!(bundle_inputs(&invalid_input_profile, BundleModeV1::Local).is_err());
 
         let mut invalid_expected = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         invalid_expected.fixtures[0].expected =
