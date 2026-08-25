@@ -1246,6 +1246,13 @@ mod tests {
     }
 
     #[test]
+    fn malformed_state_with_active_record_missing_is_rejected() {
+        let mut state = KeyRegistryStateV1::new();
+        state.active.insert(ATTRIBUTION.role, ATTRIBUTION);
+        assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
+    }
+
+    #[test]
     fn malformed_state_without_high_water_entry_is_rejected(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = KeyRegistryStateV1::new();
@@ -1535,6 +1542,19 @@ mod tests {
         assert_eq!(
             tombstone_reuse.validate(),
             Err(KeyRegistryErrorV1::InvalidState)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_authorization_rejects_missing_active_role(
+    ) -> Result<(), KeyRegistryErrorV1> {
+        let mut state = KeyRegistryStateV1::new();
+        state.register_key(KeyRegistrationV1::new(DATA, digest(57), None))?;
+        state.active.remove(&DATA.role);
+        assert_eq!(
+            state.with_encryption_authorization(DATA, digest(57), || ()),
+            Err(KeyRegistryErrorV1::InactiveKey)
         );
         Ok(())
     }

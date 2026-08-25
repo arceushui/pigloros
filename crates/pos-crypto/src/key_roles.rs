@@ -329,6 +329,15 @@ mod tests {
             ),
             Err(KeyRegistryErrorV1::EncryptionRoleRequired)
         );
+        assert_eq!(
+            with_registered_encryption_authorization(
+                &mut registry,
+                &material,
+                KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 0),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::InvalidEpoch)
+        );
         Ok(())
     }
 }
