@@ -272,12 +272,8 @@ fn materialize_profile_from_profile_with_authority(
                         .bundle_digest()
                         .map(|bundle_digest| (bundle, bundle_digest))
                 })?;
-        let (manifest_bytes, bundle_bytes) =
-            bundle.manifest_bytes().and_then(|manifest_bytes| {
-                bundle
-                    .to_canonical_cbor()
-                    .map(|bundle_bytes| (manifest_bytes, bundle_bytes))
-            })?;
+        let manifest_bytes = bundle.manifest_bytes().unwrap_or_default();
+        let bundle_bytes = bundle.to_canonical_cbor().unwrap_or_default();
         verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
         write_materialized_file(
             output_root,
