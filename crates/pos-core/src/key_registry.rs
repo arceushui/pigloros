@@ -385,6 +385,9 @@ impl KeyRegistryStateV1 {
             if record.identity != *identity {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
+            if !self.highest_epoch.contains_key(&identity.role) {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
             if record.private_material_digest.is_none() && !self.tombstones.contains_key(identity) {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }

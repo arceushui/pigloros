@@ -665,7 +665,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let db = temp.path().join("ledger.db");
-        let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (registry, identity) = registry_for(&signing_key)?;
         let material_digest = key_material_digest(&signing_key.to_bytes());
         let mut raw_store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
