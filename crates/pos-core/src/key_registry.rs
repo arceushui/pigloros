@@ -531,7 +531,7 @@ impl KeyRegistryStateV1 {
                 {
                     return Err(KeyRegistryErrorV1::InvalidState);
                 }
-                (Some(_), Some(_)) => {}
+                (Some(_), Some(_)) | (None, Some(_)) => {}
                 (Some(previous_digest), None) => {
                     if !next.tombstones.get(identity).is_some_and(|tombstone| {
                         tombstone.destroyed_material_digest == previous_digest
@@ -544,7 +544,6 @@ impl KeyRegistryStateV1 {
                         return Err(KeyRegistryErrorV1::InvalidState);
                     }
                 }
-                (None, Some(_)) => {}
             }
         }
         Ok(())
@@ -657,7 +656,11 @@ impl KeyRegistryStateV1 {
         if self.tombstones.contains_key(&identity) {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
-        let active_identity = self.active.get(&identity.role).copied().unwrap_or(identity);
+        let active_identity = self
+            .active
+            .get(&identity.role)
+            .copied()
+            .ok_or(KeyRegistryErrorV1::InactiveKey)?;
         if active_identity != identity {
             return Err(KeyRegistryErrorV1::InactiveKey);
         }
@@ -701,7 +704,11 @@ impl KeyRegistryStateV1 {
         if self.tombstones.contains_key(&identity) {
             return Err(KeyRegistryErrorV1::Destroyed);
         }
-        let active_identity = self.active.get(&identity.role).copied().unwrap_or(identity);
+        let active_identity = self
+            .active
+            .get(&identity.role)
+            .copied()
+            .ok_or(KeyRegistryErrorV1::InactiveKey)?;
         if active_identity != identity {
             return Err(KeyRegistryErrorV1::InactiveKey);
         }
@@ -1051,6 +1058,10 @@ mod tests {
         assert_eq!(
             registry.with_encryption_authorization(next, digest(2), || ()),
             Err(KeyRegistryErrorV1::Destroyed)
+        );
+        assert_eq!(
+            registry.with_encryption_authorization(DATA, digest(1), || ()),
+            Err(KeyRegistryErrorV1::InactiveKey)
         );
         Ok(())
     }
