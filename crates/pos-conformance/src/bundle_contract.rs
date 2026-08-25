@@ -7044,6 +7044,7 @@ mod instrumented_candidate_entrypoints {
         verify_archive_independently, BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1,
         ConformanceBundleV1, ProfileLifecycleV1, Signature,
     };
+    use ed25519_dalek::Signer;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn signed_draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
@@ -7335,7 +7336,6 @@ mod instrumented_candidate_entrypoints {
         let ciborium::value::Value::Array(fields) = &mut value else {
             return Err("encoded bundle is not an array".into());
         };
-        use ed25519_dalek::Signer;
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         let mut manifest_bytes = Vec::new();
         ciborium::into_writer(&fields[2], &mut manifest_bytes)?;
@@ -7351,9 +7351,7 @@ mod instrumented_candidate_entrypoints {
         Ok(())
     }
 
-    fn public_archive_validation_boundaries(
-        bundle: ConformanceBundleV1,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn public_archive_validation_boundaries(bundle: &ConformanceBundleV1) {
         let mut invalid_unsigned = bundle.clone();
         invalid_unsigned.manifest.lifecycle = ProfileLifecycleV1::Stable;
         assert_eq!(
@@ -7374,25 +7372,44 @@ mod instrumented_candidate_entrypoints {
             missing_profile.validate(),
             Err(BundleContractErrorV1::MemberMissing)
         );
-        Ok(())
     }
 
     fn public_archive_cap_boundaries(
         profile: &super::ConformanceProfileV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let max_input_path_bytes = profile
+            .fixtures
+            .iter()
+            .flat_map(|fixture| fixture.inputs.iter())
+            .map(|input| input.member_id.len())
+            .max()
+            .unwrap_or(1);
+        let max_input_bytes = profile
+            .fixtures
+            .iter()
+            .flat_map(|fixture| fixture.inputs.iter())
+            .map(|input| input.size_bytes)
+            .max()
+            .unwrap_or(1);
+        let total_input_bytes = profile
+            .fixtures
+            .iter()
+            .flat_map(|fixture| fixture.inputs.iter())
+            .map(|input| input.size_bytes)
+            .sum();
         let mut limited_profiles = [profile.clone(), profile.clone(), profile.clone()];
         limited_profiles[0]
             .evaluator_protocol
             .hard_caps
-            .max_member_path_bytes = 1;
+            .max_member_path_bytes = u16::try_from(max_input_path_bytes)?;
         limited_profiles[1]
             .evaluator_protocol
             .hard_caps
-            .max_member_bytes = 1;
+            .max_member_bytes = max_input_bytes;
         limited_profiles[2]
             .evaluator_protocol
             .hard_caps
-            .max_total_bundle_bytes = 1;
+            .max_total_bundle_bytes = total_input_bytes;
         for mut limited_profile in limited_profiles {
             limited_profile.profile_digest = limited_profile.digest();
             let (limited_members, limited_expected) =
@@ -7426,7 +7443,7 @@ mod instrumented_candidate_entrypoints {
         assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
         assert_eq!(verify_archive_independently(&archive), Ok(()));
         public_archive_decode_boundaries(&archive)?;
-        public_archive_validation_boundaries(bundle)?;
+        public_archive_validation_boundaries(&bundle);
         public_archive_cap_boundaries(&profile)
     }
 }
