@@ -1482,11 +1482,9 @@ impl Gateway {
         };
         let scope = ingress_dedup_scope(revocation.subject_id);
         self.enqueue_consent_cleanup(scope).await;
+        let marker_result = self.store.mark_append_identity_cleanup_pending(scope).await;
         self.schedule_pending_consent_cleanup();
-        self.store
-            .mark_append_identity_cleanup_pending(scope)
-            .await
-            .map_err(GatewayError::from)?;
+        marker_result.map_err(GatewayError::from)?;
         let cleanup = self
             .store
             .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
