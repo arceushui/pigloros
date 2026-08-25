@@ -32,7 +32,7 @@ fn public_store_verification_rejects_a_non_timeline_signature_role(
             event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
             payload: CanonicalBytes::from_static(b"prediction"),
             wall_time: WallTime::from_micros(1),
-            seq: Seq::ZERO,
+            seq: Seq::from_u64(1),
             causation_id: None,
             correlation_id: None,
             schema_version: SchemaVersion::V1,

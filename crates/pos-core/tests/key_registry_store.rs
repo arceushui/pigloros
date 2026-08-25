@@ -373,7 +373,9 @@ fn public_registry_traits_and_role_boundaries_are_exercised(
     let second = KeyDestructionPortV1::destroy_key(&mut registry, destruction_request)?;
     let first_tombstone = match first {
         KeyDestructionOutcomeV1::Destroyed(tombstone) => tombstone,
-        other => return Err(format!("unexpected first destruction: {other:?}").into()),
+        KeyDestructionOutcomeV1::AlreadyDestroyed(tombstone) => {
+            return Err(format!("unexpected first destruction: {tombstone:?}").into());
+        }
     };
     assert_eq!(first.tombstone(), first_tombstone);
     assert_eq!(
