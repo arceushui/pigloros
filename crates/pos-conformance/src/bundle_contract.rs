@@ -6985,13 +6985,15 @@ mod instrumented_candidate_entrypoints {
             .ok_or(BundleContractErrorV1::MemberMissing)?;
         provenance.bytes = b"{}".to_vec();
         provenance.digest = *blake3::hash(&provenance.bytes).as_bytes();
-        assert!(ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            unbound_inventory,
-            expected_results,
-        )
-        .is_err());
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &profile,
+                BundleModeV1::Local,
+                unbound_inventory,
+                expected_results,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
         Ok(())
     }
 
