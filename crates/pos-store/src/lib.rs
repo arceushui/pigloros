@@ -1130,6 +1130,8 @@ mod tests {
         registry: &pos_core::KeyRegistryStateV1,
         public_key: &pos_core::PublicKey,
     ) {
+        use pos_core::{KeyIdentityV1, KeyRoleV1};
+
         let mut missing_registry_store = open_store(StoreConfig::Memory).test_ok();
         let missing_registry = import_timeline_with_verified_signatures(
             missing_registry_store.as_mut(),
