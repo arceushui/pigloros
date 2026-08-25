@@ -1114,6 +1114,7 @@ mod tests {
     use super::*;
     use crate::{
         clock::{Seq, WallTime},
+        consent::ConsentAuthority,
         crypto::Hash,
         event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
         ids::{EntityId, EventId, TimelineId},
