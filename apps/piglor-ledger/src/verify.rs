@@ -1107,7 +1107,7 @@ mod tests {
             clock::{Seq, WallTime},
             event::{CanonicalBytes, Event, Kind, SchemaVersion},
             ids::{EntityId, EventId},
-            KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, PublicKey,
+            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey,
         };
         use pos_crypto::{chain::hash_payload, key_roles::key_material_digest};
 

@@ -1163,11 +1163,10 @@ pub fn validate_committed_batch(
 /// identity is not eligible to sign.
 pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
     match (event.signature.as_ref(), event.signature_identity) {
-        (None, None) => Ok(()),
         // ADR-065 legacy signatures predate role metadata. They may be
         // verified by an explicit legacy verifier, but cannot authorize a new
         // role-bound operation.
-        (Some(_), None) => Ok(()),
+        (_, None) => Ok(()),
         (Some(_), Some(identity)) => {
             if identity.epoch == 0 || identity.role != crate::KeyRoleV1::TimelineIntegritySigning {
                 return Err(CoreError::Storage(

@@ -495,7 +495,7 @@ impl KeyRegistryStateV1 {
     ///
     /// # Errors
     ///
-    /// Returns InvalidState when next would erase durable destruction or alter
+    /// Returns [`KeyRegistryErrorV1::InvalidState`] when next would erase durable destruction or alter
     /// an already accepted identity.
     pub fn validate_replacement(&self, next: &Self) -> Result<(), KeyRegistryErrorV1> {
         self.validate()?;
