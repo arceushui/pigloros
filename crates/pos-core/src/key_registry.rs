@@ -531,7 +531,7 @@ impl KeyRegistryStateV1 {
                 {
                     return Err(KeyRegistryErrorV1::InvalidState);
                 }
-                (Some(_), Some(_)) | (None, Some(_)) => {}
+                (_, Some(_)) => {}
                 (Some(previous_digest), None) => {
                     if !next.tombstones.get(identity).is_some_and(|tombstone| {
                         tombstone.destroyed_material_digest == previous_digest
