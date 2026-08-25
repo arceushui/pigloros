@@ -71,6 +71,9 @@ pub enum BundleContractErrorV1 {
     /// The public archive encoding is malformed or not canonical.
     #[error("conformance bundle archive encoding is invalid")]
     ArchiveEncodingInvalid,
+    /// Candidate publication lacks bound deletion and secret-review evidence.
+    #[error("Candidate conformance bundle lacks publication review evidence")]
+    CandidateEvidenceMissing,
 }
 
 /// The two execution modes materialized by #190.
@@ -431,6 +434,9 @@ impl ConformanceBundleV1 {
         }
         validate_total_bytes(total_bytes)?;
         validate_supporting_members(&profile, &self.members)?;
+        if profile.lifecycle == ProfileLifecycleV1::Candidate {
+            validate_candidate_publication(&profile, &self.members)?;
+        }
         validate_selected_bundle_caps(&profile, self)?;
         validate_expected_results(&profile, &self.manifest, &self.members)
     }
@@ -1454,9 +1460,59 @@ fn contains_secret_marker(bytes: &[u8]) -> bool {
         b"BEGIN SECRET".as_slice(),
         b"PRIVATE_KEY".as_slice(),
         b"SUBJECT_SECRET".as_slice(),
+        b"\"PRIVATEKEY\"".as_slice(),
+        b"\"SUBJECTSECRET\"".as_slice(),
+        b"\"PASSWORD\"".as_slice(),
+        b"\"CREDENTIAL\"".as_slice(),
+        b"\"ACCESS_TOKEN\"".as_slice(),
+        b"\"CLIENT_SECRET\"".as_slice(),
+        b"\"private_key\"".as_slice(),
+        b"\"subject_secret\"".as_slice(),
+        b"\"password\"".as_slice(),
+        b"\"credential\"".as_slice(),
+        b"\"access_token\"".as_slice(),
+        b"\"client_secret\"".as_slice(),
     ]
     .iter()
     .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
+}
+
+fn validate_candidate_publication(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    if profile.fixtures.iter().any(|fixture| {
+        fixture.redaction_state == crate::RedactionStateV1::EvidenceMissing
+            || fixture.replay_claim == crate::ReplayClaimV1::UnverifiableArtifactsMissing
+    }) {
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
+    let provenance = members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Provenance)
+        .ok_or(BundleContractErrorV1::CandidateEvidenceMissing)?;
+    let review_markers = [
+        b"\"candidate_status\":\"approved\"".as_slice(),
+        b"\"deletion_review\":\"approved\"".as_slice(),
+        b"\"secret_scan\":\"clean\"".as_slice(),
+    ];
+    if review_markers.iter().any(|marker| {
+        !provenance
+            .bytes
+            .windows(marker.len())
+            .any(|window| window == *marker)
+    }) {
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
+    let review_digest = *blake3::hash(&provenance.bytes).as_bytes();
+    if profile
+        .fixtures
+        .iter()
+        .any(|fixture| fixture.provenance.publication_review_digest != review_digest)
+    {
+        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
+    Ok(())
 }
 
 fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
@@ -3249,6 +3305,45 @@ mod tests {
         assert_eq!(
             invalid_signature.validate(),
             Err(BundleContractErrorV1::SignatureInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_publication_requires_review_and_deletion_evidence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile();
+        let mut missing_review = signed_bundle(&profile, BundleModeV1::Local)?;
+        let provenance_index = missing_review
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance member")?;
+        missing_review.members[provenance_index].bytes = br#"{"source":"fixtures"}"#.to_vec();
+        missing_review.members[provenance_index].digest =
+            *blake3::hash(&missing_review.members[provenance_index].bytes).as_bytes();
+        missing_review.manifest.members[provenance_index].digest =
+            missing_review.members[provenance_index].digest;
+        missing_review.manifest.members[provenance_index].size_bytes =
+            missing_review.members[provenance_index].bytes.len() as u64;
+        assert_eq!(
+            missing_review.validate(),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
+
+        let mut missing_deletion = profile;
+        missing_deletion.fixtures[0].redaction_state = RedactionStateV1::EvidenceMissing;
+        missing_deletion.fixtures[0].replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
+        missing_deletion.profile_digest = missing_deletion.digest();
+        let (members, expected_results) = bundle_inputs(&missing_deletion, BundleModeV1::Local)?;
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &missing_deletion,
+                BundleModeV1::Local,
+                members,
+                expected_results,
+            ),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())
     }
