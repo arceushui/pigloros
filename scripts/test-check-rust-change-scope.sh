@@ -58,6 +58,14 @@ git commit -m deletion >/dev/null
   exit 1
 }
 
+git checkout -B rename main >/dev/null
+git mv old.rs moved.md
+git commit -m rename >/dev/null
+[[ "$(run_scope pull_request)" == 'rust=true' ]] || {
+  printf 'ERROR: renamed Rust input was incorrectly skipped\n' >&2
+  exit 1
+}
+
 [[ "$(run_scope push)" == 'rust=true' ]] || {
   printf 'ERROR: non-pull-request run was not full-scope\n' >&2
   exit 1

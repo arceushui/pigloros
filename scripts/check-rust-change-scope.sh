@@ -21,7 +21,7 @@ else
         ;;
     esac
   done < <(
-    git diff --name-only --diff-filter=ACDMRT "origin/${base_ref}...HEAD"
+    git diff --no-renames --name-only --diff-filter=ACDMRT "origin/${base_ref}...HEAD"
   )
 fi
 
