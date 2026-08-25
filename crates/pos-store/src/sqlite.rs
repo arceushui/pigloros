@@ -9765,7 +9765,7 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn insert_identity(store: &mut SqliteStore, key: u8, scope: AppendDedupScope, expires_at: i64) {
+    fn insert_identity(store: &SqliteStore, key: u8, scope: AppendDedupScope, expires_at: i64) {
         ok(store.conn.execute(
             "INSERT INTO append_identities (dedup_key, scope_key, event_id, expires_at)
              VALUES (?1, ?2, ?3, ?4)",
