@@ -5,7 +5,6 @@ use std::env;
 use std::error::Error;
 use std::path::Path;
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os();
     let _program = arguments.next();
@@ -21,8 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
     let bytes = std::fs::read(path)?;
-    verify_archive_independently(&bytes)?;
-    Ok(())
+    verify_archive_independently(&bytes).map_err(Into::into)
 }
 
 #[cfg(test)]

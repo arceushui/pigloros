@@ -1672,7 +1672,16 @@ fn validate_authority_members(
             inventory_lifecycle,
             matrix_lifecycle,
         )?;
-        validate_execution_matrix_for_lifecycle(&matrix_json, "Candidate")?;
+        let authority_result_digests = members
+            .iter()
+            .filter(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
+            .map(|member| member.digest)
+            .collect::<BTreeSet<_>>();
+        validate_execution_matrix_for_lifecycle(
+            &matrix_json,
+            "Candidate",
+            Some(&authority_result_digests),
+        )?;
     } else {
         validate_provenance_authority_binding(&provenance, inventory_lifecycle)?;
         validate_execution_matrix(&matrix_json)?;
@@ -1917,12 +1926,13 @@ const fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErrorV1> {
-    validate_execution_matrix_for_lifecycle(matrix, "Draft")
+    validate_execution_matrix_for_lifecycle(matrix, "Draft", None)
 }
 
 fn validate_execution_matrix_for_lifecycle(
     matrix: &JsonValue,
     expected_lifecycle: &str,
+    candidate_result_digests: Option<&BTreeSet<[u8; 32]>>,
 ) -> Result<(), BundleContractErrorV1> {
     let rows = matrix
         .get("rows")
@@ -1975,6 +1985,13 @@ fn validate_execution_matrix_for_lifecycle(
                         .and_then(JsonValue::as_str)
                         .and_then(decode_blake3_hex)
                         .is_none()
+                    || !case
+                        .get("expected_result_digest")
+                        .and_then(JsonValue::as_str)
+                        .and_then(decode_blake3_hex)
+                        .is_some_and(|digest| {
+                            candidate_result_digests.is_some_and(|known| known.contains(&digest))
+                        })
             } else {
                 case.get("executed").and_then(JsonValue::as_bool) != Some(false)
                     || !case
@@ -2804,7 +2821,7 @@ mod tests {
             return Err("descriptor must be an array".into());
         };
         descriptor[1] = Value::Integer(u64::try_from(bytes.len())?.into());
-        descriptor[2] = Value::Bytes(blake3::hash(&bytes).as_bytes().to_vec());
+        descriptor[2] = Value::Bytes(blake3::hash(bytes).as_bytes().to_vec());
         Ok(())
     }
 
@@ -4725,6 +4742,11 @@ mod tests {
         candidate.lifecycle = ProfileLifecycleV1::Candidate;
 
         let (candidate_inventory, authority_members) = authority_inventory_materialized_path()?;
+        let candidate_result_digest = authority_members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
+            .ok_or("missing candidate expected result")?
+            .digest;
         let candidate_inventory_bytes = serde_json::to_vec(&candidate_inventory)?;
         let candidate_inventory_digest = *blake3::hash(&candidate_inventory_bytes).as_bytes();
         let mut candidate_matrix: JsonValue = serde_json::from_slice(include_bytes!(
@@ -4742,7 +4764,8 @@ mod tests {
             .ok_or("candidate cases are missing")?
         {
             case["executed"] = JsonValue::Bool(true);
-            case["expected_result_digest"] = JsonValue::String("00".repeat(32));
+            case["expected_result_digest"] =
+                JsonValue::String(materialized_hex(&candidate_result_digest));
         }
         let candidate_matrix_bytes = serde_json::to_vec(&candidate_matrix)?;
         let candidate_matrix_digest = *blake3::hash(&candidate_matrix_bytes).as_bytes();
@@ -5748,8 +5771,8 @@ mod tests {
             case["expected_result_digest"] = JsonValue::String("00".repeat(32));
         }
         assert_eq!(
-            validate_execution_matrix_for_lifecycle(&candidate, "Candidate"),
-            Ok(())
+            validate_execution_matrix_for_lifecycle(&candidate, "Candidate", None),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
