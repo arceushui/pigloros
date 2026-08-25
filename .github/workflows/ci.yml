@@ -140,6 +140,14 @@ jobs:
       - name: Materialize deterministic Draft/Candidate CPF1 bundles
         if: steps.signing-key.outputs.available == 'true'
         run: bash scripts/materialize-conformance-bundles.sh
+      - name: Materialize Draft bundles for pull-request verification
+        if: steps.signing-key.outputs.available == 'false' && github.event_name == 'pull_request'
+        env:
+          # Public, non-trusted key used only to exercise deterministic Draft
+          # materialization when pull-request secrets are unavailable.
+          PIGLOROS_CONFORMANCE_SIGNING_KEY: 0707070707070707070707070707070707070707070707070707070707070707
+          PIGLOROS_CONFORMANCE_PUBLICATION_ID: ci-draft-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
       - name: Upload materialized conformance bundles
         if: steps.signing-key.outputs.available == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -147,6 +155,14 @@ jobs:
           name: conformance-bundles-${{ github.sha }}
           path: fixtures/conformance/published
           retention-days: 90
+          if-no-files-found: error
+      - name: Upload pull-request Draft verification artifact
+        if: steps.signing-key.outputs.available == 'false' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conformance-bundles-pr-draft-${{ github.sha }}
+          path: ${{ runner.temp }}/conformance-draft
+          retention-days: 7
           if-no-files-found: error
 
   clippy:
