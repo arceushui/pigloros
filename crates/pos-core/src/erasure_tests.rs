@@ -19,6 +19,7 @@ use std::rc::Rc;
 #[derive(Clone)]
 struct TestCoordinatorPort {
     accepted: bool,
+    authorization_admitted: bool,
     acknowledgement_admitted: bool,
     freeze_error: Option<ErasureErrorV1>,
     admitted_freeze_provenance: Option<ErasureReferenceV1>,
@@ -30,6 +31,7 @@ struct TestCoordinatorPort {
     commit_error: Option<ErasureErrorV1>,
     targets: Vec<ErasureRequiredTargetV1>,
     records: Rc<RefCell<Vec<ErasureCoordinatorRecordV1>>>,
+    state_history: Rc<RefCell<Vec<ErasureStateV1>>>,
 }
 struct TestResolver {
     states: Vec<ErasureStateV1>,
@@ -69,6 +71,17 @@ impl ErasureStateResolverV1 for ReplyResolver {
 impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         if self.accepted {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::Unauthorized)
+        }
+    }
+    fn admit_authorization(
+        &self,
+        _request: ErasureReferenceV1,
+        _provenance: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if self.authorization_admitted {
             Ok(())
         } else {
             Err(ErasureErrorV1::Unauthorized)
@@ -147,6 +160,7 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
             return Err(error);
         }
         let mut records = self.records.borrow_mut();
+        self.state_history.borrow_mut().push(record.state().clone());
         if let Some(existing) = records
             .iter_mut()
             .find(|existing| existing.request.reference() == record.request.reference())
@@ -158,9 +172,25 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         Ok(())
     }
 }
+
+impl ErasureStateResolverV1 for TestCoordinatorPort {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        Ok(self
+            .state_history
+            .borrow()
+            .iter()
+            .find(|state| state.state_digest() == digest)
+            .cloned())
+    }
+}
+
 fn test_port(accepted: bool, targets: Vec<ErasureRequiredTargetV1>) -> TestCoordinatorPort {
     TestCoordinatorPort {
         accepted,
+        authorization_admitted: true,
         acknowledgement_admitted: true,
         freeze_error: None,
         admitted_freeze_provenance: None,
@@ -172,6 +202,7 @@ fn test_port(accepted: bool, targets: Vec<ErasureRequiredTargetV1>) -> TestCoord
         commit_error: None,
         targets,
         records: Rc::new(RefCell::new(Vec::new())),
+        state_history: Rc::new(RefCell::new(Vec::new())),
     }
 }
 fn reference(value: u8) -> ErasureReferenceV1 {
@@ -511,6 +542,27 @@ fn coordinator_public_retries_reject_injection_and_query_existing() -> Result<()
     assert_eq!(coordinator.existing(reference(1)), Some(&submitted));
     Ok(())
 }
+
+#[test]
+fn coordinator_authorization_and_rejection_use_public_host_seams() -> Result<(), ErasureErrorV1> {
+    let mut unauthorized =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, Vec::new()), reference(2));
+    unauthorized.port.authorization_admitted = false;
+    unauthorized.submit(request()?, reference(3))?;
+    assert_eq!(
+        unauthorized.authorize(reference(1), reference(9)),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, Vec::new()), reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    let rejected = coordinator.reject(reference(1), reference(9))?;
+    assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
+    assert_eq!(coordinator.reject(reference(1), reference(9))?, rejected);
+    Ok(())
+}
+
 #[test]
 fn coordinator_reloads_durable_identity_after_restart() -> Result<(), ErasureErrorV1> {
     let port = test_port(true, Vec::new());

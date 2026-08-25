@@ -1162,6 +1162,17 @@ pub trait ErasureCoordinator {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1>;
+    /// Reject a submitted request before access freeze.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when host rejection admission or durable commit
+    /// fails.
+    fn reject(
+        &mut self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<ErasureStateV1, ErasureErrorV1>;
     /// Freeze access at the Tick Boundary.
     ///
     /// # Errors
@@ -1205,13 +1216,28 @@ pub trait ErasureCoordinator {
 }
 
 /// Host capability boundary used only for authentication and frozen target discovery.
-pub trait ErasureCoordinatorPortV1 {
+pub trait ErasureCoordinatorPortV1: ErasureStateResolverV1 {
     /// Authenticate a request before the state machine records it.
     ///
     /// # Errors
     ///
     /// Returns [`ErasureErrorV1::Unauthorized`] when the host rejects ERQ1.
     fn authenticate(&self, request: &ErasureRequestV1) -> Result<(), ErasureErrorV1>;
+    /// Admit one authorization or rejection decision for a submitted request.
+    ///
+    /// The provenance digest is a reference to host-verified authorization
+    /// evidence, not caller-supplied permission. Implementations must verify
+    /// the request selectors, policy, and authority before returning success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErasureErrorV1::Unauthorized`] or a closed policy error when
+    /// the host cannot authenticate the decision.
+    fn admit_authorization(
+        &self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1>;
     /// Return the authoritative required-target closure at the freeze boundary.
     ///
     /// Once a matching `admit_freeze` succeeds, an exact retry for the same
@@ -1267,9 +1293,11 @@ pub trait ErasureCoordinatorPortV1 {
     /// Admit an acknowledgement from the authenticated owner and evidence boundary.
     ///
     /// The structural owner/target equality check in the core is necessary but
-    /// not sufficient: digests are not identities or signatures.  The host
+    /// not sufficient: digests are not identities or signatures. The host
     /// must authenticate the sender and validate the evidence before this
-    /// operation returns success.
+    /// operation returns success. Admission is keyed durably by the complete
+    /// `(request, target, owner, evidence, outcome)` identity, so a retry
+    /// after coordinator commit failure does not repeat owner-side work.
     ///
     /// # Errors
     ///
@@ -1282,9 +1310,11 @@ pub trait ErasureCoordinatorPortV1 {
     ) -> Result<(), ErasureErrorV1>;
     /// Admit the policy, trust snapshot, and signature references before ERC1.
     ///
-    /// These fields are commitments, not self-authenticating proof.  The host
+    /// These fields are commitments, not self-authenticating proof. The host
     /// must verify them against its `TrustPolicyRegistry` and signature
-    /// admission boundary before returning success.
+    /// admission boundary before returning success. Admission is keyed
+    /// durably by the canonical normalized ERC1 input, so a retry after
+    /// coordinator commit failure is idempotent across process restarts.
     ///
     /// # Errors
     ///
@@ -1484,10 +1514,13 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_scope(&self) -> Result<(), ErasureErrorV1> {
-        if !self
-            .reserved_targets
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
+        if self.reserved_targets.len() > ERASURE_MAX_INVENTORY_RESULTS
+            || self.targets.len() > ERASURE_MAX_INVENTORY_RESULTS
+            || self.acknowledgements.len() > ERASURE_MAX_INVENTORY_RESULTS
+            || !self
+                .reserved_targets
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
             || !self.targets.windows(2).all(|pair| pair[0] < pair[1])
             || has_duplicate_by_target(&self.acknowledgements)
             || self
@@ -1618,6 +1651,14 @@ impl ErasureCoordinatorRecordV1 {
         if self.receipt_input.is_none() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        let receipt_input = self
+            .receipt_input
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let reconstructed = ErasureReceiptV1::new(receipt_input.clone())?;
+        if self.receipt.as_ref() != Some(&reconstructed) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         let mut acknowledgements = self.acknowledgements.clone();
         acknowledgements.sort_unstable();
         if receipt.terminal_state() != self.state.state_digest()
@@ -1695,10 +1736,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
     ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
         match self.port.load_record(request) {
-            Ok(Some(record)) => record.validate(self.coordinator).map(|()| {
-                self.cache(record.clone());
-                record
-            }),
+            Ok(Some(record)) => record
+                .validate(self.coordinator)
+                .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
+                .map(|()| {
+                    self.cache(record.clone());
+                    record
+                }),
             Ok(None) => Err(ErasureErrorV1::ProvenanceMissing),
             Err(error) => Err(error),
         }
@@ -1784,6 +1828,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     Err(ErasureErrorV1::PolicyConflict)
                 };
             }
+            self.port.admit_authorization(request, provenance)?;
             let replay_claim = record.state.replay_claim();
             record
                 .state
@@ -1799,6 +1844,48 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 .and_then(|state| {
                     record.state = state;
                     record.authorize_provenance = Some(provenance);
+                    let state = record.state.clone();
+                    self.commit(record).map(|()| state)
+                })
+        })
+    }
+    /// Reject a submitted ERQ1 after host policy admission; an exact retry is
+    /// a query of the already committed terminal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for an unknown request, failed host admission,
+    /// or a non-monotonic state transition.
+    pub fn reject(
+        &mut self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        self.record(request).and_then(|mut record| {
+            if record.state.lifecycle() != ErasureLifecycleV1::Submitted {
+                return if record.state.lifecycle() == ErasureLifecycleV1::Rejected
+                    && record.state.provenance() == provenance
+                {
+                    Ok(record.state)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                };
+            }
+            self.port.admit_authorization(request, provenance)?;
+            let replay_claim = record.state.replay_claim();
+            record
+                .state
+                .transition(ErasureStateTransitionV1 {
+                    lifecycle: ErasureLifecycleV1::Rejected,
+                    freeze_position: None,
+                    pending_owners: Vec::new(),
+                    failed_owners: Vec::new(),
+                    acknowledged_targets: Vec::new(),
+                    replay_claim,
+                    provenance,
+                })
+                .and_then(|state| {
+                    record.state = state;
                     let state = record.state.clone();
                     self.commit(record).map(|()| state)
                 })
@@ -2194,6 +2281,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinator for ErasureCoordinatorState
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         Self::authorize(self, request, provenance)
+    }
+
+    fn reject(
+        &mut self,
+        request: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        Self::reject(self, request, provenance)
     }
 
     fn freeze_access(
