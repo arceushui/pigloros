@@ -694,6 +694,13 @@ fn durable_record_freeze_reservation_and_admission_bindings_are_checked(
     authorized.reserved_targets = vec![target];
     assert!(ErasureCoordinatorRecordV1::from_parts(authorized.clone(), reference(2)).is_ok());
 
+    let mut duplicate_reservation = authorized.clone();
+    duplicate_reservation.reserved_targets = vec![target, target];
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(duplicate_reservation, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
     let mut authorized_with_admission = authorized;
     authorized_with_admission.freeze_admission = Some(ErasureFreezeAdmissionV1 {
         freeze_position: 10,
@@ -724,6 +731,28 @@ fn durable_record_freeze_reservation_and_admission_bindings_are_checked(
         Err(ErasureErrorV1::PolicyConflict)
     );
 
+    let mut frozen_with_bad_provenance = record_parts(&frozen);
+    frozen_with_bad_provenance
+        .freeze_admission
+        .as_mut()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .provenance = reference(99);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(frozen_with_bad_provenance, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut frozen_with_bad_position = record_parts(&frozen);
+    frozen_with_bad_position
+        .freeze_admission
+        .as_mut()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .freeze_position = 99;
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(frozen_with_bad_position, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
     let mut frozen_with_reservation = record_parts(&frozen);
     frozen_with_reservation.reserved_targets = vec![target];
     assert_eq!(
@@ -743,6 +772,56 @@ fn durable_record_freeze_reservation_and_admission_bindings_are_checked(
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(terminal_without_input, reference(2)),
         Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_authorized_shape_checks_each_persisted_field() -> Result<(), ErasureErrorV1> {
+    let submitted = record_after_submit()?;
+    let authorized_state = submitted.state().transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut authorized = submitted;
+    authorized.state = authorized_state;
+    authorized.authorize_provenance = Some(reference(9));
+
+    let mut with_targets = authorized.clone();
+    with_targets.targets = vec![target];
+    assert_eq!(
+        with_targets.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut with_acknowledgements = authorized.clone();
+    with_acknowledgements.acknowledgements = vec![acknowledgement];
+    assert_eq!(
+        with_acknowledgements.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut with_receipt = authorized.clone();
+    with_receipt.receipt = Some(receipt()?);
+    assert_eq!(
+        with_receipt.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut with_receipt_input = authorized;
+    with_receipt_input.receipt_input = Some(receipt_input(
+        ErasureLifecycleV1::Complete,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert_eq!(
+        with_receipt_input.validate_lifecycle_shape(ErasureLifecycleV1::Authorized),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
 }
