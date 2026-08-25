@@ -42,7 +42,7 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 14. **Coverage rule: delete, don't exempt.** If new code can't be covered by a test, remove the code — don't use `coverage(off)` on production code. Treat the coverage threshold as a design constraint.
 
-15. **Run every applicable quality gate after each code change.** Include review fixes and restart gates from the new commit. Run the documented local checks when resources permit; when local Cargo execution is explicitly constrained, use the unchanged hosted gates and inspect their logs without lowering thresholds.
+15. **Run every applicable quality gate after each code change.** Include review fixes and restart gates from the new commit. Run the documented local format, test, lint, and coverage checks; only when the documented coverage instrumentation exhausts local memory may the unchanged hosted coverage gate serve as the fallback, with thresholds intact and logs inspected.
 
 16. **Choose Rust constructs deliberately when coverage evidence matters.** Equivalent macros and control-flow forms can create different LLVM regions; prefer the idiomatic form that keeps behavior clear and measurable.
 
@@ -154,4 +154,4 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 ## Pre-flight verification
 
-Before delivery, re-read this file and check every applicable rule against the diff, commands, records, and handoff. For a skill update, confirm that the new guidance is a synthesis rather than a transcript, that no contradictory rule remains, and that every new embedded command has been executed once against real data with plausible output. For implementation work, execute each read-only or explicitly authorized embedded command once against real data and inspect its output before relying on it; for mutating or destructive examples, validate the syntax and exact target without running them unless the task authorizes that mutation. Do not report completion until the required local or hosted, review, and external-record checks are evidenced.
+Before delivery, re-read this file and check every applicable rule against the diff, commands, records, and handoff. For a skill update, confirm that the new guidance is a synthesis rather than a transcript, that no contradictory rule remains, and that each new read-only or explicitly authorized embedded command has been executed once against real data with plausible output; validate mutating or destructive examples by syntax and exact-target inspection without executing them unless the task authorizes that mutation. For implementation work, execute each read-only or explicitly authorized embedded command once against real data and inspect its output before relying on it. Do not report completion until the required local, hosted, and external-record checks are evidenced.
