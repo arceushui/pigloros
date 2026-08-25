@@ -768,8 +768,9 @@ pub trait EventStore: Send {
     /// Load the durable role/epoch registry owned by this store, when present.
     ///
     /// # Errors
-    /// Returns [`CoreError::Storage`] when the registry snapshot cannot be read
-    /// or decoded.
+    /// Returns [`CoreError::Storage`] when the backend cannot read the registry
+    /// snapshot, or [`CoreError::Serialization`] when the snapshot cannot be
+    /// decoded or violates the registry invariants.
     fn load_key_registry(&self) -> Result<Option<crate::KeyRegistryStateV1>, CoreError> {
         Ok(None)
     }
@@ -778,7 +779,8 @@ pub trait EventStore: Send {
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the adapter cannot persist the
-    /// registry snapshot.
+    /// registry snapshot, or [`CoreError::Serialization`] when the supplied
+    /// registry is invalid or violates the replacement invariants.
     fn save_key_registry(
         &mut self,
         _registry: &crate::KeyRegistryStateV1,
