@@ -546,15 +546,19 @@ mod tests {
         ))
     }
 
-    fn local_bundle_digest(profile: &ConformanceProfileV1, signing_key: &SigningKey) -> [u8; 32] {
-        let (members, expected_results) =
-            bundle_inputs(profile, BundleModeV1::Local).expect("fixture bundle inputs are valid");
-        ConformanceBundleV1::materialize(profile, BundleModeV1::Local, members, expected_results)
-            .expect("fixture bundle materializes")
-            .sign(signing_key)
-            .expect("fixture bundle signs")
-            .bundle_digest()
-            .expect("fixture bundle has a digest")
+    fn local_bundle_digest(
+        profile: &ConformanceProfileV1,
+        signing_key: &SigningKey,
+    ) -> Result<[u8; 32], Box<dyn Error>> {
+        let (members, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
+        Ok(ConformanceBundleV1::materialize(
+            profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?
+        .sign(signing_key)?
+        .bundle_digest()?)
     }
 
     #[test]
@@ -564,10 +568,10 @@ mod tests {
             OsString::from("materialize"),
             output.clone().into_os_string(),
         ];
-        run(arguments.into_iter(), Ok(signing_key_hex())).expect("fixture materializes");
+        run(arguments.into_iter(), Ok(signing_key_hex()))?;
         assert!(output.join("artifact-integrity/draft").is_dir());
         assert!(output.join("empirical-evaluation/draft").is_dir());
-        std::fs::remove_dir_all(output).expect("fixture output is removable");
+        std::fs::remove_dir_all(output)?;
         Ok(())
     }
 
@@ -587,13 +591,13 @@ mod tests {
             OsString::from("extra"),
         ];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        std::fs::create_dir_all(&output).expect("test output directory is creatable");
+        std::fs::create_dir_all(&output)?;
         let arguments = [
             OsString::from("materialize"),
             output.clone().into_os_string(),
         ];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        std::fs::remove_dir_all(output).expect("test output is removable");
+        std::fs::remove_dir_all(output)?;
         let arguments = [OsString::from("materialize"), OsString::from("missing")];
         assert!(run(
             arguments.into_iter(),
@@ -601,11 +605,11 @@ mod tests {
         )
         .is_err());
         let blocker = output_root("blocker");
-        std::fs::write(&blocker, b"not a directory").expect("test blocker is writable");
+        std::fs::write(&blocker, b"not a directory")?;
         let child = blocker.join("child");
         let arguments = [OsString::from("materialize"), child.into_os_string()];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        std::fs::remove_file(blocker).expect("test blocker is removable");
+        std::fs::remove_file(blocker)?;
         assert!(signing_key_from_encoded(std::env::var(
             "PIGLOROS_CONFORMANCE_MISSING_SIGNING_KEY"
         ))
@@ -625,7 +629,7 @@ mod tests {
 
         let candidate = br#"{"lifecycle":"Candidate"}"#;
         assert_eq!(
-            publication_lifecycles_from_bytes(candidate).expect("candidate inventory is valid"),
+            publication_lifecycles_from_bytes(candidate)?,
             vec![
                 (ProfileLifecycleV1::Draft, "draft"),
                 (ProfileLifecycleV1::Candidate, "candidate")
@@ -688,9 +692,9 @@ mod tests {
         drop(std::fs::remove_dir_all(output));
 
         let output = output_root("write-error");
-        std::fs::create_dir_all(output.join("directory")).expect("test directory is creatable");
+        std::fs::create_dir_all(output.join("directory"))?;
         assert!(write_materialized_file(&output, "directory", b"bytes").is_err());
-        std::fs::remove_dir_all(output).expect("test directory is removable");
+        std::fs::remove_dir_all(output)?;
         Ok(())
     }
 
@@ -698,15 +702,14 @@ mod tests {
     fn materializer_manifest_and_bundle_write_errors_are_explicit() -> Result<(), Box<dyn Error>> {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
-        let digest = local_bundle_digest(&profile, &signing_key);
+        let digest = local_bundle_digest(&profile, &signing_key)?;
         let prefix = "artifact-integrity/draft";
 
         let manifest_root = output_root("manifest-error");
-        std::fs::create_dir_all(manifest_root.join(prefix)).expect("manifest prefix is creatable");
+        std::fs::create_dir_all(manifest_root.join(prefix))?;
         std::fs::create_dir_all(
             manifest_root.join(format!("{prefix}/manifest-local-{}.cbor", hex(&digest))),
-        )
-        .expect("manifest collision is creatable");
+        )?;
         assert!(materialize_profile_from_profile(
             &manifest_root,
             &signing_key,
@@ -716,22 +719,20 @@ mod tests {
             "artifact-integrity",
         )
         .is_err());
-        std::fs::remove_dir_all(manifest_root).expect("manifest test output is removable");
+        std::fs::remove_dir_all(manifest_root)?;
 
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
-        let digest = local_bundle_digest(&profile, &signing_key);
+        let digest = local_bundle_digest(&profile, &signing_key)?;
         let bundle_root = output_root("bundle-error");
-        std::fs::create_dir_all(bundle_root.join(prefix)).expect("bundle prefix is creatable");
+        std::fs::create_dir_all(bundle_root.join(prefix))?;
         std::fs::write(
             bundle_root.join(format!("{prefix}/manifest-local-{}.cbor", hex(&digest))),
             b"existing",
-        )
-        .expect("manifest collision is writable");
+        )?;
         std::fs::create_dir_all(
             bundle_root.join(format!("{prefix}/bundle-local-{}.cfb1", hex(&digest))),
-        )
-        .expect("bundle collision is creatable");
+        )?;
         assert!(materialize_profile_from_profile(
             &bundle_root,
             &signing_key,
@@ -741,7 +742,7 @@ mod tests {
             "artifact-integrity",
         )
         .is_err());
-        std::fs::remove_dir_all(bundle_root).expect("bundle test output is removable");
+        std::fs::remove_dir_all(bundle_root)?;
         Ok(())
     }
 }
