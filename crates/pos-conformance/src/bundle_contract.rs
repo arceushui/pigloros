@@ -1425,7 +1425,7 @@ fn json_object<'a>(
 ) -> Result<&'a JsonValue, BundleContractErrorV1> {
     value
         .get(field)
-        .filter(JsonValue::is_object)
+        .filter(|value| value.is_object())
         .ok_or(BundleContractErrorV1::MemberDigestMismatch)
 }
 
