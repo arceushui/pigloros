@@ -11,7 +11,7 @@ use pos_core::{
 };
 use pos_crypto::{
     key_roles::{key_material_digest, sign_for_registered_role},
-    signing::{public_key_from_verifying_key, verifying_key_from_public_key},
+    signing::public_key_from_verifying_key,
 };
 
 use crate::{
@@ -700,7 +700,8 @@ mod tests {
             .key_record(identity)
             .and_then(|record| record.public_verification_key)
             .ok_or("expected retained public verification key")?;
-        let retained_verifying_key = verifying_key_from_public_key(&retained_public_key)?;
+        let retained_verifying_key =
+            pos_crypto::signing::verifying_key_from_public_key(&retained_public_key)?;
         let events = reopened.read(timeline.id(), SeqRange::all())?;
         let event = events.first().ok_or("expected signed prediction event")?;
         let signature = event.signature.as_ref().ok_or("expected signature")?;
