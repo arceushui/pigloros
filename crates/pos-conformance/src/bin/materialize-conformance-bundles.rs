@@ -413,7 +413,7 @@ fn profile_from_record(
     profile_record: &JsonValue,
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let context = fixture_context(profile_record_bytes, claim_layer);
-    let fixtures = fixtures_from_profile_record(&profile_record, &context)?;
+    let fixtures = fixtures_from_profile_record(profile_record, &context)?;
     let air_gapped_execution_profile_digest = labeled_digest(
         "PiglorOS.ExecutionProfile.v1",
         b"deterministic-air-gapped-v1",
