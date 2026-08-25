@@ -621,6 +621,7 @@ fn validate_archive_length(length: usize) -> Result<(), BundleContractErrorV1> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn preflight_archive(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
     fn length(
         bytes: &[u8],
@@ -2788,6 +2789,23 @@ mod tests {
                 bundle.validate()?;
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn draft_bundle_skips_candidate_evidence_gate() -> Result<(), Box<dyn std::error::Error>> {
+        let mut profile = profile();
+        profile.lifecycle = ProfileLifecycleV1::Draft;
+        profile.profile_digest = profile.digest();
+        let (members, expected_results) = bundle_inputs(&profile, BundleModeV1::Local)?;
+        let bundle = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?
+        .sign(&ed25519_dalek::SigningKey::from_bytes(&[42; 32]))?;
+        assert!(bundle.validate().is_ok());
         Ok(())
     }
 
@@ -5052,6 +5070,7 @@ mod instrumented_candidate_entrypoints {
     use super::tests;
     use super::{BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundleV1};
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn signed_candidate_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
         let profile = tests::profile();
         let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
