@@ -3137,12 +3137,13 @@ impl EventStore for SqliteStore {
                                 "non-root chain entry is missing its fork sequence".to_owned(),
                             ));
                         };
+                        let fork_point_error = CoreError::Storage(format!(
+                            "Fork point precedes inherited history for timeline {tid}"
+                        ));
                         let local_limit = logical_fork
                             .as_u64()
                             .checked_sub(logical_prefix)
-                            .ok_or(CoreError::Storage(format!(
-                                "Fork point precedes inherited history for timeline {tid}"
-                            )))?;
+                            .ok_or(fork_point_error)?;
                         self.get_head_seq(tid)
                             .map(Seq::as_u64)
                             .and_then(|local_head| {
