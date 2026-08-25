@@ -2300,12 +2300,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             })
             .and_then(|terminal| {
                 record.state = terminal;
-                Self::normalize_receipt_input(request, self.coordinator, record, input.clone()).map(
-                    |normalized| {
+                Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
+                    .inspect(|normalized| {
                         record.receipt_input = Some(normalized.clone());
-                        normalized
-                    },
-                )
+                    })
             })
             .and_then(|normalized| self.port.admit_receipt(&normalized).map(|()| normalized))
             .and_then(ErasureReceiptV1::new)
