@@ -540,6 +540,17 @@ pub trait EventStore: Send {
         Ok(None)
     }
 
+    /// Durably mark one revocable scope for bounded cleanup continuation.
+    ///
+    /// The marker is written before the first cleanup attempt so a committed
+    /// revocation remains recoverable even when that attempt fails.
+    fn mark_append_identity_cleanup_pending(
+        &mut self,
+        _scope: AppendDedupScope,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
+
     /// Read events from a timeline in a seq range.
     ///
     /// For a forked timeline, this transparently stitches `parent[0..fork_seq]` + child events.

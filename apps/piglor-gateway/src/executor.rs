@@ -172,6 +172,10 @@ enum Command {
     PendingAppendIdentityCleanup {
         reply: oneshot::Sender<Result<Option<AppendDedupScope>, StoreExecutorError>>,
     },
+    MarkAppendIdentityCleanupPending {
+        scope: AppendDedupScope,
+        reply: oneshot::Sender<Result<(), StoreExecutorError>>,
+    },
     RootCount {
         maximum: usize,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
@@ -256,6 +260,7 @@ impl Command {
             | Self::Purge { .. }
             | Self::RemoveAppendIdentitiesBounded { .. }
             | Self::PendingAppendIdentityCleanup { .. }
+            | Self::MarkAppendIdentityCleanupPending { .. }
             | Self::Create { .. }
             | Self::Append { .. }
             | Self::AppendConsentGrant { .. }
@@ -1050,6 +1055,15 @@ impl StoreExecutor {
             reply
         })
     }
+    pub(crate) async fn mark_append_identity_cleanup_pending(
+        &self,
+        scope: AppendDedupScope,
+    ) -> Result<(), StoreExecutorError> {
+        submit!(self, |reply| Command::MarkAppendIdentityCleanupPending {
+            scope,
+            reply
+        })
+    }
     pub(crate) async fn admit_geo_location(
         &self,
         request: GeoLocationAdmissionRequestV1,
@@ -1481,6 +1495,9 @@ fn expire_command(command: Command) {
         Command::PendingAppendIdentityCleanup { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::MarkAppendIdentityCleanupPending { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         Command::RootCount { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1652,6 +1669,15 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             send_store_result(
                 reply,
                 state.store.event_store().pending_append_identity_cleanup(),
+            );
+        }
+        Command::MarkAppendIdentityCleanupPending { scope, reply } => {
+            send_store_result(
+                reply,
+                state
+                    .store
+                    .event_store()
+                    .mark_append_identity_cleanup_pending(scope),
             );
         }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),

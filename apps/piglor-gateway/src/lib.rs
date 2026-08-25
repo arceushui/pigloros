@@ -512,7 +512,6 @@ const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize = match NonZeroUsize::new(256) {
     Some(value) => value,
     None => NonZeroUsize::MIN,
 };
-const CONSENT_DEDUP_CLEANUP_RETRY_LIMIT: u8 = 3;
 const CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS: u64 = 50;
 
 type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
@@ -922,37 +921,45 @@ impl Gateway {
         }
     }
 
-    fn schedule_pending_consent_cleanup(&self) {
-        let gateway = self.clone();
-        tokio::spawn(async move {
-            let mut retries = 0_u8;
-            loop {
-                match gateway.process_pending_consent_cleanup().await {
-                    Ok(Some(outcome)) if outcome.more_may_remain => {
-                        retries = 0;
-                        tokio::task::yield_now().await;
-                    }
-                    Ok(Some(_)) => {
-                        retries = 0;
-                    }
-                    Ok(None) => break,
-                    Err(_) if retries < CONSENT_DEDUP_CLEANUP_RETRY_LIMIT => {
-                        retries = retries.saturating_add(1);
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS,
-                        ))
-                        .await;
-                    }
-                    Err(_) => break,
+    async fn run_pending_consent_cleanup_worker(&self) {
+        loop {
+            match self.process_pending_consent_cleanup().await {
+                Ok(Some(outcome)) if outcome.more_may_remain => {
+                    tokio::task::yield_now().await;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS,
+                    ))
+                    .await;
                 }
             }
-        });
+        }
+    }
+
+    fn schedule_pending_consent_cleanup(&self) {
+        let gateway = self.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(gateway.run_pending_consent_cleanup_worker());
+        } else {
+            let _ = std::thread::Builder::new()
+                .name("piglor-consent-cleanup".to_owned())
+                .spawn(move || {
+                    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        return;
+                    };
+                    runtime.block_on(gateway.run_pending_consent_cleanup_worker());
+                });
+        }
     }
 
     fn schedule_startup_consent_cleanup(self) -> Self {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            self.schedule_pending_consent_cleanup();
-        }
+        self.schedule_pending_consent_cleanup();
         self
     }
 
@@ -964,7 +971,7 @@ impl Gateway {
     ///
     /// # Errors
     /// Returns the underlying bounded store error. A failed scope remains
-    /// queued for the scheduler's bounded retry budget or a later maintenance
+    /// queued for the scheduler's persistent retry loop or a later maintenance
     /// invocation.
     pub async fn process_pending_consent_cleanup(
         &self,
@@ -1472,6 +1479,12 @@ impl Gateway {
             }
         };
         let scope = ingress_dedup_scope(revocation.subject_id);
+        self.enqueue_consent_cleanup(scope).await;
+        self.schedule_pending_consent_cleanup();
+        self.store
+            .mark_append_identity_cleanup_pending(scope)
+            .await
+            .map_err(GatewayError::from)?;
         let cleanup = self
             .store
             .remove_append_identities_bounded(scope, CONSENT_DEDUP_CLEANUP_BATCH)
@@ -1479,7 +1492,6 @@ impl Gateway {
             .map_err(GatewayError::from)?;
         if cleanup.more_may_remain {
             self.enqueue_consent_cleanup(scope).await;
-            self.schedule_pending_consent_cleanup();
         }
         Ok(event)
     }
@@ -3139,8 +3151,7 @@ mod tests {
             .await;
         gateway.schedule_pending_consent_cleanup();
         tokio::time::sleep(Duration::from_millis(
-            CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS
-                * u64::from(CONSENT_DEDUP_CLEANUP_RETRY_LIMIT.saturating_add(1)),
+            CONSENT_DEDUP_CLEANUP_RETRY_DELAY_MILLIS * 2,
         ))
         .await;
         assert!(gateway.process_pending_consent_cleanup().await.is_err());

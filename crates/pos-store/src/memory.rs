@@ -1765,6 +1765,16 @@ impl EventStore for MemoryStore {
         Ok(self.pending_append_identity_cleanup.last().copied())
     }
 
+    fn mark_append_identity_cleanup_pending(
+        &mut self,
+        scope: AppendDedupScope,
+    ) -> Result<(), CoreError> {
+        if !self.pending_append_identity_cleanup.contains(&scope) {
+            self.pending_append_identity_cleanup.push(scope);
+        }
+        Ok(())
+    }
+
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| self.collect_events_in_range(timeline, range))

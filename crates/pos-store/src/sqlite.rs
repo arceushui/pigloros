@@ -3055,6 +3055,19 @@ impl EventStore for SqliteStore {
             .transpose()
     }
 
+    fn mark_append_identity_cleanup_pending(
+        &mut self,
+        scope: AppendDedupScope,
+    ) -> Result<(), CoreError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO pending_append_identity_cleanup (scope_key) VALUES (?1)",
+                params![scope.as_bytes().as_slice()],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(())
+    }
+
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| {
