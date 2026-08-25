@@ -1,1 +1,1 @@
-{"case":"replay-negative","claim_layer":"replay_conformance","input":"replayed-suffix-v1","expected":"rejected"}
+{"case":"negative","input":"replayed-suffix-v1","expected":"rejected"}

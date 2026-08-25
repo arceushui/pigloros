@@ -1,1 +1,1 @@
-{"case":"metric-downgrade","claim_layer":"metric_conformance","input":"downgrade-transition-v1","expected":"not-authorized"}
+{"case":"downgrade","input":"downgrade-transition-v1","expected":"not-authorized"}

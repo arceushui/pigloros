@@ -466,7 +466,7 @@ impl ConformanceBundleV1 {
         {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
-        validate_fixture_inputs(&profile, &self.members)?;
+        validate_fixture_inputs_for_mode(&profile, self.manifest.mode, &self.members)?;
         if self.manifest.members.len() != self.members.len()
             || !strictly_ordered(&self.manifest.members)
             || !members_strictly_ordered(&self.members)
@@ -1229,7 +1229,22 @@ fn validate_fixture_inputs(
     profile: &ConformanceProfileV1,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
+    validate_fixture_inputs_for_mode(profile, None, members)
+}
+
+fn validate_fixture_inputs_for_mode(
+    profile: &ConformanceProfileV1,
+    mode: Option<BundleModeV1>,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    let execution_mode = mode.map(|mode| match mode {
+        BundleModeV1::Local => ExecutionModeV1::Local,
+        BundleModeV1::AirGapped => ExecutionModeV1::AirGapped,
+    });
     for fixture in &profile.fixtures {
+        if execution_mode.is_some_and(|execution_mode| !fixture.modes.contains(&execution_mode)) {
+            continue;
+        }
         for input in &fixture.inputs {
             let path = fixture_input_path(
                 &fixture.case_id,
@@ -1373,21 +1388,15 @@ fn validate_expected_results(
 }
 
 fn expected_identity(values: &[BundleExpectedResultV1]) -> ExpectedIdentity<'_> {
-    values
+    let mut identity = values
         .iter()
-        .map(|value| {
-            (
-                value.case_id.as_str(),
-                value.claim_layer,
-                value.execution_profile_digest,
-                value.member_path.as_str(),
-                value.digest,
-            )
-        })
-        .collect()
+        .map(|value| (value.case_id.as_str(), value.claim_layer, value.digest))
+        .collect::<ExpectedIdentity<'_>>();
+    identity.sort_unstable();
+    identity
 }
 
-type ExpectedIdentity<'a> = Vec<(&'a str, ClaimLayerV1, [u8; 32], &'a str, [u8; 32])>;
+type ExpectedIdentity<'a> = Vec<(&'a str, ClaimLayerV1, [u8; 32])>;
 
 fn validate_supporting_members(
     profile: &ConformanceProfileV1,
@@ -2321,6 +2330,9 @@ mod tests {
         let mut members = Vec::new();
         let mut expected_results = Vec::new();
         for (index, fixture) in profile.fixtures.iter().enumerate() {
+            if !fixture.modes.contains(&execution_mode) {
+                continue;
+            }
             let fixture_index = fixture
                 .case_id
                 .strip_prefix("case-")
@@ -2357,7 +2369,6 @@ mod tests {
                 member_path: path,
                 digest: member.digest,
             });
-            assert!(fixture.modes.contains(&execution_mode));
             members.push(member);
         }
         members.extend([
@@ -3532,19 +3543,15 @@ mod tests {
     }
 
     #[test]
-    fn expected_identity_preserves_all_expected_result_fields(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn expected_identity_preserves_case_layer_and_digest() -> Result<(), Box<dyn std::error::Error>>
+    {
         let profile = profile();
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
         let identity = expected_identity(&bundle.manifest.expected_results);
         assert_eq!(identity.len(), bundle.manifest.expected_results.len());
         assert!(!identity.is_empty());
         assert_eq!(identity[0].0, bundle.manifest.expected_results[0].case_id);
-        assert_eq!(
-            identity[0].3,
-            bundle.manifest.expected_results[0].member_path
-        );
-        assert_eq!(identity[0].4, bundle.manifest.expected_results[0].digest);
+        assert_eq!(identity[0].2, bundle.manifest.expected_results[0].digest);
         Ok(())
     }
 

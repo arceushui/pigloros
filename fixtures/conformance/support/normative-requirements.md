@@ -28,6 +28,9 @@ VerificationOutcome, ReplayClaim, redaction state, deterministic CPU/memory/
 event/output/storage/step/time/watchdog bounds, default-deny capability policy,
 licence, notices, SBOM, source/build/publication provenance, limitations, and
 compatibility digest. Missing bounds or provenance are invalid, not unlimited.
+The family source records are layer-neutral; each profile materializes one
+descriptor per supported deterministic ExecutionProfile so Local and
+Air-Gapped bundles do not reuse the wrong profile identity.
 
 ## Bundle parity and authority
 
