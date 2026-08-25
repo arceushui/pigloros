@@ -1133,7 +1133,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn canonical_records_bind_fixture_families_and_candidate_authority(
     ) -> Result<(), Box<dyn Error>> {
         for (_, claim_layer) in PROFILE_RECORDS {
