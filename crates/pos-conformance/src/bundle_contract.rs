@@ -3108,21 +3108,21 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
         let valid = bundle_value(&bundle);
+        independent_member_component_rejections(&valid)?;
+        independent_expected_result_component_rejections(&valid)?;
+        independent_profile_component_rejections(&bundle, &valid)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn independent_member_component_rejections(
+        valid: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let Value::Array(envelope) = &valid else {
             return Err("bundle envelope must be an array".into());
         };
         let manifest = independent_array(&envelope[2], 6)?;
         let members = independent_array_bounded(&envelope[3])?;
         let descriptors = independent_array_bounded(&manifest[4])?;
-        let expected_results = independent_array_bounded(&manifest[5])?;
-        let (expected_paths, profile_bytes) =
-            independent_member_paths_and_profile(members, descriptors)?;
-        let profile_bytes = profile_bytes.ok_or("valid bundle has no profile bytes")?;
-        let lifecycle = archive_u64(&manifest[1])?;
-        assert_eq!(
-            independent_verify_profile(profile_bytes, lifecycle, &manifest[3]),
-            Ok(())
-        );
 
         assert_eq!(
             independent_member_paths_and_profile(&[Value::Null], descriptors),
@@ -3178,7 +3178,21 @@ mod tests {
             independent_member_paths_and_profile(members, &[wrong_descriptor]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        Ok(())
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn independent_expected_result_component_rejections(
+        valid: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Value::Array(envelope) = &valid else {
+            return Err("bundle envelope must be an array".into());
+        };
+        let manifest = independent_array(&envelope[2], 6)?;
+        let members = independent_array_bounded(&envelope[3])?;
+        let descriptors = independent_array_bounded(&manifest[4])?;
+        let expected_results = independent_array_bounded(&manifest[5])?;
+        let (expected_paths, _) = independent_member_paths_and_profile(members, descriptors)?;
         assert_eq!(
             independent_verify_expected_results(&[Value::Null], descriptors, &expected_paths),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
@@ -3213,7 +3227,27 @@ mod tests {
             ),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
+        Ok(())
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn independent_profile_component_rejections(
+        bundle: &ConformanceBundleV1,
+        valid: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Value::Array(envelope) = &valid else {
+            return Err("bundle envelope must be an array".into());
+        };
+        let manifest = independent_array(&envelope[2], 6)?;
+        let members = independent_array_bounded(&envelope[3])?;
+        let descriptors = independent_array_bounded(&manifest[4])?;
+        let (_, profile_bytes) = independent_member_paths_and_profile(members, descriptors)?;
+        let profile_bytes = profile_bytes.ok_or("valid bundle has no profile bytes")?;
+        let lifecycle = archive_u64(&manifest[1])?;
+        assert_eq!(
+            independent_verify_profile(profile_bytes, lifecycle, &manifest[3]),
+            Ok(())
+        );
         assert_eq!(
             independent_verify_profile(&[0x9f, 0xff], lifecycle, &manifest[3]),
             Err(BundleContractErrorV1::ProfileInvalid)
@@ -3229,7 +3263,7 @@ mod tests {
             independent_verify_profile(&wrong_profile_bytes, lifecycle, &manifest[3]),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
-        let mut wrong_profile_magic = profile_value.clone();
+        let mut wrong_profile_magic = profile_value;
         let Value::Array(profile_fields) = &mut wrong_profile_magic else {
             return Err("profile must be an array".into());
         };
