@@ -1170,7 +1170,7 @@ mod tests {
             "input": "inputs/replay-negative.json",
             "expected": "expected/replay-negative.json"
         });
-        let mut invalid_collection = serde_json::json!({"fixtures": [invalid_fixture.clone()]});
+        let mut invalid_collection = serde_json::json!({"fixtures": [invalid_fixture]});
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         invalid_collection["fixtures"] = JsonValue::Array(vec![JsonValue::Null]);
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
@@ -1194,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_and_authority_validation_seams() -> Result<(), Box<dyn Error>> {
+    fn archive_validation_seams() -> Result<(), Box<dyn Error>> {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let (bundle_bytes, bundle_digest, manifest) =
@@ -1204,7 +1204,11 @@ mod tests {
         assert!(verify_public_archive(&bundle_bytes, &wrong_digest, &manifest).is_err());
         assert!(verify_public_archive(&bundle_bytes, &bundle_digest, b"invalid").is_err());
         assert!(verify_public_archive(b"invalid", &bundle_digest, &manifest).is_err());
+        Ok(())
+    }
 
+    #[test]
+    fn authority_validation_seams() -> Result<(), Box<dyn Error>> {
         let authority_root = output_root("invalid-authority");
         let authority_path = authority_root.join("fixtures/INV-001.json");
         assert!(
