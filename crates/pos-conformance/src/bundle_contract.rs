@@ -6253,7 +6253,7 @@ mod tests {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub mod coverage_entrypoints {
+mod coverage_entrypoints {
     use super::tests;
     use super::{
         archive_array_bounded, archive_array_exact, archive_bytes, archive_text, archive_u64,
@@ -7051,6 +7051,9 @@ pub mod coverage_entrypoints {
 }
 
 #[cfg(test)]
+use coverage_entrypoints::exercise_public_bundle_paths;
+
+#[cfg(test)]
 mod instrumented_candidate_entrypoints {
     use super::tests;
     use super::{
@@ -7162,7 +7165,7 @@ mod instrumented_candidate_entrypoints {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_bundle_contract_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
-        super::coverage_entrypoints::exercise_public_bundle_paths()?;
+        super::exercise_public_bundle_paths()?;
         let profile = tests::profile();
         let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
         let unsigned = ConformanceBundleV1::materialize(
