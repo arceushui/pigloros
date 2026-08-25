@@ -6253,7 +6253,7 @@ mod tests {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) mod coverage_entrypoints {
+pub mod coverage_entrypoints {
     use super::tests;
     use super::{
         archive_array_bounded, archive_array_exact, archive_bytes, archive_text, archive_u64,
