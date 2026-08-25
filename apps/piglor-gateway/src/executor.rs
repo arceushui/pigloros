@@ -255,6 +255,7 @@ impl Command {
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
             | Self::RemoveAppendIdentitiesBounded { .. }
+            | Self::PendingAppendIdentityCleanup { .. }
             | Self::Create { .. }
             | Self::Append { .. }
             | Self::AppendConsentGrant { .. }
@@ -1475,6 +1476,9 @@ fn expire_command(command: Command) {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::RemoveAppendIdentitiesBounded { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
+        Command::PendingAppendIdentityCleanup { reply } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
         Command::RootCount { reply, .. } => {
