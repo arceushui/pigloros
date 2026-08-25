@@ -76,6 +76,16 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
         sign_for_registered_role(&mut registry, &signing_key, encryption_identity, &payload,),
         Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
     );
+    let wrong_signing_key = SigningKey::from_bytes(&[34; 32]);
+    assert_eq!(
+        sign_for_registered_role(
+            &mut registry,
+            &wrong_signing_key,
+            signing_identity,
+            &payload,
+        ),
+        Err(pos_core::KeyRegistryErrorV1::SigningKeyMismatch)
+    );
 
     assert_eq!(
         with_registered_encryption_authorization(
@@ -103,6 +113,15 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
             || "not called",
         ),
         Err(pos_core::KeyRegistryErrorV1::EncryptionRoleRequired)
+    );
+    assert_eq!(
+        with_registered_encryption_authorization(
+            &mut registry,
+            &[35; 32],
+            encryption_identity,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::EncryptionKeyMismatch)
     );
 
     Ok(())

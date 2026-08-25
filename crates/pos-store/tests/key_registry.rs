@@ -232,3 +232,31 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         .is_some());
     Ok(())
 }
+
+#[test]
+fn sqlite_key_registry_load_rejects_malformed_persisted_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (registry, _, _) = registry()?;
+    let mut store = SqliteStore::open(path)?;
+    store.save_key_registry(&registry)?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE key_registry SET state_cbor = X'01' WHERE singleton = 1",
+        [],
+    )?;
+    drop(connection);
+
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.load_key_registry(),
+        Err(CoreError::Serialization(_))
+    ));
+    Ok(())
+}

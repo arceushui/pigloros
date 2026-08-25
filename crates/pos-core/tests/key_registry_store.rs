@@ -390,3 +390,176 @@ fn public_registry_traits_and_role_boundaries_are_exercised(
     );
     Ok(())
 }
+
+#[test]
+fn public_registry_error_contracts_are_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+    let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let signing_material = Hash::from_bytes([41; 32]);
+    let signing_public_key = PublicKey::from_bytes([42; 32]);
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_material = Hash::from_bytes([43; 32]);
+    let mut registry = KeyRegistryStateV1::new();
+
+    assert_eq!(
+        registry.register_key(KeyRegistrationV1::new(
+            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 0),
+            signing_material,
+            Some(signing_public_key),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::InvalidEpoch)
+    );
+    assert_eq!(
+        registry.register_key(KeyRegistrationV1::new(
+            signing_identity,
+            signing_material,
+            None,
+        )),
+        Err(pos_core::KeyRegistryErrorV1::MissingPublicVerificationKey)
+    );
+    assert_eq!(
+        registry.register_key(KeyRegistrationV1::new(
+            encryption_identity,
+            encryption_material,
+            Some(signing_public_key),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::UnexpectedPublicVerificationKey)
+    );
+
+    registry.register_key(KeyRegistrationV1::new(
+        signing_identity,
+        signing_material,
+        Some(signing_public_key),
+    ))?;
+    assert_eq!(
+        registry.register_key(KeyRegistrationV1::new(
+            signing_identity,
+            Hash::from_bytes([44; 32]),
+            Some(signing_public_key),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::IdentityConflict)
+    );
+    assert_eq!(
+        registry.register_key(KeyRegistrationV1::new(
+            KeyIdentityV1::new(signing_identity.role, 0),
+            signing_material,
+            Some(signing_public_key),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::InvalidEpoch)
+    );
+    registry.register_key(KeyRegistrationV1::new(
+        KeyIdentityV1::new(signing_identity.role, 2),
+        Hash::from_bytes([45; 32]),
+        Some(signing_public_key),
+    ))?;
+    assert_eq!(
+        registry.register_key(KeyRegistrationV1::new(
+            KeyIdentityV1::new(signing_identity.role, 1),
+            Hash::from_bytes([46; 32]),
+            Some(signing_public_key),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::StaleEpoch {
+            role: signing_identity.role,
+            requested: 1,
+            active: 2,
+        })
+    );
+    assert_eq!(
+        registry.register_key(KeyRegistrationV1::new(
+            KeyIdentityV1::new(KeyRoleV1::PluginReleaseSigning, 1),
+            signing_material,
+            Some(signing_public_key),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::MaterialReuse)
+    );
+
+    registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        encryption_material,
+        None,
+    ))?;
+    assert_eq!(
+        registry.with_signing_authorization(
+            signing_identity,
+            signing_material,
+            signing_public_key,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::InactiveKey)
+    );
+    assert_eq!(
+        registry.with_signing_authorization(
+            KeyIdentityV1::new(KeyRoleV1::PluginReleaseSigning, 1),
+            signing_material,
+            signing_public_key,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::NotFound)
+    );
+    assert_eq!(
+        registry.with_signing_authorization(
+            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2),
+            Hash::from_bytes([47; 32]),
+            signing_public_key,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::SigningKeyMismatch)
+    );
+    assert_eq!(
+        registry.with_encryption_authorization(
+            encryption_identity,
+            Hash::from_bytes([48; 32]),
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::EncryptionKeyMismatch)
+    );
+    assert_eq!(
+        registry.with_encryption_authorization(
+            KeyIdentityV1::new(KeyRoleV1::ExportRecipientEncryption, 1),
+            encryption_material,
+            || "not called",
+        ),
+        Err(pos_core::KeyRegistryErrorV1::NotFound)
+    );
+
+    let missing = KeyDestructionRequestV1::new(
+        KeyIdentityV1::new(KeyRoleV1::ExportRecipientEncryption, 1),
+        encryption_material,
+        Hash::from_bytes([49; 32]),
+    );
+    assert_eq!(
+        registry.destroy_key(missing),
+        Err(pos_core::KeyRegistryErrorV1::NotFound)
+    );
+    assert_eq!(
+        registry.destroy_key(KeyDestructionRequestV1::new(
+            encryption_identity,
+            Hash::from_bytes([50; 32]),
+            Hash::from_bytes([51; 32]),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::MaterialDigestMismatch)
+    );
+    let destroy_request = KeyDestructionRequestV1::new(
+        encryption_identity,
+        encryption_material,
+        Hash::from_bytes([52; 32]),
+    );
+    registry.destroy_key(destroy_request)?;
+    assert_eq!(
+        registry.destroy_key(KeyDestructionRequestV1::new(
+            encryption_identity,
+            Hash::from_bytes([53; 32]),
+            Hash::from_bytes([52; 32]),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::MaterialDigestMismatch)
+    );
+    assert_eq!(
+        registry.destroy_key(KeyDestructionRequestV1::new(
+            encryption_identity,
+            encryption_material,
+            Hash::from_bytes([54; 32]),
+        )),
+        Err(pos_core::KeyRegistryErrorV1::DestructionAuthorizationMismatch)
+    );
+
+    Ok(())
+}
