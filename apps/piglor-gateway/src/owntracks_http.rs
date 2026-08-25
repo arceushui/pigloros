@@ -732,15 +732,16 @@ mod tests {
         revoked_store.revoke_owntracks_enrollment().test_ok()?;
         let revoked_gateway =
             Gateway::new_with_owntracks_ingress_for_test(revoked_store, OWNER_KEY);
-        revoked_gateway
+        let _revoked_token = revoked_gateway
             .consent_authority
             .record_grant_on_timeline(revoked_timeline, &consent_grant(revoked_entity));
         let response = post_owntracks(
-            revoked_gateway,
+            revoked_gateway.clone(),
             authenticated_headers("application/json")?,
             location_body(),
         )
         .await;
+        drop(revoked_gateway);
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         drop(gateway);
