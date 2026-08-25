@@ -237,6 +237,19 @@ impl ErasureLifecycleV1 {
     }
 }
 
+/// Host-admitted outcome for a submitted ERQ1.
+///
+/// The decision is part of the authorization-admission key.  A host must
+/// durably deduplicate `(request, provenance, decision)` so a retry after a
+/// coordinator commit failure cannot re-admit a different lifecycle outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureAuthorizationDecisionV1 {
+    /// Permit the request to continue to access freeze.
+    Authorized,
+    /// Reject the request before access freeze.
+    Rejected,
+}
+
 /// Complete structural ERQ1 construction input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureRequestInputV1 {
@@ -1228,6 +1241,8 @@ pub trait ErasureCoordinatorPortV1: ErasureStateResolverV1 {
     /// The provenance digest is a reference to host-verified authorization
     /// evidence, not caller-supplied permission. Implementations must verify
     /// the request selectors, policy, and authority before returning success.
+    /// Admission is keyed durably by `(request, provenance, decision)` and
+    /// must return the same result for an exact retry after commit failure.
     ///
     /// # Errors
     ///
@@ -1237,6 +1252,7 @@ pub trait ErasureCoordinatorPortV1: ErasureStateResolverV1 {
         &self,
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
+        decision: ErasureAuthorizationDecisionV1,
     ) -> Result<(), ErasureErrorV1>;
     /// Return the authoritative required-target closure at the freeze boundary.
     ///
@@ -1377,7 +1393,7 @@ pub struct ErasureCoordinatorRecordPartsV1 {
     pub acknowledgements: Vec<ErasureAcknowledgementV1>,
     /// The committed terminal receipt, if any.
     pub receipt: Option<ErasureReceiptV1>,
-    /// Exact caller-supplied terminal input used for idempotent retries.
+    /// Canonical normalized terminal input used for idempotent retries.
     pub receipt_input: Option<ErasureReceiptInputV1>,
     /// Authenticated authorization provenance, if present.
     pub authorize_provenance: Option<ErasureReferenceV1>,
@@ -1775,15 +1791,18 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         match self.port.load_record(request.reference()) {
-            Ok(Some(record)) => record.validate(self.coordinator).and_then(|()| {
-                if record.request.eq(&request) {
-                    let state = record.state.clone();
-                    self.cache(record);
-                    Ok(state)
-                } else {
-                    Err(ErasureErrorV1::PolicyConflict)
-                }
-            }),
+            Ok(Some(record)) => record
+                .validate(self.coordinator)
+                .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
+                .and_then(|()| {
+                    if record.request.eq(&request) {
+                        let state = record.state.clone();
+                        self.cache(record);
+                        Ok(state)
+                    } else {
+                        Err(ErasureErrorV1::PolicyConflict)
+                    }
+                }),
             Ok(None) => self.port.authenticate(&request).and_then(|()| {
                 ErasureStateV1::submitted(request.reference(), self.coordinator, provenance)
                     .and_then(|state| {
@@ -1831,7 +1850,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     Err(ErasureErrorV1::PolicyConflict)
                 };
             }
-            self.port.admit_authorization(request, provenance)?;
+            self.port.admit_authorization(
+                request,
+                provenance,
+                ErasureAuthorizationDecisionV1::Authorized,
+            )?;
             let replay_claim = record.state.replay_claim();
             record
                 .state
@@ -1874,7 +1897,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     Err(ErasureErrorV1::PolicyConflict)
                 };
             }
-            self.port.admit_authorization(request, provenance)?;
+            self.port.admit_authorization(
+                request,
+                provenance,
+                ErasureAuthorizationDecisionV1::Rejected,
+            )?;
             let replay_claim = record.state.replay_claim();
             record
                 .state
@@ -2108,7 +2135,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
             if let Some(stored) = record.receipt.clone() {
-                return if record.receipt_input.as_ref() == Some(&input) {
+                let normalized =
+                    Self::normalize_receipt_input(request, self.coordinator, &record, input)?;
+                return if record.receipt_input.as_ref() == Some(&normalized) {
                     Ok(stored)
                 } else {
                     Err(ErasureErrorV1::PolicyConflict)
@@ -2164,6 +2193,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         input.acknowledgements.clone_from(&record.acknowledgements);
         input.pending_owners = record.state.pending_owners().to_vec();
         input.failed_owners = record.state.failed_owners().to_vec();
+        input.receipt_digest = reference_zero();
         Ok(input)
     }
 
@@ -2256,7 +2286,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
                     .and_then(|normalized| {
                         if Self::receipt_input_matches_authority(&input, &normalized) {
-                            record.receipt_input = Some(input);
+                            record.receipt_input = Some(normalized.clone());
                             Ok(normalized)
                         } else {
                             Err(ErasureErrorV1::PolicyConflict)
