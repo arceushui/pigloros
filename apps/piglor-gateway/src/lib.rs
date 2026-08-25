@@ -4086,8 +4086,12 @@ mod tests {
                     CanonicalBytes::from_static(b"x"),
                 )],
             )
-            .test_ok();
-        let export = export_timeline_own(source.as_ref(), timeline.id()).test_ok();
+            .unwrap_or_else(|error| {
+                std::panic::panic_any(format!("source oversized append failed: {error:?}"))
+            });
+        let export = export_timeline_own(source.as_ref(), timeline.id()).unwrap_or_else(|error| {
+            std::panic::panic_any(format!("oversized export failed: {error:?}"))
+        });
 
         let destinations = [
             open_store(StoreConfig::Memory).test_ok(),
@@ -4096,12 +4100,21 @@ mod tests {
             })
             .test_ok(),
         ];
-        for mut destination in destinations {
-            import_timeline_with_id(destination.as_mut(), export.clone()).test_ok();
-            let error = Gateway::new(destination)
+        for (destination_index, mut destination) in destinations.into_iter().enumerate() {
+            import_timeline_with_id(destination.as_mut(), export.clone()).unwrap_or_else(|error| {
+                std::panic::panic_any(format!(
+                    "destination {destination_index} oversized import failed: {error:?}"
+                ))
+            });
+            let result = Gateway::new(destination)
                 .read_events_page(&timeline.id().to_string(), 0, 1)
-                .await
-                .test_err();
+                .await;
+            let error = match result {
+                Ok(_) => std::panic::panic_any(format!(
+                    "destination {destination_index} unexpectedly read oversized event"
+                )),
+                Err(error) => error,
+            };
             assert!(
                 matches!(
                     error,
@@ -4110,7 +4123,7 @@ mod tests {
                         maximum: MAX_EVENT_TYPE_BYTES
                     }
                 ),
-                "unexpected imported oversized-event error: {error:?}"
+                "destination {destination_index} returned unexpected imported oversized-event error: {error:?}"
             );
         }
     }
