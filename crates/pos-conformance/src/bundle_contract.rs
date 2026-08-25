@@ -4608,6 +4608,20 @@ mod tests {
         Ok(())
     }
 
+    fn materialize_candidate_for_test(
+        profile: &ConformanceProfileV1,
+        members: &[BundleMemberV1],
+    ) -> Result<Result<ConformanceBundleV1, BundleContractErrorV1>, Box<dyn std::error::Error>>
+    {
+        let (_, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
+        Ok(ConformanceBundleV1::materialize(
+            profile,
+            BundleModeV1::Local,
+            members.to_vec(),
+            expected_results,
+        ))
+    }
+
     #[test]
     fn candidate_publication_requires_review_and_deletion_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4637,7 +4651,7 @@ mod tests {
         missing_review_members[provenance_index].bytes = malformed_provenance;
         missing_review_members[provenance_index].digest = malformed_provenance_digest;
         assert_eq!(
-            validate_candidate_publication(&missing_review_profile, &missing_review_members),
+            materialize_candidate_for_test(&missing_review_profile, &missing_review_members)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
 
@@ -4645,7 +4659,7 @@ mod tests {
         missing_deletion.fixtures[0].redaction_state = RedactionStateV1::EvidenceMissing;
         missing_deletion.fixtures[0].replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
         assert_eq!(
-            validate_candidate_publication(&missing_deletion, &missing_review_members),
+            materialize_candidate_for_test(&missing_deletion, &missing_review_members)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
 
@@ -4676,15 +4690,15 @@ mod tests {
         approved_members[provenance_index].bytes = approved_provenance;
         approved_members[provenance_index].digest = approved_provenance_digest;
         assert_eq!(
-            validate_candidate_publication(&approved_profile, &approved_members),
-            Ok(())
+            materialize_candidate_for_test(&approved_profile, &approved_members)?,
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         let mut mismatched_review_profile = approved_profile.clone();
         mismatched_review_profile.fixtures[0]
             .provenance
             .publication_review_digest = [9; 32];
         assert_eq!(
-            validate_candidate_publication(&mismatched_review_profile, &approved_members),
+            materialize_candidate_for_test(&mismatched_review_profile, &approved_members)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())
@@ -4932,7 +4946,7 @@ mod tests {
         let mut missing_provenance = members.clone();
         missing_provenance.retain(|member| member.role != BundleMemberRoleV1::Provenance);
         assert_eq!(
-            validate_candidate_publication(&candidate, &missing_provenance),
+            materialize_candidate_for_test(&candidate, &missing_provenance)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
 
@@ -4944,7 +4958,7 @@ mod tests {
         provenance.bytes = b"not-json".to_vec();
         provenance.digest = candidate.provenance_digest;
         assert_eq!(
-            validate_candidate_publication(&candidate, &malformed_provenance),
+            materialize_candidate_for_test(&candidate, &malformed_provenance)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())
@@ -5356,7 +5370,10 @@ mod tests {
             .ok_or("missing provenance member")?;
         provenance.bytes = approved_bytes;
         provenance.digest = approved_digest;
-        assert_eq!(validate_candidate_publication(&candidate, &members), Ok(()));
+        assert_eq!(
+            materialize_candidate_for_test(&candidate, &members)?,
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
         for field in ["candidate_status", "deletion_review", "secret_scan"] {
             let mut invalid = approved.clone();
             invalid[field] = JsonValue::String("pending".to_owned());
@@ -5376,7 +5393,7 @@ mod tests {
             }
             invalid_candidate.profile_digest = invalid_candidate.digest();
             assert_eq!(
-                validate_candidate_publication(&invalid_candidate, &invalid_members),
+                materialize_candidate_for_test(&invalid_candidate, &invalid_members)?,
                 Err(BundleContractErrorV1::CandidateEvidenceMissing)
             );
         }
@@ -5797,21 +5814,24 @@ mod tests {
     fn authority_candidate_rejections(
         profile: &ConformanceProfileV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut members, _) = bundle_inputs(profile, BundleModeV1::Local)?;
+        let mut candidate = profile.clone();
+        candidate.lifecycle = ProfileLifecycleV1::Candidate;
+        candidate.profile_digest = candidate.digest();
+        let (mut members, _) = bundle_inputs(&candidate, BundleModeV1::Local)?;
         members.retain(|member| member.role != BundleMemberRoleV1::Provenance);
         assert_eq!(
-            validate_candidate_publication(profile, &members),
+            materialize_candidate_for_test(&candidate, &members)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
-        let (mut malformed_members, _) = bundle_inputs(profile, BundleModeV1::Local)?;
+        let (mut malformed_members, _) = bundle_inputs(&candidate, BundleModeV1::Local)?;
         let provenance = malformed_members
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::Provenance)
             .ok_or("missing provenance member")?;
         provenance.bytes = b"not-json".to_vec();
-        provenance.digest = profile.provenance_digest;
+        provenance.digest = candidate.provenance_digest;
         assert_eq!(
-            validate_candidate_publication(profile, &malformed_members),
+            materialize_candidate_for_test(&candidate, &malformed_members)?,
             Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())
