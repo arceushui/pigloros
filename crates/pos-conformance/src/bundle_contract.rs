@@ -3397,15 +3397,38 @@ mod tests {
     fn candidate_publication_requires_review_and_deletion_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
+        let malformed_provenance = br#"{"source":"fixtures"}"#.to_vec();
+        let malformed_provenance_digest = *blake3::hash(&malformed_provenance).as_bytes();
         let mut missing_review = signed_bundle(&profile, BundleModeV1::Local)?;
+        let mut missing_review_profile = profile.clone();
+        missing_review_profile.provenance_digest = malformed_provenance_digest;
+        for fixture in &mut missing_review_profile.fixtures {
+            fixture.provenance.source_digest = malformed_provenance_digest;
+            fixture.provenance.build_digest = malformed_provenance_digest;
+            fixture.provenance.publication_review_digest = malformed_provenance_digest;
+        }
+        missing_review_profile.profile_digest = missing_review_profile.digest();
+        let profile_index = missing_review
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or("missing profile member")?;
+        let profile_bytes = missing_review_profile.to_canonical_cbor()?;
+        missing_review.members[profile_index].bytes = profile_bytes;
+        missing_review.members[profile_index].digest =
+            *blake3::hash(&missing_review.members[profile_index].bytes).as_bytes();
+        missing_review.manifest.profile_digest = missing_review_profile.profile_digest;
+        missing_review.manifest.members[profile_index].digest =
+            missing_review.members[profile_index].digest;
+        missing_review.manifest.members[profile_index].size_bytes =
+            missing_review.members[profile_index].bytes.len() as u64;
         let provenance_index = missing_review
             .members
             .iter()
             .position(|member| member.role == BundleMemberRoleV1::Provenance)
             .ok_or("missing provenance member")?;
-        missing_review.members[provenance_index].bytes = br#"{"source":"fixtures"}"#.to_vec();
-        missing_review.members[provenance_index].digest =
-            *blake3::hash(&missing_review.members[provenance_index].bytes).as_bytes();
+        missing_review.members[provenance_index].bytes = malformed_provenance;
+        missing_review.members[provenance_index].digest = malformed_provenance_digest;
         missing_review.manifest.members[provenance_index].digest =
             missing_review.members[provenance_index].digest;
         missing_review.manifest.members[provenance_index].size_bytes =
