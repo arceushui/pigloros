@@ -2173,11 +2173,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     &record,
                     authority_input.clone(),
                 )?;
-                if record.receipt_input.as_ref() != Some(&normalized) {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
-                return Self::validate_receipt_input_evidence(&authority_input, &normalized)
-                    .map(|()| stored);
+                return if record.receipt_input.as_ref() == Some(&normalized) {
+                    Ok(stored)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                };
             }
             if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
                 let freeze_position = record.state.freeze_position();
@@ -2232,31 +2232,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         input.replay_claim = weakest_inventory_claim(&input.inventories);
         input.receipt_digest = reference_zero();
         Ok(input)
-    }
-
-    fn validate_receipt_input_evidence(
-        input: &ErasureReceiptInputV1,
-        normalized: &ErasureReceiptInputV1,
-    ) -> Result<(), ErasureErrorV1> {
-        if input.inventories != normalized.inventories {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if input.policy != normalized.policy {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if input.trust != normalized.trust {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if input.provenance != normalized.provenance {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if input.issue_position != normalized.issue_position {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if input.signature != normalized.signature {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        Ok(())
     }
 
     fn finalize_record(
@@ -2332,10 +2307,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 record.state = terminal;
                 Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
                     .and_then(|normalized| {
-                        Self::validate_receipt_input_evidence(input, &normalized).map(|()| {
-                            record.receipt_input = Some(normalized.clone());
-                            normalized
-                        })
+                        record.receipt_input = Some(normalized.clone());
+                        Ok(normalized)
                     })
             })
             .and_then(|normalized| self.port.admit_receipt(&normalized).map(|()| normalized))
