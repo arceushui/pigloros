@@ -6,6 +6,27 @@ use pos_core::{
     KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, Seq, TimelineId,
 };
 use pos_store::sqlite::SqliteStore;
+use rusqlite::params;
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
+    match value {
+        ciborium::value::Value::Integer(integer) => {
+            if u64::try_from(*integer).ok() == Some(1) {
+                *integer = 0.into();
+                true
+            } else {
+                false
+            }
+        }
+        ciborium::value::Value::Array(values) => values.iter_mut().any(replace_first_integer),
+        ciborium::value::Value::Map(entries) => entries
+            .iter_mut()
+            .any(|(key, value)| replace_first_integer(key) || replace_first_integer(value)),
+        ciborium::value::Value::Tag(_, value) => replace_first_integer(value),
+        _ => false,
+    }
+}
 
 fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
@@ -256,6 +277,87 @@ fn sqlite_key_registry_load_rejects_malformed_persisted_state(
     let store = SqliteStore::open(path)?;
     assert!(matches!(
         store.load_key_registry(),
+        Err(CoreError::Serialization(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn sqlite_key_registry_rejects_a_decodable_invalid_snapshot(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (registry, _, _) = registry()?;
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&registry, &mut encoded)?;
+    let mut value: ciborium::value::Value = ciborium::from_reader(encoded.as_slice())?;
+    assert!(replace_first_integer(&mut value));
+    let mut invalid_encoded = Vec::new();
+    ciborium::into_writer(&value, &mut invalid_encoded)?;
+    let invalid: KeyRegistryStateV1 = ciborium::from_reader(invalid_encoded.as_slice())?;
+    assert!(invalid.validate().is_err());
+
+    let mut store = SqliteStore::open(path)?;
+    assert!(store.save_key_registry(&invalid).is_err());
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE key_registry SET state_cbor = ?1 WHERE singleton = 1",
+        params![invalid_encoded],
+    )?;
+    drop(connection);
+
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.load_key_registry(),
+        Err(CoreError::Serialization(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let mut store = SqliteStore::open(path)?;
+    let timeline = store.create_timeline("invalid-signature-identity")?;
+    seed_event(&mut store, timeline.id())?;
+    drop(store);
+
+    for (role, epoch) in [(-1_i64, 1_i64), (99, 1), (1, -1)] {
+        let connection = rusqlite::Connection::open(path)?;
+        connection.execute(
+            "UPDATE events SET signature_role = ?1, signature_epoch = ?2
+             WHERE timeline_id = ?3",
+            params![role, epoch, timeline.id().to_string()],
+        )?;
+        drop(connection);
+
+        let store = SqliteStore::open(path)?;
+        assert!(matches!(
+            store.read(timeline.id(), pos_core::SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE events SET signature_role = NULL, signature_epoch = 1
+         WHERE timeline_id = ?1",
+        params![timeline.id().to_string()],
+    )?;
+    drop(connection);
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Serialization(_))
     ));
     Ok(())
