@@ -528,10 +528,10 @@ impl ConformanceBundleV1 {
         }
         validate_total_bytes(total_bytes)?;
         validate_supporting_members(&profile, &self.members)?;
-        validate_authority_members(&profile, &self.members)?;
         if profile.lifecycle == ProfileLifecycleV1::Candidate {
             validate_candidate_publication(&profile, &self.members)?;
         }
+        validate_authority_members(&profile, &self.members)?;
         validate_selected_bundle_caps(&profile, self)?;
         validate_expected_results(&profile, &self.manifest, &self.members)
     }
