@@ -9429,6 +9429,11 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn some<T>(value: Option<T>) -> T {
+        value.unwrap_or_else(|| std::panic::resume_unwind(Box::new("expected coverage value")))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn expect_err<T, E: std::fmt::Debug>(value: Result<T, E>) {
         if value.is_ok() {
             std::panic::resume_unwind(Box::new("expected a fail-closed error"));
@@ -9699,12 +9704,7 @@ mod coverage_entrypoints {
             permit,
             1,
         ));
-        assert_eq!(
-            consent_event
-                .unwrap_or_else(|| panic!("expected consent event"))
-                .len(),
-            1
-        );
+        assert_eq!(some(consent_event).len(), 1);
 
         let scope = AppendDedupScope::from_keyed_hash([91; 32]);
         let identity = |key: u8| {
@@ -9718,16 +9718,12 @@ mod coverage_entrypoints {
                 tests::make_draft(EntityId::new(), &[key]),
             ));
         }
-        let first = ok(store.remove_append_identities_bounded(
-            scope,
-            std::num::NonZeroUsize::new(1).unwrap_or_else(|| panic!("nonzero")),
-        ));
+        let first =
+            ok(store.remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))));
         assert!(first.more_may_remain);
         assert_eq!(ok(store.pending_append_identity_cleanup()), Some(scope));
-        let second = ok(store.remove_append_identities_bounded(
-            scope,
-            std::num::NonZeroUsize::new(1).unwrap_or_else(|| panic!("nonzero")),
-        ));
+        let second =
+            ok(store.remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))));
         assert!(!second.more_may_remain);
         assert_eq!(ok(store.pending_append_identity_cleanup()), None);
         assert_eq!(ok(store.remove_append_identities(scope)), 0);
@@ -9741,9 +9737,8 @@ mod coverage_entrypoints {
             WallTime::from_micros(0),
             tests::make_draft(EntityId::new(), b"expired"),
         ));
-        let purged = ok(store.purge_expired_append_identities_bounded(
-            std::num::NonZeroUsize::new(1).unwrap_or_else(|| panic!("nonzero")),
-        ));
+        let purged =
+            ok(store.purge_expired_append_identities_bounded(some(std::num::NonZeroUsize::new(1))));
         assert_eq!(purged.removed, 1);
     }
 
