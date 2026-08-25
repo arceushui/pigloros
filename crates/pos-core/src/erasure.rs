@@ -1512,8 +1512,7 @@ impl ErasureCoordinatorRecordV1 {
             || !self.targets.is_empty()
             || !self.acknowledgements.is_empty()
             || self.receipt.is_some()
-            || self.receipt_input.is_some()
-            || self.freeze_admission.is_some())
+            || self.receipt_input.is_some())
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -1521,8 +1520,7 @@ impl ErasureCoordinatorRecordV1 {
             && (!self.targets.is_empty()
                 || !self.acknowledgements.is_empty()
                 || self.receipt.is_some()
-                || self.receipt_input.is_some()
-                || self.freeze_admission.is_some())
+                || self.receipt_input.is_some())
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -1531,7 +1529,6 @@ impl ErasureCoordinatorRecordV1 {
         }
         if lifecycle == ErasureLifecycleV1::AccessFrozen
             && (self.targets.is_empty()
-                || self.freeze_admission.is_none()
                 || !self.acknowledgements.is_empty()
                 || self.receipt.is_some()
                 || self.receipt_input.is_some())
