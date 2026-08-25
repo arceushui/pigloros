@@ -3608,9 +3608,8 @@ mod tests {
             .members
             .push(opposite_mode_input);
         local_with_opposite_mode_input.rebuild_member_descriptors();
-        let local_with_opposite_mode_input = local_with_opposite_mode_input.sign(&signing_key)?;
         assert_eq!(
-            local_with_opposite_mode_input.validate(),
+            local_with_opposite_mode_input.sign(&signing_key),
             Err(BundleContractErrorV1::UndeclaredMember)
         );
 
