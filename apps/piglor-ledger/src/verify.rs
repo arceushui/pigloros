@@ -771,22 +771,14 @@ mod tests {
             "https://osf.io/example".into(),
         ])
         .test_ok()?;
-        let identity =
-            pos_core::KeyIdentityV1::new(pos_core::KeyRoleV1::TimelineIntegritySigning, 1);
-        let mut invalid_registry = pos_core::KeyRegistryStateV1::new();
-        invalid_registry
-            .register_key(pos_core::KeyRegistrationV1::new(
-                identity,
-                pos_core::Hash::from_bytes([1; 32]),
-                Some(PublicKey::from_bytes([invalid_byte; 32])),
-            ))
+        let connection = rusqlite::Connection::open(&db).test_ok()?;
+        connection
+            .execute(
+                "UPDATE events SET signature = zeroblob(64),
+                 signature_role = NULL, signature_epoch = NULL",
+                [],
+            )
             .test_ok()?;
-        let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-            path: db.to_string_lossy().into_owned(),
-        })
-        .test_ok()?;
-        store.save_key_registry(&invalid_registry).test_ok()?;
-        drop(store);
         let err = run(&Source::Store(db), Some(&invalid_hex), None).test_err()?;
         assert!(err.to_string().contains("invalid --key"), "{err}");
 
@@ -1115,7 +1107,7 @@ mod tests {
             clock::{Seq, WallTime},
             event::{CanonicalBytes, Event, Kind, SchemaVersion},
             ids::{EntityId, EventId},
-            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey,
+            KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, PublicKey,
         };
         use pos_crypto::{chain::hash_payload, key_roles::key_material_digest};
 
@@ -1138,10 +1130,9 @@ mod tests {
         };
 
         let missing_identity =
-            run_store_event(event(), &KeyRegistryStateV1::new(), None, None, true)?.test_err()?;
-        assert!(missing_identity
-            .to_string()
-            .contains("legacy event signature"));
+            run_store_event(event(), &KeyRegistryStateV1::new(), None, None, true)?.test_ok()?;
+        let (_, missing_identity_reason) = expect_mismatch(missing_identity.outcome)?;
+        assert!(missing_identity_reason.contains("legacy event signature"));
 
         let wrong_role = run_store_event(
             event(),
