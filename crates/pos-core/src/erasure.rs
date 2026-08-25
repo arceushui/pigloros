@@ -1483,12 +1483,7 @@ impl ErasureCoordinatorRecordV1 {
         self.dispatch_provenance
     }
 
-    fn validate(&self, coordinator: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
-        if self.request.reference() != self.state.request()
-            || self.state.coordinator() != coordinator
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
+    fn validate_scope(&self) -> Result<(), ErasureErrorV1> {
         if !self
             .reserved_targets
             .windows(2)
@@ -1503,7 +1498,13 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let lifecycle = self.state.lifecycle();
+        Ok(())
+    }
+
+    fn validate_lifecycle_shape(
+        &self,
+        lifecycle: ErasureLifecycleV1,
+    ) -> Result<(), ErasureErrorV1> {
         if matches!(
             lifecycle,
             ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected
@@ -1545,6 +1546,13 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
+        Ok(())
+    }
+
+    fn validate_freeze_admission(
+        &self,
+        lifecycle: ErasureLifecycleV1,
+    ) -> Result<(), ErasureErrorV1> {
         if matches!(
             lifecycle,
             ErasureLifecycleV1::AccessFrozen
@@ -1572,6 +1580,10 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
+        Ok(())
+    }
+
+    fn validate_provenance(&self, lifecycle: ErasureLifecycleV1) -> Result<(), ErasureErrorV1> {
         let operation_provenance_count = [
             self.authorize_provenance,
             self.freeze_provenance,
@@ -1592,39 +1604,63 @@ impl ErasureCoordinatorRecordV1 {
         if operation_provenance_count != expected_operation_count {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if lifecycle.is_terminal() {
-            let Some(receipt) = self.receipt.as_ref() else {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            };
-            if self.receipt_input.is_none() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            let mut acknowledgements = self.acknowledgements.clone();
-            acknowledgements.sort_unstable();
-            if receipt.terminal_state() != self.state.state_digest()
-                || receipt.lifecycle() != lifecycle
-                || receipt.coordinator() != coordinator
-                || receipt.0.request != self.request.reference()
-                || receipt.required_targets() != self.targets.as_slice()
-                || receipt.acknowledgements() != acknowledgements.as_slice()
-            {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-            let complete = acknowledgements_match_closure(&self.targets, &self.acknowledgements)
-                && self
-                    .acknowledgements
-                    .iter()
-                    .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
-            if (lifecycle == ErasureLifecycleV1::Complete) != complete {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-            let (pending, failed) = derived_outcome_owners(&self.targets, &self.acknowledgements);
-            if self.state.pending_owners() != pending.as_slice()
-                || self.state.failed_owners() != failed.as_slice()
-            {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
+        Ok(())
+    }
+
+    fn validate_terminal(
+        &self,
+        lifecycle: ErasureLifecycleV1,
+        coordinator: ErasureReferenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if !lifecycle.is_terminal() {
+            return Ok(());
         }
+        let Some(receipt) = self.receipt.as_ref() else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        };
+        if self.receipt_input.is_none() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let mut acknowledgements = self.acknowledgements.clone();
+        acknowledgements.sort_unstable();
+        if receipt.terminal_state() != self.state.state_digest()
+            || receipt.lifecycle() != lifecycle
+            || receipt.coordinator() != coordinator
+            || receipt.0.request != self.request.reference()
+            || receipt.required_targets() != self.targets.as_slice()
+            || receipt.acknowledgements() != acknowledgements.as_slice()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let complete = acknowledgements_match_closure(&self.targets, &self.acknowledgements)
+            && self
+                .acknowledgements
+                .iter()
+                .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
+        if (lifecycle == ErasureLifecycleV1::Complete) != complete {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let (pending, failed) = derived_outcome_owners(&self.targets, &self.acknowledgements);
+        if self.state.pending_owners() != pending.as_slice()
+            || self.state.failed_owners() != failed.as_slice()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(())
+    }
+
+    fn validate(&self, coordinator: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
+        if self.request.reference() != self.state.request()
+            || self.state.coordinator() != coordinator
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let lifecycle = self.state.lifecycle();
+        self.validate_scope()?;
+        self.validate_lifecycle_shape(lifecycle)?;
+        self.validate_freeze_admission(lifecycle)?;
+        self.validate_provenance(lifecycle)?;
+        self.validate_terminal(lifecycle, coordinator)?;
         Ok(())
     }
 }
@@ -1838,7 +1874,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     record.state = state;
                     record.freeze_provenance = Some(provenance);
                     record.freeze_admission = Some(admission);
-                    record.targets = record.reserved_targets.clone();
+                    record.targets.clone_from(&record.reserved_targets);
                     record.reserved_targets.clear();
                     let state = record.state.clone();
                     self.commit(record).map(|()| state)
