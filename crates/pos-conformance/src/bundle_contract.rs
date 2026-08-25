@@ -4347,6 +4347,49 @@ mod tests {
     }
 
     #[test]
+    fn archive_integer_type_error_seams_are_counted() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+        let manifest = manifest_value(&bundle.manifest);
+        assert!(decode_manifest(&replace_member_field(
+            &manifest,
+            3,
+            Value::Text("role".to_owned()),
+        )?)
+        .is_err());
+        assert!(decode_manifest(&replace_expected_field(
+            &manifest,
+            1,
+            Value::Text("claim-layer".to_owned()),
+        )?)
+        .is_err());
+        assert!(decode_manifest(&replace_expected_field(
+            &manifest,
+            3,
+            Value::Text("mode".to_owned()),
+        )?)
+        .is_err());
+        assert!(decode_manifest(&replace_array_field(
+            &manifest,
+            1,
+            Value::Text("lifecycle".to_owned()),
+        )?)
+        .is_err());
+        assert!(decode_manifest(&replace_array_field(
+            &manifest,
+            2,
+            Value::Text("mode".to_owned()),
+        )?)
+        .is_err());
+        assert!(decode_member(&Value::Array(vec![
+            Value::Text("member".to_owned()),
+            Value::Bytes(vec![1]),
+            Value::Text("role".to_owned()),
+        ]))
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
     fn candidate_evidence_status_seams_are_counted() -> Result<(), Box<dyn std::error::Error>> {
         let mut candidate = profile();
         candidate.lifecycle = ProfileLifecycleV1::Candidate;
