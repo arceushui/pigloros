@@ -276,9 +276,12 @@ pub mod fixtures {
         profile: &ConformanceProfileV1,
         provenance_bytes: Vec<u8>,
         mut authority_members: Vec<BundleMemberV1>,
-    ) -> (Vec<BundleMemberV1>, BundleExpectedResultV1) {
+    ) -> Result<(Vec<BundleMemberV1>, BundleExpectedResultV1), Box<dyn std::error::Error>> {
         let input = b"public candidate input".to_vec();
         let expected = b"public candidate expected".to_vec();
+        let mut profile_member =
+            BundleMemberV1::new(PROFILE_MEMBER_PATH, profile.to_canonical_cbor()?, false);
+        profile_member.role = BundleMemberRoleV1::Profile;
         let input_path = input_path(
             "ART-001",
             &profile.execution_profile_digests[0],
@@ -286,6 +289,7 @@ pub mod fixtures {
         );
         let expected_path = expected_path("ART-001", &profile.execution_profile_digests[0]);
         let mut members = vec![
+            profile_member,
             BundleMemberV1::new(input_path, input, false),
             BundleMemberV1::new(expected_path.clone(), expected.clone(), true),
             BundleMemberV1::supporting(
@@ -335,7 +339,7 @@ pub mod fixtures {
             member_path: expected_path,
             digest: digest(&expected),
         };
-        (members, expected_result)
+        Ok((members, expected_result))
     }
 
     /// Construct the Candidate bundle used by the public materialization test.
@@ -351,7 +355,7 @@ pub mod fixtures {
         let (authority_members, provenance_bytes) = candidate_authority_data()?;
         let profile = profile(digest(&provenance_bytes));
         let (members, expected_result) =
-            candidate_members(&profile, provenance_bytes, authority_members);
+            candidate_members(&profile, provenance_bytes, authority_members)?;
         Ok(ConformanceBundleV1::materialize(
             &profile,
             BundleModeV1::Local,
