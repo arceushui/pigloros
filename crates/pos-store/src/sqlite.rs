@@ -9625,6 +9625,29 @@ mod coverage_entrypoints {
         ));
         expect_err(store.logical_head(child.id()));
         expect_err(store.logical_head_unchecked(child.id()));
+
+        let mut missing_fork = tests::new_store();
+        let root = ok(missing_fork.create_timeline("read-missing-fork-root"));
+        let child = ok(missing_fork.fork(root.id(), Seq::ZERO, "read-missing-fork-child"));
+        ok(missing_fork.conn.execute(
+            "UPDATE timelines SET fork_seq = NULL WHERE id = ?1",
+            rusqlite::params![child.id().to_string()],
+        ));
+        expect_err(missing_fork.read(child.id(), SeqRange::all()));
+
+        let mut overflow = tests::new_store();
+        let root = ok(overflow.create_timeline("logical-head-overflow-root"));
+        let child = ok(overflow.fork(root.id(), Seq::ZERO, "logical-head-overflow-child"));
+        let max = i64::MAX;
+        ok(overflow.conn.execute(
+            "UPDATE timelines SET head_seq = ?1 WHERE id = ?2",
+            rusqlite::params![max, root.id().to_string()],
+        ));
+        ok(overflow.conn.execute(
+            "UPDATE timelines SET fork_seq = ?1, head_seq = ?1 WHERE id = ?2",
+            rusqlite::params![max, child.id().to_string()],
+        ));
+        expect_err(overflow.logical_head_unchecked(child.id()));
     }
 
     #[test]
@@ -9634,6 +9657,84 @@ mod coverage_entrypoints {
         let authority = ConsentAuthority::new();
         ok(store.bind_consent_authority(authority.append_permit()));
         expect_err(store.append_bounded_visible(timeline.id(), &[], 10, true, None, None));
+    }
+
+    #[test]
+    fn bounded_append_and_identity_cleanup_cover_success_and_continuation_paths() {
+        let mut store = tests::new_store();
+        let ordinary = ok(store.create_timeline("sqlite-bounded-ordinary"));
+        let draft = tests::make_draft(EntityId::new(), b"bounded");
+        let committed = ok(store.append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1));
+        assert_eq!(committed.as_ref().map(Vec::len), Some(1));
+        assert!(store
+            .append_bounded(ordinary.id(), std::slice::from_ref(&draft), 1)
+            .test_ok()
+            .is_none());
+
+        let consent = ok(store.create_timeline("sqlite-bounded-consent"));
+        let subject = EntityId::new();
+        let grant = pos_core::ConsentGrantedV1 {
+            subject_id: subject,
+            grantee_id: EntityId::new(),
+            purpose: "bounded-consent".to_owned(),
+            modalities: pos_core::MODALITY_LOCATION,
+            min_geo_resolution: 1,
+            fork_permitted: false,
+            export_permitted: false,
+            retention_days: 0,
+            expiry_secs: 0,
+            grant_seq: 1,
+        };
+        let grant_draft = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            grant.encode().test_ok(),
+        );
+        let authority = ConsentAuthority::new();
+        let permit = authority.append_permit();
+        ok(store.bind_consent_authority(permit));
+        let consent_event = ok(store.append_consent_bounded(
+            consent.id(),
+            std::slice::from_ref(&grant_draft),
+            permit,
+            1,
+        ));
+        assert_eq!(consent_event.test_ok().len(), 1);
+
+        let scope = AppendDedupScope::from_keyed_hash([91; 32]);
+        for key in [92, 93] {
+            ok(store.append_or_duplicate(
+                ordinary.id(),
+                tests::append_identity(key, 91),
+                WallTime::from_micros(1),
+                tests::make_draft(EntityId::new(), &[key]),
+            ));
+        }
+        let first =
+            ok(store
+                .remove_append_identities_bounded(scope, std::num::NonZeroUsize::new(1).test_ok()));
+        assert!(first.more_may_remain);
+        assert_eq!(
+            store.pending_append_identity_cleanup().test_ok(),
+            Some(scope)
+        );
+        let second =
+            ok(store
+                .remove_append_identities_bounded(scope, std::num::NonZeroUsize::new(1).test_ok()));
+        assert!(!second.more_may_remain);
+        assert_eq!(store.pending_append_identity_cleanup().test_ok(), None);
+        assert_eq!(store.remove_append_identities(scope).test_ok(), 0);
+
+        ok(store.append_or_duplicate(
+            ordinary.id(),
+            tests::append_identity(94, 94),
+            WallTime::from_micros(0),
+            tests::make_draft(EntityId::new(), b"expired"),
+        ));
+        let purged =
+            ok(store
+                .purge_expired_append_identities_bounded(std::num::NonZeroUsize::new(1).test_ok()));
+        assert_eq!(purged.removed, 1);
     }
 
     #[test]
