@@ -2894,7 +2894,10 @@ impl EventStore for SqliteStore {
             .map(Some)
     }
 
-    fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+    fn save_key_registry_in_transaction(
+        &self,
+        registry: &KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
         registry
             .validate()
             .map_err(|error| CoreError::Serialization(error.to_string()))?;
@@ -2914,6 +2917,14 @@ impl EventStore for SqliteStore {
             )
             .map(|_| ())
             .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = self.save_key_registry_in_transaction(registry);
+        finish_immediate_transaction(&self.conn, result)
     }
 
     fn append_signed_authorized(
@@ -2957,7 +2968,7 @@ impl EventStore for SqliteStore {
             let outcome = registry
                 .destroy_key(request)
                 .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
-            self.save_key_registry(&registry)?;
+            self.save_key_registry_in_transaction(&registry)?;
             Ok((outcome, registry))
         })();
         finish_immediate_transaction(&self.conn, result)

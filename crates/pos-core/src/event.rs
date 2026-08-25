@@ -146,6 +146,7 @@ pub struct Event {
     pub schema_version: SchemaVersion,
     pub signature: Option<Signature>,
     /// Role and epoch domain used for the signature, when present.
+    #[serde(default)]
     pub signature_identity: Option<crate::KeyIdentityV1>,
     pub payload_hash: Hash,
 }

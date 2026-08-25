@@ -1641,10 +1641,21 @@ impl EventStore for MemoryStore {
     }
 
     fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-        Ok(self.key_registry.clone())
+        self.key_registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .validate()
+                    .map(|()| registry.clone())
+                    .map_err(|error| CoreError::Serialization(error.to_string()))
+            })
+            .transpose()
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        registry
+            .validate()
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
         if let Some(previous) = &self.key_registry {
             previous
                 .validate_replacement(registry)

@@ -457,7 +457,7 @@ mod tests {
             Box::new(memory),
             pos_core::ids::TimelineId::new(),
             EntityId::new(),
-            signing_key,
+            signing_key.clone(),
             poisoned_registry(),
             identity,
             Box::new(Blake3Hasher),
