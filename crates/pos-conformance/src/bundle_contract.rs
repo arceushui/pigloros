@@ -3999,7 +3999,7 @@ mod tests {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut malformed_matrix = members.clone();
+        let mut malformed_matrix = members.to_vec();
         malformed_matrix
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
