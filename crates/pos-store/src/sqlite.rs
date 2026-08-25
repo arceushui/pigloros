@@ -11469,6 +11469,38 @@ mod key_registry_coverage {
         store.destroy_key_registry(request)
     }
 
+    fn changed_tombstone_digest(
+        registry: &KeyRegistryStateV1,
+    ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(registry, &mut bytes)?;
+        let mut value: ciborium::value::Value = ciborium::from_reader(bytes.as_slice())?;
+        fn replace_first_bytes(
+            value: &mut ciborium::value::Value,
+            from: &[u8; 32],
+            to: [u8; 32],
+        ) -> bool {
+            match value {
+                ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
+                    *value = ciborium::value::Value::Bytes(to.to_vec());
+                    true
+                }
+                ciborium::value::Value::Array(values) => values
+                    .iter_mut()
+                    .any(|value| replace_first_bytes(value, from, to)),
+                ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+                    replace_first_bytes(key, from, to) || replace_first_bytes(value, from, to)
+                }),
+                ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
+                _ => false,
+            }
+        }
+        assert!(replace_first_bytes(&mut value, &[3; 32], [9; 32]));
+        let mut changed_bytes = Vec::new();
+        ciborium::into_writer(&value, &mut changed_bytes)?;
+        Ok(ciborium::from_reader(changed_bytes.as_slice())?)
+    }
+
     #[cfg(test)]
     mod sqlite_key_registry_failure_paths {
         use super::{
@@ -11621,7 +11653,25 @@ mod key_registry_coverage {
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
         let (_, destroyed) = sqlite_destroy_key_registry(&mut store, valid_request)?;
         assert!(destroyed.key_record(identity).is_some());
+        let changed_tombstone = changed_tombstone_digest(&destroyed)?;
+        assert!(sqlite_save_key_registry(&mut store, &changed_tombstone).is_err());
         sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_public_save_rejects_tombstone_rewrite() -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = SqliteStore::open_in_memory()?;
+        store.save_key_registry(&registry)?;
+        store.destroy_key_registry(KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            Hash::from_bytes([2; 32]),
+        ))?;
+        let destroyed = store.load_key_registry()?.ok_or("registry missing")?;
+        let changed_tombstone = changed_tombstone_digest(&destroyed)?;
+        assert!(store.save_key_registry(&changed_tombstone).is_err());
         Ok(())
     }
 }
