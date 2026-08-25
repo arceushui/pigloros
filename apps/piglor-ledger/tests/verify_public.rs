@@ -54,8 +54,10 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
         ],
     )?;
 
-    let error = verify_source(&Source::Store(database_path), None, None)
-        .expect_err("malformed persisted signature identity must fail closed");
+    let error = match verify_source(&Source::Store(database_path), None, None) {
+        Ok(report) => return Err(format!("malformed identity produced a report: {report}").into()),
+        Err(error) => error,
+    };
     assert!(error
         .to_string()
         .contains("signed event must carry a TimelineIntegritySigning role/epoch identity"));
