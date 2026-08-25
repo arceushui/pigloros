@@ -962,8 +962,13 @@ impl Gateway {
         }
     }
 
+    #[cfg(test)]
+    const fn schedule_startup_consent_cleanup(self) -> Self {
+        self
+    }
+
+    #[cfg(not(test))]
     fn schedule_startup_consent_cleanup(self) -> Self {
-        #[cfg(not(test))]
         self.schedule_pending_consent_cleanup();
         self
     }
