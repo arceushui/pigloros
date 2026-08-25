@@ -376,7 +376,7 @@ impl ExecutorStore {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparedOwnTracksIngressOutcome {
-    Prepared(PreparedOwnTracksIngressV1),
+    Prepared(Box<PreparedOwnTracksIngressV1>),
     RateLimited,
 }
 
@@ -1504,7 +1504,9 @@ fn prepare_owntracks_ingress(
     if !state.owntracks_rate_limiter.allow(prepared.rate_key()) {
         return Ok(PreparedOwnTracksIngressOutcome::RateLimited);
     }
-    Ok(PreparedOwnTracksIngressOutcome::Prepared(prepared))
+    Ok(PreparedOwnTracksIngressOutcome::Prepared(Box::new(
+        prepared,
+    )))
 }
 
 fn owntracks_input(

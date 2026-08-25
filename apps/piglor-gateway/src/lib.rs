@@ -516,10 +516,8 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 
 const CONSENT_LOCK_STRIPES: usize = 64;
 const CONSENT_LOCK_STRIPES_U64: u64 = 64;
-const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize = match NonZeroUsize::new(256) {
-    Some(limit) => limit,
-    None => unreachable!(),
-};
+const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize =
+    NonZeroUsize::new(256).unwrap_or(NonZeroUsize::MIN);
 
 type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
 
@@ -1133,7 +1131,7 @@ impl Gateway {
         now_secs: u64,
         effective_resolution: u8,
     ) -> Result<GeoLocationAdmissionOutcome, GatewayError> {
-        let _consent_timeline_guard = self.lock_consent_timeline(request.timeline()).await;
+        let consent_timeline_guard = self.lock_consent_timeline(request.timeline()).await;
         let timeline_head = self.store.logical_head(request.timeline()).await?;
         self.consent_authority.validate_on_timeline(
             request.timeline(),
@@ -1144,7 +1142,7 @@ impl Gateway {
         token.authorize_event_type(&Kind::new("geo.location"))?;
         token.authorize_geo_resolution(effective_resolution)?;
         let admission = self.admit_geo_location_from_core(request).await;
-        drop(_consent_timeline_guard);
+        drop(consent_timeline_guard);
         admission
     }
 
@@ -1169,7 +1167,7 @@ impl Gateway {
         let executor::PreparedOwnTracksIngressOutcome::Prepared(prepared) = prepared else {
             return Ok(OwnTracksIngressResult::RateLimited);
         };
-        let request = prepared.into_admission_request();
+        let request = (*prepared).into_admission_request();
         let timeline = request.timeline();
         let entity = request.entity();
         let _consent_timeline_guard = self.lock_consent_timeline(timeline).await;
