@@ -21,9 +21,10 @@ if [[ -e "${output_root}" ]]; then
   echo "refusing to overwrite retained conformance publication: ${output_root}" >&2
   exit 1
 fi
-first_output="$(mktemp -d "${TMPDIR:-/tmp}/pigloros-conformance-first.XXXXXX")"
-second_output="$(mktemp -d "${TMPDIR:-/tmp}/pigloros-conformance-second.XXXXXX")"
-trap 'rm -rf "${first_output}" "${second_output}"' EXIT
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/pigloros-conformance.XXXXXX")"
+first_output="${temporary_root}/first"
+second_output="${temporary_root}/second"
+trap 'rm -rf "${temporary_root}"' EXIT
 
 PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
   cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${first_output}"

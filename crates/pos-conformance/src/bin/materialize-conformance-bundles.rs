@@ -558,7 +558,7 @@ mod tests {
     }
 
     fn local_bundle_digest(profile: &ConformanceProfileV1, signing_key: &SigningKey) -> [u8; 32] {
-        bundle_inputs(profile, BundleModeV1::Local)
+        let digest = bundle_inputs(profile, BundleModeV1::Local)
             .ok()
             .and_then(|(members, expected_results)| {
                 ConformanceBundleV1::materialize(
@@ -570,8 +570,9 @@ mod tests {
                 .ok()
             })
             .and_then(|bundle| bundle.sign(signing_key).ok())
-            .and_then(|bundle| bundle.bundle_digest().ok())
-            .unwrap_or_default()
+            .and_then(|bundle| bundle.bundle_digest().ok());
+        assert!(digest.is_some(), "fixture bundle digest setup must succeed");
+        digest.unwrap_or_default()
     }
 
     #[test]
