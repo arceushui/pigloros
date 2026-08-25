@@ -403,14 +403,14 @@ fn profile_for_claim_layer(
     claim_layer: ClaimLayerV1,
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     validated_profile_record(claim_layer).and_then(|(profile_record_bytes, profile_record)| {
-        profile_from_record(claim_layer, profile_record_bytes, profile_record)
+        profile_from_record(claim_layer, profile_record_bytes, &profile_record)
     })
 }
 
 fn profile_from_record(
     claim_layer: ClaimLayerV1,
     profile_record_bytes: &[u8],
-    profile_record: JsonValue,
+    profile_record: &JsonValue,
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let context = fixture_context(profile_record_bytes, claim_layer);
     let fixtures = fixtures_from_profile_record(&profile_record, &context)?;
@@ -1215,7 +1215,7 @@ mod tests {
         assert!(profile_from_record(
             ClaimLayerV1::ArtifactIntegrity,
             canonical_bytes,
-            invalid_fixtures,
+            &invalid_fixtures,
         )
         .is_err());
         for field in [
