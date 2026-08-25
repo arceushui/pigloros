@@ -4822,33 +4822,7 @@ mod tests {
         matrix_member.digest = candidate_matrix_digest;
         members.extend(authority_members);
 
-        let mut invalid_provenance = members.clone();
-        invalid_provenance
-            .iter_mut()
-            .find(|member| member.role == BundleMemberRoleV1::Provenance)
-            .ok_or("missing provenance member")?
-            .bytes = serde_json::to_vec(&serde_json::json!({
-            "authority_inventory": null,
-            "adr_059_execution_matrix": {}
-        }))?;
-        assert_eq!(
-            validate_authority_members(&candidate, &invalid_provenance),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-
-        let mut invalid_matrix = members.clone();
-        let matrix_member = invalid_matrix
-            .iter_mut()
-            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
-            .ok_or("missing matrix member")?;
-        let mut invalid_matrix_json: JsonValue = serde_json::from_slice(&matrix_member.bytes)?;
-        invalid_matrix_json["cases"][0]["expected_result_digest"] =
-            JsonValue::String("00".repeat(32));
-        matrix_member.bytes = serde_json::to_vec(&invalid_matrix_json)?;
-        assert_eq!(
-            validate_authority_members(&candidate, &invalid_matrix),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
+        candidate_authority_rejection_seams(&candidate, &members)?;
 
         assert_eq!(validate_authority_members(&candidate, &members), Ok(()));
         let bundle = ConformanceBundleV1::materialize(
@@ -4859,6 +4833,40 @@ mod tests {
         )?;
         let signed_bundle = bundle.sign(&ed25519_dalek::SigningKey::from_bytes(&[42; 32]))?;
         assert_eq!(signed_bundle.validate(), Ok(()));
+        Ok(())
+    }
+
+    fn candidate_authority_rejection_seams(
+        candidate: &ConformanceProfileV1,
+        members: &[BundleMemberV1],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut invalid_provenance = members.to_vec();
+        invalid_provenance
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance member")?
+            .bytes = serde_json::to_vec(&serde_json::json!({
+            "authority_inventory": null,
+            "adr_059_execution_matrix": {}
+        }))?;
+        assert_eq!(
+            validate_authority_members(candidate, &invalid_provenance),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut invalid_matrix = members.to_vec();
+        let matrix_member = invalid_matrix
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix member")?;
+        let mut invalid_matrix_json: JsonValue = serde_json::from_slice(&matrix_member.bytes)?;
+        invalid_matrix_json["cases"][0]["expected_result_digest"] =
+            JsonValue::String("00".repeat(32));
+        matrix_member.bytes = serde_json::to_vec(&invalid_matrix_json)?;
+        assert_eq!(
+            validate_authority_members(candidate, &invalid_matrix),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
         Ok(())
     }
 
