@@ -1,7 +1,7 @@
+use pos_core::geo_admission::GeoLocationAdmissionStore;
 use pos_core::{
-    CanonicalBytes, ConsentGrantedV1, ConsentRevokedV1, EntityId, Event, EventDraft, EventId,
-    GeoLocationAdmissionStore, Kind, SchemaVersion, Seq, SeqRange, Timeline, TimelineMeta,
-    WallTime,
+    CanonicalBytes, ConsentGrantedV1, ConsentRevokedV1, EntityId, Event, EventDraft, EventId, Kind,
+    SchemaVersion, Seq, SeqRange, Timeline, TimelineMeta, WallTime,
 };
 use pos_store::{
     import_timeline, import_timeline_with_id, memory::MemoryStore, AppendDedupKey,
@@ -183,11 +183,11 @@ fn assert_generic_consent_admission_is_closed(store: &mut dyn EventStore) {
 fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmissionStore>(
     store: &mut S,
 ) {
-    let timeline = store.create_timeline("consent-coordinate-mismatch").test_ok();
+    let timeline = store
+        .create_timeline("consent-coordinate-mismatch")
+        .test_ok();
     assert_eq!(
-        store
-            .protected_logical_head(timeline.id())
-            .test_ok(),
+        store.protected_logical_head(timeline.id()).test_ok(),
         Seq::from_u64(0)
     );
     let subject = EntityId::new();
@@ -203,7 +203,11 @@ fn assert_consent_coordinate_mismatch_is_closed<S: EventStore + GeoLocationAdmis
         expiry_secs: 0,
         grant_seq: 1,
     };
-    let grant_draft = EventDraft::new(EntityId::new(), Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1), grant.encode().test_ok());
+    let grant_draft = EventDraft::new(
+        EntityId::new(),
+        Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+        grant.encode().test_ok(),
+    );
     assert!(store
         .append_consent_bounded(timeline.id(), &[grant_draft], 10)
         .test_err()

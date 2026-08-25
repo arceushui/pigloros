@@ -1,9 +1,9 @@
 use piglor_gateway::{router, ActionPrincipal, AppState, Gateway, GatewayError, LedgerWriteMode};
 use piglor_ledger::LedgerView;
+use pos_core::geo_admission::{GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1};
 use pos_core::{
     CanonicalBytes, Capability, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
-    GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1, Kind, Plugin, PluginId, TimelineId,
-    WallTime,
+    Kind, Plugin, PluginId, TimelineId, WallTime,
 };
 use pos_experiment::{Experiment, ExperimentConfig, StopCondition, TickOutcome};
 use pos_plugin_agent::{
