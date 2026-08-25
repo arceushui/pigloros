@@ -102,6 +102,17 @@ fn signed_archive_variant(
     encode_archive(&value)
 }
 
+fn post_signed_archive_variant(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+    mutate: impl FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let archive = signed_archive_variant(bundle, signing_key, |_| Ok(()))?;
+    let mut value: Value = ciborium::from_reader(Cursor::new(archive))?;
+    mutate(&mut value)?;
+    encode_archive(&value)
+}
+
 fn mutate_profile(
     value: &mut Value,
     mutate: impl FnOnce(&mut Vec<Value>),
@@ -638,6 +649,16 @@ fn assert_archive_rejected(
     Ok(())
 }
 
+fn assert_post_signed_archive_rejected(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+    mutate: impl FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let archive = post_signed_archive_variant(bundle, signing_key, mutate)?;
+    assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+    Ok(())
+}
+
 fn assert_archive_shape_rejections(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
@@ -678,11 +699,11 @@ fn assert_archive_member_rejections(
         archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Integer(0_u64.into());
         Ok(())
     })?;
-    assert_archive_rejected(bundle, signing_key, |value| {
+    assert_post_signed_archive_rejected(bundle, signing_key, |value| {
         top_fields(value)?[5] = Value::Bytes(vec![0]);
         Ok(())
     })?;
-    assert_archive_rejected(bundle, signing_key, |value| {
+    assert_post_signed_archive_rejected(bundle, signing_key, |value| {
         top_fields(value)?[4] = Value::Bytes(vec![0xff; 32]);
         Ok(())
     })?;
