@@ -6253,7 +6253,7 @@ mod tests {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod coverage_entrypoints {
+pub(super) mod coverage_entrypoints {
     use super::tests;
     use super::{
         archive_array_bounded, archive_array_exact, archive_bytes, archive_text, archive_u64,
@@ -7034,6 +7034,20 @@ mod coverage_entrypoints {
         );
         Ok(())
     }
+
+    pub(super) fn exercise_public_bundle_paths() -> Result<(), Box<dyn std::error::Error>> {
+        public_bundle_paths_are_instrumented()?;
+        public_bundle_rejection_paths_are_instrumented()?;
+        archive_scanner_accepts_inclusive_limits_and_tracks_depth()?;
+        archive_scanner_rejection_paths_are_instrumented();
+        archive_decoder_and_cap_rejection_paths_are_instrumented()?;
+        archive_field_rejection_paths_are_instrumented()?;
+        bundle_cap_rejection_paths_are_instrumented()?;
+        private_archive_and_cap_paths_are_instrumented()?;
+        bundle_validation_error_paths_are_instrumented()?;
+        bundle_pair_rejects_invalid_local_bundle()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -7146,7 +7160,9 @@ mod instrumented_candidate_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_bundle_contract_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        super::coverage_entrypoints::exercise_public_bundle_paths()?;
         let profile = tests::profile();
         let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
         let unsigned = ConformanceBundleV1::materialize(
