@@ -35,9 +35,9 @@ fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, Co
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn replace_first_bytes(
         value: &mut ciborium::value::Value,
         from: &[u8; 32],
