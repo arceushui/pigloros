@@ -10082,6 +10082,35 @@ mod coverage_entrypoints {
             .conn
             .execute_batch("DROP TABLE pending_append_identity_cleanup"));
         expect_err(pending_error.pending_append_identity_cleanup());
+
+        let scope = AppendDedupScope::from_keyed_hash([129; 32]);
+        let mut query_error = tests::new_store();
+        insert_identity(&query_error, 130, scope, 1);
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads_for_authorizer = std::sync::Arc::clone(&reads);
+        ok(query_error
+            .conn
+            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Read {
+                        table_name: "append_identities",
+                        column_name: "scope_key"
+                    }
+                ) && reads_for_authorizer.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0
+                {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            })));
+        expect_err(
+            query_error
+                .remove_append_identities_bounded(scope, some(std::num::NonZeroUsize::new(1))),
+        );
+        ok(query_error.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        ));
     }
 
     #[test]
@@ -10160,7 +10189,7 @@ mod coverage_entrypoints {
         ok(malformed_type.conn.execute(
             "INSERT INTO geographic_cell_admission_consent_records
              (consent_record_id, consent_revision, consent_record_hash, consent_record_cbor)
-             VALUES (?1, 'bad', zeroblob(32), zeroblob(1))",
+            VALUES (?1, X'01', zeroblob(32), zeroblob(1))",
             rusqlite::params![id.as_str()],
         ));
         expect_err(malformed_type.resolve_admission_consent(&id, 12));
@@ -10198,6 +10227,27 @@ mod coverage_entrypoints {
         ok(store.pair_owntracks_enrollment(request));
         ok(store.delete_timeline(timeline.id()));
         std::mem::drop(store.owntracks_enrollment_status());
+    }
+
+    #[test]
+    fn fork_hashing_fails_closed_when_parent_event_identity_is_corrupt() {
+        let mut store = tests::new_store();
+        let parent = ok(store.create_timeline("corrupt-fork-parent"));
+        let event = ok(store.append(
+            parent.id(),
+            &[tests::make_draft(EntityId::new(), b"fork-event")],
+        ));
+        ok(store.conn.execute(
+            "UPDATE events SET event_id = 'bad' WHERE event_id = ?1",
+            rusqlite::params![event[0].id.to_string()],
+        ));
+        expect_err(
+            store.create_timeline_with_meta(pos_core::timeline::TimelineMeta::forked_from(
+                parent.id(),
+                Seq::from_u64(1),
+                "corrupt-fork-child",
+            )),
+        );
     }
 
     #[test]
@@ -10384,6 +10434,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn geographic_cell_dedup_verification_rejects_tampered_sidecars() {
         let mut store = tests::new_store();
         let timeline = ok(store.create_timeline("geo-cell-consent-tamper"));
