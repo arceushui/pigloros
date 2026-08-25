@@ -1002,22 +1002,34 @@ impl ConsentAuthority {
         timeline_head: u64,
         now_secs: u64,
     ) -> Result<(), ConsentError> {
-        {
-            let sessions = self
+        Self::validate_location_subject_in_sessions(
+            &self
                 .active
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some((key, active)) = sessions.iter().find(|((timeline, subject, _, _), _)| {
-                *timeline == timeline_id && *subject == subject_id
-            }) else {
-                return Err(ConsentError::NoConsent);
-            };
-            Self::validate_from_sessions(&sessions, key, &active.token, timeline_head, now_secs)?;
-            active
-                .token
-                .authorize_event_type(&Kind::new("geo.location"))?;
-        }
-        Ok(())
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            timeline_id,
+            subject_id,
+            timeline_head,
+            now_secs,
+        )
+    }
+
+    fn validate_location_subject_in_sessions(
+        sessions: &ActiveConsentSessions,
+        timeline_id: TimelineId,
+        subject_id: EntityId,
+        timeline_head: u64,
+        now_secs: u64,
+    ) -> Result<(), ConsentError> {
+        let Some((key, active)) = sessions.iter().find(|((timeline, subject, _, _), _)| {
+            *timeline == timeline_id && *subject == subject_id
+        }) else {
+            return Err(ConsentError::NoConsent);
+        };
+        Self::validate_from_sessions(sessions, key, &active.token, timeline_head, now_secs)?;
+        active
+            .token
+            .authorize_event_type(&Kind::new("geo.location"))
     }
 
     fn validate_with_timeline(
