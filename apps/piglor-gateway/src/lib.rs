@@ -1177,28 +1177,12 @@ impl Gateway {
         self.consent_authority
             .validate_location_subject_on_timeline(timeline, entity, timeline_head.as_u64(), 0)?;
         let admission = self.store.admit_geo_location(request).await?;
-        let outcome = executor::OwnTracksIngressOutcome::Admitted {
-            outcome: admission,
-            timeline,
-            entity,
-        };
-        match outcome {
-            executor::OwnTracksIngressOutcome::RateLimited => {
-                Ok(OwnTracksIngressResult::RateLimited)
-            }
-            executor::OwnTracksIngressOutcome::Admitted {
-                outcome: admission,
-                timeline,
-                entity,
-            } => {
-                let result = classify_owntracks_admission(&admission)?;
-                if matches!(result, OwnTracksIngressResult::Accepted) {
-                    let (event_id, seq) = accepted_event_coordinates(&admission)?;
-                    self.publish_geographic_notice(timeline, event_id, entity, seq);
-                }
-                Ok(result)
-            }
+        let result = classify_owntracks_admission(&admission)?;
+        if matches!(result, OwnTracksIngressResult::Accepted) {
+            let (event_id, seq) = accepted_event_coordinates(&admission)?;
+            self.publish_geographic_notice(timeline, event_id, entity, seq);
         }
+        Ok(result)
     }
 
     /// Subscribe to live append notices (WebSocket / tests).

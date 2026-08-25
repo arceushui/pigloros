@@ -375,16 +375,6 @@ impl ExecutorStore {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OwnTracksIngressOutcome {
-    Admitted {
-        outcome: GeoLocationAdmissionOutcome,
-        timeline: TimelineId,
-        entity: EntityId,
-    },
-    RateLimited,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparedOwnTracksIngressOutcome {
     Prepared(PreparedOwnTracksIngressV1),
     RateLimited,
@@ -1497,30 +1487,6 @@ fn send_store_result<T>(
     drop(reply.send(result.map_err(StoreExecutorError::Store)));
 }
 
-fn execute_owntracks_ingress(
-    state: &mut ExecutorState,
-    basic_handle: [u8; 32],
-    basic_secret: [u8; 32],
-    payload: pos_core::CanonicalBytes,
-) -> Result<OwnTracksIngressOutcome, CoreError> {
-    let prepared = prepare_owntracks_ingress(state, basic_handle, basic_secret, payload)?;
-    let PreparedOwnTracksIngressOutcome::Prepared(prepared) = prepared else {
-        return Ok(OwnTracksIngressOutcome::RateLimited);
-    };
-    let request = prepared.into_admission_request();
-    let timeline = request.timeline();
-    let entity = request.entity();
-    let ExecutorStore::OwnTracks(store) = &mut state.store else {
-        return Err(CoreError::GeographicAdmissionUnavailable);
-    };
-    let outcome = store.admit_geo_location(request)?;
-    Ok(OwnTracksIngressOutcome::Admitted {
-        outcome,
-        timeline,
-        entity,
-    })
-}
-
 fn prepare_owntracks_ingress(
     state: &mut ExecutorState,
     basic_handle: [u8; 32],
@@ -1964,7 +1930,7 @@ mod tests {
 
     use super::{
         execute_append_command, execute_append_consent_revocation_command,
-        execute_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
+        prepare_owntracks_ingress, Command, ExecutorState, ExecutorStore, OwnTracksRateLimiter,
     };
     use pos_core::{
         event::{Event, EventDraft},
@@ -5056,7 +5022,7 @@ mod tests {
                 buckets: HashMap::new(),
             },
         };
-        let error = execute_owntracks_ingress(
+        let error = prepare_owntracks_ingress(
             &mut state,
             [1; 32],
             [2; 32],
@@ -5078,7 +5044,7 @@ mod tests {
                 buckets: HashMap::new(),
             },
         };
-        let error = execute_owntracks_ingress(
+        let error = prepare_owntracks_ingress(
             &mut state,
             [1; 32],
             [2; 32],
