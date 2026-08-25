@@ -2159,7 +2159,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 return awaiting.and_then(|state| {
                     record.state = state;
                     let awaiting_record = record.clone();
-                    Self::prepare_finalization(self, request, &mut record, input).and_then(
+                    Self::prepare_finalization(self, request, &mut record, &input).and_then(
                         |(terminal_record, receipt)| {
                             self.commit(awaiting_record)
                                 .and_then(|()| self.commit(terminal_record))
@@ -2218,7 +2218,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         record: &mut ErasureCoordinatorRecordV1,
         input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
-        Self::prepare_finalization(self, request, record, input)
+        Self::prepare_finalization(self, request, record, &input)
             .and_then(|(terminal_record, receipt)| self.commit(terminal_record).map(|()| receipt))
     }
 
@@ -2226,7 +2226,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &self,
         request: ErasureReferenceV1,
         record: &mut ErasureCoordinatorRecordV1,
-        input: ErasureReceiptInputV1,
+        input: &ErasureReceiptInputV1,
     ) -> Result<(ErasureCoordinatorRecordV1, ErasureReceiptV1), ErasureErrorV1> {
         if record.state.lifecycle() != ErasureLifecycleV1::AwaitingAcknowledgements {
             return Err(ErasureErrorV1::PolicyConflict);
