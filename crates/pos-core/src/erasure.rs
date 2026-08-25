@@ -2166,13 +2166,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
             if let Some(stored) = record.receipt.clone() {
-                let authority_input = input;
-                let normalized = Self::normalize_receipt_input(
-                    request,
-                    self.coordinator,
-                    &record,
-                    authority_input.clone(),
-                )?;
+                let normalized =
+                    Self::normalize_receipt_input(request, self.coordinator, &record, input)?;
                 return if record.receipt_input.as_ref() == Some(&normalized) {
                     Ok(stored)
                 } else {
@@ -2305,11 +2300,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             })
             .and_then(|terminal| {
                 record.state = terminal;
-                Self::normalize_receipt_input(request, self.coordinator, record, input.clone())
-                    .and_then(|normalized| {
+                Self::normalize_receipt_input(request, self.coordinator, record, input.clone()).map(
+                    |normalized| {
                         record.receipt_input = Some(normalized.clone());
-                        Ok(normalized)
-                    })
+                        normalized
+                    },
+                )
             })
             .and_then(|normalized| self.port.admit_receipt(&normalized).map(|()| normalized))
             .and_then(ErasureReceiptV1::new)
