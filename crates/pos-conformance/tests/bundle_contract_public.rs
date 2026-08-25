@@ -399,7 +399,9 @@ pub mod fixtures {
             }
         }
         let inventory_bytes = serde_json::to_vec(&inventory)?;
-        authority_members[inventory_index].bytes = inventory_bytes.clone();
+        authority_members[inventory_index]
+            .bytes
+            .clone_from(&inventory_bytes);
         authority_members[inventory_index].digest = digest(&inventory_bytes);
 
         let matrix_index = authority_members
@@ -419,7 +421,9 @@ pub mod fixtures {
             case["expected_result_digest"] = JsonValue::Null;
         }
         let matrix_bytes = serde_json::to_vec(&matrix)?;
-        authority_members[matrix_index].bytes = matrix_bytes.clone();
+        authority_members[matrix_index]
+            .bytes
+            .clone_from(&matrix_bytes);
         authority_members[matrix_index].digest = digest(&matrix_bytes);
 
         let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
@@ -504,7 +508,7 @@ fn public_bundle_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error:
     );
 
     let archive = bundle.to_canonical_cbor()?;
-    let mut trailing = archive.clone();
+    let mut trailing = archive;
     trailing.push(0);
     assert_eq!(
         ConformanceBundleV1::from_canonical_cbor(&trailing),
