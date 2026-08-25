@@ -751,10 +751,14 @@ fn assert_archive_expected_rejections(
         Ok(())
     })?;
     assert_archive_rejected(bundle, signing_key, |value| {
-        let Value::Text(expected_path) = &archive_expected(value)?[4] else {
-            return Err("expected path is not text".into());
+        let expected_path = {
+            let expected = archive_expected(value)?;
+            let Value::Text(path) = &expected[4] else {
+                return Err("expected path is not text".into());
+            };
+            path.clone()
         };
-        archive_descriptor(value, expected_path)?[3] = Value::Integer(0_u64.into());
+        archive_descriptor(value, &expected_path)?[3] = Value::Integer(0_u64.into());
         Ok(())
     })?;
     assert_archive_rejected(bundle, signing_key, |value| {
