@@ -3601,7 +3601,11 @@ mod tests {
         );
 
         let mut not_an_expected_result = bundle.members.clone();
-        not_an_expected_result[0].expected_result = false;
+        let expected_result_index = not_an_expected_result
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::ExpectedResult)
+            .ok_or("missing expected-result member")?;
+        not_an_expected_result[expected_result_index].expected_result = false;
         assert_eq!(
             validate_expected_results(&profile, &bundle.manifest, &not_an_expected_result),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
@@ -3888,7 +3892,12 @@ mod tests {
     fn candidate_publication_requires_review_and_deletion_evidence(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = profile();
-        let malformed_provenance = br#"{"source":"fixtures"}"#.to_vec();
+        let mut malformed_provenance_value: serde_json::Value = serde_json::from_slice(
+            include_bytes!("../../../fixtures/conformance/support/provenance.json"),
+        )?;
+        malformed_provenance_value["candidate_status"] =
+            serde_json::Value::String("pending".to_owned());
+        let malformed_provenance = serde_json::to_vec(&malformed_provenance_value)?;
         let malformed_provenance_digest = *blake3::hash(&malformed_provenance).as_bytes();
         let mut missing_review = signed_bundle(&profile, BundleModeV1::Local)?;
         let mut missing_review_profile = profile.clone();
@@ -4757,8 +4766,8 @@ mod coverage_entrypoints {
             super::archive_digest::<32>(&Value::Bytes(Vec::new())),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
-        for code in 0..=10 {
-            assert_eq!(super::decode_member_role(code).is_ok(), code < 10);
+        for code in 0..=14 {
+            assert_eq!(super::decode_member_role(code).is_ok(), code < 14);
         }
         for code in 0..=2 {
             assert_eq!(super::decode_bundle_mode(code).is_ok(), code < 2);
