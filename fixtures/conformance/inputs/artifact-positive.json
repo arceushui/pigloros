@@ -1,1 +1,1 @@
-{"case":"artifact-positive","claim_layer":"artifact_integrity","input":"public-artifact-v1","expected":"accepted"}
+{"case":"positive","input":"public-artifact-v1","expected":"accepted"}

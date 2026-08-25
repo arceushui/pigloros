@@ -1,1 +1,1 @@
-{"case":"knowledge-malformed","result":"typed-failure","error":"non-canonical-input"}
+{"case":"malformed","result":"typed-failure","error":"non-canonical-input"}

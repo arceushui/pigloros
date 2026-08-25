@@ -1,1 +1,1 @@
-{"case":"plugin-deletion","result":"destroyed","tombstone":"immutable"}
+{"case":"deletion","result":"destroyed","tombstone":"immutable"}

@@ -18,6 +18,12 @@ limit, deletion, downgrade, and independent-evaluation cases. A profile
 manifest lists every family explicitly; no profile is represented by a single
 input/result pair.
 
+The seven public input/result records describe fixture families only; they do
+not embed a claim-layer identity. Materialization binds each family once to
+the enclosing claim layer for deterministic-local-v1 and once for
+deterministic-air-gapped-v1, so every emitted descriptor has exactly one
+ExecutionProfile while the paired bundles retain identical expected bytes.
+
 `SHA256SUMS` is the independent byte inventory for all seven profile manifests,
 seven input records, seven expected-result records, the ADR-059 matrix, and
 seven required support artifacts. The #172 authority inventory is retained as

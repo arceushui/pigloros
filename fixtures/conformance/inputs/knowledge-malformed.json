@@ -1,1 +1,1 @@
-{"case":"knowledge-malformed","claim_layer":"knowledge_non_interference","input":"malformed-public-record-v1","expected":"typed-failure"}
+{"case":"malformed","input":"malformed-public-record-v1","expected":"typed-failure"}

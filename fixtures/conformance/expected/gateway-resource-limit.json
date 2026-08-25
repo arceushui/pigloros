@@ -1,1 +1,1 @@
-{"case":"gateway-resource-limit","result":"resource-limit","limit":"bounded-request"}
+{"case":"resource","result":"resource-limit","limit":"bounded-request"}

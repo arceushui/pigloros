@@ -3,10 +3,10 @@
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
-    ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1, EvaluatorProtocolV1,
-    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
-    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1, RedactionStateV1,
-    ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
+    EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
+    FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
+    RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -56,7 +56,8 @@ const PROFILE_RECORDS: [(&[u8], ClaimLayerV1); 7] = [
 #[derive(Clone, Copy)]
 struct FixtureContext {
     claim_layer: ClaimLayerV1,
-    execution_profile_digest: [u8; 32],
+    local_execution_profile_digest: [u8; 32],
+    air_gapped_execution_profile_digest: [u8; 32],
     profile_record_digest: [u8; 32],
     schema_digest: [u8; 32],
     provenance_digest: [u8; 32],
@@ -355,11 +356,16 @@ fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> Fi
     let notice_digest = *blake3::hash(notice).as_bytes();
     let sbom_digest = *blake3::hash(sbom).as_bytes();
     let limitations_digest = *blake3::hash(limitations).as_bytes();
-    let execution_profile_digest =
+    let local_execution_profile_digest =
         labeled_digest("PiglorOS.ExecutionProfile.v1", b"deterministic-local-v1");
+    let air_gapped_execution_profile_digest = labeled_digest(
+        "PiglorOS.ExecutionProfile.v1",
+        b"deterministic-air-gapped-v1",
+    );
     FixtureContext {
         claim_layer,
-        execution_profile_digest,
+        local_execution_profile_digest,
+        air_gapped_execution_profile_digest,
         profile_record_digest,
         schema_digest,
         provenance_digest,
@@ -381,10 +387,21 @@ fn fixtures_from_profile_record(
     if fixture_records.len() != 7 {
         return Err("canonical profile must declare all seven fixture families".into());
     }
-    let mut fixtures = fixture_records
-        .iter()
-        .map(|fixture_record| fixture(fixture_record, context))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut fixtures = Vec::with_capacity(fixture_records.len() * 2);
+    for fixture_record in fixture_records {
+        fixtures.push(fixture(
+            fixture_record,
+            context,
+            context.local_execution_profile_digest,
+            pos_conformance::ExecutionModeV1::Local,
+        )?);
+        fixtures.push(fixture(
+            fixture_record,
+            context,
+            context.air_gapped_execution_profile_digest,
+            pos_conformance::ExecutionModeV1::AirGapped,
+        )?);
+    }
     fixtures.sort_by_key(|fixture| {
         (
             fixture.case_id.clone(),
@@ -410,13 +427,9 @@ fn profile_from_record(
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let context = fixture_context(profile_record_bytes, claim_layer);
     let fixtures = fixtures_from_profile_record(profile_record, &context)?;
-    let air_gapped_execution_profile_digest = labeled_digest(
-        "PiglorOS.ExecutionProfile.v1",
-        b"deterministic-air-gapped-v1",
-    );
     let mut execution_profile_digests = vec![
-        context.execution_profile_digest,
-        air_gapped_execution_profile_digest,
+        context.local_execution_profile_digest,
+        context.air_gapped_execution_profile_digest,
     ];
     execution_profile_digests.sort_unstable();
     let mut profile = ConformanceProfileV1 {
@@ -480,6 +493,8 @@ const fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
 fn fixture(
     record: &JsonValue,
     context: &FixtureContext,
+    execution_profile_digest: [u8; 32],
+    mode: pos_conformance::ExecutionModeV1,
 ) -> Result<FixtureDescriptorV1, Box<dyn Error>> {
     let case_id = json_text(record, "case_id")?;
     let family = json_text(record, "family")?;
@@ -505,12 +520,9 @@ fn fixture(
         case_id: case_id.to_owned(),
         mandatory: true,
         claim_layer: context.claim_layer,
-        execution_profile_digest: context.execution_profile_digest,
+        execution_profile_digest,
         public_schema_digest: context.schema_digest,
-        modes: vec![
-            pos_conformance::ExecutionModeV1::Local,
-            pos_conformance::ExecutionModeV1::AirGapped,
-        ],
+        modes: vec![mode],
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         inputs: vec![FixtureInputMemberV1 {
             member_id: input_path.to_owned(),
@@ -718,6 +730,9 @@ fn bundle_inputs_with_authority(
     let mut members = Vec::new();
     let mut expected_results = Vec::new();
     for fixture in &profile.fixtures {
+        if !fixture.modes.contains(&execution_mode) {
+            continue;
+        }
         for member in &fixture.inputs {
             let input = canonical_fixture_input(&fixture.case_id, &member.member_id)?;
             members.push(BundleMemberV1::new(
@@ -748,9 +763,6 @@ fn bundle_inputs_with_authority(
             member_path: path,
             digest: member.digest,
         });
-        if !fixture.modes.contains(&execution_mode) {
-            return Err("fixture does not support selected materialization mode".into());
-        }
         members.push(member);
     }
     append_supporting_members_with_authority(&mut members, inventory_bytes, authority_root)?;
@@ -952,13 +964,13 @@ fn canonical_fixture_input(
     member_id: &str,
 ) -> Result<&'static [u8], Box<dyn Error>> {
     let expected_path = match case_id {
-        "artifact-positive" => "expected/artifact-positive.json",
-        "replay-negative" => "expected/replay-negative.json",
-        "knowledge-malformed" => "expected/knowledge-malformed.json",
-        "gateway-resource-limit" => "expected/gateway-resource-limit.json",
-        "plugin-deletion" => "expected/plugin-deletion.json",
-        "metric-downgrade" => "expected/metric-downgrade.json",
-        "empirical-independent" => "expected/empirical-independent.json",
+        "positive" => "expected/artifact-positive.json",
+        "negative" => "expected/replay-negative.json",
+        "malformed" => "expected/knowledge-malformed.json",
+        "resource" => "expected/gateway-resource-limit.json",
+        "deletion" => "expected/plugin-deletion.json",
+        "downgrade" => "expected/metric-downgrade.json",
+        "independent-evaluation" => "expected/empirical-independent.json",
         _ => return Err("fixture case is not a canonical profile family".into()),
     };
     let (input, _) = canonical_fixture_bytes(member_id, expected_path)?;
@@ -1076,6 +1088,48 @@ mod tests {
     }
 
     #[test]
+    fn profile_binds_one_execution_profile_per_mode_and_preserves_pair_parity(
+    ) -> Result<(), Box<dyn Error>> {
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        let inventory =
+            include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let (local_members, local_expected) =
+            bundle_inputs_with_authority(&profile, BundleModeV1::Local, inventory, None)?;
+        let (air_gapped_members, air_gapped_expected) =
+            bundle_inputs_with_authority(&profile, BundleModeV1::AirGapped, inventory, None)?;
+        assert_eq!(local_expected.len(), 7);
+        assert_eq!(air_gapped_expected.len(), 7);
+        assert!(local_expected.iter().all(|expected| {
+            expected.execution_profile_digest
+                == labeled_digest("PiglorOS.ExecutionProfile.v1", b"deterministic-local-v1")
+        }));
+        assert!(air_gapped_expected.iter().all(|expected| {
+            expected.execution_profile_digest
+                == labeled_digest(
+                    "PiglorOS.ExecutionProfile.v1",
+                    b"deterministic-air-gapped-v1",
+                )
+        }));
+        let local = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            local_members,
+            local_expected,
+        )?
+        .sign(&signing_key)?;
+        let air_gapped = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::AirGapped,
+            air_gapped_members,
+            air_gapped_expected,
+        )?
+        .sign(&signing_key)?;
+        ConformanceBundlePairV1 { local, air_gapped }.validate()?;
+        Ok(())
+    }
+
+    #[test]
     fn materializer_argument_and_key_errors_are_explicit() {
         let entry: fn() -> Result<(), Box<dyn Error>> = main;
         assert!(entry().is_err());
@@ -1190,7 +1244,13 @@ mod tests {
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         invalid_collection["fixtures"] = JsonValue::Array(vec![JsonValue::Null]);
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
-        assert!(fixture(&invalid_fixture, &context).is_err());
+        assert!(fixture(
+            &invalid_fixture,
+            &context,
+            context.local_execution_profile_digest,
+            pos_conformance::ExecutionModeV1::Local,
+        )
+        .is_err());
         for invalid_fixture in [
             serde_json::json!({}),
             serde_json::json!({"case_id": "artifact-positive"}),
@@ -1201,7 +1261,13 @@ mod tests {
                 "input": "inputs/artifact-positive.json"
             }),
         ] {
-            assert!(fixture(&invalid_fixture, &context).is_err());
+            assert!(fixture(
+                &invalid_fixture,
+                &context,
+                context.local_execution_profile_digest,
+                pos_conformance::ExecutionModeV1::Local,
+            )
+            .is_err());
         }
         assert_eq!(family_for_path("unknown", "unknown"), None);
         assert!(canonical_fixture_bytes("unknown", "unknown").is_err());
@@ -1398,7 +1464,7 @@ mod tests {
         assert_eq!(std::fs::read(nested_root.join("nested/file"))?, b"bytes");
         assert!(std::fs::remove_dir_all(nested_root).is_ok());
         assert!(write_materialized_file(Path::new(""), Path::new(""), b"bytes").is_err());
-        assert!(canonical_fixture_input("artifact-positive", "unknown").is_err());
+        assert!(canonical_fixture_input("positive", "unknown").is_err());
         Ok(())
     }
 
@@ -1492,7 +1558,25 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         for (_, claim_layer) in PROFILE_RECORDS {
             let profile = test_profile(claim_layer)?;
-            assert_eq!(profile.fixtures.len(), 7);
+            assert_eq!(profile.fixtures.len(), 14);
+            assert_eq!(
+                profile
+                    .fixtures
+                    .iter()
+                    .filter(|fixture| fixture.modes == [pos_conformance::ExecutionModeV1::Local])
+                    .count(),
+                7
+            );
+            assert_eq!(
+                profile
+                    .fixtures
+                    .iter()
+                    .filter(|fixture| {
+                        fixture.modes == [pos_conformance::ExecutionModeV1::AirGapped]
+                    })
+                    .count(),
+                7
+            );
             assert!(profile.fixtures.iter().all(|fixture| {
                 fixture
                     .inputs

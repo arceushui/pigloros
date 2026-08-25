@@ -1,1 +1,1 @@
-{"case":"plugin-deletion","claim_layer":"plugin_conformance","input":"deletion-receipt-v1","expected":"destroyed"}
+{"case":"deletion","input":"deletion-receipt-v1","expected":"destroyed"}

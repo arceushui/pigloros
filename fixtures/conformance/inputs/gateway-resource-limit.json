@@ -1,1 +1,1 @@
-{"case":"gateway-resource-limit","claim_layer":"gateway_client_conformance","input":"bounded-request-v1","expected":"resource-limit"}
+{"case":"resource","input":"bounded-request-v1","expected":"resource-limit"}
