@@ -969,7 +969,7 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
             }),
             pos_conformance::BundleContractErrorV1::MemberOutOfBounds,
         ),
-    )] {
+    ] {
         let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
         assert_eq!(
             pos_conformance::verify_archive_independently(&archive),
