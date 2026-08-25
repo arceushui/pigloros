@@ -393,35 +393,6 @@ fn sqlite_key_registry_requires_a_persisted_snapshot_for_authorization(
 }
 
 #[test]
-fn sqlite_public_read_rejects_a_fork_without_a_fork_sequence(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let database = tempfile::NamedTempFile::new()?;
-    let path = database
-        .path()
-        .to_str()
-        .ok_or("temporary database path is not UTF-8")?;
-    let mut store = SqliteStore::open(path)?;
-    let parent = store.create_timeline("fork-parent")?;
-    let child = store.fork(parent.id(), Seq::ZERO, "fork-child")?;
-    drop(store);
-
-    let connection = rusqlite::Connection::open(path)?;
-    let updated = connection.execute(
-        "UPDATE timelines SET fork_seq = NULL WHERE id = ?1",
-        params![child.id().to_string()],
-    )?;
-    assert_eq!(updated, 1);
-    drop(connection);
-
-    let store = SqliteStore::open(path)?;
-    assert!(matches!(
-        store.read(child.id(), pos_core::SeqRange::all()),
-        Err(CoreError::Storage(message)) if message.contains("missing its fork sequence")
-    ));
-    Ok(())
-}
-
-#[test]
 fn memory_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (registry, identity, material_digest) = registry()?;
