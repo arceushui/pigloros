@@ -5010,10 +5010,10 @@ mod coverage_entrypoints {
     fn consent_revocation_and_cleanup_boundaries_are_instrumented() {
         let mut store = MemoryStore::new();
         let timeline = ok(store.create_timeline("coverage-revocation"));
-        let subject = EntityId::new();
+        let subject = pos_core::EntityId::new();
         let revocation = pos_core::ConsentRevokedV1 {
             subject_id: subject,
-            grantee_id: EntityId::new(),
+            grantee_id: pos_core::EntityId::new(),
             grant_seq: 0,
             fence_seq: 1,
         };
