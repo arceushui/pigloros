@@ -1,7 +1,7 @@
 {
   "magic": "W8H1",
   "version": 1,
-  "lifecycle": "Candidate",
+  "lifecycle": "Draft",
   "digest_algorithm": "BLAKE3-256",
   "source": "#172 wave8-execution-repro-handoff-v1",
   "entries": [
@@ -9,111 +9,111 @@
       "fixture_id": "RPL-001",
       "execution_class": "RecordedReplay",
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": "expected-authority/fixtures/RPL-001.json",
-      "fixture_bytes_digest": "a90ac56bcad55402d01f7ddadee2a96f311ec702bf7379803339a3ab1d8e53b6",
-      "expected_result_path": "expected-authority/results/RPL-001.json",
-      "expected_result_digest": "e37c5602ec5eb63ecfdb642247c02b36b4081108fa7146523598b673ad0287f9",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "PRF-001",
       "execution_class": "ProfileRecomputation",
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": "expected-authority/fixtures/PRF-001.json",
-      "fixture_bytes_digest": "021abe61b488a32b82702b726976935cddc3d2158cd32f1c0afd403e064a9bc2",
-      "expected_result_path": "expected-authority/results/PRF-001.json",
-      "expected_result_digest": "61e353350d78da0ad2ceea44eeeeffb4a196ac1124a019d29ca488e3190e3023",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "PRF-002",
       "execution_class": "CrossProfileConformance",
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": "expected-authority/fixtures/PRF-002.json",
-      "fixture_bytes_digest": "d8269c833d157c1dbd2e0a558ee1f54178b36ba7a1456cbb6669c5f41ab42067",
-      "expected_result_path": "expected-authority/results/PRF-002.json",
-      "expected_result_digest": "0b9f7fe75b7e8aedf155ece968871f7d9e9130e79f5bb62e248fe4b27969ea4b",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "DIV-001",
       "execution_class": "ProfileRecomputation",
       "expected_outcome": "Diverged",
-      "fixture_bytes_path": "expected-authority/fixtures/DIV-001.json",
-      "fixture_bytes_digest": "2b371f5f0400d6a90bb9e2fd72d2260d323f8994ca14bc6d818c30e4b036c903",
-      "expected_result_path": "expected-authority/results/DIV-001.json",
-      "expected_result_digest": "9316f70cd705f9a6b2c24263f27985bb33c97579d494bc76b99c2a63e43df6cd",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "INV-001",
       "execution_class": "Any deterministic profile",
       "expected_outcome": "InvalidManifest",
-      "fixture_bytes_path": "expected-authority/fixtures/INV-001.json",
-      "fixture_bytes_digest": "c82fb85718896ca111a46b87f08683d8d0e46c68bc394172a559c62456a23d1b",
-      "expected_result_path": "expected-authority/results/INV-001.json",
-      "expected_result_digest": "94b91f78c718a697353066a57b045f40665515f2041f41192b1a139830c91ec3",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "INV-002",
       "execution_class": "Any deterministic profile",
       "expected_outcome": "UnverifiableArtifactsMissing",
-      "fixture_bytes_path": "expected-authority/fixtures/INV-002.json",
-      "fixture_bytes_digest": "8a8148216ed8a7adc829f2f50dc9373c2abe7e642c17f1c554792166cd20d044",
-      "expected_result_path": "expected-authority/results/INV-002.json",
-      "expected_result_digest": "e9fda9402edb2e080537ef7c3aa4f3d18836fb87b8c38634eda42f46bf46587f",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "INV-003",
       "execution_class": "Any deterministic profile",
       "expected_outcome": "IncompatibleProfile",
-      "fixture_bytes_path": "expected-authority/fixtures/INV-003.json",
-      "fixture_bytes_digest": "31a89e0eb746d9026f7c1ea2975794994e7a693475179baf5c726575b286650b",
-      "expected_result_path": "expected-authority/results/INV-003.json",
-      "expected_result_digest": "767ecc97a2f1fcb208e5cd07436e1f5bf7d95abb1757c69a30108257ce1cdc8d",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "RES-001",
       "execution_class": "ProfileRecomputation",
       "expected_outcome": "ResourceLimitExceeded",
-      "fixture_bytes_path": "expected-authority/fixtures/RES-001.json",
-      "fixture_bytes_digest": "6b154c95bb7185fa3716233e9afcfa0b76c8e768e9946757928b6128b4fdc359",
-      "expected_result_path": "expected-authority/results/RES-001.json",
-      "expected_result_digest": "be83ae59b1726069ea17abfb2ea1491bb0a50553833293c647f9a3e8352f3838",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "LIVE-001",
       "execution_class": "LiveUnverified",
       "expected_outcome": "Non-deterministic admission",
-      "fixture_bytes_path": "expected-authority/fixtures/LIVE-001.json",
-      "fixture_bytes_digest": "a42b6099ff73c53496d0ffe95760a93f76251b80e40c1d07d81f400c783f363a",
-      "expected_result_path": "expected-authority/results/LIVE-001.json",
-      "expected_result_digest": "37dbda2064a601c0f8899d63f0d8a46e63693d3ffc31ba65b94dc50500bb50a2",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "ERA-001",
       "execution_class": "RecordedReplay plus erasure state",
       "expected_outcome": "Outcome preserved; ReplayClaim degraded",
-      "fixture_bytes_path": "expected-authority/fixtures/ERA-001.json",
-      "fixture_bytes_digest": "3e8d7ddf3e177f9127d25e6df0e8ec028da4d6273d4527f714e0e0fd029b86b2",
-      "expected_result_path": "expected-authority/results/ERA-001.json",
-      "expected_result_digest": "b10b3ce96caac37f7699efdd45fb8683327424847a4dd11ec024f98466ff0520",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     },
     {
       "fixture_id": "SEC-001",
       "execution_class": "Deterministic profile",
       "expected_outcome": "InvalidManifest or typed failure",
-      "fixture_bytes_path": "expected-authority/fixtures/SEC-001.json",
-      "fixture_bytes_digest": "46fd04d29993fbaa802d29f18253f1476b5a1c208edc0b2cd08c36dea2c7aeb6",
-      "expected_result_path": "expected-authority/results/SEC-001.json",
-      "expected_result_digest": "3720061f6f4cc7783ca8b63dfd90535b77a7406cfde9fab83978b8614a558190",
-      "materialization_status": "materialized"
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
     }
   ],
   "publication_gate": "Candidate publication rejects any open digest slot and requires real fixture bytes plus BLAKE3 expected-result digests."
