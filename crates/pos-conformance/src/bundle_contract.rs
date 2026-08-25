@@ -5376,11 +5376,10 @@ mod authority_coverage_entrypoints {
     };
 
     #[test]
-    fn provenance_binding_exercises_each_short_circuit() {
+    fn provenance_binding_exercises_each_short_circuit() -> Result<(), Box<dyn std::error::Error>> {
         let valid: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/support/provenance.json"
-        ))
-        .expect("valid provenance fixture");
+        ))?;
         assert_eq!(validate_provenance_authority_binding(&valid), Ok(()));
         for (section, field, value) in [
             ("authority_inventory", "path", "wrong-path"),
@@ -5404,19 +5403,19 @@ mod authority_coverage_entrypoints {
             validate_provenance_authority_binding(&invalid),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+        Ok(())
     }
 
     #[test]
-    fn authority_inventory_and_matrix_public_paths_are_exercised() {
+    fn authority_inventory_and_matrix_public_paths_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = super::tests::profile();
-        let (members, _) = super::tests::bundle_inputs(&profile, BundleModeV1::Local)
-            .expect("valid authority members");
+        let (members, _) = super::tests::bundle_inputs(&profile, BundleModeV1::Local)?;
         assert_eq!(validate_authority_members(&profile, &members), Ok(()));
 
         let inventory: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/expected-authority/inventory.json"
-        ))
-        .expect("valid authority inventory");
+        ))?;
         let authority_members = members
             .iter()
             .filter(|member| {
@@ -5434,9 +5433,9 @@ mod authority_coverage_entrypoints {
         );
         let matrix: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/matrix/adr-059-complete.json"
-        ))
-        .expect("valid execution matrix");
+        ))?;
         assert_eq!(validate_execution_matrix(&matrix), Ok(()));
+        Ok(())
     }
 }
 
