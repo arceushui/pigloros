@@ -1659,7 +1659,7 @@ fn coordinator_normalizes_core_derived_finalize_fields_and_retries() -> Result<(
     assert_eq!(coordinator.acknowledge(reference(1), ack)?, terminal_state);
     assert_eq!(
         coordinator.finalize(reference(1), conflicting_identity),
-        committed
+        Ok(committed)
     );
     assert_eq!(
         coordinator
