@@ -788,14 +788,14 @@ fn independent_verify_profile(
     let stable_evidence_digest = independent_domain_digest(
         b"PiglorOS.ConformanceProfileStableEvidence.v1",
         &Value::Array(Vec::new()),
-    );
+    )?;
     let recomputed_profile_digest = independent_domain_digest(
         b"PiglorOS.ConformanceProfile.v1",
         &Value::Array(vec![
             Value::Array(profile_identity),
             Value::Bytes(stable_evidence_digest.to_vec()),
         ]),
-    );
+    )?;
     if embedded_profile_digest != recomputed_profile_digest {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
@@ -822,20 +822,19 @@ fn independent_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleCo
         .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
 }
 
-fn independent_domain_digest(domain: &[u8], value: &Value) -> [u8; 32] {
+fn independent_domain_digest(
+    domain: &[u8],
+    value: &Value,
+) -> Result<[u8; 32], BundleContractErrorV1> {
     let mut writer = InfallibleCborWriter(Vec::new());
-    let encoded = match ciborium::into_writer(value, &mut writer) {
-        Ok(()) => writer.0,
-        Err(ciborium::ser::Error::Io(error)) => match error {},
-        Err(ciborium::ser::Error::Value(error)) => {
-            panic!("canonical in-memory CBOR value encoding failed: {error}");
-        }
-    };
+    ciborium::into_writer(value, &mut writer)
+        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+    let encoded = writer.0;
     let mut input = Vec::with_capacity(domain.len() + encoded.len() + 1);
     input.extend_from_slice(domain);
     input.push(0);
     input.extend_from_slice(&encoded);
-    *blake3::hash(&input).as_bytes()
+    Ok(*blake3::hash(&input).as_bytes())
 }
 
 struct InfallibleCborWriter(Vec<u8>);
