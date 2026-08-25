@@ -558,10 +558,8 @@ pub mod fixtures {
             .iter()
             .position(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
             .ok_or("missing execution matrix")?;
-        let mut matrix: JsonValue =
-            serde_json::from_slice(&authority_members[matrix_index].bytes)?;
-        matrix["cases"][0]["expected_result_digest"] =
-            JsonValue::String("00".repeat(32));
+        let mut matrix: JsonValue = serde_json::from_slice(&authority_members[matrix_index].bytes)?;
+        matrix["cases"][0]["expected_result_digest"] = JsonValue::String("00".repeat(32));
         let matrix_bytes = serde_json::to_vec(&matrix)?;
         authority_members[matrix_index]
             .bytes
