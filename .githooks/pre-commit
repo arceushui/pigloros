@@ -6,9 +6,14 @@ set -euo pipefail
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 
-changed_rust_files=$(git diff --cached --name-only --diff-filter=ACM | awk '$0 ~ /\.rs$/')
-if [ -z "$changed_rust_files" ]; then
-    echo "pre-commit: no Rust files staged; skipping clippy"
+changed_files=$(git diff --cached --name-only --diff-filter=ACDMRT)
+changed_rust_files=$(printf '%s\n' "$changed_files" | awk '$0 ~ /\.rs$/')
+changed_cargo_files=$(printf '%s\n' "$changed_files" | awk '
+    $0 == "Cargo.toml" || $0 == "Cargo.lock" || $0 == "rust-toolchain.toml" ||
+    $0 ~ /\/Cargo\.toml$/ || $0 ~ /\/Cargo\.lock$/
+')
+if [ -z "$changed_rust_files" ] && [ -z "$changed_cargo_files" ]; then
+    echo "pre-commit: no Rust or Cargo metadata staged; skipping clippy"
     echo "pre-commit: OK"
     exit 0
 fi
@@ -16,6 +21,9 @@ fi
 echo "pre-commit: cargo clippy (changed packages)"
 declare -A packages=()
 needs_workspace=false
+if [ -z "$changed_rust_files" ]; then
+    needs_workspace=true
+fi
 package_name() {
     awk '
         /^\[package\][[:space:]]*$/ { in_package = 1; next }
