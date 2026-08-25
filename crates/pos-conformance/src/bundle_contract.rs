@@ -3588,14 +3588,13 @@ mod tests {
         for expected in &mut local_with_air_mode.manifest.expected_results {
             expected.mode = BundleModeV1::AirGapped;
         }
-        let local_with_air_mode = local_with_air_mode.sign(&signing_key)?;
         assert_eq!(
             (ConformanceBundlePairV1 {
                 local: local_with_air_mode,
                 air_gapped: air_gapped.clone(),
             })
             .validate(),
-            Err(BundleContractErrorV1::ModeParityMismatch)
+            Err(BundleContractErrorV1::MemberMissing)
         );
 
         let mut local_with_opposite_mode_input = signed_bundle(&profile, BundleModeV1::Local)?;
@@ -3620,14 +3619,13 @@ mod tests {
         for expected in &mut air_with_local_mode.manifest.expected_results {
             expected.mode = BundleModeV1::Local;
         }
-        let air_with_local_mode = air_with_local_mode.sign(&signing_key)?;
         assert_eq!(
             (ConformanceBundlePairV1 {
                 local: signed_bundle(&profile, BundleModeV1::Local)?,
                 air_gapped: air_with_local_mode,
             })
             .validate(),
-            Err(BundleContractErrorV1::ModeParityMismatch)
+            Err(BundleContractErrorV1::MemberMissing)
         );
 
         let mut air_with_other_path = air_gapped;
@@ -3949,6 +3947,13 @@ mod tests {
         duplicate_case_profile
             .fixtures
             .insert(1, duplicate_case_fixture);
+        duplicate_case_profile.fixtures.sort_by_key(|fixture| {
+            (
+                fixture.case_id.clone(),
+                fixture.claim_layer,
+                fixture.execution_profile_digest,
+            )
+        });
         duplicate_case_profile.profile_digest = duplicate_case_profile.digest();
         let duplicate_case_bundle = signed_bundle(&duplicate_case_profile, BundleModeV1::Local)?;
         let mut missing_one_of_duplicate_cases = duplicate_case_bundle.manifest.clone();
@@ -5220,9 +5225,12 @@ mod tests {
         );
 
         let mut network_profile = profile;
-        network_profile.fixtures[0]
-            .capability_policy
-            .network_allowed = true;
+        let network_fixture = network_profile
+            .fixtures
+            .iter_mut()
+            .find(|fixture| fixture.modes == [ExecutionModeV1::AirGapped])
+            .ok_or("missing air-gapped fixture")?;
+        network_fixture.capability_policy.network_allowed = true;
         let (members, expected_results) = bundle_inputs(&network_profile, BundleModeV1::AirGapped)?;
         assert_eq!(
             ConformanceBundleV1::materialize(

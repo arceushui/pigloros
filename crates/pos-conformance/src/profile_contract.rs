@@ -5886,15 +5886,10 @@ mod tests {
         );
 
         let mut limited = profile();
-        limited.evaluator_protocol.hard_caps.max_cases = 1;
-        let limited = limited
-            .transition_to(ProfileLifecycleV1::Candidate, vec![])
-            .unwrap_or_else(|_| profile());
+        limited.evaluator_protocol.hard_caps.max_cases = 0;
+        limited.profile_digest = limited.digest();
         assert_eq!(
-            limited.transition_to(
-                ProfileLifecycleV1::Stable,
-                vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
-            ),
+            limited.validate(),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
@@ -6492,7 +6487,10 @@ mod tests {
         );
 
         reject_profile_change(
-            |value| value.fixtures[0].capability_policy.network_allowed = true,
+            |value| {
+                value.fixtures[0].modes = vec![ExecutionModeV1::AirGapped];
+                value.fixtures[0].capability_policy.network_allowed = true;
+            },
             ConformanceContractError::FieldOutOfBounds,
         );
         reject_profile_change(
