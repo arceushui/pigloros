@@ -301,7 +301,10 @@ fn sqlite_key_registry_rejects_a_decodable_invalid_snapshot(
     assert!(invalid.validate().is_err());
 
     let mut store = SqliteStore::open(path)?;
-    assert!(store.save_key_registry(&invalid).is_err());
+    assert!(matches!(
+        store.save_key_registry(&invalid),
+        Err(CoreError::Serialization(_))
+    ));
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
@@ -314,7 +317,7 @@ fn sqlite_key_registry_rejects_a_decodable_invalid_snapshot(
     let store = SqliteStore::open(path)?;
     assert!(matches!(
         store.load_key_registry(),
-        Err(CoreError::Serialization(_) | CoreError::Storage(_))
+        Err(CoreError::Serialization(_))
     ));
     Ok(())
 }
