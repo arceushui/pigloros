@@ -1225,13 +1225,6 @@ fn append_path_component(input: &mut Vec<u8>, value: &str) {
     input.extend_from_slice(value.as_bytes());
 }
 
-fn validate_fixture_inputs(
-    profile: &ConformanceProfileV1,
-    members: &[BundleMemberV1],
-) -> Result<(), BundleContractErrorV1> {
-    validate_fixture_inputs_for_mode(profile, None, members)
-}
-
 fn validate_fixture_inputs_for_mode(
     profile: &ConformanceProfileV1,
     mode: Option<BundleModeV1>,
@@ -5122,14 +5115,14 @@ mod tests {
         let mut wrong_size = profile.clone();
         wrong_size.fixtures[0].inputs[0].size_bytes += 1;
         assert_eq!(
-            validate_fixture_inputs(&wrong_size, &bundle.members),
+            validate_fixture_inputs_for_mode(&wrong_size, None, &bundle.members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
         let mut wrong_declared_digest = profile.clone();
         wrong_declared_digest.fixtures[0].inputs[0].digest = digest(99);
         assert_eq!(
-            validate_fixture_inputs(&wrong_declared_digest, &bundle.members),
+            validate_fixture_inputs_for_mode(&wrong_declared_digest, None, &bundle.members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
@@ -5138,7 +5131,7 @@ mod tests {
         let mut wrong_content_member = bundle.members.clone();
         wrong_content_member[input_index].digest = digest(99);
         assert_eq!(
-            validate_fixture_inputs(&wrong_content_digest, &wrong_content_member),
+            validate_fixture_inputs_for_mode(&wrong_content_digest, None, &wrong_content_member),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
@@ -5149,14 +5142,14 @@ mod tests {
         empty_member[input_index].bytes.clear();
         empty_member[input_index].digest = *blake3::hash(b"").as_bytes();
         assert_eq!(
-            validate_fixture_inputs(&empty_profile, &empty_member),
+            validate_fixture_inputs_for_mode(&empty_profile, None, &empty_member),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
         let mut marked_expected = bundle.members;
         marked_expected[input_index].expected_result = true;
         assert_eq!(
-            validate_fixture_inputs(&profile, &marked_expected),
+            validate_fixture_inputs_for_mode(&profile, None, &marked_expected),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
@@ -6048,7 +6041,7 @@ mod coverage_entrypoints {
             .ok_or("missing fixture input")?;
         invalid_inputs[input_index].bytes.clear();
         assert_eq!(
-            validate_fixture_inputs(&profile, &invalid_inputs),
+            validate_fixture_inputs_for_mode(&profile, None, &invalid_inputs),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         let nested = (0..usize::from(MAX_STRUCTURAL_NESTING))
