@@ -3140,11 +3140,9 @@ impl EventStore for SqliteStore {
                         let local_limit = logical_fork
                             .as_u64()
                             .checked_sub(logical_prefix)
-                            .ok_or_else(|| {
-                                CoreError::Storage(format!(
-                                    "Fork point precedes inherited history for timeline {tid}"
-                                ))
-                            })?;
+                            .ok_or(CoreError::Storage(format!(
+                                "Fork point precedes inherited history for timeline {tid}"
+                            )))?;
                         self.get_head_seq(tid)
                             .map(Seq::as_u64)
                             .and_then(|local_head| {
