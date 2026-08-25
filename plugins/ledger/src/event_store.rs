@@ -567,6 +567,34 @@ mod tests {
     }
 
     #[test]
+    fn destruction_for_another_identity_retains_the_owned_signing_key(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let mut mem = MemoryStore::new();
+        let timeline = mem.create_timeline("ledger")?;
+        let mut store = EventLedgerStore::new(
+            Box::new(mem),
+            timeline.id(),
+            EntityId::new(),
+            signing_key,
+            Arc::clone(&registry),
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+        store.signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 99);
+
+        store.destroy_signing_key(pos_core::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            pos_core::Hash::from_bytes([8; 32]),
+        ))?;
+        assert!(store.signing_key.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn destruction_reports_registry_lock_and_store_errors() -> Result<(), Box<dyn std::error::Error>>
     {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();

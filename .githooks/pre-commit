@@ -6,27 +6,61 @@ set -euo pipefail
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 
-echo "pre-commit: cargo clippy (changed crates)"
-# Only lint changed crates to keep pre-commit fast
-changed=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' | sed 's|/.*||' | sort -u)
-crates=()
-for d in $changed; do
-    if [ -f "$d/Cargo.toml" ]; then
-        crates+=("$d")
-    fi
-done
-# Try to use --workspace if too many crates changed
-if [ ${#crates[@]} -gt 5 ] || [ ${#crates[@]} -eq 0 ]; then
-    crates=()
+changed_rust_files=$(git diff --cached --name-only --diff-filter=ACM | awk '$0 ~ /\.rs$/')
+if [ -z "$changed_rust_files" ]; then
+    echo "pre-commit: no Rust files staged; skipping clippy"
+    echo "pre-commit: OK"
+    exit 0
 fi
-if [ ${#crates[@]} -eq 0 ]; then
-    # Fall back to workspace-level clippy (only on relevant targets)
-    echo "  (workspace-level clippy — many or no crates changed)"
-    cargo clippy --all-targets -- -D warnings -W clippy::pedantic
+
+echo "pre-commit: cargo clippy (changed packages)"
+declare -A packages=()
+needs_workspace=false
+package_name() {
+    awk '
+        /^\[package\][[:space:]]*$/ { in_package = 1; next }
+        /^\[/ { in_package = 0 }
+        in_package && /^[[:space:]]*name[[:space:]]*=/ {
+            sub(/^[^=]*=[[:space:]]*/, "")
+            gsub(/["[:space:]]/, "")
+            print
+            exit
+        }
+    ' "$1"
+}
+
+while IFS= read -r file; do
+    directory=$(dirname "$file")
+    manifest=""
+    while true; do
+        if [ -f "$directory/Cargo.toml" ]; then
+            manifest="$directory/Cargo.toml"
+            break
+        fi
+        if [ "$directory" = "." ] || [ "$directory" = "/" ]; then
+            break
+        fi
+        directory=$(dirname "$directory")
+    done
+    if [ -z "$manifest" ]; then
+        needs_workspace=true
+        continue
+    fi
+    package=$(package_name "$manifest")
+    if [ -n "$package" ]; then
+        packages["$package"]="$manifest"
+    else
+        needs_workspace=true
+    fi
+done <<< "$changed_rust_files"
+
+if [ "$needs_workspace" = true ] || [ "${#packages[@]}" -gt 5 ]; then
+    echo "  (workspace-level clippy)"
+    cargo clippy --workspace --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
 else
-    for crate in "${crates[@]}"; do
-        echo "  clippy: $crate"
-        cargo clippy -p "$crate" --all-targets -- -D warnings -W clippy::pedantic
+    for package in "${!packages[@]}"; do
+        echo "  clippy: $package"
+        cargo clippy -p "$package" --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
     done
 fi
 

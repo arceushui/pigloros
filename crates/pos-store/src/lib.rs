@@ -1096,9 +1096,18 @@ mod tests {
             signature_identity: Some(identity),
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
+        let second_payload = CanonicalBytes::from_vec(b"signed-second".to_vec());
+        let second_sig =
+            sign_for_registered_role(&mut registry, &sk, identity, &second_payload).test_ok();
+        let mut second_event = event.clone();
+        second_event.id = EventId::new();
+        second_event.payload = second_payload.clone();
+        second_event.seq = Seq::from_u64(2);
+        second_event.signature = Some(second_sig);
+        second_event.payload_hash = pos_crypto::chain::hash_payload(&second_payload);
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("signed")),
-            events: vec![event],
+            events: vec![event, second_event],
             parent_fork_hash: None,
         };
 

@@ -554,11 +554,6 @@ impl KeyRegistryStateV1 {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
         }
-        for (identity, tombstone) in &self.tombstones {
-            if next.tombstones.get(identity) != Some(tombstone) {
-                return Err(KeyRegistryErrorV1::InvalidState);
-            }
-        }
         Ok(())
     }
 
@@ -1017,6 +1012,56 @@ mod tests {
             2,
             2,
             KeyRegistryErrorV1::InactiveKey,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_authorization_is_fail_closed_and_scoped() -> Result<(), KeyRegistryErrorV1> {
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(DATA, digest(1), None))?;
+        let mut called = false;
+        assert_eq!(
+            registry.with_encryption_authorization(DATA, digest(1), || {
+                called = true;
+                11_u8
+            }),
+            Ok(11)
+        );
+        assert!(called);
+
+        called = false;
+        assert_eq!(
+            registry.with_encryption_authorization(DATA, digest(9), || {
+                called = true;
+            }),
+            Err(KeyRegistryErrorV1::EncryptionKeyMismatch)
+        );
+        assert!(!called);
+
+        assert_eq!(
+            registry.with_encryption_authorization(ATTRIBUTION, digest(1), || ()),
+            Err(KeyRegistryErrorV1::EncryptionRoleRequired)
+        );
+        assert_eq!(
+            registry.with_encryption_authorization(
+                KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 0),
+                digest(1),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::InvalidEpoch)
+        );
+
+        let next = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 2);
+        registry.register_key(KeyRegistrationV1::new(next, digest(2), None))?;
+        assert_eq!(
+            registry.with_encryption_authorization(DATA, digest(1), || ()),
+            Err(KeyRegistryErrorV1::InactiveKey)
+        );
+        registry.destroy_key(KeyDestructionRequestV1::new(next, digest(2), digest(3)))?;
+        assert_eq!(
+            registry.with_encryption_authorization(next, digest(2), || ()),
+            Err(KeyRegistryErrorV1::Destroyed)
         );
         Ok(())
     }
@@ -1514,6 +1559,62 @@ mod tests {
             previous.validate_replacement(&next),
             Err(KeyRegistryErrorV1::InvalidState)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_replacement_preserves_identity_material_and_tombstone_history(
+    ) -> Result<(), KeyRegistryErrorV1> {
+        let mut previous = KeyRegistryStateV1::new();
+        previous.register_key(signing_registration(ATTRIBUTION, 50))?;
+
+        assert_eq!(previous.validate_replacement(&previous), Ok(()));
+
+        let mut public_key_changed = previous.clone();
+        public_key_changed
+            .records
+            .get_mut(&ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .public_verification_key = Some(PublicKey::from_bytes([51; 32]));
+        assert_eq!(
+            previous.validate_replacement(&public_key_changed),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut material_changed = previous.clone();
+        material_changed
+            .records
+            .get_mut(&ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .private_material_digest = Some(digest(52));
+        assert_eq!(
+            previous.validate_replacement(&material_changed),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut destroyed = previous.clone();
+        destroyed.destroy_key(KeyDestructionRequestV1::new(
+            ATTRIBUTION,
+            digest(50),
+            digest(53),
+        ))?;
+        assert_eq!(previous.validate_replacement(&destroyed), Ok(()));
+
+        let mut tombstone_changed = destroyed.clone();
+        tombstone_changed
+            .tombstones
+            .get_mut(&ATTRIBUTION)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .destroyed_material_digest = digest(54);
+        assert_eq!(
+            previous.validate_replacement(&tombstone_changed),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let next = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
+        let mut advanced = previous.clone();
+        advanced.register_key(signing_registration(next, 55))?;
+        assert_eq!(previous.validate_replacement(&advanced), Ok(()));
         Ok(())
     }
 
