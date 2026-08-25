@@ -224,8 +224,10 @@ mod coverage_entrypoints {
         expect_err(&strict_codec::decode_evidence(&encode_value(
             &ciborium::Value::Map(Vec::new()),
         )));
+        let mut invalid_closure = evidence.host_closure.clone();
+        invalid_closure.closure_event_type = "other".to_owned();
         expect_err(&verify_host_closure(
-            &evidence.host_closure,
+            &invalid_closure,
             &evidence.authoritative_events,
         ));
         let value = decode_value(ok(evidence.to_canonical_cbor()));
@@ -7880,12 +7882,6 @@ pub mod tests {
         valid.host_closure.closure_event_type = "experiment.lifecycle.consent-closed.v1".to_owned();
         valid.authoritative_events[2].event_type =
             "experiment.lifecycle.consent-closed.v1".to_owned();
-        valid.participant_views[0]
-            .hidden_event_types
-            .retain(|event_type| event_type != "consent.revoked.v1");
-        valid.participant_views[0]
-            .hidden_event_types
-            .push("experiment.lifecycle.consent-closed.v1".to_owned());
         assert_eq!(verify_evidence(&valid), Ok(()));
 
         let cases: [fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
