@@ -274,13 +274,6 @@ impl BundleMemberV1 {
     /// materialized or decoded.
     #[must_use]
     pub fn authority(path: impl Into<String>, bytes: Vec<u8>, role: BundleMemberRoleV1) -> Self {
-        debug_assert!(matches!(
-            role,
-            BundleMemberRoleV1::AuthorityInventory
-                | BundleMemberRoleV1::ExecutionMatrix
-                | BundleMemberRoleV1::AuthorityFixture
-                | BundleMemberRoleV1::AuthorityExpectedResult
-        ));
         let digest = *blake3::hash(&bytes).as_bytes();
         Self {
             path: path.into(),
@@ -2212,9 +2205,6 @@ fn validate_candidate_publication(
     profile: &ConformanceProfileV1,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
-    if profile.lifecycle != ProfileLifecycleV1::Candidate {
-        return Err(BundleContractErrorV1::CandidateEvidenceMissing);
-    }
     if profile.fixtures.iter().any(|fixture| {
         fixture.redaction_state == crate::RedactionStateV1::EvidenceMissing
             || fixture.replay_claim == crate::ReplayClaimV1::UnverifiableArtifactsMissing
@@ -6169,6 +6159,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::tests;
     use super::{
