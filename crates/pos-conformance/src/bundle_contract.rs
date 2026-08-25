@@ -1980,7 +1980,6 @@ mod tests {
             return Ok(());
         };
         let output_root = std::path::PathBuf::from(output_root);
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         let layers = [
             (ClaimLayerV1::ArtifactIntegrity, "artifact-integrity"),
             (ClaimLayerV1::ReplayConformance, "replay-conformance"),
