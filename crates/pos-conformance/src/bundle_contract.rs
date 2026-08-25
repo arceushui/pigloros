@@ -461,6 +461,7 @@ impl ConformanceBundleV1 {
             .ok_or(BundleContractErrorV1::MemberMissing)?;
         let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
             .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        let execution_mode = execution_mode_for_bundle(self.manifest.mode);
         if profile.lifecycle != self.manifest.lifecycle
             || profile.profile_digest != self.manifest.profile_digest
         {
@@ -495,15 +496,16 @@ impl ConformanceBundleV1 {
             }
             if member.role == BundleMemberRoleV1::FixtureInput
                 && !profile.fixtures.iter().any(|fixture| {
-                    fixture.inputs.iter().any(|input| {
-                        member.path
-                            == fixture_input_path(
-                                &fixture.case_id,
-                                fixture.claim_layer,
-                                &fixture.execution_profile_digest,
-                                &input.member_id,
-                            )
-                    })
+                    fixture.modes.contains(&execution_mode)
+                        && fixture.inputs.iter().any(|input| {
+                            member.path
+                                == fixture_input_path(
+                                    &fixture.case_id,
+                                    fixture.claim_layer,
+                                    &fixture.execution_profile_digest,
+                                    &input.member_id,
+                                )
+                        })
                 })
             {
                 return Err(BundleContractErrorV1::UndeclaredMember);
@@ -1225,15 +1227,19 @@ fn append_path_component(input: &mut Vec<u8>, value: &str) {
     input.extend_from_slice(value.as_bytes());
 }
 
+const fn execution_mode_for_bundle(mode: BundleModeV1) -> ExecutionModeV1 {
+    match mode {
+        BundleModeV1::Local => ExecutionModeV1::Local,
+        BundleModeV1::AirGapped => ExecutionModeV1::AirGapped,
+    }
+}
+
 fn validate_fixture_inputs_for_mode(
     profile: &ConformanceProfileV1,
     mode: Option<BundleModeV1>,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
-    let execution_mode = mode.map(|mode| match mode {
-        BundleModeV1::Local => ExecutionModeV1::Local,
-        BundleModeV1::AirGapped => ExecutionModeV1::AirGapped,
-    });
+    let execution_mode = mode.map(execution_mode_for_bundle);
     for fixture in &profile.fixtures {
         if execution_mode.is_some_and(|execution_mode| !fixture.modes.contains(&execution_mode)) {
             continue;
@@ -2116,7 +2122,7 @@ mod tests {
             claim_layer,
             execution_profile_digest: digest(1),
             public_schema_digest: digest(2),
-            modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
+            modes: vec![ExecutionModeV1::Local],
             subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
             inputs: vec![FixtureInputMemberV1 {
                 member_id: format!("input-{index:02}.json"),
@@ -2200,17 +2206,34 @@ mod tests {
             ClaimLayerV1::MetricConformance,
             ClaimLayerV1::EmpiricalEvaluation,
         ];
-        let fixtures = claim_layers
+        let mut fixtures = claim_layers
             .into_iter()
             .enumerate()
             .map(|(index, claim_layer)| profile_fixture(index, claim_layer))
-            .collect();
+            .collect::<Vec<_>>();
+        let mut air_gapped = fixtures
+            .iter()
+            .cloned()
+            .map(|mut fixture| {
+                fixture.execution_profile_digest = digest(2);
+                fixture.modes = vec![ExecutionModeV1::AirGapped];
+                fixture
+            })
+            .collect::<Vec<_>>();
+        fixtures.append(&mut air_gapped);
+        fixtures.sort_by_key(|fixture| {
+            (
+                fixture.case_id.clone(),
+                fixture.claim_layer,
+                fixture.execution_profile_digest,
+            )
+        });
         let mut profile = ConformanceProfileV1 {
             profile_id: "pigloros.w8.conformance-bundle".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(12),
-            execution_profile_digests: vec![digest(1)],
+            execution_profile_digests: vec![digest(1), digest(2)],
             public_schema_digests: vec![digest(2)],
             fixtures,
             allowed_divergences: Vec::new(),
@@ -2293,10 +2316,12 @@ mod tests {
         }
     }
 
-    fn profile_for_claim_layer(index: usize, claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
+    fn profile_for_claim_layer(claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
         let mut profile = profile();
         profile.profile_id = claim_layer_profile_id(claim_layer).to_owned();
-        profile.fixtures = vec![profile.fixtures[index].clone()];
+        profile.fixtures.retain(|fixture| {
+            fixture.claim_layer == claim_layer && fixture.modes == [ExecutionModeV1::Local]
+        });
         profile.profile_digest = profile.digest();
         profile
     }
@@ -2364,7 +2389,13 @@ mod tests {
             });
             members.push(member);
         }
-        members.extend([
+        members.extend(supporting_bundle_members());
+        append_authority_artifacts(&mut members)?;
+        Ok((members, expected_results))
+    }
+
+    fn supporting_bundle_members() -> [BundleMemberV1; 9] {
+        [
             BundleMemberV1::supporting(
                 "support/normative-requirements.md",
                 include_bytes!("../../../fixtures/conformance/support/normative-requirements.md")
@@ -2414,9 +2445,7 @@ mod tests {
                     .to_vec(),
                 BundleMemberRoleV1::ExecutionMatrix,
             ),
-        ]);
-        append_authority_artifacts(&mut members)?;
-        Ok((members, expected_results))
+        ]
     }
 
     fn append_authority_artifacts(
@@ -2821,7 +2850,7 @@ mod tests {
         ];
         for claim_layer in claim_layers {
             let profile = profile_for_claim_layer_families(claim_layer);
-            assert_eq!(profile.fixtures.len(), 7);
+            assert_eq!(profile.fixtures.len(), 14);
             for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
                 let bundle = signed_bundle(&profile, mode)?;
                 assert_eq!(bundle.manifest.expected_results.len(), 7);
@@ -3567,6 +3596,23 @@ mod tests {
             })
             .validate(),
             Err(BundleContractErrorV1::ModeParityMismatch)
+        );
+
+        let mut local_with_opposite_mode_input = signed_bundle(&profile, BundleModeV1::Local)?;
+        let opposite_mode_input = air_gapped
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::FixtureInput)
+            .cloned()
+            .ok_or("test bundle has an opposite-mode fixture input")?;
+        local_with_opposite_mode_input
+            .members
+            .push(opposite_mode_input);
+        local_with_opposite_mode_input.rebuild_member_descriptors();
+        let local_with_opposite_mode_input = local_with_opposite_mode_input.sign(&signing_key)?;
+        assert_eq!(
+            local_with_opposite_mode_input.validate(),
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
 
         let mut air_with_local_mode = air_gapped.clone();
@@ -5104,7 +5150,7 @@ mod tests {
 
     #[test]
     fn fixture_input_guards_are_independent() -> Result<(), Box<dyn std::error::Error>> {
-        let profile = profile_for_claim_layer(0, ClaimLayerV1::ArtifactIntegrity);
+        let profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
         let input_index = bundle
             .members

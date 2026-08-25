@@ -1015,6 +1015,9 @@ fn validate_fixture(
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
+    if fixture.modes.len() != 1 {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
     fixture
         .inputs
         .iter()
@@ -2650,7 +2653,7 @@ mod tests {
             claim_layer: ClaimLayerV1::ArtifactIntegrity,
             execution_profile_digest: digest(1),
             public_schema_digest: digest(2),
-            modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
+            modes: vec![ExecutionModeV1::Local],
             subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
             inputs: vec![FixtureInputMemberV1 {
                 member_id: "fixture.json".to_owned(),
@@ -2958,10 +2961,7 @@ mod tests {
                 },
                 vec![],
             ),
-            case_outcomes: vec![
-                case_outcome_record(ExecutionModeV1::Local),
-                case_outcome_record(ExecutionModeV1::AirGapped),
-            ],
+            case_outcomes: vec![case_outcome_record(ExecutionModeV1::Local)],
             attestation: StableEvidenceAttestationV1 {
                 signer_public_key: [0; 32],
                 signature: [0; 64],
@@ -4893,6 +4893,12 @@ mod tests {
         reject_profile_change(
             |value| value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::Local],
             ConformanceContractError::NonCanonicalOrder,
+        );
+        reject_profile_change(
+            |value| {
+                value.fixtures[0].modes = vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped]
+            },
+            ConformanceContractError::FieldOutOfBounds,
         );
     }
 
