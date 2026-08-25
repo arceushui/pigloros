@@ -1654,6 +1654,29 @@ impl EventStore for MemoryStore {
         Ok(before.saturating_sub(self.append_identities.len()))
     }
 
+    fn remove_append_identities_bounded(
+        &mut self,
+        scope: AppendDedupScope,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        let mut matching: Vec<_> = self
+            .append_identities
+            .iter()
+            .filter(|(_, record)| record.scope == scope)
+            .map(|(key, record)| (record.expires_at, *key))
+            .collect();
+        matching.sort_unstable_by_key(|(expires_at, key)| (*expires_at, key.as_bytes()));
+        let more_may_remain = matching.len() > limit.get();
+        let removed = matching.len().min(limit.get());
+        for (_, key) in matching.into_iter().take(removed) {
+            self.append_identities.remove(&key);
+        }
+        Ok(PurgeOutcome {
+            removed,
+            more_may_remain,
+        })
+    }
+
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| self.collect_events_in_range(timeline, range))

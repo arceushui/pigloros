@@ -512,6 +512,10 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 
 const CONSENT_LOCK_STRIPES: usize = 64;
 const CONSENT_LOCK_STRIPES_U64: u64 = 64;
+const CONSENT_DEDUP_CLEANUP_BATCH: NonZeroUsize = match NonZeroUsize::new(256) {
+    Some(limit) => limit,
+    None => unreachable!(),
+};
 
 type ConsentHistoryLocks = Vec<Arc<tokio::sync::Mutex<()>>>;
 
@@ -1339,7 +1343,10 @@ impl Gateway {
             }
         };
         self.store
-            .remove_append_identities(ingress_dedup_scope(revocation.subject_id))
+            .remove_append_identities_bounded(
+                ingress_dedup_scope(revocation.subject_id),
+                CONSENT_DEDUP_CLEANUP_BATCH,
+            )
             .await
             .map_err(GatewayError::from)?;
         Ok(event)

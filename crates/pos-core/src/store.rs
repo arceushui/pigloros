@@ -498,6 +498,26 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Remove at most `limit` append identities owned by one revocable scope.
+    ///
+    /// The bounded form is the consent-revocation invalidation seam. Callers
+    /// must schedule another pass when `more_may_remain` is true; a revocation
+    /// never performs an unbounded scan on the write path.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend does not implement
+    /// bounded append identity withdrawal cleanup.
+    fn remove_append_identities_bounded(
+        &mut self,
+        _scope: AppendDedupScope,
+        _limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        Err(CoreError::Storage(
+            "bounded append identity withdrawal cleanup is unsupported by this EventStore"
+                .to_owned(),
+        ))
+    }
+
     /// Read events from a timeline in a seq range.
     ///
     /// For a forked timeline, this transparently stitches `parent[0..fork_seq]` + child events.

@@ -169,6 +169,11 @@ enum Command {
         scope: AppendDedupScope,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
     },
+    RemoveAppendIdentitiesBounded {
+        scope: AppendDedupScope,
+        limit: NonZeroUsize,
+        reply: oneshot::Sender<Result<PurgeOutcome, StoreExecutorError>>,
+    },
     RootCount {
         maximum: usize,
         reply: oneshot::Sender<Result<usize, StoreExecutorError>>,
@@ -245,6 +250,7 @@ impl Command {
             | Self::AdmitGeoLocation { .. }
             | Self::Purge { .. }
             | Self::RemoveAppendIdentities { .. }
+            | Self::RemoveAppendIdentitiesBounded { .. }
             | Self::Create { .. }
             | Self::Append { .. }
             | Self::AppendConsentGrant { .. }
@@ -1008,6 +1014,17 @@ impl StoreExecutor {
             reply
         })
     }
+    pub(crate) async fn remove_append_identities_bounded(
+        &self,
+        scope: AppendDedupScope,
+        limit: NonZeroUsize,
+    ) -> Result<PurgeOutcome, StoreExecutorError> {
+        submit!(self, |reply| Command::RemoveAppendIdentitiesBounded {
+            scope,
+            limit,
+            reply
+        })
+    }
     pub(crate) async fn admit_geo_location(
         &self,
         request: GeoLocationAdmissionRequestV1,
@@ -1424,6 +1441,9 @@ fn expire_command(command: Command) {
         Command::RemoveAppendIdentities { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
+        Command::RemoveAppendIdentitiesBounded { reply, .. } => {
+            drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
+        }
         Command::RootCount { reply, .. } => {
             drop(reply.send(Err(StoreExecutorError::DeadlineExceeded)));
         }
@@ -1580,6 +1600,19 @@ fn execute(state: &mut ExecutorState, command: Command) -> CommandExecution {
             send_store_result(
                 reply,
                 state.store.event_store().remove_append_identities(scope),
+            );
+        }
+        Command::RemoveAppendIdentitiesBounded {
+            scope,
+            limit,
+            reply,
+        } => {
+            send_store_result(
+                reply,
+                state
+                    .store
+                    .event_store()
+                    .remove_append_identities_bounded(scope, limit),
             );
         }
         Command::RootCount { maximum, reply } => execute_root_count_command(state, maximum, reply),

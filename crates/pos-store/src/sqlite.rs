@@ -2849,6 +2849,52 @@ impl EventStore for SqliteStore {
             .map_err(|error| CoreError::Storage(error.to_string()))
     }
 
+    fn remove_append_identities_bounded(
+        &mut self,
+        scope: AppendDedupScope,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let mut stmt = tx
+            .prepare("SELECT dedup_key FROM append_identities WHERE scope_key = ?1 ORDER BY expires_at, dedup_key LIMIT ?2")
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let keys: Result<Vec<Vec<u8>>, _> = stmt
+            .query_map(
+                params![
+                    scope.as_bytes().as_slice(),
+                    i64::try_from(limit.get()).unwrap_or(i64::MAX)
+                ],
+                |row| row.get(0),
+            )
+            .and_then(Iterator::collect);
+        let keys = keys.map_err(|error| CoreError::Storage(error.to_string()))?;
+        drop(stmt);
+        for key in &keys {
+            tx.execute(
+                "DELETE FROM append_identities WHERE scope_key = ?1 AND dedup_key = ?2",
+                params![scope.as_bytes().as_slice(), key],
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        let more_may_remain = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM append_identities WHERE scope_key = ?1)",
+                params![scope.as_bytes().as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?
+            != 0;
+        tx.commit()
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        Ok(PurgeOutcome {
+            removed: keys.len(),
+            more_may_remain,
+        })
+    }
+
     fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| {
