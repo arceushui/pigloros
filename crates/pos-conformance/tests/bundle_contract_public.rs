@@ -997,9 +997,8 @@ fn archive_without_first_fixture_input(
         };
         archive_array(value, 3)?.remove(member_index);
         let manifest = archive_array(value, 2)?;
-        let descriptors = match manifest.get_mut(4) {
-            Some(Value::Array(descriptors)) => descriptors,
-            _ => return Err("archive descriptors are missing".into()),
+        let Some(Value::Array(descriptors)) = manifest.get_mut(4) else {
+            return Err("archive descriptors are missing".into());
         };
         let descriptor_index = descriptors
             .iter()
