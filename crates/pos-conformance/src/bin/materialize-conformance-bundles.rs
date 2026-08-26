@@ -4,11 +4,12 @@ use ed25519_dalek::SigningKey;
 #[cfg(test)]
 use pos_conformance::ConformanceBundlePairV1;
 use pos_conformance::{
-    verify_archive_independently, BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1,
-    BundleModeV1, ClaimLayerV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
-    EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
-    FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
-    RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    expected_result_member_path, fixture_input_member_path, verify_archive_independently,
+    BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
+    ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1, EvaluatorProtocolV1,
+    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
+    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1, RedactionStateV1,
+    ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -763,7 +764,7 @@ fn bundle_inputs_with_authority(
         for member in &fixture.inputs {
             let input = canonical_fixture_input(&fixture.case_id, &member.member_id)?;
             members.push(BundleMemberV1::new(
-                fixture_input_path(
+                fixture_input_member_path(
                     &fixture.case_id,
                     fixture.claim_layer,
                     &fixture.execution_profile_digest,
@@ -776,7 +777,7 @@ fn bundle_inputs_with_authority(
         let ExpectedResultV1::CanonicalBytes { bytes, .. } = &fixture.expected else {
             return Err("materializer requires canonical public expected bytes".into());
         };
-        let path = expected_member_path(
+        let path = expected_result_member_path(
             &fixture.case_id,
             fixture.claim_layer,
             &fixture.execution_profile_digest,
@@ -941,37 +942,6 @@ fn safe_authority_relative_path(path: &str) -> Result<&Path, Box<dyn Error>> {
     } else {
         Ok(relative)
     }
-}
-
-fn fixture_input_path(
-    case_id: &str,
-    claim_layer: ClaimLayerV1,
-    execution_profile_digest: &[u8; 32],
-    member_id: &str,
-) -> String {
-    let mut input = b"PiglorOS.CPF1InputPath.v1\0".to_vec();
-    append_path_component(&mut input, case_id);
-    input.push(claim_layer_code(claim_layer));
-    input.extend_from_slice(execution_profile_digest);
-    append_path_component(&mut input, member_id);
-    format!("inputs/{}.bin", blake3::hash(&input).to_hex())
-}
-
-fn expected_member_path(
-    case_id: &str,
-    claim_layer: ClaimLayerV1,
-    execution_profile_digest: &[u8; 32],
-) -> String {
-    let mut input = b"PiglorOS.CPF1ExpectedPath.v1\0".to_vec();
-    append_path_component(&mut input, case_id);
-    input.push(claim_layer_code(claim_layer));
-    input.extend_from_slice(execution_profile_digest);
-    format!("expected/{}.bin", blake3::hash(&input).to_hex())
-}
-
-fn append_path_component(input: &mut Vec<u8>, value: &str) {
-    input.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    input.extend_from_slice(value.as_bytes());
 }
 
 const fn claim_layer_code(claim_layer: ClaimLayerV1) -> u8 {

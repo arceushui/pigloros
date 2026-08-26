@@ -20,10 +20,10 @@ mod bundle_contract;
 mod profile_contract;
 
 pub use bundle_contract::{
-    verify_archive_independently, BundleContractErrorV1, BundleExpectedResultV1, BundleManifestV1,
-    BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
-    ConformanceBundlePairV1, ConformanceBundleV1, CONFORMANCE_BUNDLE_MAGIC_V1,
-    MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+    expected_result_member_path, fixture_input_member_path, verify_archive_independently,
+    BundleContractErrorV1, BundleExpectedResultV1, BundleManifestV1, BundleMemberDescriptorV1,
+    BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
+    CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 #[doc(hidden)]
 pub use profile_contract::expected_result_bytes;
