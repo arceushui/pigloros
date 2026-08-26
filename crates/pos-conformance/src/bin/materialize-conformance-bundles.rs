@@ -465,7 +465,12 @@ fn profile_from_record(
         stable_evidence: Vec::new(),
         profile_digest: [0; 32],
     };
-    profile.profile_digest = profile.digest();
+    profile.bind_execution_matrix_digest(
+        *blake3::hash(include_bytes!(
+            "../../../../fixtures/conformance/matrix/adr-059-complete.json"
+        ))
+        .as_bytes(),
+    )?;
     Ok(profile)
 }
 
@@ -1134,6 +1139,15 @@ mod tests {
     fn profile_binds_one_execution_profile_per_mode_and_preserves_pair_parity(
     ) -> Result<(), Box<dyn Error>> {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        assert_eq!(
+            profile.execution_matrix_digest()?,
+            Some(
+                *blake3::hash(include_bytes!(
+                    "../../../../fixtures/conformance/matrix/adr-059-complete.json"
+                ))
+                .as_bytes()
+            )
+        );
         let inventory =
             include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
         let signing_key = SigningKey::from_bytes(&[7; 32]);
