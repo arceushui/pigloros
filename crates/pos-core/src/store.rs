@@ -1518,10 +1518,20 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum InitializationFailure {
+        None,
+        Load,
+        List,
+        Create,
+        Save,
+    }
+
     struct RegistryStore {
         registry: Option<crate::KeyRegistryStateV1>,
         timeline: Option<Timeline>,
         appended: bool,
+        initialization_failure: InitializationFailure,
     }
 
     impl RegistryStore {
@@ -1530,12 +1540,16 @@ mod tests {
                 registry: Some(registry),
                 timeline: Some(Timeline::new(TimelineMeta::root("registry"))),
                 appended: false,
+                initialization_failure: InitializationFailure::None,
             }
         }
     }
 
     impl EventStore for RegistryStore {
         fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+            if self.initialization_failure == InitializationFailure::Create {
+                return Err(CoreError::Storage("create_timeline failed".to_owned()));
+            }
             Ok(Timeline::new(TimelineMeta::root("registry-created")))
         }
 
@@ -1561,6 +1575,9 @@ mod tests {
         }
 
         fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            if self.initialization_failure == InitializationFailure::List {
+                return Err(CoreError::Storage("list_timelines failed".to_owned()));
+            }
             Ok(self.timeline.clone().into_iter().collect())
         }
 
@@ -1569,6 +1586,9 @@ mod tests {
         }
 
         fn load_key_registry(&self) -> Result<Option<crate::KeyRegistryStateV1>, CoreError> {
+            if self.initialization_failure == InitializationFailure::Load {
+                return Err(CoreError::Storage("load_key_registry failed".to_owned()));
+            }
             Ok(self.registry.clone())
         }
 
@@ -1576,6 +1596,9 @@ mod tests {
             &mut self,
             registry: &crate::KeyRegistryStateV1,
         ) -> Result<(), CoreError> {
+            if self.initialization_failure == InitializationFailure::Save {
+                return Err(CoreError::Storage("save_key_registry failed".to_owned()));
+            }
             self.registry = Some(registry.clone());
             Ok(())
         }
@@ -1706,6 +1729,32 @@ mod tests {
             None
         );
         assert!(store.registry.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn default_timeline_initialization_propagates_backend_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for failure in [
+            InitializationFailure::Load,
+            InitializationFailure::List,
+            InitializationFailure::Create,
+            InitializationFailure::Save,
+        ] {
+            let mut store = RegistryStore::new(crate::KeyRegistryStateV1::new());
+            store.initialization_failure = failure;
+            store.timeline = match failure {
+                InitializationFailure::Create => None,
+                _ => Some(Timeline::new(TimelineMeta::root("ledger"))),
+            };
+            if failure == InitializationFailure::Save {
+                store.registry = None;
+            }
+            let error = store
+                .initialize_timeline_with_key_registry("ledger", &crate::KeyRegistryStateV1::new())
+                .test_err()?;
+            assert!(!error.to_string().is_empty());
+        }
         Ok(())
     }
 

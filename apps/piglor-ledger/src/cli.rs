@@ -2446,10 +2446,6 @@ mod tests {
     #[test]
     fn build_store_without_ledger_timeline_errors() -> Result<(), Box<dyn std::error::Error>> {
         // A read-only build must reject a store without an existing ledger timeline.
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return Ok(());
-        }
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         {
@@ -2459,7 +2455,6 @@ mod tests {
             .test_ok()?;
             store.create_timeline("other").test_ok()?;
         }
-        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).test_ok()?;
         let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -2468,9 +2463,29 @@ mod tests {
             "--site".into(),
             tmp.path().join("site").to_str().test_ok()?.to_owned(),
         ]);
-        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).test_ok()?;
-        assert!(err.is_err(), "expected error from read-only DB");
+        assert!(err.test_err()?.to_string().contains("no 'ledger' timeline"));
 
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn open_store_reports_a_malformed_registry_schema() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("malformed-registry.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
+        let raw = pos_store::sqlite::SqliteStore::open(db.to_str().test_ok()?).test_ok()?;
+        drop(raw);
+        let connection = rusqlite::Connection::open(&db)?;
+        connection.execute_batch(
+            "DROP TABLE key_registry;
+             CREATE TABLE key_registry (singleton INTEGER PRIMARY KEY, wrong_column BLOB);",
+        )?;
+        drop(connection);
+
+        let error = open_store(&Source::Store(db), Some(&key_path)).test_err()?;
+        assert!(error.to_string().contains("state_cbor"), "{error}");
         Ok(())
     }
 

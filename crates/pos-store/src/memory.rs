@@ -4920,7 +4920,9 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::ConsentAuthority;
+    use pos_core::{
+        ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRegistryPortV1, KeyRoleV1, PublicKey,
+    };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
@@ -4959,6 +4961,52 @@ mod coverage_entrypoints {
             AppendDedupKey::from_keyed_hash([key; 32]),
             AppendDedupScope::from_keyed_hash([scope; 32]),
         )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn invalid_registry() -> KeyRegistryStateV1 {
+        fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
+            match value {
+                ciborium::value::Value::Integer(integer)
+                    if u64::try_from(*integer).ok() == Some(1) =>
+                {
+                    *integer = 0.into();
+                    true
+                }
+                ciborium::value::Value::Array(values) => {
+                    values.iter_mut().any(replace_first_integer)
+                }
+                ciborium::value::Value::Map(entries) => entries
+                    .iter_mut()
+                    .any(|(key, value)| replace_first_integer(key) || replace_first_integer(value)),
+                ciborium::value::Value::Tag(_, value) => replace_first_integer(value),
+                _ => false,
+            }
+        }
+
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        ok(registry.register_key(KeyRegistrationV1::new(
+            identity,
+            Hash::from_bytes([31; 32]),
+            Some(PublicKey::from_bytes([32; 32])),
+        )));
+        let mut encoded = Vec::new();
+        ok(ciborium::into_writer(&registry, &mut encoded));
+        let mut value: ciborium::value::Value = ok(ciborium::from_reader(encoded.as_slice()));
+        assert!(replace_first_integer(&mut value));
+        let mut invalid_encoded = Vec::new();
+        ok(ciborium::into_writer(&value, &mut invalid_encoded));
+        ok(ciborium::from_reader(invalid_encoded.as_slice()))
+    }
+
+    #[test]
+    fn memory_key_registry_revalidates_loaded_and_saved_snapshots() {
+        let invalid = invalid_registry();
+        let mut store = MemoryStore::new();
+        store.key_registry = Some(invalid.clone());
+        assert!(store.load_key_registry().is_err());
+        assert!(store.save_key_registry(&invalid).is_err());
     }
 
     #[test]

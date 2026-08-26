@@ -391,6 +391,29 @@ fn sqlite_key_registry_mutations_reject_read_only_transactions(
 }
 
 #[test]
+fn sqlite_read_only_open_rejects_missing_signature_identity_columns(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for schema in [
+        "CREATE TABLE events (id INTEGER PRIMARY KEY);",
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, signature_role INTEGER);",
+    ] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or("temporary database path is not UTF-8")?;
+        let connection = rusqlite::Connection::open(path)?;
+        connection.execute_batch(schema)?;
+        drop(connection);
+        assert!(matches!(
+            SqliteStore::open_read_only(path),
+            Err(CoreError::Storage(_))
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn sqlite_key_registry_rejects_a_decodable_invalid_snapshot(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
