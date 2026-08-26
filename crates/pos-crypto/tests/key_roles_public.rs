@@ -262,3 +262,19 @@ fn public_role_bound_key_mismatch_errors_are_closed() -> Result<(), Box<dyn std:
     );
     Ok(())
 }
+
+#[test]
+fn public_destruction_error_messages_identify_each_failure() {
+    assert_eq!(
+        KeyMaterialDestructionError::<&str>::AlreadyDestroyed.to_string(),
+        "key material is already destroyed"
+    );
+    assert_eq!(
+        KeyMaterialDestructionError::<&str>::MaterialDigestMismatch.to_string(),
+        "key material digest does not match the request"
+    );
+    assert_eq!(
+        KeyMaterialDestructionError::Commit("registry unavailable").to_string(),
+        "key registry commit failed: registry unavailable"
+    );
+}

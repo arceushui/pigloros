@@ -130,9 +130,7 @@ impl EncryptionKeyMaterial {
 
 impl Drop for EncryptionKeyMaterial {
     fn drop(&mut self) {
-        if let Some(mut key) = self.private_material.take() {
-            key.zeroize();
-        }
+        self.destroy();
     }
 }
 
