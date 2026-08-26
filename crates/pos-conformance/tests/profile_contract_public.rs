@@ -230,7 +230,7 @@ pub mod fixtures {
         let mut fields = vec![
             text("CPF1"),
             uint(1),
-            text("pigloros.w8.external#matrix=0101010101010101010101010101010101010101010101010101010101010101"),
+            text("pigloros.w8.knowledge-non-interference.1.0.0#matrix=0101010101010101010101010101010101010101010101010101010101010101"),
             text("1.0.0"),
             uint(lifecycle),
             bytes(12),
@@ -389,7 +389,7 @@ fn profile_without_matrix_binding() -> ConformanceProfileV1 {
         compatibility_digest: [11; 32],
     };
     let mut profile = ConformanceProfileV1 {
-        profile_id: "pigloros.test".to_owned(),
+        profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
         semantic_version: "1.0.0".to_owned(),
         lifecycle: pos_conformance::ProfileLifecycleV1::Draft,
         normative_spec_digest: [12; 32],
@@ -553,7 +553,9 @@ fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
     );
 
     assert_eq!(bound.bind_execution_matrix_digest(matrix_digest), Ok(()));
-    assert!(bound.profile_id.starts_with("pigloros.test#matrix="));
+    assert!(bound
+        .profile_id
+        .starts_with("pigloros.w8.knowledge-non-interference.1.0.0#matrix="));
     assert_eq!(bound.execution_matrix_digest(), Ok(matrix_digest));
     assert_ne!(bound.profile_digest, unbound_digest);
     let encoded = bound.to_canonical_cbor();
@@ -568,6 +570,15 @@ fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
         Ok(())
     );
     assert_ne!(bound.profile_digest, different_matrix.profile_digest);
+
+    let mut non_knowledge = profile_without_matrix_binding();
+    non_knowledge.profile_id = "pigloros.test".to_owned();
+    non_knowledge.profile_digest = non_knowledge.digest();
+    assert_eq!(
+        non_knowledge.bind_execution_matrix_digest([1; 32]),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+    assert_eq!(non_knowledge.validate(), Ok(()));
 
     let mut mismatched = bound.clone();
     assert_eq!(mismatched.bind_execution_matrix_digest([8; 32]), Ok(()));
@@ -605,7 +616,10 @@ fn public_profile_matrix_binding_rejects_invalid_hex_zero_and_overlong_ids() {
     );
 
     let mut uppercase = profile_without_matrix_binding();
-    uppercase.profile_id = format!("pigloros.test#matrix={}", "AB".repeat(32));
+    uppercase.profile_id = format!(
+        "pigloros.w8.knowledge-non-interference.1.0.0#matrix={}",
+        "AB".repeat(32)
+    );
     assert_eq!(uppercase.execution_matrix_digest(), Ok([0xab; 32]));
 
     let mut duplicate_marker = profile_without_matrix_binding();

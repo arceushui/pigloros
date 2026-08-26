@@ -29,9 +29,9 @@ from being interpreted as executed conformance evidence.
 Each expected record also declares the exact Draft-unavailable typed result
 (`ProvenanceMissing`) that the materializer encodes into the bundle, so the
 packaged result cannot silently diverge from the public record.
-Draft CPF1 bundles encode the unavailable outcome as the typed
-`ProvenanceMissing` expected result; they do not copy the descriptive `result`
-field into an evidence-bearing bundle member.
+Draft CPF1 bundles encode the exact checked-in expected-result record bytes;
+the record's `status: "pending"` and `ProvenanceMissing` declaration keep those
+bytes explicitly unavailable rather than executed evidence.
 
 `SHA256SUMS` and `BLAKE3SUMS` are independent byte inventories for every
 remaining public profile, input, expected result, matrix, inventory, and support

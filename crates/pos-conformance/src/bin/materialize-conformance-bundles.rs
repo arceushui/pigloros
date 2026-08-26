@@ -636,7 +636,7 @@ fn fixture(
     }
     let (input, expected) =
         canonical_fixture_bytes(context.claim_layer, input_path, expected_path)?;
-    let draft_expected_result = validate_fixture_records(
+    let expected_result_bytes = validate_fixture_records(
         input,
         expected,
         case_id,
@@ -666,7 +666,10 @@ fn fixture(
             digest: *blake3::hash(input).as_bytes(),
             provenance_digest: context.provenance_digest,
         }],
-        expected: draft_expected_result,
+        expected: ExpectedResultV1::CanonicalBytes {
+            digest: *blake3::hash(&expected_result_bytes).as_bytes(),
+            bytes: expected_result_bytes,
+        },
         expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
         expected_verification_error: Some(SafeErrorCodeV1::ProvenanceMissing),
         replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
@@ -720,7 +723,7 @@ fn validate_fixture_records(
     case_id: &str,
     family: &str,
     claim_layer: &str,
-) -> Result<ExpectedResultV1, Box<dyn Error>> {
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let input_record: JsonValue = serde_json::from_slice(input)?;
     let expected_record: JsonValue = serde_json::from_slice(expected)?;
     for record in [&input_record, &expected_record] {
@@ -748,9 +751,7 @@ fn validate_fixture_records(
     {
         return Err("Draft fixture records contain unsupported evidence claims".into());
     }
-    Ok(ExpectedResultV1::TypedFailure(
-        SafeErrorCodeV1::ProvenanceMissing,
-    ))
+    Ok(expected.to_vec())
 }
 
 fn family_for_path(input_path: &str, expected_path: &str) -> Option<&'static str> {

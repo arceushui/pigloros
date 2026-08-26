@@ -32,8 +32,15 @@ fn run_with_verifier(
 }
 
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "conformance bundle path is not a regular file",
+        )
+        .into());
+    }
     let file = File::open(path)?;
-    let metadata = file.metadata()?;
     let bytes = read_bounded(file, metadata.len(), MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
     verify_archive_independently(&bytes).map_err(Into::into)
 }
@@ -75,6 +82,8 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::io::{self, Cursor, Read};
+    #[cfg(unix)]
+    use std::process::Command;
 
     struct FailingReader;
 
@@ -132,13 +141,25 @@ mod tests {
     }
 
     #[test]
-    fn verify_path_rejects_a_directory_after_opening_it() -> Result<(), Box<dyn std::error::Error>>
+    fn verify_path_rejects_a_directory_before_opening_it() -> Result<(), Box<dyn std::error::Error>>
     {
         let path =
             std::env::temp_dir().join(format!("pigloros-directory-cfb1-{}", std::process::id()));
         fs::create_dir(&path)?;
         let result = verify_path(&path);
         fs::remove_dir(&path)?;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_path_rejects_a_fifo_before_opening_it() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!("pigloros-fifo-cfb1-{}", std::process::id()));
+        let status = Command::new("mkfifo").arg(&path).status()?;
+        assert!(status.success());
+        let result = verify_path(&path);
+        fs::remove_file(&path)?;
         assert!(result.is_err());
         Ok(())
     }
