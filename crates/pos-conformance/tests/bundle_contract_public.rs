@@ -32,6 +32,15 @@ const MATERIALIZED_LAYERS: [&str; 7] = [
     "empirical-evaluation",
 ];
 
+type ArchiveMutation = Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>;
+type JsonMutation = Box<dyn FnOnce(&mut JsonValue)>;
+type CapMutation = Box<dyn Fn(&mut EvaluatorHardCapsV1)>;
+type PublicBundleInputs = (
+    ConformanceProfileV1,
+    Vec<BundleMemberV1>,
+    Vec<BundleExpectedResultV1>,
+);
+
 fn top_fields(value: &mut Value) -> Result<&mut Vec<Value>, Box<dyn std::error::Error>> {
     match value {
         Value::Array(fields) if fields.len() == 6 => Ok(fields),
@@ -1016,12 +1025,42 @@ fn assert_json_member_rejected(
     mutate: impl FnOnce(&mut JsonValue),
     expected: pos_conformance::BundleContractErrorV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let changed = mutate_json_member(bundle, path, mutate)?;
+    let changed = mutate_bound_json_member(bundle, path, mutate)?;
     assert_eq!(changed.validate(), Err(expected));
     Ok(())
 }
 
-fn mutate_json_member(
+fn replace_member_bytes(
+    bundle: &mut ConformanceBundleV1,
+    member_index: usize,
+    bytes: Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let digest = *blake3::hash(&bytes).as_bytes();
+    let path = bundle.members[member_index].path.clone();
+    bundle.members[member_index].bytes = bytes;
+    bundle.members[member_index].digest = digest;
+    let descriptor = bundle
+        .manifest
+        .members
+        .iter_mut()
+        .find(|descriptor| descriptor.path == path)
+        .ok_or("JSON descriptor is missing")?;
+    descriptor.size_bytes = bundle.members[member_index].bytes.len() as u64;
+    descriptor.digest = digest;
+    Ok(())
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn mutate_bound_json_member(
     bundle: &ConformanceBundleV1,
     path: &str,
     mutate: impl FnOnce(&mut JsonValue),
@@ -1035,30 +1074,39 @@ fn mutate_json_member(
     let mut json: JsonValue = serde_json::from_slice(&changed.members[member_index].bytes)?;
     mutate(&mut json);
     let bytes = serde_json::to_vec(&json)?;
-    let digest = *blake3::hash(&bytes).as_bytes();
-    changed.members[member_index].bytes = bytes;
-    changed.members[member_index].digest = digest;
-    let descriptor = changed
-        .manifest
-        .members
-        .iter_mut()
-        .find(|descriptor| descriptor.path == path)
-        .ok_or("JSON descriptor is missing")?;
-    descriptor.size_bytes = changed.members[member_index].bytes.len() as u64;
-    descriptor.digest = digest;
+    replace_member_bytes(&mut changed, member_index, bytes.clone())?;
+    if path == AUTHORITY_INVENTORY_MEMBER_PATH {
+        let provenance_index = changed
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("provenance member is missing")?;
+        let mut provenance: JsonValue =
+            serde_json::from_slice(&changed.members[provenance_index].bytes)?;
+        provenance["authority_inventory"]["sha256_digest"] =
+            JsonValue::String(hex_digest(&Sha256::digest(&bytes)));
+        let provenance_bytes = serde_json::to_vec(&provenance)?;
+        replace_member_bytes(&mut changed, provenance_index, provenance_bytes)?;
+
+        let profile_index = changed
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or("profile member is missing")?;
+        let mut profile =
+            ConformanceProfileV1::from_canonical_cbor(&changed.members[profile_index].bytes)?;
+        profile.provenance_digest = changed.members[provenance_index].digest;
+        profile.profile_digest = profile.digest();
+        let profile_bytes = profile.to_canonical_cbor()?;
+        replace_member_bytes(&mut changed, profile_index, profile_bytes)?;
+        changed.manifest.profile_digest = profile.profile_digest;
+    }
     Ok(changed)
 }
 
 fn public_bundle_inputs(
     bundle: &ConformanceBundleV1,
-) -> Result<
-    (
-        ConformanceProfileV1,
-        Vec<BundleMemberV1>,
-        Vec<BundleExpectedResultV1>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<PublicBundleInputs, Box<dyn std::error::Error>> {
     let profile_member = bundle
         .members
         .iter()
@@ -1409,7 +1457,7 @@ fn public_archive_decoder_rejects_each_manifest_field_shape(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
-    let mutations: Vec<Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>> = vec![
+    let mutations: Vec<ArchiveMutation> = vec![
         Box::new(|value| {
             top_fields(value)?[0] = Value::Null;
             Ok(())
@@ -1459,9 +1507,10 @@ fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
-    let mutations: Vec<Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>> = vec![
+    let mutations: Vec<ArchiveMutation> = vec![
         Box::new(|value| {
-            archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(99_u64.into());
+            archive_member(value, "support/normative-requirements.md")?[2] =
+                Value::Integer(99_u64.into());
             Ok(())
         }),
         Box::new(|value| {
@@ -1524,19 +1573,10 @@ fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
     Ok(())
 }
 
-#[test]
-fn public_expected_result_validation_rejects_each_bound_mismatch(
+fn assert_expected_scalar_bound_mismatches(
+    bundle: &ConformanceBundleV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bundle = signed_draft_bundle()?;
-    let expected_member_index = bundle
-        .members
-        .iter()
-        .position(|member| member.role == BundleMemberRoleV1::ExpectedResult)
-        .ok_or("expected-result member is missing")?;
-    let expected_path = bundle.members[expected_member_index].path.clone();
-
     let mut wrong_mode = bundle.clone();
-    wrong_mode.manifest.mode = BundleModeV1::AirGapped;
     wrong_mode.manifest.expected_results[0].mode = BundleModeV1::AirGapped;
     assert_eq!(
         wrong_mode.validate(),
@@ -1557,6 +1597,20 @@ fn public_expected_result_validation_rejects_each_bound_mismatch(
         Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
     );
 
+    let mut missing_fixture = bundle.clone();
+    missing_fixture.manifest.expected_results[0].case_id = "missing-fixture".to_owned();
+    assert_eq!(
+        missing_fixture.validate(),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+    Ok(())
+}
+
+fn assert_expected_member_bound_mismatches(
+    bundle: &ConformanceBundleV1,
+    expected_member_index: usize,
+    expected_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut missing_member = bundle.clone();
     missing_member.members.remove(expected_member_index);
     missing_member
@@ -1585,13 +1639,6 @@ fn public_expected_result_validation_rejects_each_bound_mismatch(
         Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
     );
 
-    let mut missing_fixture = bundle.clone();
-    missing_fixture.manifest.expected_results[0].case_id = "missing-fixture".to_owned();
-    assert_eq!(
-        missing_fixture.validate(),
-        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
-    );
-
     let replacement_path = "expected/alternate.bin".to_owned();
     let mut undeclared_path = bundle.clone();
     undeclared_path.members[expected_member_index].path = replacement_path.clone();
@@ -1608,7 +1655,13 @@ fn public_expected_result_validation_rejects_each_bound_mismatch(
         undeclared_path.validate(),
         Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
     );
+    Ok(())
+}
 
+fn assert_expected_order_mismatch(
+    bundle: ConformanceBundleV1,
+    expected_member_index: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let expected_member = bundle.members[expected_member_index].clone();
     let duplicate_path = "expected/duplicate.bin".to_owned();
     let duplicate_member = BundleMemberV1::new(duplicate_path.clone(), expected_member.bytes, true);
@@ -1641,16 +1694,37 @@ fn public_expected_result_validation_rejects_each_bound_mismatch(
 }
 
 #[test]
+fn public_expected_result_validation_rejects_each_bound_mismatch(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = signed_draft_bundle()?;
+    let expected_member_index = bundle
+        .members
+        .iter()
+        .position(|member| member.role == BundleMemberRoleV1::ExpectedResult)
+        .ok_or("expected-result member is missing")?;
+    let expected_path = bundle.members[expected_member_index].path.clone();
+    assert_expected_scalar_bound_mismatches(&bundle)?;
+    assert_expected_member_bound_mismatches(&bundle, expected_member_index, &expected_path)?;
+    assert_expected_order_mismatch(bundle, expected_member_index)?;
+    Ok(())
+}
+
+#[test]
 fn public_materialization_caps_reject_bundle_shape_overflows(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let base = signed_draft_bundle()?;
     let (profile, members, expected_results) = public_bundle_inputs(&base)?;
     let input_size = profile.fixtures[0].inputs[0].size_bytes;
-    let input_path_bytes = profile.fixtures[0].inputs[0].member_id.len() as u16;
-    let mutations: Vec<Box<dyn Fn(&mut EvaluatorHardCapsV1)>> = vec![
-        Box::new(|caps| caps.max_bundle_members = 1),
+    let expected_size = match &profile.fixtures[0].expected {
+        ExpectedResultV1::CanonicalBytes { bytes, .. } => u64::try_from(bytes.len())?,
+        _ => return Err("draft fixture expected canonical bytes".into()),
+    };
+    let fixture_member_size = input_size.max(expected_size);
+    let input_path_bytes = u16::try_from(profile.fixtures[0].inputs[0].member_id.len())?;
+    let mutations: Vec<CapMutation> = vec![
+        Box::new(|caps| caps.max_bundle_members = 2),
         Box::new(move |caps| caps.max_member_path_bytes = input_path_bytes),
-        Box::new(move |caps| caps.max_member_bytes = input_size),
+        Box::new(move |caps| caps.max_member_bytes = fixture_member_size),
         Box::new(move |caps| caps.max_total_bundle_bytes = input_size),
     ];
     for mutate in mutations {
@@ -1697,7 +1771,7 @@ fn public_independent_verifier_rejects_each_zero_archive_cap(
 fn public_draft_authority_records_reject_each_malformed_shape(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bundle = signed_draft_bundle()?;
-    let inventory_cases: Vec<Box<dyn FnOnce(&mut JsonValue)>> = vec![
+    let inventory_cases: Vec<JsonMutation> = vec![
         Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
         Box::new(|value| value["lifecycle"] = JsonValue::String("Stable".to_owned())),
@@ -1705,10 +1779,10 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         Box::new(|value| value["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| {
             value["entries"][0]["materialization_status"] =
-                JsonValue::String("materialized".to_owned())
+                JsonValue::String("materialized".to_owned());
         }),
         Box::new(|value| {
-            value["entries"][0]["fixture_bytes_path"] = JsonValue::String("x".to_owned())
+            value["entries"][0]["fixture_bytes_path"] = JsonValue::String("x".to_owned());
         }),
         Box::new(|value| {
             let duplicate = value["entries"][1]["fixture_id"].clone();
@@ -1727,9 +1801,9 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         &bundle,
         "authority/expected-authority-inventory.json",
         |value| {
-            value["entries"].as_array_mut().map(|entries| entries.pop());
+            let _ = value["entries"].as_array_mut().map(Vec::pop);
         },
-        pos_conformance::BundleContractErrorV1::MemberMissing,
+        pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
     )?;
     assert_json_member_rejected(
         &bundle,
@@ -1738,7 +1812,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
     )?;
 
-    let matrix_cases: Vec<Box<dyn FnOnce(&mut JsonValue)>> = vec![
+    let matrix_cases: Vec<JsonMutation> = vec![
         Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
         Box::new(|value| value["lifecycle"] = JsonValue::String("Candidate".to_owned())),
