@@ -1420,6 +1420,28 @@ fn assert_archive_profile_rejections(
         mutate_profile(value, |fields| fields[16] = Value::Null)
     })?;
     assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[0] = Value::Null)
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[1] = Value::Text("wrong".to_owned()))
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[4] = Value::Text("wrong".to_owned()))
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[0] = Value::Null)
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[1] = Value::Null)
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[4] = Value::Null)
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        archive_array(value, 2)?[3] = Value::Null;
+        Ok(())
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
         let mut noncanonical = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
             Some(Value::Bytes(profile_bytes)) => profile_bytes.clone(),
             _ => return Err("profile bytes are missing".into()),
@@ -1471,6 +1493,85 @@ fn assert_independent_profile_shape_rejections(
     assert_eq!(
         pos_conformance::verify_archive_independently(&invalid_text_profile),
         Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_each_expected_result_shape(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let mutations: Vec<ArchiveMutation> = vec![
+        Box::new(|value| {
+            archive_expected(value)?[0] = Value::Integer(1_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[1] = Value::Text("wrong".to_owned());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[1] = Value::Integer(99_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[2] = Value::Bytes(vec![0]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[3] = Value::Text("wrong".to_owned());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[3] = Value::Integer(99_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[5] = Value::Bytes(vec![0]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[4] = Value::Integer(1_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_array(value, 2)?[5] = Value::Array(vec![Value::Null]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[4] = Value::Text("expected/missing.bin".to_owned());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[3] = Value::Integer(1_u64.into());
+            Ok(())
+        }),
+    ];
+    for mutate in mutations {
+        assert_archive_rejected(&bundle, &signing_key, mutate)?;
+    }
+
+    let malformed_fixtures = signed_archive_variant(&bundle, &signing_key, |value| {
+        let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => return Err("profile bytes are missing".into()),
+        };
+        let mut profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))?;
+        let Value::Array(fields) = &mut profile else {
+            return Err("profile is not an array".into());
+        };
+        fields[8] = Value::Null;
+        let profile_bytes = encode_archive(&profile)?;
+        archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(profile_bytes.clone());
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
+        descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
+        descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&malformed_fixtures),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
     );
     Ok(())
 }
