@@ -74,8 +74,7 @@ impl EventLedgerStore {
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
         let mut candidate_registry = persisted_registry
-            .as_ref()
-            .cloned()
+            .clone()
             .unwrap_or_else(|| registry.clone());
         let signing_key = SigningKeyMaterial::new(signing_key);
         let public_verification_key = signing_key.public_verification_key().map_err(|error| {
@@ -136,19 +135,21 @@ impl EventLedgerStore {
                 "ledger signing key has already been irreversibly destroyed".to_owned(),
             ));
         }
-        let mut registry = self
+        let mut registry_guard = self
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
         let store = &mut self.store;
-        let registry = &mut *registry;
+        let registry = &mut *registry_guard;
         let signing_key = &mut self.signing_key;
-        destroy_registered_signing_key::<CoreError, _>(signing_key, request, |request| {
-            let (outcome, next) = store.destroy_key_registry(request)?;
-            *registry = next;
-            Ok(outcome)
-        })
-        .map_err(|error| match error {
+        let result =
+            destroy_registered_signing_key::<CoreError, _>(signing_key, request, |request| {
+                let (outcome, next) = store.destroy_key_registry(request)?;
+                *registry = next;
+                Ok(outcome)
+            });
+        drop(registry_guard);
+        result.map_err(|error| match error {
             KeyMaterialDestructionError::AlreadyDestroyed => LedgerError::Store(
                 "ledger signing key has already been irreversibly destroyed".to_owned(),
             ),
