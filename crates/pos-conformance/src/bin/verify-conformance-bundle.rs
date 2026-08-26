@@ -106,5 +106,7 @@ mod tests {
     fn bounded_reader_rejects_declared_and_observed_oversize() {
         assert!(read_bounded(Cursor::new([]), 6, 5).is_err());
         assert!(read_bounded(Cursor::new([0_u8; 6]), 5, 5).is_err());
+        assert!(read_bounded(Cursor::new([]), 5, 5).is_ok());
+        assert!(read_bounded(Cursor::new([0_u8; 5]), 5, 5).is_ok());
     }
 }

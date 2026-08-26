@@ -2439,6 +2439,7 @@ mod tests {
         VerificationOutcomeV1,
     };
     use pos_crypto::canonical;
+    use std::collections::BTreeSet;
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
@@ -5665,6 +5666,214 @@ mod tests {
             validate_authority_inventory(&nonnull_path_inventory, &[]),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
+
+        let draft_inventory: JsonValue = serde_json::from_slice(inventory_bytes)?;
+        for field in [
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            "expected_result_path",
+            "expected_result_digest",
+        ] {
+            let mut invalid = draft_inventory.clone();
+            invalid["entries"][0][field] = JsonValue::String("unexpected".to_owned());
+            assert_eq!(
+                validate_authority_inventory(&invalid, &[]),
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn authority_inventory_count_and_digest_checks_are_independent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (candidate_inventory, members) = authority_inventory_materialized_path()?;
+
+        let mut wrong_fixture_digest = candidate_inventory.clone();
+        wrong_fixture_digest["entries"][0]["fixture_bytes_digest"] =
+            JsonValue::String("09".repeat(32));
+        assert_eq!(
+            validate_authority_inventory(&wrong_fixture_digest, &members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut one_role_short = members.clone();
+        let first_fixture = one_role_short
+            .iter_mut()
+            .find(|member| member.path == "authority/fixtures/RPL-001.json")
+            .ok_or("missing first authority fixture")?;
+        first_fixture.bytes = br#"{"fixture_id":"OTHER"}"#.to_vec();
+        first_fixture.digest = *blake3::hash(&first_fixture.bytes).as_bytes();
+        let mut invalid_inventory = candidate_inventory;
+        invalid_inventory["entries"][0]["fixture_bytes_digest"] =
+            JsonValue::String(materialized_hex(&first_fixture.digest));
+        one_role_short.retain(|member| member.path != "authority/fixtures/PRF-001.json");
+        assert_eq!(
+            validate_authority_inventory(&invalid_inventory, &one_role_short),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_publication_rejects_each_single_authority_violation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut candidate = profile();
+        candidate.lifecycle = ProfileLifecycleV1::Candidate;
+        let mut evidence: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/support/provenance.json"
+        ))?;
+        evidence["candidate_status"] = JsonValue::String("approved".to_owned());
+        evidence["deletion_review"] = JsonValue::String("approved".to_owned());
+        evidence["secret_scan"] = JsonValue::String("clean".to_owned());
+        let evidence_bytes = serde_json::to_vec(&evidence)?;
+        let evidence_digest = *blake3::hash(&evidence_bytes).as_bytes();
+        candidate.provenance_digest = evidence_digest;
+        for fixture in &mut candidate.fixtures {
+            fixture.redaction_state = RedactionStateV1::None;
+            fixture.replay_claim = ReplayClaimV1::Exact;
+            fixture.provenance.publication_review_digest = evidence_digest;
+        }
+        let provenance = BundleMemberV1::supporting(
+            "support/provenance.json",
+            evidence_bytes,
+            BundleMemberRoleV1::Provenance,
+        );
+        assert_eq!(
+            validate_candidate_publication(&candidate, std::slice::from_ref(&provenance)),
+            Ok(())
+        );
+
+        for (field, value) in [
+            ("candidate_status", "pending"),
+            ("deletion_review", "pending"),
+            ("secret_scan", "dirty"),
+        ] {
+            let mut invalid_evidence = evidence.clone();
+            invalid_evidence[field] = JsonValue::String(value.to_owned());
+            let invalid_bytes = serde_json::to_vec(&invalid_evidence)?;
+            let invalid_digest = *blake3::hash(&invalid_bytes).as_bytes();
+            let mut invalid_candidate = candidate.clone();
+            invalid_candidate.provenance_digest = invalid_digest;
+            for fixture in &mut invalid_candidate.fixtures {
+                fixture.provenance.publication_review_digest = invalid_digest;
+            }
+            let invalid_provenance = BundleMemberV1::supporting(
+                "support/provenance.json",
+                invalid_bytes,
+                BundleMemberRoleV1::Provenance,
+            );
+            assert_eq!(
+                validate_candidate_publication(
+                    &invalid_candidate,
+                    std::slice::from_ref(&invalid_provenance),
+                ),
+                Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            );
+        }
+
+        for (redaction_state, replay_claim) in [
+            (RedactionStateV1::EvidenceMissing, ReplayClaimV1::Exact),
+            (
+                RedactionStateV1::None,
+                ReplayClaimV1::UnverifiableArtifactsMissing,
+            ),
+        ] {
+            let mut invalid_candidate = candidate.clone();
+            invalid_candidate.fixtures[0].redaction_state = redaction_state;
+            invalid_candidate.fixtures[0].replay_claim = replay_claim;
+            assert_eq!(
+                validate_candidate_publication(
+                    &invalid_candidate,
+                    std::slice::from_ref(&provenance),
+                ),
+                Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            );
+        }
+
+        let mut wrong_binding = candidate;
+        wrong_binding.provenance_digest = [9; 32];
+        assert_eq!(
+            validate_candidate_publication(&wrong_binding, std::slice::from_ref(&provenance)),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn candidate_matrix_predicates_are_checked_independently(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let matrix_bytes =
+            include_bytes!("../../../fixtures/conformance/matrix/adr-059-complete.json");
+        let mut candidate: JsonValue = serde_json::from_slice(matrix_bytes)?;
+        candidate["lifecycle"] = JsonValue::String("Candidate".to_owned());
+        for row in candidate["rows"]
+            .as_array_mut()
+            .ok_or("candidate rows are missing")?
+        {
+            row["executed_case_count"] = JsonValue::Number(16_u64.into());
+        }
+        let expected_digest = [7; 32];
+        let expected_digest_text = materialized_hex(&expected_digest);
+        for case in candidate["cases"]
+            .as_array_mut()
+            .ok_or("candidate cases are missing")?
+        {
+            case["executed"] = JsonValue::Bool(true);
+            case["expected_result_digest"] = JsonValue::String(expected_digest_text.clone());
+        }
+        let known = [expected_digest].into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(
+            validate_execution_matrix_for_lifecycle(&candidate, "Candidate", Some(&known)),
+            Ok(())
+        );
+
+        let mut not_executed = candidate.clone();
+        not_executed["cases"][0]["executed"] = JsonValue::Bool(false);
+        assert_eq!(
+            validate_execution_matrix_for_lifecycle(&not_executed, "Candidate", Some(&known)),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut wrong_operator_predicate: JsonValue = serde_json::from_slice(matrix_bytes)?;
+        wrong_operator_predicate["equality_predicates"][0]["OpEq"] =
+            JsonValue::String("wrong".to_owned());
+        assert_eq!(
+            validate_execution_matrix(&wrong_operator_predicate),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_bundle_caps_reject_each_exclusive_limit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bundle = signed_bundle(&profile(), BundleModeV1::Local)?;
+
+        let mut profile_size = profile();
+        profile_size.evaluator_protocol.hard_caps.max_profile_bytes = 0;
+        profile_size
+            .evaluator_protocol
+            .hard_caps
+            .max_structural_nesting = u8::MAX;
+        assert_eq!(
+            validate_selected_bundle_caps(&profile_size, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+
+        let mut structural_depth = profile();
+        structural_depth
+            .evaluator_protocol
+            .hard_caps
+            .max_profile_bytes = u64::MAX;
+        structural_depth
+            .evaluator_protocol
+            .hard_caps
+            .max_structural_nesting = 0;
+        assert_eq!(
+            validate_selected_bundle_caps(&structural_depth, &bundle),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
         Ok(())
     }
 
@@ -7041,6 +7250,7 @@ mod coverage_entrypoints {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod instrumented_candidate_entrypoints {
     use super::tests;
     use super::{

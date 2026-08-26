@@ -1201,6 +1201,8 @@ mod tests {
         assert_eq!(decode_hex(&"0g".repeat(32)), None);
         assert_eq!(decode_hex(&"ab".repeat(32)), Some([0xab; 32]));
         assert_eq!(decode_hex(&"AB".repeat(32)), Some([0xab; 32]));
+        assert_eq!(decode_hex(&"01".repeat(32)), Some([0x01; 32]));
+        assert_eq!(decode_hex(&"a5".repeat(32)), Some([0xa5; 32]));
         assert_eq!(hex(&[0xabu8; 32]), "ab".repeat(32));
         assert!(json_text(&JsonValue::Null, "missing").is_err());
         assert!(json_string_array(&JsonValue::Null, "missing").is_err());
@@ -1243,7 +1245,7 @@ mod tests {
             validate_profile_record_bindings(ClaimLayerV1::ArtifactIntegrity, &invalid_digest)
                 .is_err()
         );
-        let mut invalid_matrix_digest = canonical_record;
+        let mut invalid_matrix_digest = canonical_record.clone();
         invalid_matrix_digest["adr_059_execution_matrix_blake3_digest"] =
             JsonValue::String("00".repeat(32));
         assert!(validate_profile_record_bindings(
@@ -1251,6 +1253,51 @@ mod tests {
             &invalid_matrix_digest
         )
         .is_err());
+
+        let fixture_records = canonical_record["fixtures"]
+            .as_array()
+            .ok_or("canonical fixture records are missing")?;
+        let deletion_record = fixture_records
+            .iter()
+            .find(|record| record.get("family").and_then(JsonValue::as_str) == Some("deletion"))
+            .ok_or("canonical deletion fixture is missing")?;
+        let deletion = fixture(
+            deletion_record,
+            &context,
+            context.local_execution_profile_digest,
+            ExecutionModeV1::Local,
+        )?;
+        assert_eq!(
+            deletion.replay_claim,
+            pos_conformance::ReplayClaimV1::StructuralOnly
+        );
+        assert_eq!(
+            deletion.redaction_state,
+            pos_conformance::RedactionStateV1::StructuralOnly
+        );
+
+        let positive_record = fixture_records
+            .iter()
+            .find(|record| record.get("family").and_then(JsonValue::as_str) == Some("positive"))
+            .ok_or("canonical positive fixture is missing")?;
+        let positive = fixture(
+            positive_record,
+            &context,
+            context.local_execution_profile_digest,
+            ExecutionModeV1::Local,
+        )?;
+        assert_eq!(positive.replay_claim, pos_conformance::ReplayClaimV1::Exact);
+        assert_eq!(
+            positive.redaction_state,
+            pos_conformance::RedactionStateV1::None
+        );
+
+        let protocol = evaluator_protocol([42; 32]);
+        assert_eq!(protocol.hard_caps.max_profile_bytes, 16_777_216);
+        assert_eq!(protocol.hard_caps.max_member_path_bytes, 256);
+        assert_eq!(protocol.hard_caps.max_member_bytes, 67_108_864);
+        assert_eq!(protocol.hard_caps.max_total_bundle_bytes, 1_073_741_824);
+        assert_eq!(protocol.hard_caps.max_diagnostic_bytes, 1_048_576);
         Ok(())
     }
 
