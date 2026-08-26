@@ -569,8 +569,10 @@ impl SqliteStore {
             columns.insert(row.map_err(Self::into_storage_error)?);
         }
         drop(statement);
-        if columns.contains("signature_role") && columns.contains("signature_epoch") {
-            return Ok(());
+        if columns.contains("signature_role") {
+            if columns.contains("signature_epoch") {
+                return Ok(());
+            }
         }
         Err(CoreError::Storage(
             "SQLite events table is missing required signature identity columns".to_owned(),
