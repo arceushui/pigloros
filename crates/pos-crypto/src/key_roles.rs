@@ -8,7 +8,7 @@ use pos_core::{
     KeyRegistryEncryptionPortV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1,
     Signature,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const KEY_MATERIAL_DOMAIN: &[u8] = b"pigloros/key-material/v1";
 const ROLE_SIGNATURE_DOMAIN: &[u8] = b"pigloros/role-signature/v1";
@@ -89,7 +89,7 @@ impl SigningKeyMaterial {
 /// limited to registry authorization in this ticket; encryption algorithms and
 /// ciphertext formats belong to the consuming storage boundary.
 pub struct EncryptionKeyMaterial {
-    private_material: Option<[u8; 32]>,
+    private_material: Option<Zeroizing<[u8; 32]>>,
     material_digest: Hash,
 }
 
@@ -99,7 +99,7 @@ impl EncryptionKeyMaterial {
     pub fn new(key: [u8; 32]) -> Self {
         let material_digest = key_material_digest(&key);
         Self {
-            private_material: Some(key),
+            private_material: Some(Zeroizing::new(key)),
             material_digest,
         }
     }
@@ -127,12 +127,6 @@ impl EncryptionKeyMaterial {
             key.zeroize();
         }
         self.private_material = None;
-    }
-}
-
-impl Drop for EncryptionKeyMaterial {
-    fn drop(&mut self) {
-        self.destroy();
     }
 }
 
