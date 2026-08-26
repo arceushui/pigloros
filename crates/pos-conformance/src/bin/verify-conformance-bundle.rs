@@ -32,10 +32,18 @@ fn run_with_verifier(
 }
 
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    let file = File::open(path)?;
-    let metadata = file.metadata()?;
-    let bytes = read_bounded(file, metadata.len(), MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
-    verify_archive_independently(&bytes).map_err(Into::into)
+    File::open(path)
+        .map_err(|error| Box::new(error) as Box<dyn Error>)
+        .and_then(|file| {
+            file.metadata()
+                .map_err(|error| Box::new(error) as Box<dyn Error>)
+                .and_then(|metadata| {
+                    read_bounded(file, metadata.len(), MAX_CONFORMANCE_BUNDLE_BYTES_V1)
+                })
+        })
+        .and_then(|bytes| {
+            verify_archive_independently(&bytes).map_err(|error| Box::new(error) as Box<dyn Error>)
+        })
 }
 
 fn read_bounded(
@@ -68,9 +76,18 @@ fn read_bounded(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{main, read_bounded, run, run_with_verifier, verify_path};
+    use std::cell::Cell;
     use std::ffi::OsString;
     use std::fs;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Read};
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("fixture reader failed"))
+        }
+    }
 
     #[test]
     fn verifier_argument_errors_are_explicit() {
@@ -92,6 +109,23 @@ mod tests {
     }
 
     #[test]
+    fn verifier_stops_at_the_first_rejected_path() {
+        let calls = Cell::new(0);
+        let mut arguments = [
+            OsString::from("verify"),
+            OsString::from("first.cbor"),
+            OsString::from("second.cbor"),
+        ]
+        .into_iter();
+        let result = run_with_verifier(&mut arguments, |_| {
+            calls.set(calls.get() + 1);
+            Err(io::Error::other("fixture verifier rejected archive").into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
     fn verify_path_rejects_invalid_archive() -> Result<(), Box<dyn std::error::Error>> {
         let path =
             std::env::temp_dir().join(format!("pigloros-invalid-cfb1-{}.cbor", std::process::id()));
@@ -108,5 +142,6 @@ mod tests {
         assert!(read_bounded(Cursor::new([0_u8; 6]), 5, 5).is_err());
         assert!(read_bounded(Cursor::new([]), 5, 5).is_ok());
         assert!(read_bounded(Cursor::new([0_u8; 5]), 5, 5).is_ok());
+        assert!(read_bounded(FailingReader, 0, 5).is_err());
     }
 }

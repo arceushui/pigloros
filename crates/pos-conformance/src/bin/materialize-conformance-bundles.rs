@@ -260,36 +260,71 @@ fn materialize_profile_from_profile_with_authority(
         output_root,
         format!("{prefix}/CPF1-{}.cbor", hex(&profile.profile_digest)),
         &profile_bytes,
-    )?;
-    for (mode, mode_name) in [
-        (BundleModeV1::Local, "local"),
-        (BundleModeV1::AirGapped, "air-gapped"),
-    ] {
-        let (members, expected_results) =
-            bundle_inputs_with_authority(&profile, mode, inventory_bytes, authority_root)?;
-        let (bundle, bundle_digest) =
-            ConformanceBundleV1::materialize(&profile, mode, members, expected_results)
+    )
+    .and_then(|()| {
+        [
+            (BundleModeV1::Local, "local"),
+            (BundleModeV1::AirGapped, "air-gapped"),
+        ]
+        .into_iter()
+        .try_for_each(|(mode, mode_name)| {
+            materialized_bundle_artifacts(
+                &profile,
+                signing_key,
+                mode,
+                inventory_bytes,
+                authority_root,
+            )
+            .and_then(|(bundle_bytes, bundle_digest, manifest_bytes)| {
+                write_materialized_file(
+                    output_root,
+                    format!("{prefix}/manifest-{mode_name}-{}.cbor", hex(&bundle_digest)),
+                    &manifest_bytes,
+                )
+                .and_then(|()| {
+                    write_materialized_file(
+                        output_root,
+                        format!("{prefix}/bundle-{mode_name}-{}.cfb1", hex(&bundle_digest)),
+                        &bundle_bytes,
+                    )
+                })
+            })
+        })
+    })
+}
+
+fn materialized_bundle_artifacts(
+    profile: &ConformanceProfileV1,
+    signing_key: &SigningKey,
+    mode: BundleModeV1,
+    inventory_bytes: &[u8],
+    authority_root: Option<&Path>,
+) -> Result<(Vec<u8>, [u8; 32], Vec<u8>), Box<dyn Error>> {
+    bundle_inputs_with_authority(profile, mode, inventory_bytes, authority_root)
+        .and_then(|(members, expected_results)| {
+            ConformanceBundleV1::materialize(profile, mode, members, expected_results)
                 .and_then(|bundle| bundle.sign(signing_key))
                 .and_then(|bundle| {
                     bundle
                         .bundle_digest()
                         .map(|bundle_digest| (bundle, bundle_digest))
-                })?;
-        let manifest_bytes = bundle.manifest_bytes()?;
-        let bundle_bytes = bundle.to_canonical_cbor()?;
-        verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
-        write_materialized_file(
-            output_root,
-            format!("{prefix}/manifest-{mode_name}-{}.cbor", hex(&bundle_digest)),
-            &manifest_bytes,
-        )?;
-        write_materialized_file(
-            output_root,
-            format!("{prefix}/bundle-{mode_name}-{}.cfb1", hex(&bundle_digest)),
-            &bundle_bytes,
-        )?;
-    }
-    Ok(())
+                })
+                .map_err(|error| Box::new(error) as Box<dyn Error>)
+        })
+        .and_then(|(bundle, bundle_digest)| {
+            bundle
+                .manifest_bytes()
+                .map_err(|error| Box::new(error) as Box<dyn Error>)
+                .and_then(|manifest_bytes| {
+                    bundle
+                        .to_canonical_cbor()
+                        .map_err(|error| Box::new(error) as Box<dyn Error>)
+                        .and_then(|bundle_bytes| {
+                            verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)
+                                .map(|()| (bundle_bytes, bundle_digest, manifest_bytes))
+                        })
+                })
+        })
 }
 
 fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
@@ -1004,15 +1039,35 @@ fn verify_public_archive(
     expected_digest: &[u8; 32],
     expected_manifest: &[u8],
 ) -> Result<(), Box<dyn Error>> {
-    let decoded = ConformanceBundleV1::from_canonical_cbor(bundle_bytes)?;
-    if decoded.to_canonical_cbor()? != bundle_bytes
-        || decoded.manifest_bytes()? != expected_manifest
-        || decoded.bundle_digest()? != *expected_digest
-    {
-        return Err("public archive verification did not reproduce canonical bytes".into());
-    }
-    verify_archive_independently(bundle_bytes)?;
-    Ok(())
+    ConformanceBundleV1::from_canonical_cbor(bundle_bytes)
+        .map_err(|error| Box::new(error) as Box<dyn Error>)
+        .and_then(|decoded| {
+            decoded
+                .to_canonical_cbor()
+                .map_err(|error| Box::new(error) as Box<dyn Error>)
+                .and_then(|canonical_bytes| {
+                    decoded
+                        .manifest_bytes()
+                        .map_err(|error| Box::new(error) as Box<dyn Error>)
+                        .and_then(|manifest_bytes| {
+                            decoded
+                                .bundle_digest()
+                                .map_err(|error| Box::new(error) as Box<dyn Error>)
+                                .and_then(|bundle_digest| {
+                                    if canonical_bytes != bundle_bytes
+                                        || manifest_bytes != expected_manifest
+                                        || bundle_digest != *expected_digest
+                                    {
+                                        Err("public archive verification did not reproduce canonical bytes"
+                                            .into())
+                                    } else {
+                                        verify_archive_independently(bundle_bytes)
+                                            .map_err(|error| Box::new(error) as Box<dyn Error>)
+                                    }
+                                })
+                        })
+                })
+        })
 }
 
 fn write_materialized_file(
