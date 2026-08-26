@@ -484,6 +484,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         registry.apply_event(&consent_event);
