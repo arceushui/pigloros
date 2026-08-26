@@ -48,7 +48,7 @@ impl ExecutionMatrixBindingV1 {
         Self { digest }
     }
 
-    const fn is_valid(self) -> bool {
+    fn is_valid(self) -> bool {
         self.digest != [0; 32]
     }
 }

@@ -261,8 +261,8 @@ publishable_roots=(
   "${fixture_root}/expected-authority"
   "${fixture_root}/support"
 )
-secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|(?:private[ _-]?key|secret|credential|password)[[:space:]]*[:=][[:space:]]*[^[:space:]}]+|(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}'
-if rg -n -i -I --pcre2 -- "${secret_pattern}" "${publishable_roots[@]}"; then
+secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|(private[ _-]?key|secret|credential|password)[[:space:]]*[:=][[:space:]]*[^[:space:]}]+|(AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}'
+if grep -R -n -i -I -E -- "${secret_pattern}" "${publishable_roots[@]}"; then
   echo "forbidden secret material found in public conformance fixtures" >&2
   exit 1
 else
