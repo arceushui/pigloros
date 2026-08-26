@@ -2698,6 +2698,7 @@ mod coverage_entrypoints {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod run_coverage_entrypoints {
     use super::*;
 
@@ -2840,5 +2841,18 @@ mod run_coverage_entrypoints {
             }
             .run(),
         );
+    }
+
+    #[test]
+    fn minimal_resource_budget_exercises_run_failure_propagation() {
+        let mut input = proof_input();
+        input.scenario_id = "minimal-budget".to_owned();
+        input.resource_limit = 1;
+        assert!(MoatProofRun {
+            input,
+            mode: ExecutionModeV1::Local,
+        }
+        .run()
+        .is_err());
     }
 }
