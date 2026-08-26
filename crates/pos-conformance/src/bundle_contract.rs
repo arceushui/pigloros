@@ -1322,7 +1322,11 @@ fn independent_matrix_digest(profile_id: &str) -> Result<[u8; 32], BundleContrac
     let Some((base, encoded_digest)) = profile_id.split_once("#matrix=") else {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     };
-    if base.is_empty() || encoded_digest.contains("#matrix=") || encoded_digest.len() != 64 {
+    if !crate::profile_contract::requires_execution_matrix_binding(profile_id)
+        || base.is_empty()
+        || encoded_digest.contains("#matrix=")
+        || encoded_digest.len() != 64
+    {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     let digest = crate::decode_hex_digest(encoded_digest)
