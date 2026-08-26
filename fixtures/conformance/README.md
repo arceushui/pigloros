@@ -32,6 +32,22 @@ bundled until the concrete handoff arrives.
 The hosted verifier independently checks every available public digest before
 bundle materialization.
 
+The support SBOM is intentionally scoped to the published fixture artifact,
+which contains public data and contract documents rather than compiled code or
+its build environment. It therefore has no software components. The Rust
+workspace and the materializer toolchain are outside that artifact boundary;
+their dependency/advisory checks remain CI responsibilities (`cargo-deny`,
+`cargo-audit`, and the pinned toolchain). The checked-in `SHA256SUMS` file is
+the byte-integrity authority for this scoped support record.
+
+The canonical architecture decisions for the CPF1 and authority workflow are
+ADR-058 through ADR-062 on the [Redmine project wiki](https://redmine.piglor.com/projects/pigloros/wiki).
+
+Repository settings must require the `ci-gate` check for protected branches;
+adding a workflow job does not change GitHub branch-protection rules. The
+mutation workflow has its own `diff mutation testing` fan-in check, which must
+also remain required for changes that run that workflow.
+
 The support directory contains the normative specification, schema, licence,
 notice, SBOM, provenance, and limitations members that every immutable bundle
 manifest must declare.

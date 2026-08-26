@@ -34,15 +34,16 @@ PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
   cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${second_output}"
 diff -rq "${first_output}" "${second_output}"
 
-mapfile -t materialized_files < <(
-  find "${first_output}" -type f \( -name '*.cbor' -o -name '*.cfb1' \) -print | sort
+mapfile -t materialized_files < <(find "${first_output}" -type f -print | sort)
+mapfile -t profile_files < <(
+  find "${first_output}" -type f -name 'CPF1-*.cbor' -print | sort
+)
+mapfile -t manifest_files < <(
+  find "${first_output}" -type f -name 'manifest-*.cbor' -print | sort
 )
 mapfile -t archive_files < <(
-  find "${first_output}" -type f -name '*.cfb1' -print | sort
+  find "${first_output}" -type f -name 'bundle-*.cfb1' -print | sort
 )
-if ((${#archive_files[@]} > 0)); then
-  cargo run -p pos-conformance --bin verify-conformance-bundle --locked -- "${archive_files[@]}"
-fi
 authority_lifecycle="$(jq -r '.lifecycle' fixtures/conformance/expected-authority/inventory.json)"
 case "${authority_lifecycle}" in
   Draft) lifecycle_count=1 ;;
@@ -52,11 +53,24 @@ case "${authority_lifecycle}" in
     exit 1
     ;;
 esac
-expected_file_count=$((7 * lifecycle_count * 5))
-if ((${#materialized_files[@]} != expected_file_count)); then
-  echo "expected ${expected_file_count} deterministic CPF1/profile/manifest/archive files, found ${#materialized_files[@]}" >&2
+expected_profile_count=$((7 * lifecycle_count))
+expected_manifest_count=$((7 * lifecycle_count * 2))
+expected_archive_count=$((7 * lifecycle_count * 2))
+expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count))
+if ((
+  ${#profile_files[@]} != expected_profile_count ||
+  ${#manifest_files[@]} != expected_manifest_count ||
+  ${#archive_files[@]} != expected_archive_count ||
+  ${#materialized_files[@]} != expected_file_count
+)); then
+  echo "expected ${expected_profile_count} profiles, ${expected_manifest_count} manifests, and ${expected_archive_count} archives; found ${#profile_files[@]} profiles, ${#manifest_files[@]} manifests, ${#archive_files[@]} archives, and ${#materialized_files[@]} total files" >&2
   exit 1
 fi
+if ((${#archive_files[@]} == 0)); then
+  echo "materialization produced no archives" >&2
+  exit 1
+fi
+cargo run -p pos-conformance --bin verify-conformance-bundle --locked -- "${archive_files[@]}"
 
 (cd "${first_output}" && sha256sum --tag "${materialized_files[@]#${first_output}/}" > SHA256SUMS)
 cp "${source_inventory}" "${first_output}/SOURCE-SHA256SUMS"

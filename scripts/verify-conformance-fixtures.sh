@@ -253,10 +253,24 @@ for input in "${inputs[@]}"; do
   }
 done
 
-if rg -n -i 'private[ _-]?key|begin[ _-]?secret|subject[ _-]?secret|credential|password' \
-  "${fixture_root}/inputs" "${fixture_root}/expected"; then
-  echo "forbidden secret marker found in public conformance fixtures" >&2
+publishable_roots=(
+  "${fixture_root}/inputs"
+  "${fixture_root}/expected"
+  "${fixture_root}/profiles"
+  "${fixture_root}/matrix"
+  "${fixture_root}/expected-authority"
+  "${fixture_root}/support"
+)
+secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|(?:private[ _-]?key|secret|credential|password)[[:space:]]*[:=][[:space:]]*[^[:space:]}]+|(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}'
+if rg -n -i -I --pcre2 -- "${secret_pattern}" "${publishable_roots[@]}"; then
+  echo "forbidden secret material found in public conformance fixtures" >&2
   exit 1
+else
+  scan_status=$?
+  if (( scan_status != 1 )); then
+    echo "secret scan could not inspect all publishable conformance fixtures" >&2
+    exit "${scan_status}"
+  fi
 fi
 
 mapfile -t profiles < <(find "${profile_root}" -type f -print | sort)
