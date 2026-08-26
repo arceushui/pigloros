@@ -5628,6 +5628,16 @@ mod tests {
             validate_stable_evidence(&invalid_profile, Some(&trusted_root_policy())),
             Err(ConformanceContractError::ProvenanceMissing)
         );
+
+        let mut invalid_second_identity = stable_evidence("beta", 40);
+        invalid_second_identity.implementation.build_digest = [0; 32];
+        let mut invalid_second_profile = candidate();
+        invalid_second_profile.stable_evidence =
+            vec![stable_evidence("alpha", 30), invalid_second_identity];
+        assert_eq!(
+            validate_stable_evidence(&invalid_second_profile, Some(&trusted_root_policy()),),
+            Err(ConformanceContractError::ProvenanceMissing)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -6790,6 +6800,16 @@ mod tests {
             ConformanceProfileV1::from_canonical_cbor(&[0x9b_u8, 0, 0, 0, 0, 0, 0, 0, 1,]).is_err()
         );
         assert!(ConformanceProfileV1::from_canonical_cbor(&[0x7f_u8, 0xff]).is_err());
+        assert_eq!(
+            preflight_cbor(&[0x58, 0x02, 0]),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+        let mut overflowing_bytes = vec![0x5b_u8];
+        overflowing_bytes.extend([0xff; 8]);
+        assert_eq!(
+            preflight_cbor(&overflowing_bytes),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
 
         let mut exact_depth = vec![0x81; usize::from(MAX_STRUCTURAL_NESTING)];
         exact_depth.push(0xf6);
