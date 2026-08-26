@@ -289,7 +289,7 @@ where
         return Err(KeyRegistryErrorV1::Destroyed);
     };
     let digest = private_material.material_digest;
-    registry.with_encryption_authorization(identity, digest, || operation(material.as_ref()))
+    registry.with_encryption_authorization(identity, digest, || operation(material))
 }
 
 /// Verify a role/epoch-bound signature.
