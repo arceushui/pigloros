@@ -113,7 +113,7 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
 
     let material_digest = encryption_material.material_digest()?;
     assert_eq!(
-        destroy_registered_encryption_key(
+        destroy_registered_encryption_key::<(), _>(
             &mut encryption_material,
             pos_core::KeyDestructionRequestV1::new(
                 encryption_identity,
@@ -172,7 +172,7 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
         pos_core::Hash::from_bytes([9; 32]),
     );
     assert_eq!(
-        destroy_registered_signing_key(&mut material, wrong_request, |_| {
+        destroy_registered_signing_key::<(), _>(&mut material, wrong_request, |_| {
             unreachable!("the material digest must be checked first")
         }),
         Err(KeyMaterialDestructionError::MaterialDigestMismatch)
