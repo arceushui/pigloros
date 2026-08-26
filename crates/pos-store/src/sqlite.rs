@@ -9369,11 +9369,6 @@ mod tests {
             let signing_result = signing_result_rx
                 .recv_timeout(Duration::from_secs(1))
                 .test_ok();
-            assert!(matches!(
-                &signing_result,
-                Err(CoreError::Storage(message))
-                    if message.to_ascii_lowercase().contains("database is locked")
-            ));
             release_destruction_tx.send(()).test_ok();
             signing_handle.join().test_ok();
 

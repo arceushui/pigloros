@@ -82,7 +82,7 @@ jobs:
           --shard "${{ matrix.shard }}/4"
           --baseline skip
           --jobs 4
-          --timeout 1800
+          --timeout 300
           --cap-lints true
           --cargo-arg=--locked
       - name: Upload mutation report
