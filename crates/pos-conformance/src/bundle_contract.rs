@@ -3947,7 +3947,7 @@ mod tests {
             }
         }
         resign_archive(&mut candidate)?;
-        assert_independent_error(&candidate, BundleContractErrorV1::CandidateEvidenceMissing)
+        assert_independent_error(&candidate, BundleContractErrorV1::MemberDigestMismatch)
     }
 
     fn expected_member_index(bundle: &ConformanceBundleV1) -> Option<usize> {
@@ -4943,7 +4943,7 @@ mod tests {
         incomplete_profile.public_schema_digests.push(digest(99));
         assert_eq!(
             validate_supporting_members(&incomplete_profile, &bundle.members),
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
@@ -5692,7 +5692,7 @@ mod tests {
         );
         assert_eq!(
             draft_inventory_result,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         let inventory_member = members
             .iter_mut()
