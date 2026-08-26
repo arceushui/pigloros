@@ -2336,7 +2336,7 @@ fn validate_authority_members(
     if profile
         .execution_matrix_digest()
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?
-        != Some(*blake3::hash(&matrix.bytes).as_bytes())
+        != *blake3::hash(&matrix.bytes).as_bytes()
     {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }

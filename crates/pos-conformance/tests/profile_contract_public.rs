@@ -230,7 +230,7 @@ pub mod fixtures {
         let mut fields = vec![
             text("CPF1"),
             uint(1),
-            text("pigloros.w8.external"),
+            text("pigloros.w8.external#matrix=0101010101010101010101010101010101010101010101010101010101010101"),
             text("1.0.0"),
             uint(lifecycle),
             bytes(12),
@@ -339,7 +339,7 @@ fn report_with_cases(count: usize) -> ConformanceReportV1 {
     report
 }
 
-fn profile_for_digest() -> ConformanceProfileV1 {
+fn profile_without_matrix_binding() -> ConformanceProfileV1 {
     let expected = b"expected".to_vec();
     let fixture = FixtureDescriptorV1 {
         case_id: "ART-001".to_owned(),
@@ -430,6 +430,12 @@ fn profile_for_digest() -> ConformanceProfileV1 {
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();
+    profile
+}
+
+fn profile_for_digest() -> ConformanceProfileV1 {
+    let mut profile = profile_without_matrix_binding();
+    assert_eq!(profile.bind_execution_matrix_digest([1; 32]), Ok(()));
     profile
 }
 
@@ -525,20 +531,30 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
 
 #[test]
 fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
-    let mut bound = profile_for_digest();
+    let mut bound = profile_without_matrix_binding();
     let unbound_digest = bound.digest();
     let matrix_digest = *blake3::hash(b"adr-059-execution-matrix").as_bytes();
 
-    assert_eq!(bound.execution_matrix_digest(), Ok(None));
+    assert_eq!(
+        bound.execution_matrix_digest(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+    assert_eq!(
+        bound.validate(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
     assert_eq!(
         bound.bind_execution_matrix_digest([0; 32]),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
-    assert_eq!(bound.execution_matrix_digest(), Ok(None));
+    assert_eq!(
+        bound.execution_matrix_digest(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
 
     assert_eq!(bound.bind_execution_matrix_digest(matrix_digest), Ok(()));
     assert!(bound.profile_id.starts_with("pigloros.test#matrix="));
-    assert_eq!(bound.execution_matrix_digest(), Ok(Some(matrix_digest)));
+    assert_eq!(bound.execution_matrix_digest(), Ok(matrix_digest));
     assert_ne!(bound.profile_digest, unbound_digest);
     let encoded = bound.to_canonical_cbor();
     assert_eq!(
@@ -546,7 +562,7 @@ fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
         Ok(bound.clone())
     );
 
-    let mut different_matrix = profile_for_digest();
+    let mut different_matrix = profile_without_matrix_binding();
     assert_eq!(
         different_matrix.bind_execution_matrix_digest([7; 32]),
         Ok(())
@@ -564,7 +580,7 @@ fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
 
 #[test]
 fn public_profile_matrix_binding_rejects_malformed_suffixes() {
-    let mut malformed = profile_for_digest();
+    let mut malformed = profile_without_matrix_binding();
     malformed.profile_id.push_str("#matrix=not-a-digest");
     malformed.profile_digest = malformed.digest();
     assert_eq!(
@@ -579,7 +595,7 @@ fn public_profile_matrix_binding_rejects_malformed_suffixes() {
 
 #[test]
 fn public_profile_matrix_binding_rejects_invalid_hex_zero_and_overlong_ids() {
-    let mut invalid_hex = profile_for_digest();
+    let mut invalid_hex = profile_without_matrix_binding();
     invalid_hex.profile_id.push_str("#matrix=");
     invalid_hex.profile_id.push_str(&"g".repeat(64));
     invalid_hex.profile_digest = invalid_hex.digest();
@@ -588,11 +604,11 @@ fn public_profile_matrix_binding_rejects_invalid_hex_zero_and_overlong_ids() {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut uppercase = profile_for_digest();
+    let mut uppercase = profile_without_matrix_binding();
     uppercase.profile_id = format!("pigloros.test#matrix={}", "AB".repeat(32));
-    assert_eq!(uppercase.execution_matrix_digest(), Ok(Some([0xab; 32])));
+    assert_eq!(uppercase.execution_matrix_digest(), Ok([0xab; 32]));
 
-    let mut duplicate_marker = profile_for_digest();
+    let mut duplicate_marker = profile_without_matrix_binding();
     duplicate_marker.profile_id.push_str("#matrix=");
     duplicate_marker.profile_id.push_str(&"0".repeat(32));
     duplicate_marker.profile_id.push_str("#matrix=");
@@ -601,14 +617,14 @@ fn public_profile_matrix_binding_rejects_invalid_hex_zero_and_overlong_ids() {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut empty_base = profile_for_digest();
+    let mut empty_base = profile_without_matrix_binding();
     empty_base.profile_id = "#matrix=".to_owned();
     assert_eq!(
         empty_base.execution_matrix_digest(),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut zero = profile_for_digest();
+    let mut zero = profile_without_matrix_binding();
     zero.profile_id.push_str("#matrix=");
     zero.profile_id.push_str(&"0".repeat(64));
     zero.profile_digest = zero.digest();
@@ -617,14 +633,14 @@ fn public_profile_matrix_binding_rejects_invalid_hex_zero_and_overlong_ids() {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut overlong = profile_for_digest();
+    let mut overlong = profile_without_matrix_binding();
     overlong.profile_id = "p".repeat(256);
     assert_eq!(
         overlong.bind_execution_matrix_digest([1; 32]),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut malformed_rebind = profile_for_digest();
+    let mut malformed_rebind = profile_without_matrix_binding();
     malformed_rebind.profile_id.push_str("#matrix=short");
     assert_eq!(
         malformed_rebind.bind_execution_matrix_digest([1; 32]),

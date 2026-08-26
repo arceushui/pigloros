@@ -35,9 +35,9 @@ const EXECUTION_MATRIX_BINDING_MARKER: &str = "#matrix=";
 
 /// Typed content identity for the ADR-059 execution matrix.
 ///
-/// The CPF1 V1 wire record predates a dedicated matrix field. To preserve its
-/// canonical 17-field encoding, materialized profiles carry this value in the
-/// profile-ID binding suffix and validate it as part of the profile identity.
+/// The CPF1 V1 wire record has no dedicated matrix field. To preserve its
+/// canonical 17-field encoding, profiles carry this value in the profile-ID
+/// binding suffix and validate it as part of the profile identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ExecutionMatrixBindingV1 {
     digest: [u8; 32],
@@ -591,8 +591,11 @@ impl ConformanceProfileV1 {
         if !binding.is_valid() {
             return Err(ConformanceContractError::FieldOutOfBounds);
         }
-        let base_profile_id = matrix_binding_parts(&self.profile_id)?
-            .map_or(self.profile_id.as_str(), |(base, _)| base);
+        let base_profile_id = if self.profile_id.contains(EXECUTION_MATRIX_BINDING_MARKER) {
+            matrix_binding_parts(&self.profile_id)?.0
+        } else {
+            self.profile_id.as_str()
+        };
         let suffix = format!(
             "{EXECUTION_MATRIX_BINDING_MARKER}{}",
             crate::hex_digest(&binding.digest)
@@ -606,17 +609,17 @@ impl ConformanceProfileV1 {
         bound.validate().map(|()| *self = bound)
     }
 
-    /// Return the bound ADR-059 matrix digest, if this profile carries one.
+    /// Return the bound ADR-059 matrix digest.
     ///
-    /// Unbound profiles remain valid for generic CPF1 callers. Materialized
-    /// Wave 8 profiles are required to use the `bind_execution_matrix_digest`
-    /// method.
+    /// Every valid CPF1 profile carries this binding. Builders may create an
+    /// unbound value temporarily, but it must be passed through
+    /// `bind_execution_matrix_digest` before validation or serialization.
     ///
     /// # Errors
     ///
-    /// Returns a closed safe error when a profile-ID binding is malformed.
-    pub fn execution_matrix_digest(&self) -> Result<Option<[u8; 32]>, ConformanceContractError> {
-        matrix_binding_parts(&self.profile_id).map(|parts| parts.map(|(_, binding)| binding.digest))
+    /// Returns a closed safe error when a profile-ID binding is missing or malformed.
+    pub fn execution_matrix_digest(&self) -> Result<[u8; 32], ConformanceContractError> {
+        matrix_binding_parts(&self.profile_id).map(|(_, binding)| binding.digest)
     }
 
     /// Digest the immutable CPF fields and the attached Stable-evidence commitment.
@@ -1732,10 +1735,10 @@ fn zero_digest(value: &[u8; 32]) -> bool {
 
 fn matrix_binding_parts(
     profile_id: &str,
-) -> Result<Option<(&str, ExecutionMatrixBindingV1)>, ConformanceContractError> {
+) -> Result<(&str, ExecutionMatrixBindingV1), ConformanceContractError> {
     let Some((base, encoded_digest)) = profile_id.split_once(EXECUTION_MATRIX_BINDING_MARKER)
     else {
-        return Ok(None);
+        return Err(ConformanceContractError::FieldOutOfBounds);
     };
     if base.is_empty()
         || encoded_digest.contains(EXECUTION_MATRIX_BINDING_MARKER)
@@ -1747,7 +1750,7 @@ fn matrix_binding_parts(
         .ok_or(ConformanceContractError::FieldOutOfBounds)?;
     let binding = ExecutionMatrixBindingV1::from_digest(digest);
     if binding.is_valid() {
-        Ok(Some((base, binding)))
+        Ok((base, binding))
     } else {
         Err(ConformanceContractError::FieldOutOfBounds)
     }
@@ -2791,7 +2794,7 @@ mod tests {
             compatibility_digest: digest(11),
         };
         let mut profile = ConformanceProfileV1 {
-            profile_id: "pigloros.w8.artifact-integrity".to_owned(),
+            profile_id: "pigloros.w8.artifact-integrity#matrix=0101010101010101010101010101010101010101010101010101010101010101".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(12),

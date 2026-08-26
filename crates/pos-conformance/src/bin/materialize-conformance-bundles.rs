@@ -1283,12 +1283,10 @@ mod tests {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         assert_eq!(
             profile.execution_matrix_digest()?,
-            Some(
-                *blake3::hash(include_bytes!(
-                    "../../../../fixtures/conformance/matrix/execution-matrix.json"
-                ))
-                .as_bytes()
-            )
+            *blake3::hash(include_bytes!(
+                "../../../../fixtures/conformance/matrix/execution-matrix.json"
+            ))
+            .as_bytes()
         );
         let inventory =
             include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
