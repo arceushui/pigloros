@@ -2180,6 +2180,14 @@ mod coverage_entrypoints {
             Err(KeyRegistryErrorV1::InvalidState)
         );
 
+        replacement_entrypoints_cover_material_and_history_guards(&valid, signing, next_signing);
+    }
+
+    fn replacement_entrypoints_cover_material_and_history_guards(
+        valid: &KeyRegistryStateV1,
+        signing: KeyIdentityV1,
+        next_signing: KeyIdentityV1,
+    ) {
         let mut changed_public_key = valid.clone();
         changed_public_key.records.insert(
             signing,
