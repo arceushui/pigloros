@@ -4920,9 +4920,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::{
-        ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRegistryPortV1, KeyRoleV1, PublicKey,
-    };
+    use pos_core::{ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey};
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
