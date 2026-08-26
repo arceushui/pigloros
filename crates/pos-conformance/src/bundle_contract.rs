@@ -5697,7 +5697,7 @@ mod tests {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut one_role_short = members.clone();
+        let mut one_role_short = members;
         let first_fixture = one_role_short
             .iter_mut()
             .find(|member| member.path == "authority/fixtures/RPL-001.json")
@@ -5822,7 +5822,7 @@ mod tests {
             case["executed"] = JsonValue::Bool(true);
             case["expected_result_digest"] = JsonValue::String(expected_digest_text.clone());
         }
-        let known = [expected_digest].into_iter().collect::<BTreeSet<_>>();
+        let known = std::iter::once(expected_digest).collect::<BTreeSet<_>>();
         assert_eq!(
             validate_execution_matrix_for_lifecycle(&candidate, "Candidate", Some(&known)),
             Ok(())
