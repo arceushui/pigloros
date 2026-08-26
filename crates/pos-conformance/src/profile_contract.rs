@@ -170,6 +170,23 @@ pub enum ExpectedResultV1 {
     },
 }
 
+impl ExpectedResultV1 {
+    /// Encode this expected result using the canonical CPF1 wire representation.
+    ///
+    /// This is the same representation used by the bundle expected-result
+    /// member, including typed failures and allowed divergences.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConformanceContractError::InvalidEncoding`] when canonical
+    /// encoding fails.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ConformanceContractError> {
+        canonical::encode(&encode_expected(self))
+            .map(|bytes| bytes.as_slice().to_vec())
+            .map_err(|_| ConformanceContractError::InvalidEncoding)
+    }
+}
+
 /// One profile-approved classified divergence and its first canonical coordinate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllowedDivergenceV1 {
@@ -1652,6 +1669,11 @@ fn validate_fixture_verification_outcome(
             VerificationOutcomeV1::UnverifiableArtifactsMissing,
             Some(SafeErrorCodeV1::ProvenanceMissing),
         )
+        | (
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ProvenanceMissing),
+            VerificationOutcomeV1::UnverifiableArtifactsMissing,
+            Some(SafeErrorCodeV1::ProvenanceMissing),
+        )
         | (ExpectedResultV1::AllowedDivergence { .. }, VerificationOutcomeV1::Diverged, None) => {
             Ok(())
         }
@@ -1892,20 +1914,6 @@ fn encode_expected(value: &ExpectedResultV1) -> Value {
             ]),
         ]),
     }
-}
-
-/// Encode a typed or classified expected result as canonical bundle bytes.
-///
-/// # Errors
-///
-/// Returns [`ConformanceContractError::InvalidEncoding`] when canonical
-/// encoding fails.
-pub(crate) fn expected_result_bytes(
-    value: &ExpectedResultV1,
-) -> Result<Vec<u8>, ConformanceContractError> {
-    canonical::encode(&encode_expected(value))
-        .map(|bytes| bytes.as_slice().to_vec())
-        .map_err(|_| ConformanceContractError::InvalidEncoding)
 }
 
 fn encode_divergence(value: &AllowedDivergenceV1) -> Value {
@@ -4476,6 +4484,20 @@ mod tests {
             missing_provenance.validate(),
             Err(ConformanceContractError::ProvenanceMissing)
         );
+
+        let mut draft_unavailable = profile();
+        draft_unavailable.fixtures[0].expected =
+            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ProvenanceMissing);
+        draft_unavailable.fixtures[0].expected_verification_outcome =
+            VerificationOutcomeV1::UnverifiableArtifactsMissing;
+        draft_unavailable.fixtures[0].expected_verification_error =
+            Some(SafeErrorCodeV1::ProvenanceMissing);
+        draft_unavailable.profile_digest = draft_unavailable.digest();
+        assert_eq!(draft_unavailable.validate(), Ok(()));
+        assert!(!draft_unavailable.fixtures[0]
+            .expected
+            .to_canonical_bytes()
+            .is_err());
     }
 
     #[test]

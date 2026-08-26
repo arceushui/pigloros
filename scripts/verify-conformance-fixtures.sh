@@ -275,7 +275,55 @@ publishable_roots=(
   "${fixture_root}/expected-authority"
   "${fixture_root}/support"
 )
+if [[ -d "${fixture_root}/published" ]]; then
+  publishable_roots+=("${fixture_root}/published")
+fi
 secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|"(api[_-]?key|apikey|password|credential|credentials|access[_-]?token|refresh[_-]?token|authorization|bearer[_-]?token|client[_-]?secret|subject[_-]?secret|private[_-]?key|privatekey|secret)([_-]?digest)?"[[:space:]]*:[[:space:]]*"[^"[:space:]]+"|(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{16,}|(AKIA|ASIA)[0-9A-Z]{16}|(gh[pousr]_|github_pat_|glpat-|xox[baprs]-|sk_(live|test)_|AIza)[A-Za-z0-9._-]{16,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+
+json_secret_query='
+  def normalized: ascii_downcase | gsub("-"; "_");
+  def sensitive:
+    (normalized) as $key |
+    $key == "api_key" or $key == "apikey" or $key == "password" or
+    $key == "credential" or $key == "credentials" or
+    $key == "access_token" or $key == "refresh_token" or
+    $key == "authorization" or $key == "bearer_token" or
+    $key == "client_secret" or $key == "subject_secret" or
+    $key == "private_key" or $key == "privatekey" or
+    $key == "secret" or $key == "token";
+  def sensitive_digest:
+    (normalized) as $key |
+    ($key | endswith("_digest")) and
+    (($key | sub("_digest$"; "")) | sensitive);
+  def empty_sensitive_value:
+    . == null or (type == "string" and . == "");
+  def contains_secret:
+    if type == "object" then
+      any(to_entries[];
+        ((.key | sensitive) and ((.value | empty_sensitive_value) | not)) or
+        (.key | sensitive_digest) or
+        (.value | contains_secret))
+    elif type == "array" then
+      any(.[]; contains_secret)
+    else false
+    end;
+  contains_secret
+'
+for root in "${publishable_roots[@]}"; do
+  while IFS= read -r -d '' json_file; do
+    if jq -e "${json_secret_query}" "${json_file}" >/dev/null; then
+      echo "forbidden secret material found in JSON fixture: ${json_file}" >&2
+      exit 1
+    else
+      scan_status=$?
+      if (( scan_status != 1 )); then
+        echo "secret scan could not parse JSON fixture: ${json_file}" >&2
+        exit "${scan_status}"
+      fi
+    fi
+  done < <(find "${root}" -type f -name '*.json' -print0)
+done
+
 if grep -R -n -i -I -E -- "${secret_pattern}" "${publishable_roots[@]}"; then
   echo "forbidden secret material found in public conformance fixtures" >&2
   exit 1

@@ -621,10 +621,7 @@ fn fixture(
             digest: *blake3::hash(input).as_bytes(),
             provenance_digest: context.provenance_digest,
         }],
-        expected: ExpectedResultV1::CanonicalBytes {
-            bytes: expected.to_vec(),
-            digest: *blake3::hash(expected).as_bytes(),
-        },
+        expected: ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ProvenanceMissing),
         expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
         expected_verification_error: Some(SafeErrorCodeV1::ProvenanceMissing),
         replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
@@ -863,15 +860,13 @@ fn bundle_inputs_from_profile(
                 false,
             ));
         }
-        let ExpectedResultV1::CanonicalBytes { bytes, .. } = &fixture.expected else {
-            return Err("materializer requires canonical public expected bytes".into());
-        };
+        let bytes = fixture.expected.to_canonical_bytes()?;
         let path = expected_result_member_path(
             &fixture.case_id,
             fixture.claim_layer,
             &fixture.execution_profile_digest,
         );
-        let member = BundleMemberV1::new(path.clone(), bytes.clone(), true);
+        let member = BundleMemberV1::new(path.clone(), bytes, true);
         expected_results.push(BundleExpectedResultV1 {
             case_id: fixture.case_id.clone(),
             claim_layer: fixture.claim_layer,

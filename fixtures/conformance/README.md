@@ -26,6 +26,9 @@ ExecutionProfile while the paired bundles retain identical expected bytes.
 The `result` value in a checked-in expected record is descriptive fixture
 metadata only; `status: "pending"` and the CPF1 unavailable outcome prevent it
 from being interpreted as executed conformance evidence.
+Draft CPF1 bundles encode the unavailable outcome as the typed
+`ProvenanceMissing` expected result; they do not copy the descriptive `result`
+field into an evidence-bearing bundle member.
 
 `SHA256SUMS` and `BLAKE3SUMS` are independent byte inventories for every
 remaining public profile, input, expected result, matrix, inventory, and support
@@ -58,7 +61,10 @@ variant cases, with the row-specific AuthEq/PublicEq/OpEq predicates from
 ADR-059. Every coordinate is deliberately `executed: false` and has no result
 digest until #193 supplies independently produced execution evidence.
 `expected-authority/inventory.json` records the eleven #172 handoff slots as
-pending; #190 does not invent authority fixture/result bytes.
+pending. Its `expected_outcome` values are planned authority targets, not
+observed results; the null paths/digests and pending materialization status are
+the authoritative Draft state. #190 does not invent authority fixture/result
+bytes.
 
 The checked-in Draft inventory produces Draft Local/Air-Gapped bundles only.
 Materialized bytes are CI transport artifacts, not Candidate evidence or a
@@ -69,5 +75,6 @@ execution evidence.
 The Draft materializer binds every layer-specific input/result pair to its
 CPF1 profile, validates the authority handoff and matrix as open slots, checks
 the Local/Air-Gapped pair before writing either archive, and independently
-verifies the resulting public archives. It does not execute the matrix or
-claim that descriptive metadata is conformance evidence.
+performs a structural cross-check of the resulting public archives. It does
+not execute the matrix or claim that descriptive metadata is conformance
+evidence; the independently produced execution evidence belongs to #193.

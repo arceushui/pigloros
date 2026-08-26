@@ -2191,7 +2191,27 @@ fn bundle_pair_payloads(
                     | BundleMemberRoleV1::AuthorityExpectedResult
             )
         })
-        .map(|member| (member.path.clone(), member.role, member.bytes.clone()))
+        .map(|member| {
+            let identity = if member.role == BundleMemberRoleV1::ExpectedResult {
+                bundle
+                    .manifest
+                    .expected_results
+                    .iter()
+                    .find(|expected| expected.member_path == member.path)
+                    .map(|expected| {
+                        format!(
+                            "expected-result/{}/{}/{}",
+                            expected.case_id,
+                            claim_layer_code(expected.claim_layer),
+                            crate::hex_digest(&expected.execution_profile_digest)
+                        )
+                    })
+                    .unwrap_or_else(|| member.path.clone())
+            } else {
+                member.path.clone()
+            };
+            (identity, member.role, member.bytes.clone())
+        })
         .collect::<Vec<_>>();
     payloads.sort_unstable_by(|left, right| {
         left.0
@@ -2256,10 +2276,9 @@ fn validate_expected_results(
                 }
                 bytes.clone()
             }
-            typed_or_divergent => {
-                crate::profile_contract::expected_result_bytes(typed_or_divergent)
-                    .map_err(|_| BundleContractErrorV1::EncodingFailed)?
-            }
+            typed_or_divergent => typed_or_divergent
+                .to_canonical_bytes()
+                .map_err(|_| BundleContractErrorV1::EncodingFailed)?,
         };
         if expected.digest != *blake3::hash(&expected_bytes).as_bytes() {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -3628,9 +3647,7 @@ mod tests {
             }
             let bytes = match &fixture.expected {
                 ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
-                typed_or_divergent => {
-                    crate::profile_contract::expected_result_bytes(typed_or_divergent)?
-                }
+                typed_or_divergent => typed_or_divergent.to_canonical_bytes()?,
             };
             let path = expected_result_member_path(
                 &fixture.case_id,
@@ -5506,8 +5523,7 @@ mod tests {
         let mut typed_profile = profile;
         typed_profile.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
-        let typed_bytes =
-            crate::profile_contract::expected_result_bytes(&typed_profile.fixtures[0].expected)?;
+        let typed_bytes = typed_profile.fixtures[0].expected.to_canonical_bytes()?;
         let typed_digest = *blake3::hash(&typed_bytes).as_bytes();
         let mut typed_members = bundle.members;
         let typed_path = expected_result_member_path(
@@ -5543,9 +5559,8 @@ mod tests {
             validate_expected_results(&profile, &bundle.manifest, &bundle.members),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
-        let typed = crate::profile_contract::expected_result_bytes(
-            &ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding),
-        )?;
+        let typed = ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding)
+            .to_canonical_bytes()?;
         assert!(!typed.is_empty());
         assert_ne!(typed, vec![0]);
         assert_ne!(typed, vec![1]);
