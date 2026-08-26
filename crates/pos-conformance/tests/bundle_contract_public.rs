@@ -1537,11 +1537,7 @@ fn public_independent_verifier_classifies_role_mismatch_as_undeclared(
     Ok(())
 }
 
-#[test]
-fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>>
-{
-    let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+fn assert_raw_independent_archive_rejections() {
     assert!(pos_conformance::verify_archive_independently(&[0x01, 0x00]).is_err());
     assert!(pos_conformance::verify_archive_independently(&[0x9a, 0, 1, 0, 1]).is_err());
     assert!(pos_conformance::verify_archive_independently(&[0x5a, 0x04, 0, 0, 1]).is_err());
@@ -1593,6 +1589,14 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
         &exact_member_array(),
     ))
     .is_err());
+}
+
+#[test]
+fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>>
+{
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    assert_raw_independent_archive_rejections();
     assert_archive_shape_rejections(&bundle, &signing_key)?;
     assert_archive_member_rejections(&bundle, &signing_key)?;
     assert_archive_expected_rejections(&bundle, &signing_key)?;
