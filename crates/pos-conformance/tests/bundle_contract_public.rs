@@ -917,7 +917,43 @@ fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
 
-    let changed_expected = signed_archive_variant(&bundle, &signing_key, |value| {
+    let changed_expected = archive_with_changed_expected(&bundle, &signing_key)?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&changed_expected),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let missing_input = archive_without_first_fixture_input(&bundle, &signing_key)?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&missing_input),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    let misplaced_support = archive_with_misplaced_support(&bundle, &signing_key)?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&misplaced_support),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    let mixed_case_secret = archive_with_mixed_case_secret(&bundle, &signing_key)?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&mixed_case_secret),
+        Err(pos_conformance::BundleContractErrorV1::SecretMaterialDetected)
+    );
+
+    let stale_matrix_binding = archive_with_stale_matrix_binding(&bundle, &signing_key)?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&stale_matrix_binding),
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
+    Ok(())
+}
+
+fn archive_with_changed_expected(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    signed_archive_variant(bundle, signing_key, |value| {
         let expected = archive_expected(value)?;
         let path = match &expected[4] {
             Value::Text(path) => path.clone(),
@@ -935,13 +971,14 @@ fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
         descriptor[1] = Value::Integer((changed_len as u64).into());
         descriptor[2] = Value::Bytes(changed_digest);
         Ok(())
-    })?;
-    assert_eq!(
-        pos_conformance::verify_archive_independently(&changed_expected),
-        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
-    );
+    })
+}
 
-    let missing_input = signed_archive_variant(&bundle, &signing_key, |value| {
+fn archive_without_first_fixture_input(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    signed_archive_variant(bundle, signing_key, |value| {
         let (member_index, path) = {
             let members = archive_array(value, 3)?;
             let index = members
@@ -976,38 +1013,41 @@ fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
             .ok_or("fixture input descriptor is missing")?;
         descriptors.remove(descriptor_index);
         Ok(())
-    })?;
-    assert_eq!(
-        pos_conformance::verify_archive_independently(&missing_input),
-        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
-    );
+    })
+}
 
-    let misplaced_support = signed_archive_variant(&bundle, &signing_key, |value| {
+fn archive_with_misplaced_support(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    signed_archive_variant(bundle, signing_key, |value| {
         let member = archive_member(value, "support/normative-requirements.md")?;
         member[0] = Value::Text("support/normative-requirements.txt".to_owned());
         let descriptor = archive_descriptor(value, "support/normative-requirements.md")?;
         descriptor[0] = Value::Text("support/normative-requirements.txt".to_owned());
         Ok(())
-    })?;
-    assert_eq!(
-        pos_conformance::verify_archive_independently(&misplaced_support),
-        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
-    );
+    })
+}
 
-    let mixed_case_secret = signed_archive_variant(&bundle, &signing_key, |value| {
+fn archive_with_mixed_case_secret(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    signed_archive_variant(bundle, signing_key, |value| {
         let member = archive_member(value, "support/normative-requirements.md")?;
         member[1] = Value::Bytes(b"\"PaSsWoRd\"".to_vec());
         let descriptor = archive_descriptor(value, "support/normative-requirements.md")?;
         descriptor[1] = Value::Integer((b"\"PaSsWoRd\"".len() as u64).into());
         descriptor[2] = Value::Bytes(blake3::hash(b"\"PaSsWoRd\"").as_bytes().to_vec());
         Ok(())
-    })?;
-    assert_eq!(
-        pos_conformance::verify_archive_independently(&mixed_case_secret),
-        Err(pos_conformance::BundleContractErrorV1::SecretMaterialDetected)
-    );
+    })
+}
 
-    let stale_matrix_binding = signed_archive_variant(&bundle, &signing_key, |value| {
+fn archive_with_stale_matrix_binding(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    signed_archive_variant(bundle, signing_key, |value| {
         let matrix_bytes = {
             let member = archive_member(value, EXECUTION_MATRIX_MEMBER_PATH)?;
             let Value::Bytes(bytes) = &mut member[1] else {
@@ -1020,12 +1060,7 @@ fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
         descriptor[1] = Value::Integer((matrix_bytes.len() as u64).into());
         descriptor[2] = Value::Bytes(blake3::hash(&matrix_bytes).as_bytes().to_vec());
         Ok(())
-    })?;
-    assert_eq!(
-        pos_conformance::verify_archive_independently(&stale_matrix_binding),
-        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
-    );
-    Ok(())
+    })
 }
 
 #[test]
