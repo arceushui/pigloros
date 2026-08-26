@@ -945,12 +945,8 @@ fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), Conforma
     let mut bundle_bytes = 0_u64;
     for fixture in &profile.fixtures {
         for member in &fixture.inputs {
-            member_count = member_count
-                .checked_add(1)
-                .ok_or(ConformanceContractError::FieldOutOfBounds)?;
-            bundle_bytes = bundle_bytes
-                .checked_add(member.size_bytes)
-                .ok_or(ConformanceContractError::FieldOutOfBounds)?;
+            member_count = member_count.saturating_add(1);
+            bundle_bytes = bundle_bytes.saturating_add(member.size_bytes);
             if member.member_id.len() > usize::from(caps.max_member_path_bytes)
                 || member.size_bytes > caps.max_member_bytes
             {
@@ -1020,11 +1016,11 @@ fn validate_fixture(
         .iter()
         .try_for_each(validate_input_member)
         .and_then(|()| {
-            let input_bytes = fixture.inputs.iter().try_fold(0_u64, |total, input| {
-                total.checked_add(input.size_bytes)
-            });
-            if input_bytes.ok_or(ConformanceContractError::FieldOutOfBounds)?
-                > profile.evaluator_protocol.hard_caps.max_total_bundle_bytes
+            let input_bytes = fixture
+                .inputs
+                .iter()
+                .fold(0_u64, |total, input| total.saturating_add(input.size_bytes));
+            if input_bytes > profile.evaluator_protocol.hard_caps.max_total_bundle_bytes
                 || fixture.modes.contains(&ExecutionModeV1::AirGapped)
                     && fixture.capability_policy.network_allowed
                 || matches!(

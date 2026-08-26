@@ -780,3 +780,94 @@ fn public_replay_claim_erasure_seam_only_preserves_or_weakens() {
         ReplayClaimV1::IncompatibleProfile
     );
 }
+
+fn profile_with_field(index: usize, replacement: Value) -> Vec<u8> {
+    let mut value: Value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
+        .expect("profile fixture must decode");
+    value
+        .as_array_mut()
+        .expect("profile fixture must be an array")[index] = replacement;
+    fixtures::encode(&value)
+}
+
+fn profile_with_fixture_field(index: usize, replacement: Value) -> Vec<u8> {
+    let mut value: Value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
+        .expect("profile fixture must decode");
+    value
+        .as_array_mut()
+        .expect("profile fixture must be an array")[8]
+        .as_array_mut()
+        .expect("fixture inventory must be an array")[0]
+        .as_array_mut()
+        .expect("fixture must be an array")[index] = replacement;
+    fixtures::encode(&value)
+}
+
+#[test]
+fn public_profile_decoders_cover_nested_failure_shapes() {
+    let uint = |value: u64| Value::Integer(value.into());
+    let bytes = |seed: u8| Value::Bytes(vec![seed; 32]);
+    let expected_canonical = |first: Value, second: Value, digest: Value| {
+        Value::Array(vec![first, second, digest, Value::Null, Value::Null])
+    };
+    let expected_divergence = |classification: Value, coordinate: Value| {
+        Value::Array(vec![
+            uint(2),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![classification, coordinate]),
+        ])
+    };
+
+    let malformed_profiles = [
+        profile_with_field(9, Value::Array(vec![Value::Null])),
+        profile_with_fixture_field(5, Value::Array(vec![uint(99)])),
+        profile_with_fixture_field(8, Value::Array(vec![Value::Null; 5])),
+        profile_with_fixture_field(8, expected_canonical(uint(0), Value::Null, bytes(5))),
+        profile_with_fixture_field(8, expected_canonical(uint(0), bytes(5), Value::Null)),
+        profile_with_fixture_field(8, expected_divergence(Value::Null, Value::Bytes(vec![1]))),
+        profile_with_fixture_field(8, expected_divergence(uint(0), Value::Null)),
+        profile_with_field(16, Value::Null),
+    ];
+
+    for bytes in malformed_profiles {
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+    }
+}
+
+#[test]
+fn public_profile_validation_covers_transition_and_authority_failures() {
+    let profile = profile_for_digest();
+    let policy = TrustedRootPolicyV1 {
+        trusted_root_public_keys: vec![[42; 32]],
+        trust_policy_snapshot_digest: [1; 32],
+    };
+    assert_eq!(
+        profile.transition_to_with_trust_policy(
+            pos_conformance::ProfileLifecycleV1::Draft,
+            Vec::new(),
+            &policy,
+        ),
+        Err(ConformanceContractError::ProfileLifecycleInvalid)
+    );
+
+    let caps = profile.evaluator_protocol.hard_caps.clone();
+    let request = request_for_caps(&caps);
+    let mut invalid_caps = caps.clone();
+    invalid_caps.max_profile_bytes = 0;
+    assert_eq!(
+        request.validate_with_hard_caps(&invalid_caps),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+
+    let mut invalid_protocol = profile.evaluator_protocol.clone();
+    invalid_protocol.protocol_id.clear();
+    assert_eq!(
+        request.validate_with_protocol(&invalid_protocol),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+}
