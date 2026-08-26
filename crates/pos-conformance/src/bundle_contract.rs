@@ -8103,6 +8103,7 @@ mod coverage_entrypoints {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod instrumented_candidate_entrypoints {
     use super::tests;
     use super::{
