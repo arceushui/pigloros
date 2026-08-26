@@ -571,14 +571,23 @@ fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
     );
     assert_ne!(bound.profile_digest, different_matrix.profile_digest);
 
-    let mut non_knowledge = profile_without_matrix_binding();
-    non_knowledge.profile_id = "pigloros.test".to_owned();
-    non_knowledge.profile_digest = non_knowledge.digest();
-    assert_eq!(
-        non_knowledge.bind_execution_matrix_digest([1; 32]),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-    assert_eq!(non_knowledge.validate(), Ok(()));
+    for profile_id in [
+        "pigloros.w8.artifact-integrity.1.0.0",
+        "pigloros.w8.replay-conformance.1.0.0",
+        "pigloros.w8.gateway-client-conformance.1.0.0",
+        "pigloros.w8.plugin-conformance.1.0.0",
+        "pigloros.w8.metric-conformance.1.0.0",
+        "pigloros.w8.empirical-evaluation.1.0.0",
+    ] {
+        let mut non_knowledge = profile_without_matrix_binding();
+        non_knowledge.profile_id = profile_id.to_owned();
+        non_knowledge.profile_digest = non_knowledge.digest();
+        assert_eq!(
+            non_knowledge.bind_execution_matrix_digest([1; 32]),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+        assert_eq!(non_knowledge.validate(), Ok(()));
+    }
 
     let mut mismatched = bound.clone();
     assert_eq!(mismatched.bind_execution_matrix_digest([8; 32]), Ok(()));
