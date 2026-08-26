@@ -1282,6 +1282,18 @@ fn assert_archive_shape_rejections(
     ] {
         assert_archive_rejected(bundle, signing_key, mutate)?;
     }
+    for mutate in [
+        Box::new(|value: &mut Value| {
+            top_fields(value)?[0] = Value::Null;
+            Ok(())
+        }) as Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>,
+        Box::new(|value: &mut Value| {
+            top_fields(value)?[1] = Value::Text("wrong".to_owned());
+            Ok(())
+        }),
+    ] {
+        assert_archive_rejected(bundle, signing_key, mutate)?;
+    }
     Ok(())
 }
 
@@ -1572,6 +1584,40 @@ fn public_independent_verifier_rejects_each_expected_result_shape(
     assert_eq!(
         pos_conformance::verify_archive_independently(&malformed_fixtures),
         Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+    );
+
+    let cap_limited_archive = signed_archive_variant(&bundle, &signing_key, |value| {
+        let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => return Err("profile bytes are missing".into()),
+        };
+        let mut profile = ConformanceProfileV1::from_canonical_cbor(&profile_bytes)?;
+        let total_cap = u64::try_from(profile_bytes.len())?;
+        profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = total_cap;
+        let profile_digest = profile.digest();
+        let mut profile_value: Value = ciborium::from_reader(Cursor::new(profile_bytes))?;
+        let Value::Array(fields) = &mut profile_value else {
+            return Err("profile is not an array".into());
+        };
+        let Value::Array(protocol) = &mut fields[10] else {
+            return Err("profile protocol is not an array".into());
+        };
+        let Value::Array(caps) = &mut protocol[4] else {
+            return Err("profile caps are not an array".into());
+        };
+        caps[5] = Value::Integer(total_cap.into());
+        fields[16] = Value::Bytes(profile_digest.to_vec());
+        let profile_bytes = encode_archive(&profile_value)?;
+        archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(profile_bytes.clone());
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
+        descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
+        descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
+        archive_array(value, 2)?[3] = Value::Bytes(profile_digest.to_vec());
+        Ok(())
+    })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&cap_limited_archive),
+        Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
     );
     Ok(())
 }

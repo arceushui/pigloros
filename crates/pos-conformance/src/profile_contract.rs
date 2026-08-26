@@ -6809,6 +6809,10 @@ mod tests {
             preflight_cbor(&[0x58, 0x02, 0]),
             Err(ConformanceContractError::InvalidEncoding)
         );
+        assert_eq!(
+            preflight_cbor(&[0x58]),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
         let mut overflowing_bytes = vec![0x5b_u8];
         overflowing_bytes.extend([0xff; 8]);
         assert_eq!(
