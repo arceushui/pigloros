@@ -2439,6 +2439,7 @@ fn json_object<'a>(
         .ok_or(BundleContractErrorV1::MemberDigestMismatch)
 }
 
+#[cfg(test)]
 fn validate_provenance_authority_binding(
     provenance: &JsonValue,
     inventory_lifecycle: &str,
