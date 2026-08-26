@@ -3053,7 +3053,10 @@ mod tests {
             }
             assert_independent_error(&invalid, BundleContractErrorV1::ArchiveEncodingInvalid)?;
         }
-        for field in [1, 2] {
+        for (field, expected_error) in [
+            (1, BundleContractErrorV1::LifecycleInvalid),
+            (2, BundleContractErrorV1::ArchiveEncodingInvalid),
+        ] {
             let mut invalid = valid.clone();
             if let Value::Array(fields) = &mut invalid {
                 fields[2] = match &fields[2] {
@@ -3065,7 +3068,7 @@ mod tests {
                     _ => return Err("manifest must be an array".into()),
                 };
             }
-            assert_independent_error(&invalid, BundleContractErrorV1::LifecycleInvalid)?;
+            assert_independent_error(&invalid, expected_error)?;
         }
         let mut mismatched_count = valid.clone();
         if let Value::Array(fields) = &mut mismatched_count {
@@ -6941,7 +6944,7 @@ mod coverage_entrypoints {
                 0,
                 Value::Text("inputs/renamed-member.bin".to_owned()),
             )?),
-            Err(BundleContractErrorV1::UndeclaredMember)
+            Err(BundleContractErrorV1::NonCanonicalOrder)
         );
         assert_eq!(
             verify_archive_independently(&replace_archive_member_and_descriptor_path(
@@ -6958,7 +6961,7 @@ mod coverage_entrypoints {
                 0,
                 Value::Text(first_path.to_owned()),
             )?),
-            Err(BundleContractErrorV1::UndeclaredMember)
+            Err(BundleContractErrorV1::NonCanonicalOrder)
         );
         assert_eq!(
             verify_archive_independently(&replace_archive_member_field(
