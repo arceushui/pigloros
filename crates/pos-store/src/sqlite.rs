@@ -569,14 +569,15 @@ impl SqliteStore {
             columns.insert(row.map_err(Self::into_storage_error)?);
         }
         drop(statement);
-        if columns.contains("signature_role") {
-            if columns.contains("signature_epoch") {
-                return Ok(());
-            }
+        match (
+            columns.contains("signature_role"),
+            columns.contains("signature_epoch"),
+        ) {
+            (true, true) => Ok(()),
+            _ => Err(CoreError::Storage(
+                "SQLite events table is missing required signature identity columns".to_owned(),
+            )),
         }
-        Err(CoreError::Storage(
-            "SQLite events table is missing required signature identity columns".to_owned(),
-        ))
     }
 
     fn geographic_fence_permits(
