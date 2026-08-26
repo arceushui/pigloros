@@ -924,13 +924,16 @@ fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
             _ => return Err("expected path is not text".into()),
         };
         let member = archive_member(value, &path)?;
-        let Value::Bytes(bytes) = &mut member[1] else {
-            return Err("expected member bytes are missing".into());
+        let (changed_len, changed_digest) = {
+            let Value::Bytes(bytes) = &mut member[1] else {
+                return Err("expected member bytes are missing".into());
+            };
+            bytes.push(0);
+            (bytes.len(), blake3::hash(bytes).as_bytes().to_vec())
         };
-        bytes.push(0);
         let descriptor = archive_descriptor(value, &path)?;
-        descriptor[1] = Value::Integer((bytes.len() as u64).into());
-        descriptor[2] = Value::Bytes(blake3::hash(bytes).as_bytes().to_vec());
+        descriptor[1] = Value::Integer((changed_len as u64).into());
+        descriptor[2] = Value::Bytes(changed_digest);
         Ok(())
     })?;
     assert_eq!(
