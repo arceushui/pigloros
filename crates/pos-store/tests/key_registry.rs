@@ -229,9 +229,9 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
 
         let destroy_handle = scope.spawn(move || {
             let result = destruction_store.destroy_key_registry(destruction_request);
-            destruction_done_tx
-                .send(())
-                .expect("destruction ordering receiver must remain available");
+            destruction_done_tx.send(()).map_err(|_| {
+                CoreError::Storage("destruction completion signal failed".to_owned())
+            })?;
             result
         });
         let destruction_waited = matches!(
