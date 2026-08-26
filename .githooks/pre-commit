@@ -10,11 +10,18 @@ changed_files=$(git diff --cached --name-only --diff-filter=ACDMRT)
 changed_cargo_manifests=$(printf '%s\n' "$changed_files" | awk '
     $0 == "Cargo.toml" || $0 ~ /\/Cargo\.toml$/
 ')
-if [ -n "$changed_cargo_manifests" ]; then
-    echo "pre-commit: cargo generate-lockfile"
-    cargo generate-lockfile
-    git add Cargo.lock
-fi
+while IFS= read -r manifest; do
+    [ -n "$manifest" ] || continue
+    if [ "$manifest" = "fuzz/Cargo.toml" ]; then
+        echo "pre-commit: cargo generate-lockfile --manifest-path $manifest"
+        cargo generate-lockfile --manifest-path "$manifest"
+        git add fuzz/Cargo.lock
+    else
+        echo "pre-commit: cargo generate-lockfile"
+        cargo generate-lockfile
+        git add Cargo.lock
+    fi
+done <<< "$changed_cargo_manifests"
 
 # Include a generated lockfile in the metadata gate below when the command
 # above added it to the index.
@@ -32,6 +39,7 @@ fi
 
 echo "pre-commit: cargo clippy (changed packages)"
 declare -A packages=()
+declare -A isolated_manifests=()
 needs_workspace=false
 if [ -z "$changed_rust_files" ]; then
     needs_workspace=true
@@ -66,6 +74,11 @@ while IFS= read -r file; do
         needs_workspace=true
         continue
     fi
+    manifest=${manifest#./}
+    if [ "$manifest" = "fuzz/Cargo.toml" ]; then
+        isolated_manifests["$manifest"]="$manifest"
+        continue
+    fi
     package=$(package_name "$manifest")
     if [ -n "$package" ]; then
         packages["$package"]="$manifest"
@@ -83,5 +96,10 @@ else
         cargo clippy -p "$package" --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
     done
 fi
+
+for manifest in "${!isolated_manifests[@]}"; do
+    echo "  clippy: $manifest"
+    cargo clippy --manifest-path "$manifest" --all-targets --locked -- -D warnings -W clippy::pedantic
+done
 
 echo "pre-commit: OK"

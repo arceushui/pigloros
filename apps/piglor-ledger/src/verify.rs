@@ -194,7 +194,7 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
     let n = events.len();
     for event in &events {
         if let Some((which, reason)) =
-            verify_store_event(event, supplied_public_key, registry.as_ref())?
+            verify_store_event(event, Some(supplied_public_key), registry.as_ref())?
         {
             return Ok(VerifyReport {
                 tier: "store".to_owned(),
