@@ -2604,8 +2604,8 @@ mod tests {
     // The public contract tests below exercise canonical CBOR, validation,
     // lifecycle transitions, and hard-cap entrypoints. Closed enum mapping
     // tests below only enumerate the representation used by those seams.
-    use ed25519_dalek::Signer;
     use super::*;
+    use ed25519_dalek::Signer;
 
     const MAX_FIXTURE_COUNT: u32 = 65_536;
     const MAX_MEMBER_PATH_BYTES: u16 = 256;
