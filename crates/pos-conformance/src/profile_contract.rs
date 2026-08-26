@@ -5653,8 +5653,9 @@ mod tests {
         let mut at_limit = stable_evidence("alpha", 30);
         for case in &mut at_limit.case_outcomes {
             case.first_coordinate = Some(vec![b'x'; 127]);
+            case.fixture_digest = fixture_digest(&constrained.fixtures[0]);
         }
-        refresh_stable_attestation(&mut at_limit);
+        refresh_stable_report_for_profile(&mut at_limit, &constrained);
         assert_eq!(
             validate_stable_implementation(&at_limit, &constrained, None),
             Ok(())
