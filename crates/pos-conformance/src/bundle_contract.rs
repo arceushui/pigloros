@@ -4871,7 +4871,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_bundle_fails_closed_without_coordinate_bound_authority(
+    pub(super) fn candidate_bundle_fails_closed_without_coordinate_bound_authority(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut candidate = profile();
         candidate.lifecycle = ProfileLifecycleV1::Candidate;
@@ -5878,7 +5878,7 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authority_inventory_materialized_path(
+    pub(super) fn authority_inventory_materialized_path(
     ) -> Result<(JsonValue, Vec<BundleMemberV1>), Box<dyn std::error::Error>> {
         let mut candidate_inventory: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/expected-authority/inventory.json"
@@ -6474,11 +6474,14 @@ mod coverage_entrypoints {
         preflight_archive_caps, required_support_digests, validate_archive_caps,
         validate_expected_results, validate_fixture_inputs_for_mode, validate_member_count,
         validate_member_size, validate_preflight_archive_caps, validate_selected_bundle_caps,
-        validate_supporting_members, validate_total_bytes, BundleContractErrorV1,
-        BundleMemberRoleV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1, PublicKey,
-        Value, MAX_MEMBERS, MAX_MEMBER_BYTES, MAX_MEMBER_PATH_BYTES, MAX_STRUCTURAL_NESTING,
-        MAX_TOTAL_BUNDLE_BYTES,
+        validate_supporting_members, validate_total_bytes, verify_archive_independently,
+        BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundlePairV1,
+        ConformanceBundleV1, PublicKey, Value, MAX_MEMBERS, MAX_MEMBER_BYTES,
+        MAX_MEMBER_PATH_BYTES, MAX_STRUCTURAL_NESTING, MAX_TOTAL_BUNDLE_BYTES,
     };
+    use ed25519_dalek::Signer;
+    use serde_json::Value as JsonValue;
+    use std::collections::BTreeSet;
 
     pub(super) fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
         signed_bundle_for(&tests::profile(), BundleModeV1::Local)
@@ -6509,6 +6512,10 @@ mod coverage_entrypoints {
 
     fn raw_archive(first: &[u8], members: &[u8]) -> Vec<u8> {
         raw_archive_with_header(&[0x86], first, members)
+    }
+
+    fn truncated_archive_member_path() -> Vec<u8> {
+        vec![0x86, 0x60, 0x01, 0x80, 0x81, 0x83, 0x61]
     }
 
     fn exact_member_array() -> Vec<u8> {
@@ -6562,6 +6569,687 @@ mod coverage_entrypoints {
             Value::Array(Vec::new()),
             Value::Array(vec![expected]),
         ])
+    }
+
+    fn replace_array_item(
+        container: &mut Value,
+        collection_index: usize,
+        item_index: usize,
+        replacement: Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let fields = array_fields(container, "expected an array container")?;
+        let collection = fields
+            .get_mut(collection_index)
+            .ok_or("array collection is missing")?;
+        let items = array_fields(collection, "expected an array collection")?;
+        let item = items.get_mut(item_index).ok_or("array item is missing")?;
+        *item = replacement;
+        Ok(())
+    }
+
+    fn replace_array_item_field(
+        container: &mut Value,
+        collection_index: usize,
+        item_index: usize,
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let fields = array_fields(container, "expected an array container")?;
+        let collection = fields
+            .get_mut(collection_index)
+            .ok_or("array collection is missing")?;
+        let items = array_fields(collection, "expected an array collection")?;
+        let item = items.get_mut(item_index).ok_or("array item is missing")?;
+        let item_fields = array_fields(item, "expected an array item")?;
+        *item_fields
+            .get_mut(field_index)
+            .ok_or("array item field is missing")? = replacement;
+        Ok(())
+    }
+
+    fn array_fields<'a>(
+        value: &'a mut Value,
+        error: &str,
+    ) -> Result<&'a mut Vec<Value>, Box<dyn std::error::Error>> {
+        let Value::Array(fields) = value else {
+            return Err(error.into());
+        };
+        Ok(fields)
+    }
+
+    fn resign_archive(value: &mut Value) -> Result<(), Box<dyn std::error::Error>> {
+        let fields = array_fields(value, "expected an archive array")?;
+        let manifest_bytes = encode_archive_value(fields.get(2).ok_or("manifest is missing")?)?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        *fields.get_mut(4).ok_or("public key is missing")? =
+            Value::Bytes(signing_key.verifying_key().to_bytes().to_vec());
+        *fields.get_mut(5).ok_or("signature is missing")? =
+            Value::Bytes(signing_key.sign(&manifest_bytes).to_bytes().to_vec());
+        Ok(())
+    }
+
+    fn replace_archive_member(
+        bundle: &ConformanceBundleV1,
+        member_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        replace_array_item(&mut value, 3, member_index, replacement)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_member_field(
+        bundle: &ConformanceBundleV1,
+        member_index: usize,
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        replace_array_item_field(&mut value, 3, member_index, field_index, replacement)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_descriptor(
+        bundle: &ConformanceBundleV1,
+        descriptor_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        replace_array_item(manifest, 4, descriptor_index, replacement)?;
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_descriptor_field(
+        bundle: &ConformanceBundleV1,
+        descriptor_index: usize,
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        replace_array_item_field(manifest, 4, descriptor_index, field_index, replacement)?;
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_top_field(
+        bundle: &ConformanceBundleV1,
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        *fields
+            .get_mut(field_index)
+            .ok_or("archive field is missing")? = replacement;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_manifest_field(
+        bundle: &ConformanceBundleV1,
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        let manifest_fields = array_fields(manifest, "expected a manifest array")?;
+        *manifest_fields
+            .get_mut(field_index)
+            .ok_or("manifest field is missing")? = replacement;
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_expected_result(
+        bundle: &ConformanceBundleV1,
+        expected_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        replace_array_item(manifest, 5, expected_index, replacement)?;
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_expected_result_field(
+        bundle: &ConformanceBundleV1,
+        expected_index: usize,
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        replace_array_item_field(manifest, 5, expected_index, field_index, replacement)?;
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn duplicate_archive_expected_result(
+        bundle: &ConformanceBundleV1,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        let manifest_fields = array_fields(manifest, "expected a manifest array")?;
+        let expected_results = manifest_fields
+            .get_mut(5)
+            .ok_or("expected-result array is missing")?;
+        let expected_values =
+            array_fields(expected_results, "expected-result array is not an array")?;
+        let first = expected_values
+            .first()
+            .cloned()
+            .ok_or("expected result is missing")?;
+        replace_array_item(manifest, 5, 1, first)?;
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn remove_archive_expected_result(
+        bundle: &ConformanceBundleV1,
+        expected_index: usize,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        let manifest_fields = array_fields(manifest, "expected a manifest array")?;
+        let expected_results = array_fields(
+            manifest_fields
+                .get_mut(5)
+                .ok_or("expected-result array is missing")?,
+            "expected-result array is not an array",
+        )?;
+        if expected_results.get(expected_index).is_none() {
+            return Err("expected result is missing".into());
+        }
+        expected_results.remove(expected_index);
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_profile(
+        bundle: &ConformanceBundleV1,
+        profile_index: usize,
+        profile_bytes: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let profile_path = bundle.members[profile_index].path.clone();
+        let descriptor_index = bundle
+            .manifest
+            .members
+            .iter()
+            .position(|member| member.path == profile_path)
+            .ok_or("missing profile descriptor")?;
+        let mut value = bundle_value(bundle);
+        replace_array_item_field(
+            &mut value,
+            3,
+            profile_index,
+            1,
+            Value::Bytes(profile_bytes.to_vec()),
+        )?;
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        let manifest_fields = array_fields(manifest, "expected a manifest array")?;
+        let descriptors = array_fields(
+            manifest_fields
+                .get_mut(4)
+                .ok_or("member descriptor array is missing")?,
+            "member descriptor array is not an array",
+        )?;
+        let descriptor = descriptors
+            .get_mut(descriptor_index)
+            .ok_or("profile descriptor is missing")?;
+        let descriptor_fields = array_fields(descriptor, "expected a member descriptor array")?;
+        descriptor_fields[1] = Value::Integer(u64::try_from(profile_bytes.len())?.into());
+        descriptor_fields[2] = Value::Bytes(blake3::hash(profile_bytes).as_bytes().to_vec());
+        resign_archive(&mut value)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_value_field(
+        value: &Value,
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mut value = value.clone();
+        let fields = array_fields(&mut value, "expected an array value")?;
+        *fields
+            .get_mut(field_index)
+            .ok_or("value field is missing")? = replacement;
+        Ok(value)
+    }
+
+    fn replace_profile_field(
+        profile_bytes: &[u8],
+        field_index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let profile: Value = ciborium::from_reader(std::io::Cursor::new(profile_bytes))?;
+        let profile = replace_value_field(&profile, field_index, replacement)?;
+        Ok(encode_archive_value(&profile)?)
+    }
+
+    #[test]
+    fn independent_archive_rejection_matrix_is_instrumented(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let input_indices = bundle
+            .members
+            .iter()
+            .enumerate()
+            .filter_map(|(index, member)| {
+                (member.role == BundleMemberRoleV1::FixtureInput).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let first_input = *input_indices.first().ok_or("missing first fixture input")?;
+        let second_input = *input_indices.get(1).ok_or("missing second fixture input")?;
+        let first_path = bundle.members[first_input].path.clone();
+        let first_descriptor = bundle
+            .manifest
+            .members
+            .iter()
+            .position(|member| member.path == first_path)
+            .ok_or("missing first member descriptor")?;
+
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                first_input,
+                0,
+                Value::Text("inputs/renamed-member.bin".to_owned()),
+            )?),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                second_input,
+                0,
+                Value::Text(first_path.clone()),
+            )?),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                first_input,
+                2,
+                Value::Integer(1_u64.into()),
+            )?),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                first_input,
+                2,
+                Value::Integer(99_u64.into()),
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut changed_bytes = bundle.members[first_input].bytes.clone();
+        changed_bytes[0] ^= 1;
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                first_input,
+                1,
+                Value::Bytes(Vec::new()),
+            )?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                first_input,
+                1,
+                Value::Bytes(changed_bytes),
+            )?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member(
+                &bundle,
+                first_input,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                first_input,
+                0,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                &bundle,
+                first_input,
+                1,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_descriptor(
+                &bundle,
+                first_descriptor,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_descriptor_field(
+                &bundle,
+                first_descriptor,
+                3,
+                Value::Integer(99_u64.into()),
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_top_field(
+                &bundle,
+                4,
+                Value::Bytes(vec![0xff; 32]),
+            )?),
+            Err(BundleContractErrorV1::SignatureInvalid)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn independent_archive_expected_result_rejection_matrix_is_instrumented(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let expected_member_index = bundle
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::ExpectedResult)
+            .ok_or("missing expected-result member")?;
+        let expected_descriptor = bundle
+            .manifest
+            .members
+            .iter()
+            .position(|member| member.path == bundle.members[expected_member_index].path)
+            .ok_or("missing expected-result descriptor")?;
+        assert_eq!(
+            verify_archive_independently(&replace_archive_expected_result(
+                &bundle,
+                0,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_expected_result_field(
+                &bundle,
+                0,
+                4,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&duplicate_archive_expected_result(&bundle)?),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_expected_result_field(
+                &bundle,
+                0,
+                4,
+                Value::Text("missing/member.bin".to_owned()),
+            )?),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_descriptor_field(
+                &bundle,
+                expected_descriptor,
+                3,
+                Value::Integer(0_u64.into()),
+            )?),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_expected_result_field(
+                &bundle,
+                0,
+                5,
+                Value::Bytes(vec![9; 32]),
+            )?),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+        assert_eq!(
+            verify_archive_independently(&remove_archive_expected_result(&bundle, 0)?),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn independent_member_shape_rejection_matrix_is_instrumented(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let member_bytes = b"member".to_vec();
+        let member_path = "member".to_owned();
+        let member_digest = *blake3::hash(&member_bytes).as_bytes();
+        let member = Value::Array(vec![
+            Value::Text(member_path.clone()),
+            Value::Bytes(member_bytes.clone()),
+            Value::Integer(0_u64.into()),
+        ]);
+        let descriptor = Value::Array(vec![
+            Value::Text(member_path),
+            Value::Integer(u64::try_from(member_bytes.len())?.into()),
+            Value::Bytes(member_digest.to_vec()),
+            Value::Integer(0_u64.into()),
+        ]);
+        assert_eq!(
+            super::independent_member_paths_and_profile(
+                std::slice::from_ref(&member),
+                std::slice::from_ref(&descriptor),
+            )?,
+            (BTreeSet::new(), None)
+        );
+        for (invalid_member, invalid_descriptor) in [
+            (Value::Null, descriptor.clone()),
+            (member.clone(), Value::Null),
+            (
+                replace_value_field(&member, 0, Value::Null)?,
+                descriptor.clone(),
+            ),
+            (
+                replace_value_field(&member, 1, Value::Null)?,
+                descriptor.clone(),
+            ),
+            (
+                replace_value_field(&member, 2, Value::Integer(99_u64.into()))?,
+                descriptor.clone(),
+            ),
+            (
+                member.clone(),
+                replace_value_field(&descriptor, 3, Value::Integer(99_u64.into()))?,
+            ),
+        ] {
+            assert_eq!(
+                super::independent_member_paths_and_profile(
+                    std::slice::from_ref(&invalid_member),
+                    std::slice::from_ref(&invalid_descriptor),
+                ),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn independent_profile_rejection_matrix_is_instrumented(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_bundle()?;
+        let profile_index = bundle
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or("missing profile member")?;
+        let profile = tests::profile();
+        let profile_bytes = profile.to_canonical_cbor()?;
+        let profile_digest = Value::Bytes(profile.profile_digest.to_vec());
+        assert_eq!(
+            super::independent_verify_profile(&profile_bytes, 0, &profile_digest),
+            Ok(())
+        );
+        assert_eq!(
+            super::independent_verify_profile(b"invalid", 0, &profile_digest),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+        let encoded_null = encode_archive_value(&Value::Null)?;
+        assert_eq!(
+            super::independent_verify_profile(&encoded_null, 0, &profile_digest),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_profile(
+                &bundle,
+                profile_index,
+                b"invalid",
+            )?),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+        for (field_index, replacement, expected_error) in [
+            (
+                0,
+                Value::Text("wrong".to_owned()),
+                BundleContractErrorV1::ProfileInvalid,
+            ),
+            (
+                1,
+                Value::Integer(99_u64.into()),
+                BundleContractErrorV1::ProfileInvalid,
+            ),
+            (
+                4,
+                Value::Integer(1_u64.into()),
+                BundleContractErrorV1::ProfileInvalid,
+            ),
+            (
+                16,
+                Value::Null,
+                BundleContractErrorV1::ArchiveEncodingInvalid,
+            ),
+        ] {
+            assert_eq!(
+                verify_archive_independently(&replace_archive_profile(
+                    &bundle,
+                    profile_index,
+                    &replace_profile_field(&profile_bytes, field_index, replacement)?,
+                )?),
+                Err(expected_error)
+            );
+        }
+        assert_eq!(
+            verify_archive_independently(&replace_archive_manifest_field(
+                &bundle,
+                3,
+                Value::Bytes(vec![9; 32]),
+            )?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        assert_eq!(
+            super::archive_preflight::scan(&truncated_archive_member_path()),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            super::archive_preflight::scan(&raw_archive(&[0x60], &[0x81, 0x82, 0x60, 0x40],)),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn independent_preflight_and_authority_rejection_matrix_is_instrumented(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut limited_profile = tests::profile();
+        limited_profile.evaluator_protocol.hard_caps.max_cases = 1;
+        let empty_preflight = super::ArchivePreflight {
+            profile_bytes: None,
+            member_count: 0,
+            total_member_bytes: 0,
+            largest_member_bytes: 0,
+            largest_member_path_bytes: 0,
+            maximum_depth: 0,
+        };
+        assert_eq!(
+            validate_preflight_archive_caps(&limited_profile, &empty_preflight, 1),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+
+        assert_eq!(
+            super::validate_authority_inventory_digest(&JsonValue::Null, b""),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        let draft_inventory: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/expected-authority/inventory.json"
+        ))?;
+        assert_eq!(
+            super::validate_authority_inventory(&draft_inventory, &[]),
+            Ok(())
+        );
+        let (candidate_inventory, authority_members) =
+            tests::authority_inventory_materialized_path()?;
+        assert_eq!(
+            super::validate_authority_inventory(&candidate_inventory, &authority_members),
+            Ok(())
+        );
+
+        tests::candidate_bundle_fails_closed_without_coordinate_bound_authority()?;
+
+        let mut malformed_candidate = tests::profile();
+        malformed_candidate.lifecycle = super::ProfileLifecycleV1::Candidate;
+        let malformed_provenance = b"not-json".to_vec();
+        let malformed_digest = *blake3::hash(&malformed_provenance).as_bytes();
+        malformed_candidate.provenance_digest = malformed_digest;
+        for fixture in &mut malformed_candidate.fixtures {
+            fixture.provenance.source_digest = malformed_digest;
+            fixture.provenance.build_digest = malformed_digest;
+            fixture.provenance.publication_review_digest = malformed_digest;
+        }
+        malformed_candidate.profile_digest = malformed_candidate.digest();
+        let (mut malformed_members, expected_results) =
+            tests::bundle_inputs(&malformed_candidate, BundleModeV1::Local)?;
+        let provenance_member = malformed_members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance member")?;
+        provenance_member.bytes = malformed_provenance;
+        provenance_member.digest = malformed_digest;
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &malformed_candidate,
+                BundleModeV1::Local,
+                malformed_members,
+                expected_results,
+            ),
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+        );
+
+        Ok(())
     }
 
     #[test]
