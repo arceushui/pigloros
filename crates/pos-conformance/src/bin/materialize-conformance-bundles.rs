@@ -131,6 +131,8 @@ macro_rules! fixture_sources {
 struct LayerSpec {
     claim_layer: ClaimLayerV1,
     name: &'static str,
+    fixture_root: &'static str,
+    wire_code: u8,
     profile_id: &'static str,
     subject_adapter: SubjectAdapterKindV1,
     profile_record: &'static [u8],
@@ -141,6 +143,8 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     LayerSpec {
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
         name: "artifact-integrity",
+        fixture_root: "artifact-integrity",
+        wire_code: 0,
         profile_id: "pigloros.w8.artifact-integrity.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         profile_record: include_bytes!(
@@ -151,6 +155,8 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     LayerSpec {
         claim_layer: ClaimLayerV1::ReplayConformance,
         name: "replay-conformance",
+        fixture_root: "replay-conformance",
+        wire_code: 1,
         profile_id: "pigloros.w8.replay-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         profile_record: include_bytes!(
@@ -161,6 +167,8 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     LayerSpec {
         claim_layer: ClaimLayerV1::KnowledgeNonInterference,
         name: "knowledge-non-interference",
+        fixture_root: "knowledge-non-interference",
+        wire_code: 2,
         profile_id: "pigloros.w8.knowledge-non-interference.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         profile_record: include_bytes!(
@@ -171,6 +179,8 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     LayerSpec {
         claim_layer: ClaimLayerV1::GatewayClientConformance,
         name: "gateway-client-conformance",
+        fixture_root: "gateway-client-conformance",
+        wire_code: 3,
         profile_id: "pigloros.w8.gateway-client-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::PublicGatewayProtocol,
         profile_record: include_bytes!(
@@ -181,6 +191,8 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     LayerSpec {
         claim_layer: ClaimLayerV1::PluginConformance,
         name: "plugin-conformance",
+        fixture_root: "plugin-conformance",
+        wire_code: 4,
         profile_id: "pigloros.w8.plugin-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::PublicPluginProtocol,
         profile_record: include_bytes!(
@@ -191,6 +203,8 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     LayerSpec {
         claim_layer: ClaimLayerV1::MetricConformance,
         name: "metric-conformance",
+        fixture_root: "metric-conformance",
+        wire_code: 5,
         profile_id: "pigloros.w8.metric-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         profile_record: include_bytes!(
@@ -201,6 +215,8 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     LayerSpec {
         claim_layer: ClaimLayerV1::EmpiricalEvaluation,
         name: "empirical-evaluation",
+        fixture_root: "empirical-evaluation",
+        wire_code: 6,
         profile_id: "pigloros.w8.empirical-evaluation.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         profile_record: include_bytes!(
@@ -211,7 +227,10 @@ const LAYER_SPECS: [LayerSpec; 7] = [
 ];
 
 fn layer_spec(claim_layer: ClaimLayerV1) -> &'static LayerSpec {
-    &LAYER_SPECS[usize::from(claim_layer_code(claim_layer))]
+    LAYER_SPECS
+        .iter()
+        .find(|spec| spec.claim_layer == claim_layer)
+        .expect("every claim layer must have one catalog entry")
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -405,11 +424,12 @@ fn validate_profile_record_bindings(
     let matrix = include_bytes!("../../../../fixtures/conformance/matrix/execution-matrix.json");
     let matrix_json: JsonValue = serde_json::from_slice(matrix)?;
     let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
-    if json_text(profile_record, "profile_id")? != profile_id(claim_layer)
+    let spec = layer_spec(claim_layer);
+    if json_text(profile_record, "profile_id")? != spec.profile_id
         || json_text(profile_record, "claim_layer")? != claim_layer_name(claim_layer)
+        || json_text(profile_record, "fixture_root")? != spec.fixture_root
+        || json_u64(profile_record, "wire_code")? != u64::from(spec.wire_code)
         || json_text(profile_record, "authority_inventory")? != "expected-authority/inventory.json"
-        || json_text(profile_record, "adr_059_execution_matrix")? != "matrix/execution-matrix.json"
-        || json_text(profile_record, "adr_059_execution_matrix_status")? != matrix_lifecycle
         || json_string_array(profile_record, "execution_profiles")?
             != vec!["deterministic-local-v1", "deterministic-air-gapped-v1"]
         || json_string_array(profile_record, "bundle_modes")? != vec!["local", "air-gapped"]
@@ -422,12 +442,33 @@ fn validate_profile_record_bindings(
         profile_record,
         "authority_inventory_sha256_digest",
     )?) != Some(Sha256::digest(inventory).into())
-        || pos_conformance::decode_hex_digest(json_text(
-            profile_record,
-            "adr_059_execution_matrix_blake3_digest",
-        )?) != Some(*blake3::hash(matrix).as_bytes())
     {
         return Err("canonical profile record digest binding is invalid".into());
+    }
+    if claim_layer == ClaimLayerV1::KnowledgeNonInterference
+        && (json_text(profile_record, "adr_059_execution_matrix")?
+            != "matrix/execution-matrix.json"
+            || json_text(profile_record, "adr_059_execution_matrix_status")? != matrix_lifecycle
+            || pos_conformance::decode_hex_digest(json_text(
+                profile_record,
+                "adr_059_execution_matrix_blake3_digest",
+            )?) != Some(*blake3::hash(matrix).as_bytes()))
+    {
+        return Err("knowledge profile matrix binding is invalid".into());
+    }
+    if claim_layer != ClaimLayerV1::KnowledgeNonInterference
+        && [
+            "adr_059_execution_matrix",
+            "adr_059_execution_matrix_blake3_digest",
+            "adr_059_execution_matrix_status",
+            "matrix",
+            "matrix_size_bytes",
+            "matrix_blake3_digest",
+        ]
+        .iter()
+        .any(|field| profile_record.get(*field).is_some())
+    {
+        return Err("execution matrix binding is only valid for the knowledge profile".into());
     }
     Ok(())
 }
@@ -555,12 +596,16 @@ fn profile_from_record(
         stable_evidence: Vec::new(),
         profile_digest: [0; 32],
     };
-    profile.bind_execution_matrix_digest(
-        *blake3::hash(include_bytes!(
-            "../../../../fixtures/conformance/matrix/execution-matrix.json"
-        ))
-        .as_bytes(),
-    )?;
+    if claim_layer == ClaimLayerV1::KnowledgeNonInterference {
+        profile.bind_execution_matrix_digest(
+            *blake3::hash(include_bytes!(
+                "../../../../fixtures/conformance/matrix/execution-matrix.json"
+            ))
+            .as_bytes(),
+        )?;
+    } else {
+        profile.profile_digest = profile.digest();
+    }
     Ok(profile)
 }
 
@@ -729,9 +774,9 @@ fn canonical_fixture_bytes(
     input_path: &str,
     expected_path: &str,
 ) -> Result<CanonicalFixtureBytes, Box<dyn Error>> {
-    let layer_name = claim_layer_name(claim_layer);
-    if !input_path.starts_with(&format!("inputs/{layer_name}/"))
-        || !expected_path.starts_with(&format!("expected/{layer_name}/"))
+    let fixture_root = layer_spec(claim_layer).fixture_root;
+    if !input_path.starts_with(&format!("inputs/{fixture_root}/"))
+        || !expected_path.starts_with(&format!("expected/{fixture_root}/"))
     {
         return Err("canonical fixture paths are bound to the wrong claim layer".into());
     }
@@ -764,6 +809,13 @@ fn json_text<'a>(value: &'a JsonValue, field: &str) -> Result<&'a str, Box<dyn E
     value
         .get(field)
         .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("canonical profile field is missing: {field}").into())
+}
+
+fn json_u64(value: &JsonValue, field: &str) -> Result<u64, Box<dyn Error>> {
+    value
+        .get(field)
+        .and_then(JsonValue::as_u64)
         .ok_or_else(|| format!("canonical profile field is missing: {field}").into())
 }
 
@@ -951,18 +1003,6 @@ fn append_supporting_members(
     Ok(())
 }
 
-const fn claim_layer_code(claim_layer: ClaimLayerV1) -> u8 {
-    match claim_layer {
-        ClaimLayerV1::ArtifactIntegrity => 0,
-        ClaimLayerV1::ReplayConformance => 1,
-        ClaimLayerV1::KnowledgeNonInterference => 2,
-        ClaimLayerV1::GatewayClientConformance => 3,
-        ClaimLayerV1::PluginConformance => 4,
-        ClaimLayerV1::MetricConformance => 5,
-        ClaimLayerV1::EmpiricalEvaluation => 6,
-    }
-}
-
 fn canonical_fixture_input(
     claim_layer: ClaimLayerV1,
     member_id: &str,
@@ -1100,8 +1140,10 @@ mod tests {
     fn profile_binds_one_execution_profile_per_mode_and_preserves_pair_parity(
     ) -> Result<(), Box<dyn Error>> {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        assert!(profile.execution_matrix_digest().is_err());
+        let knowledge_profile = test_profile(ClaimLayerV1::KnowledgeNonInterference)?;
         assert_eq!(
-            profile.execution_matrix_digest()?,
+            knowledge_profile.execution_matrix_digest()?,
             *blake3::hash(include_bytes!(
                 "../../../../fixtures/conformance/matrix/execution-matrix.json"
             ))
@@ -1221,6 +1263,7 @@ mod tests {
         );
         assert_eq!(pos_conformance::hex_digest(&[0xabu8; 32]), "ab".repeat(32));
         assert!(json_text(&JsonValue::Null, "missing").is_err());
+        assert!(json_u64(&JsonValue::Null, "missing").is_err());
         assert!(json_string_array(&JsonValue::Null, "missing").is_err());
         assert!(json_string_array(&serde_json::json!({"values": ["ok", 7]}), "values").is_err());
     }
@@ -1234,6 +1277,8 @@ mod tests {
         for field in [
             "profile_id",
             "claim_layer",
+            "fixture_root",
+            "wire_code",
             "authority_inventory",
             "adr_059_execution_matrix",
             "adr_059_execution_matrix_status",
@@ -1470,13 +1515,12 @@ mod tests {
         for field in [
             "profile_id",
             "claim_layer",
+            "fixture_root",
+            "wire_code",
             "authority_inventory",
-            "adr_059_execution_matrix",
-            "adr_059_execution_matrix_status",
             "execution_profiles",
             "bundle_modes",
             "authority_inventory_sha256_digest",
-            "adr_059_execution_matrix_blake3_digest",
         ] {
             let mut missing = canonical_record.clone();
             missing

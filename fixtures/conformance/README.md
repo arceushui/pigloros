@@ -78,3 +78,9 @@ the Local/Air-Gapped pair before writing either archive, and independently
 performs a structural cross-check of the resulting public archives. It does
 not execute the matrix or claim that descriptive metadata is conformance
 evidence; the independently produced execution evidence belongs to #193.
+
+CI also independently regenerates the 49 expected-result records from the
+public input identities and fixture-family contract before running the Rust
+materializer. This check does not import the materializer or execute a claim;
+it ensures the checked-in Draft records are reproducible by a separate,
+small verifier.

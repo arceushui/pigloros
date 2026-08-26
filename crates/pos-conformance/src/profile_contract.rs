@@ -32,12 +32,13 @@ const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_COMPRESSION_EXPANSION: u32 = 100;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
 const EXECUTION_MATRIX_BINDING_MARKER: &str = "#matrix=";
+const KNOWLEDGE_PROFILE_ID: &str = "pigloros.w8.knowledge-non-interference.1.0.0";
 
 /// Typed content identity for the ADR-059 execution matrix.
 ///
 /// The CPF1 V1 wire record has no dedicated matrix field. To preserve its
-/// canonical 17-field encoding, profiles carry this value in the profile-ID
-/// binding suffix and validate it as part of the profile identity.
+/// canonical 17-field encoding, the knowledge profile carries this value in
+/// the profile-ID binding suffix and validates it as part of its identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ExecutionMatrixBindingV1 {
     digest: [u8; 32],
@@ -633,9 +634,8 @@ impl ConformanceProfileV1 {
 
     /// Return the bound ADR-059 matrix digest.
     ///
-    /// Every valid CPF1 profile carries this binding. Builders may create an
-    /// unbound value temporarily, but it must be passed through
-    /// `bind_execution_matrix_digest` before validation or serialization.
+    /// The knowledge-non-interference profile requires this binding. Other
+    /// profiles may omit it because ADR-059 execution belongs to #193.
     ///
     /// # Errors
     ///
@@ -981,7 +981,11 @@ fn validate_profile(
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
-    matrix_binding_parts(&profile.profile_id)?;
+    if requires_execution_matrix_binding(&profile.profile_id)
+        || profile.profile_id.contains(EXECUTION_MATRIX_BINDING_MARKER)
+    {
+        matrix_binding_parts(&profile.profile_id)?;
+    }
     validate_protocol(&profile.evaluator_protocol)
         .and_then(|()| validate_independence_requirements(&profile.independence_requirements))
         .and_then(|()| validate_fixtures(profile))
@@ -1791,6 +1795,13 @@ fn matrix_binding_parts(
     } else {
         Err(ConformanceContractError::FieldOutOfBounds)
     }
+}
+
+pub(crate) fn requires_execution_matrix_binding(profile_id: &str) -> bool {
+    profile_id
+        .split_once(EXECUTION_MATRIX_BINDING_MARKER)
+        .map_or(profile_id, |(base, _)| base)
+        == KNOWLEDGE_PROFILE_ID
 }
 
 fn strictly_ordered<T: Ord>(values: &[T]) -> bool {

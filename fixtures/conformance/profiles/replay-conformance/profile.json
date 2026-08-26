@@ -1,6 +1,8 @@
 {
   "profile_id": "pigloros.w8.replay-conformance.1.0.0",
   "claim_layer": "replay-conformance",
+  "wire_code": 1,
+  "fixture_root": "replay-conformance",
   "fixtures": [
     {
       "claim_layer": "replay-conformance",
@@ -54,9 +56,6 @@
   ],
   "authority_inventory": "expected-authority/inventory.json",
   "authority_inventory_sha256_digest": "9411e315c91698c4b5dc9d40a2823f9a784923e48e2d652c17c9f9e4a479bcc1",
-  "adr_059_execution_matrix": "matrix/execution-matrix.json",
-  "adr_059_execution_matrix_blake3_digest": "3eee92bb8eaeb5e2bc8f0eff5b33e36532caa278f2b4139bbd50250da236a660",
-  "adr_059_execution_matrix_status": "Draft",
   "execution_profiles": [
     "deterministic-local-v1",
     "deterministic-air-gapped-v1"

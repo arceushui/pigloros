@@ -128,16 +128,28 @@ for index in "${!profile_layers[@]}"; do
     --arg matrix "matrix/execution-matrix.json" \
     --arg matrix_lifecycle "${matrix_lifecycle}" \
     --arg matrix_blake3 "${matrix_blake3_digest}" \
+    --argjson wire_code "${index}" \
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
     '.claim_layer == $layer and
+      .wire_code == $wire_code and .fixture_root == $layer and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
-      .adr_059_execution_matrix == $matrix and .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
-      .adr_059_execution_matrix_status == $matrix_lifecycle and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
       (.fixtures | length == 7) and
       all(.fixtures[]; .claim_layer == $layer) and
       ([.fixtures[].family] == ["positive", "negative", "malformed", "resource", "deletion", "downgrade", "independent-evaluation"]) and
-      (if $layer == "knowledge-non-interference" then (.matrix == $matrix and .matrix_size_bytes == $matrix_size and .matrix_blake3_digest == $matrix_blake3) else true end)' \
+      (if $layer == "knowledge-non-interference" then
+        .adr_059_execution_matrix == $matrix and
+        .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
+        .adr_059_execution_matrix_status == $matrix_lifecycle and
+        .matrix == $matrix and .matrix_size_bytes == $matrix_size and
+        .matrix_blake3_digest == $matrix_blake3
+       else
+        (has("adr_059_execution_matrix") | not) and
+        (has("adr_059_execution_matrix_blake3_digest") | not) and
+        (has("adr_059_execution_matrix_status") | not) and
+        (has("matrix") | not) and (has("matrix_size_bytes") | not) and
+        (has("matrix_blake3_digest") | not)
+       end)' \
     "${profile}" >/dev/null || {
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1

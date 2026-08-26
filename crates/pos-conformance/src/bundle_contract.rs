@@ -1092,9 +1092,13 @@ fn independent_verify_authority_members(
     let provenance_json = parse_authority_json(provenance.bytes)?;
     let profile_fields = independent_array(profile, 17)?;
     let profile_id = archive_text(&profile_fields[2])?;
-    let bound_matrix_digest = independent_matrix_digest(profile_id)?;
-    if bound_matrix_digest != *blake3::hash(matrix.bytes).as_bytes() {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    if crate::profile_contract::requires_execution_matrix_binding(profile_id)
+        || profile_id.contains("#matrix=")
+    {
+        let bound_matrix_digest = independent_matrix_digest(profile_id)?;
+        if bound_matrix_digest != *blake3::hash(matrix.bytes).as_bytes() {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
     }
     let inventory_lifecycle = json_text(&inventory_json, "lifecycle")?;
     let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
@@ -2377,12 +2381,10 @@ fn validate_authority_members(
     let provenance = parse_authority_json(&provenance.bytes)?;
     let inventory_json = parse_authority_json(&inventory.bytes)?;
     let matrix_json = parse_authority_json(&matrix.bytes)?;
-    if profile
-        .execution_matrix_digest()
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?
-        != *blake3::hash(&matrix.bytes).as_bytes()
-    {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    if let Ok(bound_matrix_digest) = profile.execution_matrix_digest() {
+        if bound_matrix_digest != *blake3::hash(&matrix.bytes).as_bytes() {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
     }
     validate_matrix_provenance_digest(&provenance, &matrix.bytes)?;
     let inventory_lifecycle = json_text(&inventory_json, "lifecycle")?;
