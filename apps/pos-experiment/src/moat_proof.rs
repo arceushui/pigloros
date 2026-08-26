@@ -2585,21 +2585,39 @@ mod coverage_entrypoints {
 
         let mut invalid_baseline = report.baseline.clone();
         invalid_baseline.authoritative_events.clear();
-        assert!(verify_independent_fixture_reproduction(
-            &invalid_baseline,
-            &report.counterfactual,
-            &expected,
-        )
-        .is_err());
+        let invalid_baseline_json = test_ok(invalid_baseline.to_json());
+        assert!(matches!(
+            pos_reference::reproduce_fixture_json(&invalid_baseline_json),
+            Err(pos_reference::ReferenceError::InvalidForkEvidence(_))
+        ));
+        assert!(matches!(
+            verify_independent_fixture_reproduction(
+                &invalid_baseline,
+                &report.counterfactual,
+                &expected,
+            ),
+            Err(MoatProofError::Reference(
+                pos_reference::ReferenceError::InvalidForkEvidence(_)
+            ))
+        ));
 
         let mut invalid_counterfactual = report.counterfactual.clone();
         invalid_counterfactual.authoritative_events.clear();
-        assert!(verify_independent_fixture_reproduction(
-            &report.baseline,
-            &invalid_counterfactual,
-            &expected,
-        )
-        .is_err());
+        let invalid_counterfactual_json = test_ok(invalid_counterfactual.to_json());
+        assert!(matches!(
+            pos_reference::reproduce_fixture_json(&invalid_counterfactual_json),
+            Err(pos_reference::ReferenceError::InvalidForkEvidence(_))
+        ));
+        assert!(matches!(
+            verify_independent_fixture_reproduction(
+                &report.baseline,
+                &invalid_counterfactual,
+                &expected,
+            ),
+            Err(MoatProofError::Reference(
+                pos_reference::ReferenceError::InvalidForkEvidence(_)
+            ))
+        ));
     }
 
     #[test]
