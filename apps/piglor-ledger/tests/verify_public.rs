@@ -1,5 +1,5 @@
 use ed25519_dalek::SigningKey;
-use piglor_ledger::{run, verify_source, Source, VerifyOutcome};
+use piglor_ledger::{run, verify_source, Source};
 use pos_core::{
     CanonicalBytes, EntityId, Event, EventId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
     KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
@@ -264,7 +264,7 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
     }
     let anchors = format!("2/1={anchor_one},2/2={anchor_two}");
     let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
-    assert_eq!(report.outcome, VerifyOutcome::Ok);
+    assert!(report.to_string().starts_with("OK: store"));
     Ok(())
 }
 
