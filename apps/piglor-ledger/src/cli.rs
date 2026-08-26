@@ -63,6 +63,16 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
     Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
 }
 
+fn register_initial_key(
+    registry: &mut KeyRegistryStateV1,
+    registration: KeyRegistrationV1,
+) -> Result<(), CliError> {
+    registry
+        .register_key(registration)
+        .map(|_| ())
+        .map_err(|error| CliError::BadSource(format!("initial ledger registration: {error}")))
+}
+
 fn ledger_signing_registry(
     signing_key: &ed25519_dalek::SigningKey,
     persisted_registry: Option<&KeyRegistryStateV1>,
@@ -79,13 +89,10 @@ fn ledger_signing_registry(
     if persisted_registry.is_none() {
         // The initial role/epoch and generated key material are valid by
         // construction. Later epochs come from the durable active registry.
-        registry
-            .register_key(KeyRegistrationV1::new(
-                identity,
-                material_digest,
-                Some(public_verification_key),
-            ))
-            .expect("initial ledger signing registration must satisfy the registry contract");
+        register_initial_key(
+            &mut registry,
+            KeyRegistrationV1::new(identity, material_digest, Some(public_verification_key)),
+        )?;
     }
     registry
         .with_signing_authorization(identity, material_digest, public_verification_key, || ())
@@ -2522,6 +2529,24 @@ mod coverage_entrypoints {
     use super::*;
     use crate::test_helpers::TestResultExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn initial_registration_reports_registry_rejection() -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = generate_keypair();
+        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 0);
+        let mut registry = KeyRegistryStateV1::new();
+        let error = register_initial_key(
+            &mut registry,
+            KeyRegistrationV1::new(
+                identity,
+                key_material_digest(signing_key.as_bytes()),
+                Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+            ),
+        )
+        .test_err()?;
+        assert!(error.to_string().contains("initial ledger registration"));
+        Ok(())
+    }
 
     #[test]
     fn export_serialization_entrypoint_is_covered() -> Result<(), Box<dyn std::error::Error>> {
