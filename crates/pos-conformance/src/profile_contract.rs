@@ -5781,6 +5781,9 @@ mod tests {
         }
         refresh_stable_report_for_profile(&mut at_limit, &constrained);
         let mut second = stable_evidence("beta", 40);
+        for case in &mut second.case_outcomes {
+            case.fixture_digest = fixture_digest(&constrained.fixtures[0]);
+        }
         refresh_stable_report_for_profile(&mut second, &constrained);
         assert!(constrained
             .transition_to(

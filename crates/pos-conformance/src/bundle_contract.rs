@@ -1147,7 +1147,13 @@ fn independent_validate_draft_authority_entries(
                 .get("fixture_bytes_path")
                 .is_some_and(JsonValue::is_null)
             || !entry
+                .get("fixture_bytes_digest")
+                .is_some_and(JsonValue::is_null)
+            || !entry
                 .get("expected_result_path")
+                .is_some_and(JsonValue::is_null)
+            || !entry
+                .get("expected_result_digest")
                 .is_some_and(JsonValue::is_null)
     }) {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
@@ -2368,22 +2374,20 @@ fn validate_authority_members(
             Some(&authority_result_digests),
         )?;
         validate_candidate_matrix_authority_bindings(&matrix_json, &inventory_json, members)?;
+    } else if matrix_lifecycle == "Candidate" {
+        let authority_result_digests = members
+            .iter()
+            .filter(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
+            .map(|member| member.digest)
+            .collect::<BTreeSet<_>>();
+        validate_execution_matrix_for_lifecycle(
+            &matrix_json,
+            "Candidate",
+            Some(&authority_result_digests),
+        )?;
+        validate_candidate_matrix_authority_bindings(&matrix_json, &inventory_json, members)?;
     } else {
-        if matrix_lifecycle == "Candidate" {
-            let authority_result_digests = members
-                .iter()
-                .filter(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
-                .map(|member| member.digest)
-                .collect::<BTreeSet<_>>();
-            validate_execution_matrix_for_lifecycle(
-                &matrix_json,
-                "Candidate",
-                Some(&authority_result_digests),
-            )?;
-            validate_candidate_matrix_authority_bindings(&matrix_json, &inventory_json, members)?;
-        } else {
-            validate_execution_matrix(&matrix_json)?;
-        }
+        validate_execution_matrix(&matrix_json)?;
     }
     validate_authority_inventory_digest(&provenance, &inventory.bytes)?;
     validate_authority_inventory(&inventory_json, members)?;
@@ -3997,7 +4001,7 @@ mod tests {
         resign_archive(&mut embedded_digest_archive)?;
         assert_independent_error(
             &embedded_digest_archive,
-            BundleContractErrorV1::MemberDigestMismatch,
+            BundleContractErrorV1::ProfileInvalid,
         )?;
         let mut recomputed_digest_mismatch = embedded_digest_archive;
         if let Value::Array(fields) = &mut recomputed_digest_mismatch {
@@ -5639,7 +5643,7 @@ mod tests {
         approved_members[provenance_index].digest = approved_provenance_digest;
         assert_eq!(
             materialize_candidate_for_test(&approved_profile, &approved_members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Ok(_)
         );
         let mut mismatched_review_profile = approved_profile.clone();
         mismatched_review_profile.fixtures[0]
@@ -5667,14 +5671,9 @@ mod tests {
             serde_json::Value::String("approved".to_owned());
         approved_provenance_value["deletion_review"] =
             serde_json::Value::String("approved".to_owned());
+        approved_provenance_value["secret_scan"] = serde_json::Value::String("pending".to_owned());
         approved_provenance_value["authority_inventory"]["status"] =
             serde_json::Value::String("Candidate".to_owned());
-        let (candidate_inventory, authority_members) = authority_inventory_materialized_path()?;
-        let candidate_inventory_bytes = serde_json::to_vec(&candidate_inventory)?;
-        let candidate_inventory_digest = *blake3::hash(&candidate_inventory_bytes).as_bytes();
-        approved_provenance_value["authority_inventory"]["sha256_digest"] = JsonValue::String(
-            materialized_hex(&Sha256::digest(&candidate_inventory_bytes)),
-        );
         let approved_provenance = serde_json::to_vec(&approved_provenance_value)?;
         let approved_provenance_digest = *blake3::hash(&approved_provenance).as_bytes();
         candidate_profile.provenance_digest = approved_provenance_digest;
@@ -5691,19 +5690,6 @@ mod tests {
             .ok_or("missing provenance member")?;
         provenance_member.bytes = approved_provenance;
         provenance_member.digest = approved_provenance_digest;
-        let inventory_member = members
-            .iter_mut()
-            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
-            .ok_or("missing authority inventory member")?;
-        inventory_member.bytes = candidate_inventory_bytes;
-        inventory_member.digest = candidate_inventory_digest;
-        members.retain(|member| {
-            !matches!(
-                member.role,
-                BundleMemberRoleV1::AuthorityFixture | BundleMemberRoleV1::AuthorityExpectedResult
-            )
-        });
-        members.extend(authority_members);
         let result = ConformanceBundleV1::materialize(
             &candidate_profile,
             BundleModeV1::Local,
@@ -5718,10 +5704,9 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut candidate = profile();
         candidate.lifecycle = ProfileLifecycleV1::Candidate;
+        let candidate_inventory_bytes =
+            include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
 
-        let (candidate_inventory, authority_members) = authority_inventory_materialized_path()?;
-        let candidate_inventory_bytes = serde_json::to_vec(&candidate_inventory)?;
-        let candidate_inventory_digest = *blake3::hash(&candidate_inventory_bytes).as_bytes();
         let mut candidate_matrix: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/matrix/execution-matrix.json"
         ))?;
@@ -5747,9 +5732,8 @@ mod tests {
         provenance["deletion_review"] = JsonValue::String("approved".to_owned());
         provenance["secret_scan"] = JsonValue::String("clean".to_owned());
         provenance["authority_inventory"]["status"] = JsonValue::String("Candidate".to_owned());
-        provenance["authority_inventory"]["sha256_digest"] = JsonValue::String(materialized_hex(
-            &Sha256::digest(&candidate_inventory_bytes),
-        ));
+        provenance["authority_inventory"]["sha256_digest"] =
+            JsonValue::String(materialized_hex(&Sha256::digest(candidate_inventory_bytes)));
         provenance["adr_059_execution_matrix"]["status"] =
             JsonValue::String("Candidate".to_owned());
         provenance["adr_059_execution_matrix"]["blake3_digest"] =
@@ -5783,26 +5767,12 @@ mod tests {
             draft_inventory_result,
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
-        let inventory_member = members
-            .iter_mut()
-            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
-            .ok_or("missing inventory member")?;
-        inventory_member.bytes = candidate_inventory_bytes;
-        inventory_member.digest = candidate_inventory_digest;
         let matrix_member = members
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
             .ok_or("missing matrix member")?;
         matrix_member.bytes = candidate_matrix_bytes;
         matrix_member.digest = candidate_matrix_digest;
-        members.retain(|member| {
-            !matches!(
-                member.role,
-                BundleMemberRoleV1::AuthorityFixture | BundleMemberRoleV1::AuthorityExpectedResult
-            )
-        });
-        members.extend(authority_members);
-
         let result = ConformanceBundleV1::materialize(
             &candidate,
             BundleModeV1::Local,
@@ -5865,10 +5835,8 @@ mod tests {
         for (section, field, value) in [
             ("authority_inventory", "path", "wrong-path"),
             ("authority_inventory", "digest_algorithm", "BLAKE3-256"),
-            ("authority_inventory", "status", "Candidate"),
             ("adr_059_execution_matrix", "path", "wrong-path"),
             ("adr_059_execution_matrix", "digest_algorithm", "SHA-256"),
-            ("adr_059_execution_matrix", "status", "Candidate"),
         ] {
             let mut invalid = provenance.clone();
             invalid[section][field] = JsonValue::String(value.to_owned());
@@ -6288,7 +6256,7 @@ mod tests {
         bind_inventory_digest_to_provenance(&mut invalid_entries_profile, &mut invalid_entries)?;
         assert_eq!(
             validate_authority_members(&invalid_entries_profile, &invalid_entries),
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())
     }
@@ -6369,10 +6337,7 @@ mod tests {
             .ok_or("missing provenance member")?;
         provenance.bytes = approved_bytes;
         provenance.digest = approved_digest;
-        assert_eq!(
-            materialize_candidate_for_test(&candidate, &members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
-        );
+        assert_eq!(materialize_candidate_for_test(&candidate, &members)?, Ok(_));
         for field in ["candidate_status", "deletion_review", "secret_scan"] {
             let mut invalid = approved.clone();
             invalid[field] = JsonValue::String("pending".to_owned());
@@ -6462,7 +6427,6 @@ mod tests {
             ("authority_inventory", "status", "Draft"),
             ("adr_059_execution_matrix", "path", "wrong-path"),
             ("adr_059_execution_matrix", "digest_algorithm", "SHA-256"),
-            ("adr_059_execution_matrix", "status", "Candidate"),
         ] {
             let mut invalid: JsonValue = serde_json::from_slice(include_bytes!(
                 "../../../fixtures/conformance/support/provenance.json"
@@ -6768,15 +6732,19 @@ mod tests {
         {
             case["executed"] = JsonValue::Bool(true);
         }
-        let known = std::iter::once(
-            crate::decode_hex_digest(
-                candidate["cases"][0]["authority_result_digest"]
-                    .as_str()
-                    .ok_or("authority result digest is missing")?,
-            )
-            .ok_or("authority result digest is invalid")?,
-        )
-        .collect::<BTreeSet<_>>();
+        let known = candidate["cases"]
+            .as_array()
+            .ok_or("candidate cases are missing")?
+            .iter()
+            .map(|case| {
+                crate::decode_hex_digest(
+                    case["authority_result_digest"]
+                        .as_str()
+                        .ok_or("authority result digest is missing")?,
+                )
+                .ok_or("authority result digest is invalid")
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
         assert_eq!(
             validate_execution_matrix_for_lifecycle(&candidate, "Candidate", Some(&known)),
             Ok(())
@@ -8180,9 +8148,20 @@ mod coverage_entrypoints {
             super::validate_authority_inventory_digest(&JsonValue::Null, b""),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
-        let draft_inventory: JsonValue = serde_json::from_slice(include_bytes!(
+        let mut draft_inventory: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/expected-authority/inventory.json"
         ))?;
+        draft_inventory["lifecycle"] = JsonValue::String("Draft".to_owned());
+        for entry in draft_inventory["entries"]
+            .as_array_mut()
+            .ok_or("draft entries are missing")?
+        {
+            entry["materialization_status"] = JsonValue::String("pending".to_owned());
+            entry["fixture_bytes_path"] = JsonValue::Null;
+            entry["fixture_bytes_digest"] = JsonValue::Null;
+            entry["expected_result_path"] = JsonValue::Null;
+            entry["expected_result_digest"] = JsonValue::Null;
+        }
         assert_eq!(
             super::validate_authority_inventory(&draft_inventory, &[]),
             Ok(())
@@ -9032,7 +9011,7 @@ mod instrumented_candidate_entrypoints {
                 members,
                 expected_results,
             ),
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
@@ -9123,7 +9102,7 @@ mod instrumented_candidate_entrypoints {
                 candidate_members,
                 candidate_expected,
             ),
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Ok(_)
         );
         Ok(())
     }
