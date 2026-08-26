@@ -782,24 +782,32 @@ fn public_replay_claim_erasure_seam_only_preserves_or_weakens() {
 }
 
 fn profile_with_field(index: usize, replacement: Value) -> Vec<u8> {
-    let mut value: Value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
-        .expect("profile fixture must decode");
-    value
-        .as_array_mut()
-        .expect("profile fixture must be an array")[index] = replacement;
+    let Ok(mut value) = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
+    else {
+        panic!("profile fixture must decode");
+    };
+    let Value::Array(fields) = &mut value else {
+        panic!("profile fixture must be an array");
+    };
+    fields[index] = replacement;
     fixtures::encode(&value)
 }
 
 fn profile_with_fixture_field(index: usize, replacement: Value) -> Vec<u8> {
-    let mut value: Value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
-        .expect("profile fixture must decode");
-    value
-        .as_array_mut()
-        .expect("profile fixture must be an array")[8]
-        .as_array_mut()
-        .expect("fixture inventory must be an array")[0]
-        .as_array_mut()
-        .expect("fixture must be an array")[index] = replacement;
+    let Ok(mut value) = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
+    else {
+        panic!("profile fixture must decode");
+    };
+    let Value::Array(fields) = &mut value else {
+        panic!("profile fixture must be an array");
+    };
+    let Value::Array(fixtures) = &mut fields[8] else {
+        panic!("fixture inventory must be an array");
+    };
+    let Value::Array(fixture) = &mut fixtures[0] else {
+        panic!("fixture must be an array");
+    };
+    fixture[index] = replacement;
     fixtures::encode(&value)
 }
 
@@ -857,14 +865,14 @@ fn public_profile_validation_covers_transition_and_authority_failures() {
 
     let caps = profile.evaluator_protocol.hard_caps.clone();
     let request = request_for_caps(&caps);
-    let mut invalid_caps = caps.clone();
+    let mut invalid_caps = caps;
     invalid_caps.max_profile_bytes = 0;
     assert_eq!(
         request.validate_with_hard_caps(&invalid_caps),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut invalid_protocol = profile.evaluator_protocol.clone();
+    let mut invalid_protocol = profile.evaluator_protocol;
     invalid_protocol.protocol_id.clear();
     assert_eq!(
         request.validate_with_protocol(&invalid_protocol),
