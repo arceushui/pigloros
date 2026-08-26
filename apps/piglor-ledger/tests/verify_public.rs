@@ -305,6 +305,6 @@ fn public_store_verification_rejects_malformed_key_anchor_sets(
     };
     assert!(error
         .to_string()
-        .contains("entries must use role/epoch=hex format"));
+        .contains("entries must use role-code/epoch=hex format"));
     Ok(())
 }
