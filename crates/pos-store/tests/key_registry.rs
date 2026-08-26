@@ -179,6 +179,38 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 }
 
 #[test]
+fn sqlite_key_registry_initialization_public_contract_covers_reuse_and_creation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let empty = KeyRegistryStateV1::new();
+    let mut store = SqliteStore::open_in_memory()?;
+    let created = store.initialize_timeline_with_key_registry("ledger", &empty)?;
+    assert_eq!(created.meta.name.as_deref(), Some("ledger"));
+    assert_eq!(store.load_key_registry()?, Some(empty.clone()));
+
+    let reused = store.initialize_timeline_with_key_registry("ledger", &empty)?;
+    assert_eq!(reused.id(), created.id());
+
+    let (registry, _, _) = registry()?;
+    let mut persisted = SqliteStore::open_in_memory()?;
+    persisted.save_key_registry(&registry)?;
+    let created_with_registry =
+        persisted.initialize_timeline_with_key_registry("ledger", &registry)?;
+    assert_eq!(created_with_registry.meta.name.as_deref(), Some("ledger"));
+
+    let mut mismatch = SqliteStore::open_in_memory()?;
+    mismatch.save_key_registry(&registry)?;
+    let mismatch_error = mismatch
+        .initialize_timeline_with_key_registry("ledger", &empty)
+        .err()
+        .ok_or("registry mismatch was accepted")?;
+    assert!(mismatch_error
+        .to_string()
+        .contains("changed during ledger initialization"));
+    assert!(mismatch.list_timelines()?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;

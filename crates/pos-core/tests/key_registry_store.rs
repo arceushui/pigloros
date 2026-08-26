@@ -13,6 +13,9 @@ struct RegistryStore {
     registry: Option<KeyRegistryStateV1>,
     timeline: Option<Timeline>,
     committed: bool,
+    fail_save: bool,
+    fail_delete: bool,
+    deleted: Option<TimelineId>,
 }
 
 struct MinimalStore {
@@ -68,6 +71,9 @@ impl RegistryStore {
             registry,
             timeline: Some(Timeline::new(TimelineMeta::root("registry-test"))),
             committed: false,
+            fail_save: false,
+            fail_delete: false,
+            deleted: None,
         }
     }
 }
@@ -111,7 +117,18 @@ impl EventStore for RegistryStore {
     }
 
     fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        if self.fail_save {
+            return Err(CoreError::Storage("registry save failed".to_owned()));
+        }
         self.registry = Some(registry.clone());
+        Ok(())
+    }
+
+    fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
+        if self.fail_delete {
+            return Err(CoreError::Storage("timeline delete failed".to_owned()));
+        }
+        self.deleted = Some(id);
         Ok(())
     }
 
@@ -287,6 +304,65 @@ fn event_store_key_registry_defaults_cover_authorized_paths(
     );
     let (_, destroyed) = store.destroy_key_registry(request)?;
     assert!(destroyed.key_record(identity).is_some());
+    Ok(())
+}
+
+#[test]
+fn event_store_initialization_defaults_cover_each_state_transition(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let empty = KeyRegistryStateV1::new();
+    let (registry, _, _) = registered_state()?;
+
+    let mut existing = RegistryStore::new(None);
+    existing.timeline = Some(Timeline::new(TimelineMeta::root("ledger")));
+    let reused = existing.initialize_timeline_with_key_registry("ledger", &empty)?;
+    assert_eq!(reused.meta.name.as_deref(), Some("ledger"));
+    assert_eq!(existing.registry, Some(empty.clone()));
+
+    let mut persisted = RegistryStore::new(Some(registry.clone()));
+    persisted.timeline = None;
+    let created_with_registry =
+        persisted.initialize_timeline_with_key_registry("ledger", &registry)?;
+    assert_eq!(created_with_registry.meta.name.as_deref(), Some("ledger"));
+
+    let mut fresh = RegistryStore::new(None);
+    fresh.timeline = None;
+    let created_with_new_registry =
+        fresh.initialize_timeline_with_key_registry("ledger", &empty)?;
+    assert_eq!(
+        created_with_new_registry.meta.name.as_deref(),
+        Some("ledger")
+    );
+    assert_eq!(fresh.registry, Some(empty.clone()));
+
+    let mut mismatch = RegistryStore::new(Some(registry));
+    let mismatch_error = mismatch
+        .initialize_timeline_with_key_registry("ledger", &empty)
+        .err()
+        .ok_or("registry mismatch was accepted")?;
+    assert!(mismatch_error
+        .to_string()
+        .contains("changed during ledger initialization"));
+
+    let mut rollback = RegistryStore::new(None);
+    rollback.timeline = None;
+    rollback.fail_save = true;
+    let save_error = rollback
+        .initialize_timeline_with_key_registry("ledger", &empty)
+        .err()
+        .ok_or("registry save failure was accepted")?;
+    assert!(save_error.to_string().contains("registry save failed"));
+    assert!(rollback.deleted.is_some());
+
+    let mut rollback_failure = RegistryStore::new(None);
+    rollback_failure.timeline = None;
+    rollback_failure.fail_save = true;
+    rollback_failure.fail_delete = true;
+    let rollback_error = rollback_failure
+        .initialize_timeline_with_key_registry("ledger", &empty)
+        .err()
+        .ok_or("rollback failure was accepted")?;
+    assert!(rollback_error.to_string().contains("rollback also failed"));
     Ok(())
 }
 

@@ -66,7 +66,7 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
 fn ledger_signing_registry(
     signing_key: &ed25519_dalek::SigningKey,
     persisted_registry: Option<&KeyRegistryStateV1>,
-) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
+) -> Result<(KeyRegistryStateV1, KeyIdentityV1), CliError> {
     let material_digest = key_material_digest(signing_key.as_bytes());
     let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
     let identity = persisted_registry
@@ -92,7 +92,7 @@ fn ledger_signing_registry(
     registry
         .with_signing_authorization(identity, material_digest, public_verification_key, || ())
         .map_err(|error| CliError::BadSource(format!("ledger signing authorization: {error}")))?;
-    Ok((Arc::new(Mutex::new(registry)), identity))
+    Ok((registry, identity))
 }
 
 /// Open the source as a `Box<dyn LedgerStore>`. Store tier requires
@@ -116,18 +116,13 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
             let persisted_registry = event_store
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
-            let (registry, identity) =
+            let (registry_state, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
-            let registry_snapshot = registry
-                .lock()
-                .map_err(|_| {
-                    CliError::BadSource("ledger signing registry is unavailable".to_owned())
-                })
-                .map(|guard| (*guard).clone())?;
             let timeline_id = event_store
-                .initialize_timeline_with_key_registry("ledger", &registry_snapshot)
+                .initialize_timeline_with_key_registry("ledger", &registry_state)
                 .map_err(|error| CliError::BadSource(error.to_string()))?
                 .id();
+            let registry = Arc::new(Mutex::new(registry_state));
             Ok(Box::new(
                 EventLedgerStore::new(
                     event_store,
