@@ -12,6 +12,7 @@ use pos_conformance::{
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -90,6 +91,52 @@ fn archive_descriptor<'a>(
         Value::Array(fields) => Ok(fields),
         _ => Err("archive descriptor is not an array".into()),
     }
+}
+
+fn replace_archive_descriptor_value(
+    value: &mut Value,
+    path: &str,
+    replacement: Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = archive_array(value, 2)?;
+    let Some(Value::Array(descriptors)) = manifest.get_mut(4) else {
+        return Err("archive descriptors are missing".into());
+    };
+    let index = descriptors
+        .iter()
+        .position(|descriptor| {
+            matches!(
+                descriptor,
+                Value::Array(fields)
+                    if fields.first() == Some(&Value::Text(path.to_owned()))
+            )
+        })
+        .ok_or("archive descriptor is missing")?;
+    descriptors[index] = replacement;
+    Ok(())
+}
+
+fn replace_archive_expected_value(
+    value: &mut Value,
+    replacement: Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = archive_array(value, 2)?;
+    let Some(Value::Array(expected)) = manifest.get_mut(5) else {
+        return Err("archive expected results are missing".into());
+    };
+    let Some(first) = expected.first_mut() else {
+        return Err("archive expected result is missing".into());
+    };
+    *first = replacement;
+    Ok(())
+}
+
+fn replace_profile_bytes(
+    value: &mut Value,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(bytes.to_vec());
+    Ok(())
 }
 
 fn archive_expected(value: &mut Value) -> Result<&mut Vec<Value>, Box<dyn std::error::Error>> {
@@ -811,6 +858,21 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn public_verifier_rejects_directory_input() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = std::env::temp_dir().join(format!(
+        "pigloros-conformance-directory-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory)?;
+    let verifier_binary = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
+        .ok_or("verifier binary path is unavailable")?;
+    let status = Command::new(verifier_binary).arg(&directory).status()?;
+    fs::remove_dir_all(&directory)?;
+    assert!(!status.success());
+    Ok(())
+}
+
+#[test]
 fn public_draft_archive_round_trip_and_independent_verification(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
@@ -1102,27 +1164,36 @@ fn mutate_bound_json_member(
             JsonValue::String(hex_digest(&Sha256::digest(&bytes)));
         let provenance_bytes = serde_json::to_vec(&provenance)?;
         replace_member_bytes(&mut changed, provenance_index, provenance_bytes)?;
-
-        let profile_index = changed
-            .members
-            .iter()
-            .position(|member| member.role == BundleMemberRoleV1::Profile)
-            .ok_or("profile member is missing")?;
-        let mut profile =
-            ConformanceProfileV1::from_canonical_cbor(&changed.members[profile_index].bytes)?;
-        let provenance_digest = changed.members[provenance_index].digest;
-        profile.provenance_digest = provenance_digest;
-        for fixture in &mut profile.fixtures {
-            fixture.provenance.source_digest = provenance_digest;
-            fixture.provenance.build_digest = provenance_digest;
-            fixture.provenance.publication_review_digest = provenance_digest;
-        }
-        profile.profile_digest = profile.digest();
-        let profile_bytes = profile.to_canonical_cbor()?;
-        replace_member_bytes(&mut changed, profile_index, profile_bytes)?;
-        changed.manifest.profile_digest = profile.profile_digest;
+        rebind_profile_to_provenance(&mut changed, provenance_index)?;
+    } else if path == "support/provenance.json" {
+        rebind_profile_to_provenance(&mut changed, member_index)?;
     }
     Ok(changed)
+}
+
+fn rebind_profile_to_provenance(
+    bundle: &mut ConformanceBundleV1,
+    provenance_index: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let profile_index = bundle
+        .members
+        .iter()
+        .position(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or("profile member is missing")?;
+    let mut profile =
+        ConformanceProfileV1::from_canonical_cbor(&bundle.members[profile_index].bytes)?;
+    let provenance_digest = bundle.members[provenance_index].digest;
+    profile.provenance_digest = provenance_digest;
+    for fixture in &mut profile.fixtures {
+        fixture.provenance.source_digest = provenance_digest;
+        fixture.provenance.build_digest = provenance_digest;
+        fixture.provenance.publication_review_digest = provenance_digest;
+    }
+    profile.profile_digest = profile.digest();
+    let profile_bytes = profile.to_canonical_cbor()?;
+    replace_member_bytes(bundle, profile_index, profile_bytes)?;
+    bundle.manifest.profile_digest = profile.profile_digest;
+    Ok(())
 }
 
 fn public_bundle_inputs(
@@ -1191,6 +1262,26 @@ fn assert_archive_shape_rejections(
     ] {
         assert_archive_rejected(bundle, signing_key, mutate)?;
     }
+    for mutate in [
+        Box::new(|value: &mut Value| {
+            top_fields(value)?[2] = Value::Null;
+            Ok(())
+        }) as Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>,
+        Box::new(|value: &mut Value| {
+            archive_array(value, 2)?[1] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value: &mut Value| {
+            archive_array(value, 2)?[1] = Value::Integer(2_u64.into());
+            Ok(())
+        }),
+        Box::new(|value: &mut Value| {
+            archive_array(value, 2)?[2] = Value::Null;
+            Ok(())
+        }),
+    ] {
+        assert_archive_rejected(bundle, signing_key, mutate)?;
+    }
     Ok(())
 }
 
@@ -1202,6 +1293,21 @@ fn assert_archive_member_rejections(
         archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(0_u64.into());
         archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Integer(0_u64.into());
         Ok(())
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        archive_member(value, "support/normative-requirements.md")?[2] =
+            Value::Integer(14_u64.into());
+        Ok(())
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        replace_archive_descriptor_value(
+            value,
+            "support/normative-requirements.md",
+            Value::Integer(14_u64.into()),
+        )
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        replace_archive_descriptor_value(value, "support/normative-requirements.md", Value::Null)
     })?;
     assert_post_signed_archive_rejected(bundle, signing_key, |value| {
         top_fields(value)?[5] = Value::Bytes(vec![0]);
@@ -1246,6 +1352,9 @@ fn assert_archive_expected_rejections(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_archive_rejected(bundle, signing_key, |value| {
+        replace_archive_expected_value(value, Value::Null)
+    })?;
     assert_archive_rejected(bundle, signing_key, |value| {
         archive_expected(value)?[4] = Value::Null;
         Ok(())
@@ -1307,18 +1416,76 @@ fn assert_archive_profile_rejections(
         descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
         Ok(())
     })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[16] = Value::Null)
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        let mut noncanonical = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
+            Some(Value::Bytes(profile_bytes)) => profile_bytes.clone(),
+            _ => return Err("profile bytes are missing".into()),
+        };
+        replace_first_byte(&mut noncanonical, 0, &[0x18, 0x00])?;
+        replace_profile_bytes(value, &noncanonical)
+    })?;
+    Ok(())
+}
+
+fn assert_independent_profile_shape_rejections(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_archive_rejected(bundle, signing_key, |value| {
+        replace_profile_bytes(value, &[0xff])
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        let empty = encode_archive(&Value::Array(Vec::new()))?;
+        replace_profile_bytes(value, &empty)
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| fields[10] = Value::Null)
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| {
+            if let Value::Array(protocol) = &mut fields[10] {
+                protocol[4] = Value::Null;
+            }
+        })
+    })?;
+    assert_archive_rejected(bundle, signing_key, |value| {
+        mutate_profile(value, |fields| {
+            if let Value::Array(protocol) = &mut fields[10] {
+                if let Value::Array(caps) = &mut protocol[4] {
+                    caps[0] = Value::Null;
+                }
+            }
+        })
+    })?;
     Ok(())
 }
 
 fn raw_archive_with_header(top_header: &[u8], first: &[u8], members: &[u8]) -> Vec<u8> {
+    raw_archive_with_tail(top_header, first, members, &[0x58, 0x20], &[0x58, 0x40])
+}
+
+fn raw_archive_with_tail(
+    top_header: &[u8],
+    first: &[u8],
+    members: &[u8],
+    public_key: &[u8],
+    signature: &[u8],
+) -> Vec<u8> {
     let mut bytes = top_header.to_vec();
     bytes.extend_from_slice(first);
     bytes.extend_from_slice(&[0x01, 0x80]);
     bytes.extend_from_slice(members);
-    bytes.extend_from_slice(&[0x58, 0x20]);
-    bytes.extend_from_slice(&[0; 32]);
-    bytes.extend_from_slice(&[0x58, 0x40]);
-    bytes.extend_from_slice(&[0; 64]);
+    bytes.extend_from_slice(public_key);
+    if public_key == [0x58, 0x20].as_slice() {
+        bytes.extend_from_slice(&[0; 32]);
+    }
+    bytes.extend_from_slice(signature);
+    if signature == [0x58, 0x40].as_slice() {
+        bytes.extend_from_slice(&[0; 64]);
+    }
     bytes
 }
 
@@ -1393,6 +1560,31 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     .is_err());
     assert!(pos_conformance::verify_archive_independently(&raw_archive(
         &[0x60],
+        &[0x81, 0x83, 0x60, 0x59, 0x04, 0x00],
+    ))
+    .is_err());
+    assert!(pos_conformance::verify_archive_independently(&raw_archive(
+        &[0x60],
+        &[0x81, 0x83, 0x59, 0x04, 0x00],
+    ))
+    .is_err());
+    assert!(pos_conformance::verify_archive_independently(&raw_archive(
+        &[0x60],
+        &[0x81, 0x83, 0x60, 0x40, 0xc0],
+    ))
+    .is_err());
+    assert!(
+        pos_conformance::verify_archive_independently(&raw_archive_with_tail(
+            &[0x86],
+            &[0x60],
+            &[0x80],
+            &[0xc0],
+            &[0x40],
+        ))
+        .is_err()
+    );
+    assert!(pos_conformance::verify_archive_independently(&raw_archive(
+        &[0x60],
         &[0x81, 0x83, 0x79, 0x01, 0x01],
     ))
     .is_err());
@@ -1405,6 +1597,7 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     assert_archive_member_rejections(&bundle, &signing_key)?;
     assert_archive_expected_rejections(&bundle, &signing_key)?;
     assert_archive_profile_rejections(&bundle, &signing_key)?;
+    assert_independent_profile_shape_rejections(&bundle, &signing_key)?;
 
     let mut noncanonical_archive = signed_archive_variant(&bundle, &signing_key, |_| Ok(()))?;
     replace_first_byte(&mut noncanonical_archive, 0x01, &[0x18, 0x01])?;
@@ -1759,6 +1952,30 @@ fn public_materialization_caps_reject_bundle_shape_overflows(
 }
 
 #[test]
+fn public_archive_encoder_enforces_the_encoded_bundle_cap() -> Result<(), Box<dyn std::error::Error>>
+{
+    let base = signed_draft_bundle()?;
+    let (mut profile, members, expected_results) = public_bundle_inputs(&base)?;
+    let profile_bytes = profile.to_canonical_cbor()?;
+    let member_total =
+        members
+            .iter()
+            .try_fold(u64::try_from(profile_bytes.len())?, |total, member| {
+                Ok::<_, Box<dyn std::error::Error>>(total + u64::try_from(member.bytes.len())?)
+            })?;
+    profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = member_total + 1;
+    profile.profile_digest = profile.digest();
+    let bundle =
+        ConformanceBundleV1::materialize(&profile, BundleModeV1::Local, members, expected_results)?
+            .sign(&SigningKey::from_bytes(&[42; 32]))?;
+    assert_eq!(
+        bundle.to_canonical_cbor(),
+        Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_independent_verifier_rejects_each_zero_archive_cap(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
@@ -1829,13 +2046,39 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         "inventory entries shape",
     )?;
 
+    for (index, mutate) in [
+        Box::new(|value: &mut JsonValue| {
+            value["authority_inventory"]["sha256_digest"] = JsonValue::Null;
+        }) as Box<dyn FnOnce(&mut JsonValue)>,
+        Box::new(|value: &mut JsonValue| {
+            value["authority_inventory"]["sha256_digest"] =
+                JsonValue::String("not-a-digest".to_owned());
+        }),
+        Box::new(|value: &mut JsonValue| {
+            value["authority_inventory"]["sha256_digest"] = JsonValue::String("00".repeat(32));
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_json_member_rejected(
+            &bundle,
+            "support/provenance.json",
+            mutate,
+            pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+            &format!("provenance inventory digest case {index}"),
+        )?;
+    }
+
     let matrix_cases: Vec<JsonMutation> = vec![
         Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
         Box::new(|value| value["lifecycle"] = JsonValue::String("Candidate".to_owned())),
+        Box::new(|value| value["lifecycle"] = JsonValue::Null),
         Box::new(|value| value["row_count"] = JsonValue::Number(11_u64.into())),
         Box::new(|value| value["case_count"] = JsonValue::Number(191_u64.into())),
         Box::new(|value| value["rows"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["rows"][0]["variants"] = JsonValue::Null),
         Box::new(|value| value["rows"][0]["variants"] = JsonValue::Array(Vec::new())),
         Box::new(|value| value["rows"][0]["modes"] = JsonValue::Array(Vec::new())),
         Box::new(|value| value["rows"][0]["executed_case_count"] = JsonValue::Number(1_u64.into())),
