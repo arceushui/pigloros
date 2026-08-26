@@ -4,6 +4,7 @@ use pos_core::{
     KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
 };
 use rusqlite::params;
+use std::fmt::Write;
 use std::process::Command;
 
 #[test]
@@ -121,10 +122,10 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
     )?;
     drop(store);
 
-    let invalid_public_key_hex = invalid_public_key
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let mut invalid_public_key_hex = String::with_capacity(invalid_public_key.len() * 2);
+    for byte in invalid_public_key {
+        write!(&mut invalid_public_key_hex, "{byte:02x}")?;
+    }
     let error = match verify_source(
         &Source::Store(database_path),
         Some(&invalid_public_key_hex),
