@@ -1301,8 +1301,9 @@ mod tests {
             Some(identity),
             true,
         )?
-        .test_err()?;
-        assert!(no_public_key.to_string().contains("no public key"));
+        .test_ok()?;
+        let (_, reason) = expect_mismatch(no_public_key.outcome)?;
+        assert!(reason.contains("persisted registry"), "{reason}");
 
         let invalid_signature = run_store_event(
             event(),
