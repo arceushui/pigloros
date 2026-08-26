@@ -2953,6 +2953,37 @@ impl EventStore for SqliteStore {
         finish_immediate_transaction(&self.conn, result)
     }
 
+    fn initialize_timeline_with_key_registry(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = (|| {
+            let persisted = self.load_key_registry()?;
+            if persisted
+                .as_ref()
+                .is_some_and(|current| current != expected_registry)
+            {
+                return Err(CoreError::Storage(
+                    "durable key registry changed during ledger initialization".to_owned(),
+                ));
+            }
+            if persisted.is_none() {
+                self.save_key_registry_in_transaction(expected_registry)?;
+            }
+
+            let existing = self
+                .list_timelines()?
+                .into_iter()
+                .find(|timeline| timeline.meta.name.as_deref() == Some(name));
+            existing.map_or_else(|| self.create_timeline(name), Ok)
+        })();
+        finish_immediate_transaction(&self.conn, result)
+    }
+
     fn append_signed_authorized(
         &mut self,
         timeline: TimelineId,
@@ -9255,6 +9286,47 @@ mod tests {
             .append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut create_event)
             .test_err();
         assert!(error.to_string().contains("durable key registry"));
+    }
+
+    #[test]
+    fn sqlite_ledger_initialization_is_atomic() {
+        let mut store = new_store();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_ledger_timeline BEFORE INSERT ON timelines
+                 BEGIN SELECT RAISE(ABORT, 'reject ledger timeline'); END",
+            )
+            .test_ok();
+
+        let error = store
+            .initialize_timeline_with_key_registry("ledger", &KeyRegistryStateV1::new())
+            .test_err();
+        assert!(error.to_string().contains("reject ledger timeline"));
+        assert!(store.load_key_registry().test_ok().is_none());
+        assert!(store.list_timelines().test_ok().is_empty());
+    }
+
+    #[test]
+    fn sqlite_ledger_initialization_rejects_a_changed_registry() {
+        let mut store = new_store();
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        store.save_key_registry(&persisted).test_ok();
+
+        let error = store
+            .initialize_timeline_with_key_registry("ledger", &KeyRegistryStateV1::new())
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("changed during ledger initialization"));
+        assert!(store.list_timelines().test_ok().is_empty());
     }
 
     #[test]

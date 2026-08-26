@@ -790,6 +790,48 @@ pub trait EventStore: Send {
         ))
     }
 
+    /// Initialize a named ledger Timeline and its durable signing registry.
+    ///
+    /// Durable adapters should override this operation with one transaction
+    /// covering registry validation/persistence and Timeline creation. The
+    /// default composes the existing seams and rolls back a newly created
+    /// Timeline if registry persistence fails.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the registry changed since the
+    /// caller authorized it, when the backend cannot persist the registry or
+    /// create the Timeline, or when rollback itself fails.
+    fn initialize_timeline_with_key_registry(
+        &mut self,
+        name: &str,
+        expected_registry: &crate::KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        let persisted = self.load_key_registry()?;
+        if persisted
+            .as_ref()
+            .is_some_and(|current| current != expected_registry)
+        {
+            return Err(CoreError::Storage(
+                "durable key registry changed during ledger initialization".to_owned(),
+            ));
+        }
+
+        let Some(timeline) = self
+            .list_timelines()?
+            .into_iter()
+            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+        else {
+            let timeline = self.create_timeline(name)?;
+            if persisted.is_some() {
+                return Ok(timeline);
+            }
+            return persist_registry_after_timeline_creation(self, timeline, expected_registry);
+        };
+        if persisted.is_none() {
+            self.save_key_registry(expected_registry)?;
+        }
+        Ok(timeline)
+    }
     /// Atomically recheck a registry snapshot, create, and append one
     /// authorized event.
     ///
@@ -846,6 +888,22 @@ pub trait EventStore: Send {
         self.save_key_registry(&registry)?;
         Ok((outcome, registry))
     }
+}
+
+fn persist_registry_after_timeline_creation(
+    store: &mut dyn EventStore,
+    timeline: Timeline,
+    expected_registry: &crate::KeyRegistryStateV1,
+) -> Result<Timeline, CoreError> {
+    if let Err(error) = store.save_key_registry(expected_registry) {
+        return match store.delete_timeline(timeline.id()) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(CoreError::Storage(format!(
+                "ledger initialization failed ({error}); Timeline rollback also failed ({rollback_error})"
+            ))),
+        };
+    }
+    Ok(timeline)
 }
 
 /// Export a timeline's **logical** event stream as a portable snapshot.

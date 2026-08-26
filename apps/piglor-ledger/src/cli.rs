@@ -118,7 +118,10 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let (registry, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
-            let timeline_id = find_or_create_ledger_timeline(&mut *event_store)?;
+            let timeline_id = event_store
+                .initialize_timeline_with_key_registry("ledger", &registry)
+                .map_err(|error| CliError::BadSource(error.to_string()))?
+                .id();
             Ok(Box::new(
                 EventLedgerStore::new(
                     event_store,
@@ -192,19 +195,6 @@ fn days_since_epoch_to_date(mut days: u32) -> String {
     }
     let day = days + 1;
     format!("{year:04}-{month:02}-{day:02}")
-}
-
-/// Find the timeline named `"ledger"`; create it if the store is empty.
-fn find_or_create_ledger_timeline(
-    store: &mut dyn pos_core::store::EventStore,
-) -> Result<TimelineId, CliError> {
-    for tl in store.list_timelines()? {
-        if tl.meta.name.as_deref() == Some("ledger") {
-            return Ok(tl.id());
-        }
-    }
-    let tl = store.create_timeline("ledger")?;
-    Ok(tl.id())
 }
 
 /// Find the existing ledger timeline without mutating the store.
@@ -1761,7 +1751,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_readonly_db_fails_on_create_timeline() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L135: `?` on create_timeline when the DB is read-only.
+        // Covers the atomic initialization failure when the DB is read-only.
         // Creates a valid empty SQLite DB, then makes it read-only so that
         // create_timeline fails.
         use std::os::unix::fs::PermissionsExt;
@@ -1784,15 +1774,15 @@ mod tests {
                 path: db.to_string_lossy().into_owned(),
             })
             .test_ok()?;
-            // Create a non-ledger timeline so list_timelines iterates without finding "ledger".
+            // Create a non-ledger timeline so initialization must inspect the list.
             store.create_timeline("other").test_ok()?;
         }
-        // Make it read-only so create_timeline("ledger") fails.
+        // Make it read-only so ledger initialization fails.
         std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).test_ok()?;
         let err = open_store(&Source::Store(db.clone()), Some(&key_path));
         // Restore permissions so cleanup works.
         std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).test_ok()?;
-        // Either list_timelines or create_timeline failed due to read-only DB.
+        // Either registry initialization or timeline creation failed due to read-only DB.
         assert!(err.is_err(), "expected error from read-only DB");
 
         Ok(())
@@ -1801,10 +1791,9 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn find_or_create_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>>
-    {
-        // Covers L130: `?` on list_timelines when the DB has a corrupt
-        // timeline name column (cannot be decoded as UTF-8/ULID).
+    fn open_store_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>> {
+        // Covers list-timeline failure when the DB has a corrupt timeline
+        // name column (cannot be decoded as UTF-8/ULID).
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[
@@ -1839,8 +1828,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_reuse_existing_ledger_timeline() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L133 (return Ok early when ledger timeline found) and
-        // also exercises the `?` on list_timelines with a valid store.
+        // Also exercises reuse of an existing ledger Timeline after
+        // list_timelines succeeds.
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[
@@ -2012,7 +2001,7 @@ mod tests {
     fn open_store_store_with_key_succeeds_and_well_known_entity_covered(
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Exercises: well_known_entity(), the store: branch of open_store,
-        // and find_or_create_ledger_timeline (new timeline).
+        // and the atomic ledger initialization seam (new timeline).
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("l.db");
         let key_path = tmp.path().join("sk");
@@ -2030,8 +2019,7 @@ mod tests {
         );
 
         // Open a second time: now the timeline already exists, so
-        // find_or_create_ledger_timeline returns early from the `for` loop
-        // (the "already-exists" branch — previously uncovered).
+        // initialization seam reuses it without changing the registry.
         let store2 = open_store(&Source::Store(db), Some(&key_path));
         assert!(store2.is_ok(), "second open (reuse branch) must succeed");
 
@@ -2064,11 +2052,8 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn find_or_create_skips_non_ledger_timelines_in_loop() -> Result<(), Box<dyn std::error::Error>>
-    {
-        // Exercises line 134: the `}` closing the inner `if` in the `for` loop
-        // of find_or_create_ledger_timeline — hit when we iterate a non-ledger
-        // timeline and skip it, then find or create "ledger".
+    fn open_store_skips_non_ledger_timelines() -> Result<(), Box<dyn std::error::Error>> {
+        // Exercise initialization after a non-ledger timeline already exists.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("l.db");
         let key_path = tmp.path().join("sk");
@@ -2086,7 +2071,7 @@ mod tests {
         .test_ok()?;
         raw.create_timeline("other").test_ok()?;
         drop(raw);
-        // Now open_store will iterate "other" (skips it), then create "ledger".
+        // Now open_store skips "other" and creates the "ledger" timeline.
         let store = open_store(&Source::Store(db), Some(&key_path));
         assert!(
             store.is_ok(),
