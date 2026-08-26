@@ -2,6 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-independent-evaluation",
   "family": "independent-evaluation",
+  "input_blake3_digest": "1740b5af6545ef5edff3b9d41720cdc6e92482ec83287984c2724036aa483366",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {

@@ -2,6 +2,7 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-independent-evaluation",
   "family": "independent-evaluation",
+  "input_blake3_digest": "0848374f538c28493a7483f6c51024982d0a33ca1149d4cf3041f4dec9f82676",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {

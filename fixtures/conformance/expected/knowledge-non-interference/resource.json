@@ -2,6 +2,7 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-resource",
   "family": "resource",
+  "input_blake3_digest": "2fef860873718df62de175fcd718b7313bd23098104b06f93cd7e589569b47f4",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {

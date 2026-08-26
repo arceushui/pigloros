@@ -115,6 +115,5 @@
       "expected_result_digest": null,
       "materialization_status": "pending"
     }
-  ],
-  "publication_gate": "Candidate publication requires independently verified fixture bytes, expected-result bytes, and complete matrix bindings."
+  ]
 }

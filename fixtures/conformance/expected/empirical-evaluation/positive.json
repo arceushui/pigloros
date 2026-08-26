@@ -2,6 +2,7 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-positive",
   "family": "positive",
+  "input_blake3_digest": "5cfb744243831d7f2ec7070bd8a7b87923df67e7a26f3056f64915eb7a8edf21",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {

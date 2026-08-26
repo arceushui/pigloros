@@ -181,12 +181,15 @@ for index in "${!profile_layers[@]}"; do
       echo "invalid input fixture record for ${layer}: ${input_path}" >&2
       exit 1
     }
+    input_blake3_digest="$(b3sum "${fixture_root}/${input_path}" | awk '{print $1}')"
     jq -e \
       --arg case_id "${case_id}" \
       --arg fixture_layer "${fixture_layer}" \
       --arg family "${family}" \
+      --arg input_blake3_digest "${input_blake3_digest}" \
       '.case_id == $case_id and .claim_layer == $fixture_layer and
        .family == $family and
+       .input_blake3_digest == $input_blake3_digest and
        ((.result | type) == "string") and (.result != "") and
        .status == "pending" and
        .draft_expected_result == {kind: "typed-failure", error_code: "ProvenanceMissing"} and
@@ -235,9 +238,6 @@ jq -e \
   --arg authority_lifecycle "${authority_lifecycle}" \
   --arg matrix_lifecycle "${matrix_lifecycle}" \
   --arg matrix_blake3 "${matrix_blake3_digest}" '
-  .candidate_status == "pending" and
-  .deletion_review == "pending" and
-  .secret_scan == "pending" and
   .authority_inventory.path == "expected-authority/inventory.json" and
   .authority_inventory.digest_algorithm == "SHA-256" and
   .authority_inventory.status == $authority_lifecycle and

@@ -2,6 +2,7 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-downgrade",
   "family": "downgrade",
+  "input_blake3_digest": "b2695b2991795d7e98cc13726634e6a6d79cb965801c879bdec3d463849cce4e",
   "result": "not-authorized",
   "status": "pending",
   "draft_expected_result": {

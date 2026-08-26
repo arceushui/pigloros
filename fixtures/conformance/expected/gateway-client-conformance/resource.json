@@ -2,6 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-resource",
   "family": "resource",
+  "input_blake3_digest": "4ceeefe1a9d3f1a33c6b14ac0feaa8401f04443bb9669a9a79c3808579fdefe2",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {

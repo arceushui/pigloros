@@ -2,6 +2,7 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-malformed",
   "family": "malformed",
+  "input_blake3_digest": "0d06779040fbad6e827a31b0cf3540657f80ad1595e7acb19341f074ffedec44",
   "result": "typed-failure",
   "status": "pending",
   "draft_expected_result": {

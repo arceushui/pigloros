@@ -19,10 +19,6 @@ use std::process::Command;
 
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/execution-matrix.json";
-const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
-    "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
-    "LIVE-001", "ERA-001", "SEC-001",
-];
 const MATERIALIZED_LAYERS: [&str; 7] = [
     "artifact-integrity",
     "replay-conformance",
@@ -224,16 +220,6 @@ pub mod fixtures {
         *blake3::hash(bytes).as_bytes()
     }
 
-    fn hex(bytes: &[u8]) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut output = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            output.push(HEX[(byte >> 4) as usize] as char);
-            output.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        output
-    }
-
     fn input_path(case_id: &str, profile_digest: &[u8; 32], member_id: &str) -> String {
         fixture_input_member_path(
             case_id,
@@ -330,16 +316,16 @@ pub mod fixtures {
     }
 
     fn profile(provenance_digest: [u8; 32]) -> ConformanceProfileV1 {
-        let input = b"public candidate input";
-        let expected = b"public candidate expected".to_vec();
+        let input = b"public draft input";
+        let expected = b"public draft expected".to_vec();
         let schema_digest = digest(include_bytes!(
             "../../../fixtures/conformance/support/schema-cpf1-v1.cddl"
         ));
         let fixture = fixture(provenance_digest, input, expected, schema_digest);
         let mut profile = ConformanceProfileV1 {
-            profile_id: "pigloros.public-candidate-test".to_owned(),
+            profile_id: "pigloros.public-draft-test".to_owned(),
             semantic_version: "1.0.0".to_owned(),
-            lifecycle: ProfileLifecycleV1::Candidate,
+            lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(include_bytes!(
                 "../../../fixtures/conformance/support/normative-requirements.md"
             )),
@@ -368,145 +354,37 @@ pub mod fixtures {
         profile
     }
 
-    fn authority_members() -> Result<Vec<BundleMemberV1>, Box<dyn std::error::Error>> {
-        let mut inventory: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/expected-authority/inventory.json"
-        ))?;
-        inventory["lifecycle"] = JsonValue::String("Candidate".to_owned());
-        let entries = inventory["entries"]
-            .as_array_mut()
-            .ok_or("missing entries")?;
-        let mut members = Vec::with_capacity(entries.len() * 2);
-        for (index, entry) in entries.iter_mut().enumerate() {
-            let fixture_id = AUTHORITY_FIXTURE_IDS[index];
-            let execution_class = entry
-                .get("execution_class")
-                .and_then(JsonValue::as_str)
-                .ok_or("authority execution class is missing")?;
-            let expected_outcome = entry
-                .get("expected_outcome")
-                .and_then(JsonValue::as_str)
-                .ok_or("authority expected outcome is missing")?;
-            let fixture_bytes = serde_json::to_vec(&serde_json::json!({
-                "fixture_id": fixture_id,
-                "execution_class": execution_class,
-                "expected_outcome": expected_outcome
-            }))?;
-            let result_bytes = serde_json::to_vec(&serde_json::json!({
-                "fixture_id": fixture_id,
-                "execution_class": execution_class,
-                "expected_outcome": expected_outcome,
-                "expected": true
-            }))?;
-            let fixture_digest = digest(&fixture_bytes);
-            let result_digest = digest(&result_bytes);
-            let fixture_path = format!("fixtures/{fixture_id}.json");
-            let result_path = format!("results/{fixture_id}.json");
-            entry["materialization_status"] = JsonValue::String("materialized".to_owned());
-            entry["fixture_bytes_path"] = JsonValue::String(fixture_path.clone());
-            entry["fixture_bytes_digest"] = JsonValue::String(hex(&fixture_digest));
-            entry["expected_result_path"] = JsonValue::String(result_path.clone());
-            entry["expected_result_digest"] = JsonValue::String(hex(&result_digest));
-            members.push(BundleMemberV1::authority(
-                format!("authority/{fixture_path}"),
-                fixture_bytes,
-                BundleMemberRoleV1::AuthorityFixture,
-            ));
-            members.push(BundleMemberV1::authority(
-                format!("authority/{result_path}"),
-                result_bytes,
-                BundleMemberRoleV1::AuthorityExpectedResult,
-            ));
-        }
-        let inventory_bytes = serde_json::to_vec(&inventory)?;
-        members.push(BundleMemberV1::authority(
-            AUTHORITY_INVENTORY_MEMBER_PATH,
-            inventory_bytes,
-            BundleMemberRoleV1::AuthorityInventory,
-        ));
-        Ok(members)
-    }
-
-    fn candidate_authority_data(
+    fn draft_authority_members(
     ) -> Result<(Vec<BundleMemberV1>, Vec<u8>), Box<dyn std::error::Error>> {
-        let mut provenance: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/support/provenance.json"
-        ))?;
-        let mut authority_members = authority_members()?;
-        let mut matrix: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/matrix/execution-matrix.json"
-        ))?;
-        matrix["lifecycle"] = JsonValue::String("Candidate".to_owned());
-        for row in matrix["rows"].as_array_mut().ok_or("missing rows")? {
-            row["executed_case_count"] = JsonValue::Number(16_u64.into());
-        }
-        for (index, case) in matrix["cases"]
-            .as_array_mut()
-            .ok_or("missing cases")?
-            .iter_mut()
-            .enumerate()
-        {
-            let fixture_id = AUTHORITY_FIXTURE_IDS[index % AUTHORITY_FIXTURE_IDS.len()];
-            let result_path = format!("authority/results/{fixture_id}.json");
-            let result_digest = authority_members
-                .iter()
-                .find(|member| {
-                    member.role == BundleMemberRoleV1::AuthorityExpectedResult
-                        && member.path == result_path
-                })
-                .ok_or("missing authority result")?
-                .digest;
-            case["authority_fixture_id"] = JsonValue::String(fixture_id.to_owned());
-            case["executed"] = JsonValue::Bool(true);
-            case["authority_result_digest"] = JsonValue::String(hex(&result_digest));
-            let coordinate_result = serde_json::to_string(&serde_json::json!({
-                "case_id": case["case_id"],
-                "fixture_id": case["fixture_id"],
-                "variant": case["variant"],
-                "mode": case["mode"],
-                "authority_fixture_id": fixture_id,
-                "outcome": "VerifiedExact",
-                "verification": "independent-public-record"
-            }))?;
-            case["expected_result_digest"] =
-                JsonValue::String(hex(&digest(coordinate_result.as_bytes())));
-            case["expected_result"] = JsonValue::String(coordinate_result);
-        }
-        let matrix_bytes = serde_json::to_vec(&matrix)?;
-        let matrix_digest = digest(&matrix_bytes);
-        authority_members.push(BundleMemberV1::authority(
-            EXECUTION_MATRIX_MEMBER_PATH,
-            matrix_bytes,
-            BundleMemberRoleV1::ExecutionMatrix,
-        ));
-        provenance["candidate_status"] = JsonValue::String("approved".to_owned());
-        provenance["deletion_review"] = JsonValue::String("approved".to_owned());
-        provenance["secret_scan"] = JsonValue::String("clean".to_owned());
-        provenance["authority_inventory"]["status"] = JsonValue::String("Candidate".to_owned());
-        let inventory = authority_members
-            .iter()
-            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
-            .ok_or("missing inventory")?;
-        let inventory_digest = Sha256::digest(&inventory.bytes);
-        provenance["authority_inventory"]["sha256_digest"] =
-            JsonValue::String(hex(&inventory_digest));
-        provenance["adr_059_execution_matrix"]["status"] =
-            JsonValue::String("Candidate".to_owned());
-        provenance["adr_059_execution_matrix"]["sha256_digest"] =
-            JsonValue::String(hex(&matrix_digest));
-        provenance["adr_059_execution_matrix"]["executed_case_count"] =
-            JsonValue::Number(192_u64.into());
-        let provenance_bytes = serde_json::to_vec(&provenance)?;
-        Ok((authority_members, provenance_bytes))
+        let inventory_bytes =
+            include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json")
+                .to_vec();
+        let matrix_bytes =
+            include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json").to_vec();
+        let provenance_bytes =
+            include_bytes!("../../../fixtures/conformance/support/provenance.json").to_vec();
+        let members = vec![
+            BundleMemberV1::authority(
+                AUTHORITY_INVENTORY_MEMBER_PATH,
+                inventory_bytes,
+                BundleMemberRoleV1::AuthorityInventory,
+            ),
+            BundleMemberV1::authority(
+                EXECUTION_MATRIX_MEMBER_PATH,
+                matrix_bytes,
+                BundleMemberRoleV1::ExecutionMatrix,
+            ),
+        ];
+        Ok((members, provenance_bytes))
     }
 
-    fn candidate_members(
+    fn draft_members(
         profile: &ConformanceProfileV1,
         provenance_bytes: Vec<u8>,
         mut authority_members: Vec<BundleMemberV1>,
     ) -> (Vec<BundleMemberV1>, BundleExpectedResultV1) {
-        let input = b"public candidate input".to_vec();
-        let expected = b"public candidate expected".to_vec();
+        let input = b"public draft input".to_vec();
+        let expected = b"public draft expected".to_vec();
         let input_path = input_path(
             "ART-001",
             &profile.execution_profile_digests[0],
@@ -578,121 +456,6 @@ pub mod fixtures {
         Ok(())
     }
 
-    /// Construct the Candidate bundle used by the public materialization test.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the checked-in fixture data cannot be decoded or
-    /// serialized into the test bundle.
-    pub fn candidate_bundle() -> Result<
-        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
-        Box<dyn std::error::Error>,
-    > {
-        let (authority_members, provenance_bytes) = candidate_authority_data()?;
-        let mut profile = profile(digest(&provenance_bytes));
-        bind_profile_to_matrix(&mut profile, &authority_members)?;
-        let (members, expected_result) =
-            candidate_members(&profile, provenance_bytes, authority_members);
-        Ok(ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            vec![expected_result],
-        ))
-    }
-
-    /// Construct a Candidate bundle whose publication-review digest is wrong.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the checked-in authority fixture data cannot be
-    /// decoded or serialized into the test bundle.
-    pub fn candidate_bundle_with_review_mismatch() -> Result<
-        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
-        Box<dyn std::error::Error>,
-    > {
-        let (authority_members, provenance_bytes) = candidate_authority_data()?;
-        let mut profile = profile(digest(&provenance_bytes));
-        bind_profile_to_matrix(&mut profile, &authority_members)?;
-        profile.fixtures[0].provenance.publication_review_digest =
-            profile.fixtures[0].provenance.notices_digest;
-        profile.profile_digest = profile.digest();
-        let (members, expected_result) =
-            candidate_members(&profile, provenance_bytes, authority_members);
-        Ok(ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            vec![expected_result],
-        ))
-    }
-
-    /// Construct a Candidate bundle with an invalid provenance authority path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the checked-in authority fixture data cannot be
-    /// decoded or serialized into the test bundle.
-    pub fn candidate_bundle_with_invalid_provenance_binding() -> Result<
-        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
-        Box<dyn std::error::Error>,
-    > {
-        let (authority_members, provenance_bytes) = candidate_authority_data()?;
-        let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
-        provenance["authority_inventory"]["path"] = JsonValue::String("wrong.json".to_owned());
-        let provenance_bytes = serde_json::to_vec(&provenance)?;
-        let mut profile = profile(digest(&provenance_bytes));
-        bind_profile_to_matrix(&mut profile, &authority_members)?;
-        let (members, expected_result) =
-            candidate_members(&profile, provenance_bytes, authority_members);
-        Ok(ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            vec![expected_result],
-        ))
-    }
-
-    /// Construct a Candidate bundle with a matrix coordinate outside the
-    /// independently supplied authority-result set.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the checked-in authority fixture data cannot be
-    /// decoded or serialized into the test bundle.
-    pub fn candidate_bundle_with_invalid_matrix_coordinate() -> Result<
-        Result<ConformanceBundleV1, pos_conformance::BundleContractErrorV1>,
-        Box<dyn std::error::Error>,
-    > {
-        let (mut authority_members, provenance_bytes) = candidate_authority_data()?;
-        let matrix_index = authority_members
-            .iter()
-            .position(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
-            .ok_or("missing execution matrix")?;
-        let mut matrix: JsonValue = serde_json::from_slice(&authority_members[matrix_index].bytes)?;
-        matrix["cases"][0]["expected_result_digest"] = JsonValue::String("00".repeat(32));
-        let matrix_bytes = serde_json::to_vec(&matrix)?;
-        authority_members[matrix_index]
-            .bytes
-            .clone_from(&matrix_bytes);
-        authority_members[matrix_index].digest = digest(&matrix_bytes);
-
-        let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
-        provenance["adr_059_execution_matrix"]["blake3_digest"] =
-            JsonValue::String(hex(&digest(&matrix_bytes)));
-        let provenance_bytes = serde_json::to_vec(&provenance)?;
-        let mut profile = profile(digest(&provenance_bytes));
-        bind_profile_to_matrix(&mut profile, &authority_members)?;
-        let (members, expected_result) =
-            candidate_members(&profile, provenance_bytes, authority_members);
-        Ok(ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            vec![expected_result],
-        ))
-    }
-
     /// Construct a valid Draft bundle for public archive-path coverage.
     ///
     /// # Errors
@@ -700,80 +463,13 @@ pub mod fixtures {
     /// Returns an error if the checked-in fixture data cannot be transformed
     /// into the Draft authority shape.
     pub fn draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
-        let (mut authority_members, mut provenance_bytes) = candidate_authority_data()?;
-        authority_members.retain(|member| {
-            !matches!(
-                member.role,
-                BundleMemberRoleV1::AuthorityFixture | BundleMemberRoleV1::AuthorityExpectedResult
-            )
-        });
-
-        let inventory_index = authority_members
-            .iter()
-            .position(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
-            .ok_or("missing authority inventory")?;
-        let mut inventory: JsonValue =
-            serde_json::from_slice(&authority_members[inventory_index].bytes)?;
-        inventory["lifecycle"] = JsonValue::String("Draft".to_owned());
-        for entry in inventory["entries"]
-            .as_array_mut()
-            .ok_or("missing inventory entries")?
-        {
-            entry["materialization_status"] = JsonValue::String("pending".to_owned());
-            for field in [
-                "fixture_bytes_path",
-                "fixture_bytes_digest",
-                "expected_result_path",
-                "expected_result_digest",
-            ] {
-                entry[field] = JsonValue::Null;
-            }
-        }
-        let inventory_bytes = serde_json::to_vec(&inventory)?;
-        authority_members[inventory_index]
-            .bytes
-            .clone_from(&inventory_bytes);
-        authority_members[inventory_index].digest = digest(&inventory_bytes);
-
-        let matrix_index = authority_members
-            .iter()
-            .position(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
-            .ok_or("missing execution matrix")?;
-        let mut matrix: JsonValue = serde_json::from_slice(&authority_members[matrix_index].bytes)?;
-        matrix["lifecycle"] = JsonValue::String("Draft".to_owned());
-        for row in matrix["rows"].as_array_mut().ok_or("missing matrix rows")? {
-            row["executed_case_count"] = JsonValue::Number(0_u64.into());
-        }
-        for case in matrix["cases"]
-            .as_array_mut()
-            .ok_or("missing matrix cases")?
-        {
-            case["executed"] = JsonValue::Bool(false);
-            case["expected_result_digest"] = JsonValue::Null;
-        }
-        let matrix_bytes = serde_json::to_vec(&matrix)?;
-        authority_members[matrix_index]
-            .bytes
-            .clone_from(&matrix_bytes);
-        authority_members[matrix_index].digest = digest(&matrix_bytes);
-
-        let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
-        provenance["authority_inventory"]["status"] = JsonValue::String("Draft".to_owned());
-        provenance["authority_inventory"]["sha256_digest"] =
-            JsonValue::String(hex(&Sha256::digest(&inventory_bytes)));
-        provenance["adr_059_execution_matrix"]["status"] = JsonValue::String("Draft".to_owned());
-        provenance["adr_059_execution_matrix"]["sha256_digest"] =
-            JsonValue::String(hex(&Sha256::digest(&matrix_bytes)));
-        provenance["adr_059_execution_matrix"]["executed_case_count"] =
-            JsonValue::Number(0_u64.into());
-        provenance_bytes = serde_json::to_vec(&provenance)?;
-
+        let (authority_members, provenance_bytes) = draft_authority_members()?;
         let mut profile = profile(digest(&provenance_bytes));
         profile.lifecycle = ProfileLifecycleV1::Draft;
         bind_profile_to_matrix(&mut profile, &authority_members)?;
         profile.profile_digest = profile.digest();
         let (members, expected_result) =
-            candidate_members(&profile, provenance_bytes, authority_members);
+            draft_members(&profile, provenance_bytes, authority_members);
         Ok(ConformanceBundleV1::materialize(
             &profile,
             BundleModeV1::Local,
@@ -781,16 +477,6 @@ pub mod fixtures {
             vec![expected_result],
         )?)
     }
-}
-
-#[test]
-fn public_candidate_materialization_is_reserved_for_governance(
-) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
-        fixtures::candidate_bundle()?,
-        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
-    );
-    Ok(())
 }
 
 #[test]
@@ -2022,18 +1708,6 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
         );
     }
 
-    assert_eq!(
-        fixtures::candidate_bundle_with_review_mismatch()?,
-        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
-    );
-    assert_eq!(
-        fixtures::candidate_bundle_with_invalid_provenance_binding()?,
-        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
-    );
-    assert_eq!(
-        fixtures::candidate_bundle_with_invalid_matrix_coordinate()?,
-        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
-    );
     Ok(())
 }
 

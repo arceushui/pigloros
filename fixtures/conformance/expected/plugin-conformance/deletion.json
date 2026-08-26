@@ -2,6 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-deletion",
   "family": "deletion",
+  "input_blake3_digest": "0f758a43233a4e10735a600d858b99d84d1e8660a49944bd6653f660af22d6ee",
   "result": "destroyed",
   "status": "pending",
   "draft_expected_result": {

@@ -39,8 +39,6 @@ clean_checkout="${temporary_root}/clean-checkout"
 clean_output="${temporary_root}/clean-output"
 mkdir -p "${clean_checkout}"
 git archive --format=tar HEAD | tar -xf - -C "${clean_checkout}"
-bash "${clean_checkout}/scripts/verify-conformance-fixtures.sh" \
-  "${clean_checkout}/fixtures/conformance"
 (cd "${clean_checkout}" && \
   CARGO_TARGET_DIR="${temporary_root}/clean-target" \
   PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \

@@ -2,6 +2,7 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-independent-evaluation",
   "family": "independent-evaluation",
+  "input_blake3_digest": "c52380476135a7229fe18a69cd26b1bdfe5db52d7e97ca0254de8dcc36cc0e36",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {

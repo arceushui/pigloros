@@ -2,6 +2,7 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-resource",
   "family": "resource",
+  "input_blake3_digest": "2aa19e0f2ba0ef60e2348d7121b7a47b98cf77b2c314b872c55976a005b4ee6d",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {

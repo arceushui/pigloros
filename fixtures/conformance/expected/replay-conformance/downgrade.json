@@ -2,6 +2,7 @@
   "claim_layer": "replay-conformance",
   "case_id": "replay-conformance-downgrade",
   "family": "downgrade",
+  "input_blake3_digest": "7decc112309c521caa3f89f1df450938e5140e8f05c22a0c8a9570d29d5b2342",
   "result": "not-authorized",
   "status": "pending",
   "draft_expected_result": {

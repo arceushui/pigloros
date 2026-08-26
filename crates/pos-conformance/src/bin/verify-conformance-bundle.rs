@@ -58,17 +58,12 @@ fn open_regular_file(path: &Path) -> Result<(File, u64), Box<dyn Error>> {
 }
 
 #[cfg(not(unix))]
-fn open_regular_file(path: &Path) -> Result<(File, u64), Box<dyn Error>> {
-    let file = File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "conformance bundle path is not a regular file",
-        )
-        .into());
-    }
-    Ok((file, metadata.len()))
+fn open_regular_file(_path: &Path) -> Result<(File, u64), Box<dyn Error>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "regular-file conformance verification is unsupported on this platform",
+    )
+    .into())
 }
 
 fn read_bounded(

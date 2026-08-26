@@ -2,6 +2,7 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-negative",
   "family": "negative",
+  "input_blake3_digest": "53ef30da0049c52389dc152158c6dbce2150d9d7bc74e695b362b8599946d084",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {

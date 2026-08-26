@@ -2,6 +2,7 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-positive",
   "family": "positive",
+  "input_blake3_digest": "b6d1bd8cf68a9d268022eb6d192d3e4b03890e88f50284d1ac444eddb094afa5",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {

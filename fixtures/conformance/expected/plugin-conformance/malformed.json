@@ -2,6 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-malformed",
   "family": "malformed",
+  "input_blake3_digest": "e4abc9dda3d9b2ba2282d17a4ac1800d0754984f6f4f343a86b11ef4584e7522",
   "result": "typed-failure",
   "status": "pending",
   "draft_expected_result": {

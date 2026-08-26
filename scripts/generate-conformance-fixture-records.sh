@@ -88,12 +88,14 @@ while IFS=$'\t' read -r case_id claim_layer family input_path expected_path; do
     echo "input fixture is not canonical JSON: ${case_id}" >&2
     exit 1
   }
+  input_blake3_digest="$(b3sum "${input_file}" | awk '{print $1}')"
   jq -n \
     --arg claim_layer "${claim_layer}" \
     --arg case_id "${case_id}" \
     --arg family "${family}" \
+    --arg input_blake3_digest "${input_blake3_digest}" \
     --arg result "${result}" \
-    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, result: $result, status: "pending", draft_expected_result: {kind: "typed-failure", error_code: "ProvenanceMissing"}}' \
+    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, result: $result, status: "pending", draft_expected_result: {kind: "typed-failure", error_code: "ProvenanceMissing"}}' \
     > "${generated_file}"
   cmp -- "${generated_file}" "${expected_file}" || {
     echo "expected fixture record is not independently reproducible: ${case_id}" >&2
@@ -140,8 +142,7 @@ jq -n '
     lifecycle: "Draft",
     digest_algorithm: "BLAKE3-256",
     source: "#172 wave8-execution-repro-handoff-v1",
-    entries: .,
-    publication_gate: "Candidate publication requires independently verified fixture bytes, expected-result bytes, and complete matrix bindings."
+    entries: .
   }
 ' > "${generated_authority}"
 cmp -- "${generated_authority}" "${fixture_root}/expected-authority/inventory.json" || {

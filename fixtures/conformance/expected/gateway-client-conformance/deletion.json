@@ -2,6 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-deletion",
   "family": "deletion",
+  "input_blake3_digest": "042a405591fb0ed4f63120f7798221cfb7afd75cf390286fc33a984370ed723d",
   "result": "destroyed",
   "status": "pending",
   "draft_expected_result": {

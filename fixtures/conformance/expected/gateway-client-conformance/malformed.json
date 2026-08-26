@@ -2,6 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-malformed",
   "family": "malformed",
+  "input_blake3_digest": "723b8dcc2bebf6093feafe239f7b77d99653516c7e7e7a03d79c5c13a07f93a1",
   "result": "typed-failure",
   "status": "pending",
   "draft_expected_result": {

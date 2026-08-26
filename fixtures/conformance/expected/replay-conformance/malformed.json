@@ -2,6 +2,7 @@
   "claim_layer": "replay-conformance",
   "case_id": "replay-conformance-malformed",
   "family": "malformed",
+  "input_blake3_digest": "7c1a4c298f92c953bb3f7a4134146dd0e4041c96d191e9a396e51f1befec34d2",
   "result": "typed-failure",
   "status": "pending",
   "draft_expected_result": {

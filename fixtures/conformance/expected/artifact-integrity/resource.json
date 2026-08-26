@@ -2,6 +2,7 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-resource",
   "family": "resource",
+  "input_blake3_digest": "cc985c31d00b464860b2a1365bb658c70261001810706a1f7fde6d779c8a6595",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {

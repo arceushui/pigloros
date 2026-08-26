@@ -13,6 +13,8 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
@@ -274,6 +276,7 @@ fn run_with_inventory(
     }
     let signing_key = signing_key_from_encoded(encoded_signing_key)?;
     let lifecycles = publication_lifecycles_from_bytes(inventory_bytes)?;
+    std::fs::create_dir(&output_root)?;
     let context = MaterializationContext {
         output_root: &output_root,
         signing_key: &signing_key,
@@ -739,6 +742,12 @@ fn validate_fixture_records(
             return Err("fixture record identity does not match its profile declaration".into());
         }
     }
+    let declared_input_digest =
+        crate::decode_hex_digest(json_text(&expected_record, "input_blake3_digest")?)
+            .ok_or("expected fixture input digest is invalid")?;
+    if declared_input_digest != *blake3::hash(input).as_bytes() {
+        return Err("expected fixture input digest does not match its input bytes".into());
+    }
     let draft_result = expected_record
         .get("draft_expected_result")
         .ok_or("Draft expected result is missing")?;
@@ -1076,7 +1085,9 @@ fn write_materialized_file(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, bytes)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -1436,6 +1447,17 @@ mod tests {
             "artifact-integrity",
         )
         .is_err());
+        let mut mismatched_input_digest: JsonValue = serde_json::from_slice(positive_expected)?;
+        mismatched_input_digest["input_blake3_digest"] = JsonValue::String("00".repeat(32));
+        let mismatched_input_digest_bytes = serde_json::to_vec(&mismatched_input_digest)?;
+        assert!(validate_fixture_records(
+            positive_input,
+            &mismatched_input_digest_bytes,
+            "artifact-integrity-positive",
+            "positive",
+            "artifact-integrity",
+        )
+        .is_err());
         let mut invalid_input: JsonValue = serde_json::from_slice(positive_input)?;
         invalid_input["case_id"] = JsonValue::String("wrong-case".to_owned());
         let invalid_input_bytes = serde_json::to_vec(&invalid_input)?;
@@ -1691,10 +1713,10 @@ mod tests {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let (members, expected) = bundle_inputs(&profile, BundleModeV1::Local)?;
         assert_eq!(expected.len(), 7);
-        assert!(members.iter().all(|member| !matches!(
-            member.role,
-            BundleMemberRoleV1::AuthorityFixture | BundleMemberRoleV1::AuthorityExpectedResult
-        )));
+        assert!(members.iter().any(|member| {
+            member.role == BundleMemberRoleV1::AuthorityInventory
+                && member.path == AUTHORITY_INVENTORY_MEMBER_PATH
+        }));
         Ok(())
     }
 

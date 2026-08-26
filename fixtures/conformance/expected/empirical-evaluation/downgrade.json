@@ -2,6 +2,7 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-downgrade",
   "family": "downgrade",
+  "input_blake3_digest": "010b64fdbc3046bee5995ed0af3699f1a8148f4d3c6187775679b55908685ce7",
   "result": "not-authorized",
   "status": "pending",
   "draft_expected_result": {

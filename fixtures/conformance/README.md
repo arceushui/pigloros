@@ -23,6 +23,8 @@ Each public input/result pair includes its claim-layer and case identity.
 Materialization binds every family to deterministic-local-v1 or
 deterministic-air-gapped-v1, so every emitted descriptor has exactly one
 ExecutionProfile while the paired bundles retain identical expected bytes.
+Each expected record also carries the BLAKE3-256 digest of its exact input
+bytes; the independent generator and hosted verifier recompute this binding.
 The `result` value in a checked-in expected record is descriptive fixture
 metadata only; `status: "pending"` and the CPF1 unavailable outcome prevent it
 from being interpreted as executed conformance evidence.

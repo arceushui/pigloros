@@ -2,6 +2,7 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-deletion",
   "family": "deletion",
+  "input_blake3_digest": "a568673d3c922ed931ac111763553a153d158938fd2097b5b8eff01409bdc1f2",
   "result": "destroyed",
   "status": "pending",
   "draft_expected_result": {

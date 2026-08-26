@@ -2,6 +2,7 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-deletion",
   "family": "deletion",
+  "input_blake3_digest": "5831221babd1dba3c61528577e2c327f341e04c5d4fd1e1b0b0f66c6ee4b3f19",
   "result": "destroyed",
   "status": "pending",
   "draft_expected_result": {

@@ -2,6 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-negative",
   "family": "negative",
+  "input_blake3_digest": "1214beaa3a71ed62ee7a91085726fe24d2e96ca172556655f5f91a5e7a4a1ee1",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {

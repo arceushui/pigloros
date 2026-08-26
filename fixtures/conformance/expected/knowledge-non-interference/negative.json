@@ -2,6 +2,7 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-negative",
   "family": "negative",
+  "input_blake3_digest": "49c8e7101efe5714fc1f3f684321a4c9cf9d794a0e53c560af7cfb244454eee1",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {

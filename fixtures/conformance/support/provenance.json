@@ -5,7 +5,7 @@
   "authority_inventory": {
     "digest_algorithm": "SHA-256",
     "path": "expected-authority/inventory.json",
-    "sha256_digest": "9411e315c91698c4b5dc9d40a2823f9a784923e48e2d652c17c9f9e4a479bcc1",
+    "sha256_digest": "486fe381a9a3e94b103428f9f58c4cfed7bb5875d3a4bb98a7e5868af9ea66ea",
     "status": "Draft"
   },
   "adr_059_execution_matrix": {
@@ -14,8 +14,5 @@
     "executed_case_count": 0,
     "path": "matrix/execution-matrix.json",
     "status": "Draft"
-  },
-  "candidate_status": "pending",
-  "deletion_review": "pending",
-  "secret_scan": "pending"
+  }
 }

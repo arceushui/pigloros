@@ -2,6 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-negative",
   "family": "negative",
+  "input_blake3_digest": "ca68c296cb4861b19d335fd33e2d9a37be12aa8473a95c552ef8d3648e54c2d0",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {

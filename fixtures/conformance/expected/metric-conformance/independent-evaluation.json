@@ -2,6 +2,7 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-independent-evaluation",
   "family": "independent-evaluation",
+  "input_blake3_digest": "b913971bbb029e2bb02e7a878285ec8cbbeebe25d0348d79ebcce3466f1f7cdb",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {
