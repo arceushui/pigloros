@@ -118,8 +118,14 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let (registry, identity) =
                 ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
+            let registry_snapshot = registry
+                .lock()
+                .map_err(|_| {
+                    CliError::BadSource("ledger signing registry is unavailable".to_owned())
+                })
+                .map(|guard| (*guard).clone())?;
             let timeline_id = event_store
-                .initialize_timeline_with_key_registry("ledger", &registry)
+                .initialize_timeline_with_key_registry("ledger", &registry_snapshot)
                 .map_err(|error| CliError::BadSource(error.to_string()))?
                 .id();
             Ok(Box::new(
