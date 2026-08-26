@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
-const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/adr-059-execution-matrix.json";
+const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/execution-matrix.json";
 const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
     "LIVE-001", "ERA-001", "SEC-001",
@@ -434,7 +434,7 @@ pub mod fixtures {
         ))?;
         let mut authority_members = authority_members()?;
         let mut matrix: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/matrix/adr-059-complete.json"
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
         ))?;
         matrix["lifecycle"] = JsonValue::String("Candidate".to_owned());
         for row in matrix["rows"].as_array_mut().ok_or("missing rows")? {
@@ -2452,7 +2452,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
     for (index, mutate) in matrix_cases.into_iter().enumerate() {
         assert_json_member_rejected(
             &bundle,
-            "authority/adr-059-execution-matrix.json",
+            "authority/execution-matrix.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
             &format!("matrix case {index}"),

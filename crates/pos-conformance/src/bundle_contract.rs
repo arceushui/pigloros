@@ -32,7 +32,7 @@ const MAX_STRUCTURAL_NESTING: u8 = 32;
 const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
-const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/adr-059-execution-matrix.json";
+const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/execution-matrix.json";
 const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
     "LIVE-001", "ERA-001", "SEC-001",
@@ -2422,7 +2422,7 @@ fn validate_provenance_authority_binding_for_lifecycle(
         || json_text(inventory, "digest_algorithm")? != "SHA-256"
         || json_text(inventory, "status")? != inventory_lifecycle
         || !matches!(inventory_lifecycle, "Draft" | "Candidate")
-        || json_text(matrix, "path")? != "matrix/adr-059-complete.json"
+        || json_text(matrix, "path")? != "matrix/execution-matrix.json"
         || json_text(matrix, "digest_algorithm")? != "BLAKE3-256"
         || json_text(matrix, "status")? != matrix_lifecycle
         || !matches!(matrix_lifecycle, "Draft" | "Candidate")
@@ -3271,7 +3271,7 @@ mod tests {
             profile
                 .bind_execution_matrix_digest(
                     *blake3::hash(include_bytes!(
-                        "../../../fixtures/conformance/matrix/adr-059-complete.json"
+                        "../../../fixtures/conformance/matrix/execution-matrix.json"
                     ))
                     .as_bytes(),
                 )
@@ -3320,7 +3320,7 @@ mod tests {
             profile
                 .bind_execution_matrix_digest(
                     *blake3::hash(include_bytes!(
-                        "../../../fixtures/conformance/matrix/adr-059-complete.json"
+                        "../../../fixtures/conformance/matrix/execution-matrix.json"
                     ))
                     .as_bytes(),
                 )
@@ -3340,7 +3340,7 @@ mod tests {
             profile
                 .bind_execution_matrix_digest(
                     *blake3::hash(include_bytes!(
-                        "../../../fixtures/conformance/matrix/adr-059-complete.json"
+                        "../../../fixtures/conformance/matrix/execution-matrix.json"
                     ))
                     .as_bytes(),
                 )
@@ -3455,7 +3455,7 @@ mod tests {
             ),
             BundleMemberV1::authority(
                 EXECUTION_MATRIX_MEMBER_PATH,
-                include_bytes!("../../../fixtures/conformance/matrix/adr-059-complete.json")
+                include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json")
                     .to_vec(),
                 BundleMemberRoleV1::ExecutionMatrix,
             ),
@@ -5627,7 +5627,7 @@ mod tests {
         let candidate_inventory_bytes = serde_json::to_vec(&candidate_inventory)?;
         let candidate_inventory_digest = *blake3::hash(&candidate_inventory_bytes).as_bytes();
         let mut candidate_matrix: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/matrix/adr-059-complete.json"
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
         ))?;
         candidate_matrix["lifecycle"] = JsonValue::String("Candidate".to_owned());
         for row in candidate_matrix["rows"]
@@ -5946,7 +5946,7 @@ mod tests {
 
     fn authority_matrix_json_validation_seams() -> Result<(), Box<dyn std::error::Error>> {
         let matrix: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/matrix/adr-059-complete.json"
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
         ))?;
         assert_eq!(validate_execution_matrix(&matrix), Ok(()));
         for (section, field, value) in [
@@ -6037,7 +6037,7 @@ mod tests {
         }
 
         let matrix: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/matrix/adr-059-complete.json"
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
         ))?;
         for field in ["magic", "version", "lifecycle", "row_count", "case_count"] {
             let mut invalid = matrix.clone();
@@ -6608,7 +6608,7 @@ mod tests {
     fn candidate_matrix_predicates_are_checked_independently(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let matrix_bytes =
-            include_bytes!("../../../fixtures/conformance/matrix/adr-059-complete.json");
+            include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
         let mut candidate: JsonValue = serde_json::from_slice(matrix_bytes)?;
         candidate["lifecycle"] = JsonValue::String("Candidate".to_owned());
         for row in candidate["rows"]
@@ -6876,7 +6876,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn authority_matrix_rejection() -> Result<(), Box<dyn std::error::Error>> {
         let matrix_bytes =
-            include_bytes!("../../../fixtures/conformance/matrix/adr-059-complete.json");
+            include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
         for (field, value) in [
             ("magic", JsonValue::String("wrong".to_owned())),
             ("lifecycle", JsonValue::String("Candidate".to_owned())),

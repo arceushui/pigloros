@@ -11,7 +11,7 @@
   "adr_059_execution_matrix": {
     "digest_algorithm": "BLAKE3-256",
     "executed_case_count": 0,
-    "path": "matrix/adr-059-complete.json",
+    "path": "matrix/execution-matrix.json",
     "status": "Draft"
   },
   "candidate_status": "pending",

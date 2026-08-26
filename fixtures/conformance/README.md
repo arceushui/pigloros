@@ -52,7 +52,7 @@ The support directory contains the normative specification, schema, licence,
 notice, SBOM, provenance, and limitations members that every immutable bundle
 manifest must declare.
 
-The Draft `matrix/adr-059-complete.json` records all twelve accepted
+The Draft `matrix/execution-matrix.json` records all twelve accepted
 non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork
 variant cases, with the row-specific AuthEq/PublicEq/OpEq predicates from
 ADR-059. `expected-authority/inventory.json` records the eleven #172

@@ -316,13 +316,13 @@ fn validate_profile_record_bindings(
     claim_layer: ClaimLayerV1,
     profile_record: &JsonValue,
 ) -> Result<(), Box<dyn Error>> {
-    let matrix = include_bytes!("../../../../fixtures/conformance/matrix/adr-059-complete.json");
+    let matrix = include_bytes!("../../../../fixtures/conformance/matrix/execution-matrix.json");
     let matrix_json: JsonValue = serde_json::from_slice(matrix)?;
     let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
     if json_text(profile_record, "profile_id")? != profile_id(claim_layer)
         || json_text(profile_record, "claim_layer")? != claim_layer_name(claim_layer)
         || json_text(profile_record, "authority_inventory")? != "expected-authority/inventory.json"
-        || json_text(profile_record, "adr_059_execution_matrix")? != "matrix/adr-059-complete.json"
+        || json_text(profile_record, "adr_059_execution_matrix")? != "matrix/execution-matrix.json"
         || json_text(profile_record, "adr_059_execution_matrix_status")? != matrix_lifecycle
         || json_string_array(profile_record, "execution_profiles")?
             != vec!["deterministic-local-v1", "deterministic-air-gapped-v1"]
@@ -468,7 +468,7 @@ fn profile_from_record(
     };
     profile.bind_execution_matrix_digest(
         *blake3::hash(include_bytes!(
-            "../../../../fixtures/conformance/matrix/adr-059-complete.json"
+            "../../../../fixtures/conformance/matrix/execution-matrix.json"
         ))
         .as_bytes(),
     )?;
@@ -852,8 +852,8 @@ fn append_supporting_members_with_authority(
     inventory.role = BundleMemberRoleV1::AuthorityInventory;
     members.push(inventory);
     let mut matrix = BundleMemberV1::new(
-        "authority/adr-059-execution-matrix.json",
-        include_bytes!("../../../../fixtures/conformance/matrix/adr-059-complete.json").to_vec(),
+        "authority/execution-matrix.json",
+        include_bytes!("../../../../fixtures/conformance/matrix/execution-matrix.json").to_vec(),
         false,
     );
     matrix.role = BundleMemberRoleV1::ExecutionMatrix;
@@ -1113,7 +1113,7 @@ mod tests {
             profile.execution_matrix_digest()?,
             Some(
                 *blake3::hash(include_bytes!(
-                    "../../../../fixtures/conformance/matrix/adr-059-complete.json"
+                    "../../../../fixtures/conformance/matrix/execution-matrix.json"
                 ))
                 .as_bytes()
             )

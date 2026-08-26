@@ -13,7 +13,7 @@ if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "
   exit 1
 fi
 
-matrix_path="${fixture_root}/matrix/adr-059-complete.json"
+matrix_path="${fixture_root}/matrix/execution-matrix.json"
 authority_path="${fixture_root}/expected-authority/inventory.json"
 [[ -s "${matrix_path}" && -s "${authority_path}" ]] || {
   echo "missing Draft conformance inventory artifacts" >&2
@@ -183,7 +183,7 @@ for index in "${!profile_layers[@]}"; do
     --arg layer "${layer}" \
     --arg authority "expected-authority/inventory.json" \
     --arg authority_sha256 "${authority_inventory_sha256}" \
-    --arg matrix "matrix/adr-059-complete.json" \
+    --arg matrix "matrix/execution-matrix.json" \
     --arg matrix_lifecycle "${matrix_lifecycle}" \
     --arg matrix_blake3 "${matrix_blake3_digest}" \
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
@@ -227,7 +227,7 @@ jq -e \
   .authority_inventory.path == "expected-authority/inventory.json" and
   .authority_inventory.digest_algorithm == "SHA-256" and
   .authority_inventory.status == $authority_lifecycle and
-  .adr_059_execution_matrix.path == "matrix/adr-059-complete.json" and
+  .adr_059_execution_matrix.path == "matrix/execution-matrix.json" and
   .adr_059_execution_matrix.digest_algorithm == "BLAKE3-256" and
   .adr_059_execution_matrix.status == $matrix_lifecycle and
   .adr_059_execution_matrix.executed_case_count == (if $matrix_lifecycle == "Candidate" then 192 else 0 end)
