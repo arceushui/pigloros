@@ -6736,6 +6736,14 @@ pub mod tests {
         let encoded = strict_codec::encode_consent(&audit);
         assert_eq!(strict_codec::decode_consent(&encoded), Ok(audit));
         assert!(strict_codec::decode_consent(&Value::Array(Vec::new())).is_err());
+        let Value::Array(fields) = encoded else {
+            return;
+        };
+        for index in 0..fields.len() {
+            let mut malformed = fields.clone();
+            malformed[index] = Value::Map(Vec::new());
+            assert!(strict_codec::decode_consent(&Value::Array(malformed)).is_err());
+        }
     }
 
     #[test]

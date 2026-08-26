@@ -7918,6 +7918,17 @@ mod coverage_entrypoints {
     #[test]
     fn bundle_cap_rejection_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
         let bundle = signed_bundle()?;
+        let member = bundle
+            .members
+            .first()
+            .cloned()
+            .ok_or(BundleContractErrorV1::MemberMissing)?;
+        let mut too_many_members = bundle.clone();
+        too_many_members.members = vec![member; MAX_MEMBERS + 1];
+        assert_eq!(
+            too_many_members.validate(),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
         assert_eq!(
             validate_member_count(MAX_MEMBERS + 1),
             Err(BundleContractErrorV1::MemberOutOfBounds)
