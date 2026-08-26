@@ -32,18 +32,10 @@ fn run_with_verifier(
 }
 
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    File::open(path)
-        .map_err(|error| Box::new(error) as Box<dyn Error>)
-        .and_then(|file| {
-            file.metadata()
-                .map_err(|error| Box::new(error) as Box<dyn Error>)
-                .and_then(|metadata| {
-                    read_bounded(file, metadata.len(), MAX_CONFORMANCE_BUNDLE_BYTES_V1)
-                })
-        })
-        .and_then(|bytes| {
-            verify_archive_independently(&bytes).map_err(|error| Box::new(error) as Box<dyn Error>)
-        })
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    let bytes = read_bounded(file, metadata.len(), MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
+    verify_archive_independently(&bytes).map_err(Into::into)
 }
 
 fn read_bounded(

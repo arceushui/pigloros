@@ -70,7 +70,6 @@ struct FixtureContext {
 }
 
 type CanonicalFixtureBytes = (&'static [u8], &'static [u8]);
-type MaterializedBundleArtifacts = (Vec<u8>, [u8; 32], Vec<u8>);
 
 fn main() -> Result<(), Box<dyn Error>> {
     run(
@@ -261,71 +260,36 @@ fn materialize_profile_from_profile_with_authority(
         output_root,
         format!("{prefix}/CPF1-{}.cbor", hex(&profile.profile_digest)),
         &profile_bytes,
-    )
-    .and_then(|()| {
-        [
-            (BundleModeV1::Local, "local"),
-            (BundleModeV1::AirGapped, "air-gapped"),
-        ]
-        .into_iter()
-        .try_for_each(|(mode, mode_name)| {
-            materialized_bundle_artifacts(
-                &profile,
-                signing_key,
-                mode,
-                inventory_bytes,
-                authority_root,
-            )
-            .and_then(|(bundle_bytes, bundle_digest, manifest_bytes)| {
-                write_materialized_file(
-                    output_root,
-                    format!("{prefix}/manifest-{mode_name}-{}.cbor", hex(&bundle_digest)),
-                    &manifest_bytes,
-                )
-                .and_then(|()| {
-                    write_materialized_file(
-                        output_root,
-                        format!("{prefix}/bundle-{mode_name}-{}.cfb1", hex(&bundle_digest)),
-                        &bundle_bytes,
-                    )
-                })
-            })
-        })
-    })
-}
-
-fn materialized_bundle_artifacts(
-    profile: &ConformanceProfileV1,
-    signing_key: &SigningKey,
-    mode: BundleModeV1,
-    inventory_bytes: &[u8],
-    authority_root: Option<&Path>,
-) -> Result<MaterializedBundleArtifacts, Box<dyn Error>> {
-    bundle_inputs_with_authority(profile, mode, inventory_bytes, authority_root)
-        .and_then(|(members, expected_results)| {
-            ConformanceBundleV1::materialize(profile, mode, members, expected_results)
+    )?;
+    for (mode, mode_name) in [
+        (BundleModeV1::Local, "local"),
+        (BundleModeV1::AirGapped, "air-gapped"),
+    ] {
+        let (members, expected_results) =
+            bundle_inputs_with_authority(&profile, mode, inventory_bytes, authority_root)?;
+        let (bundle, bundle_digest) =
+            ConformanceBundleV1::materialize(&profile, mode, members, expected_results)
                 .and_then(|bundle| bundle.sign(signing_key))
                 .and_then(|bundle| {
                     bundle
                         .bundle_digest()
                         .map(|bundle_digest| (bundle, bundle_digest))
-                })
-                .map_err(|error| Box::new(error) as Box<dyn Error>)
-        })
-        .and_then(|(bundle, bundle_digest)| {
-            bundle
-                .manifest_bytes()
-                .map_err(|error| Box::new(error) as Box<dyn Error>)
-                .and_then(|manifest_bytes| {
-                    bundle
-                        .to_canonical_cbor()
-                        .map_err(|error| Box::new(error) as Box<dyn Error>)
-                        .and_then(|bundle_bytes| {
-                            verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)
-                                .map(|()| (bundle_bytes, bundle_digest, manifest_bytes))
-                        })
-                })
-        })
+                })?;
+        let manifest_bytes = bundle.manifest_bytes()?;
+        let bundle_bytes = bundle.to_canonical_cbor()?;
+        verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
+        write_materialized_file(
+            output_root,
+            format!("{prefix}/manifest-{mode_name}-{}.cbor", hex(&bundle_digest)),
+            &manifest_bytes,
+        )?;
+        write_materialized_file(
+            output_root,
+            format!("{prefix}/bundle-{mode_name}-{}.cfb1", hex(&bundle_digest)),
+            &bundle_bytes,
+        )?;
+    }
+    Ok(())
 }
 
 fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
