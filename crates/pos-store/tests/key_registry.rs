@@ -7,6 +7,7 @@ use pos_core::{
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use rusqlite::params;
+use std::cell::Cell;
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
@@ -24,6 +25,24 @@ fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
             .iter_mut()
             .any(|(key, value)| replace_first_integer(key) || replace_first_integer(value)),
         ciborium::value::Value::Tag(_, value) => replace_first_integer(value),
+        _ => false,
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn replace_first_bytes(value: &mut ciborium::value::Value, from: &[u8; 32], to: [u8; 32]) -> bool {
+    match value {
+        ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
+            *value = ciborium::value::Value::Bytes(to.to_vec());
+            true
+        }
+        ciborium::value::Value::Array(values) => values
+            .iter_mut()
+            .any(|value| replace_first_bytes(value, from, to)),
+        ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
+            replace_first_bytes(key, from, to) || replace_first_bytes(value, from, to)
+        }),
+        ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
         _ => false,
     }
 }
@@ -58,28 +77,6 @@ fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, Co
 #[test]
 fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn replace_first_bytes(
-        value: &mut ciborium::value::Value,
-        from: &[u8; 32],
-        to: [u8; 32],
-    ) -> bool {
-        match value {
-            ciborium::value::Value::Bytes(bytes) if bytes.as_slice() == from => {
-                *value = ciborium::value::Value::Bytes(to.to_vec());
-                true
-            }
-            ciborium::value::Value::Array(values) => values
-                .iter_mut()
-                .any(|value| replace_first_bytes(value, from, to)),
-            ciborium::value::Value::Map(entries) => entries.iter_mut().any(|(key, value)| {
-                replace_first_bytes(key, from, to) || replace_first_bytes(value, from, to)
-            }),
-            ciborium::value::Value::Tag(_, value) => replace_first_bytes(value, from, to),
-            _ => false,
-        }
-    }
-
     let (registry, identity, material_digest) = registry()?;
     let mut store = SqliteStore::open_in_memory()?;
     assert!(store.load_key_registry()?.is_none());
@@ -99,7 +96,9 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
         2
     );
 
+    let mismatch_callback_called = Cell::new(false);
     let mut mismatch_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+        mismatch_callback_called.set(true);
         Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
     };
     assert!(matches!(
@@ -108,8 +107,9 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
             &KeyRegistryStateV1::new(),
             &mut mismatch_callback,
         ),
-        Err(CoreError::Storage(_))
+        Err(CoreError::Storage(message)) if message.contains("changed during signing")
     ));
+    assert!(!mismatch_callback_called.get());
 
     let mut missing_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
         Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
@@ -141,6 +141,12 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
     let (_, destroyed) = store.destroy_key_registry(valid_request)?;
     assert!(destroyed.key_record(identity).is_some());
+    let (already_destroyed, same_state) = store.destroy_key_registry(valid_request)?;
+    assert!(matches!(
+        already_destroyed,
+        pos_core::KeyDestructionOutcomeV1::AlreadyDestroyed(_)
+    ));
+    assert_eq!(same_state, destroyed);
 
     let mut restored = KeyRegistryStateV1::new();
     restored.register_key(KeyRegistrationV1::new(
@@ -148,7 +154,10 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
         material_digest,
         Some(pos_core::PublicKey::from_bytes([4; 32])),
     ))?;
-    assert!(store.save_key_registry(&restored).is_err());
+    assert!(matches!(
+        store.save_key_registry(&restored),
+        Err(CoreError::Serialization(_))
+    ));
 
     let mut encoded = Vec::new();
     ciborium::into_writer(&destroyed, &mut encoded)?;
@@ -157,8 +166,14 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
     let mut changed_encoded = Vec::new();
     ciborium::into_writer(&value, &mut changed_encoded)?;
     let changed_tombstone: KeyRegistryStateV1 = ciborium::from_reader(changed_encoded.as_slice())?;
-    assert!(store.save_key_registry(&changed_tombstone).is_err());
-    assert!(store.save_key_registry(&KeyRegistryStateV1::new()).is_err());
+    assert!(matches!(
+        store.save_key_registry(&changed_tombstone),
+        Err(CoreError::Serialization(_))
+    ));
+    assert!(matches!(
+        store.save_key_registry(&KeyRegistryStateV1::new()),
+        Err(CoreError::Serialization(_))
+    ));
     assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
 }
@@ -186,10 +201,9 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
     let (callback_entered_tx, callback_entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let (destruction_done_tx, destruction_done_rx) = std::sync::mpsc::channel();
     let live_registry = registry.clone();
 
-    let (sign_result, destroy_result, destruction_waited) = std::thread::scope(|scope| {
+    let (sign_result, destroy_result) = std::thread::scope(|scope| {
         let sign_handle = scope.spawn(move || {
             let mut callback_event = event;
             let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
@@ -204,7 +218,13 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
             };
             signing_store.append_signed_authorized(timeline_id, &live_registry, &mut callback)
         });
-        callback_entered_rx.recv()?;
+        if let Err(error) = callback_entered_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            let release_failed = release_tx.send(()).is_err();
+            return Err(format!(
+                "signing callback was not entered: {error}; release failed: {release_failed}"
+            )
+            .into());
+        }
 
         let destroy_handle = scope.spawn(move || {
             let result = destruction_store.destroy_key_registry(destruction_request);
@@ -222,10 +242,9 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         let destroy_result = destroy_handle
             .join()
             .map_err(|_| std::io::Error::other("destruction thread panicked"))?;
-        Ok::<_, Box<dyn std::error::Error>>((sign_result, destroy_result, destruction_waited))
+        Ok::<_, Box<dyn std::error::Error>>((sign_result, destroy_result))
     })?;
 
-    assert!(destruction_waited);
     assert!(sign_result.is_ok());
     assert!(destroy_result.is_ok());
 
@@ -446,12 +465,30 @@ fn memory_key_registry_public_contract_covers_persistence_and_authorization(
         material_digest,
         Hash::from_bytes([8; 32]),
     ))?;
+    let request =
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([8; 32]));
+    let (already_destroyed, same_state) = store.destroy_key_registry(request)?;
+    assert!(matches!(
+        already_destroyed,
+        pos_core::KeyDestructionOutcomeV1::AlreadyDestroyed(_)
+    ));
+    assert_eq!(same_state, destroyed);
     assert_eq!(
         destroyed
             .key_record(identity)
             .and_then(|record| record.private_material_digest),
         None
     );
+    let mut restored = KeyRegistryStateV1::new();
+    restored.register_key(KeyRegistrationV1::new(
+        identity,
+        material_digest,
+        Some(pos_core::PublicKey::from_bytes([4; 32])),
+    ))?;
+    assert!(matches!(
+        store.save_key_registry(&restored),
+        Err(CoreError::Serialization(_))
+    ));
     assert_eq!(store.load_key_registry()?, Some(destroyed));
     Ok(())
 }

@@ -329,6 +329,20 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
     open_store_with_hasher(config, Box::new(pos_crypto::chain::Blake3Hasher))
 }
 
+/// Open an existing `SQLite` store for read-only consumers.
+///
+/// Unlike [`open_store`], this never creates a database, initializes schema,
+/// or returns a writable backend.
+///
+/// # Errors
+/// Returns `CoreError::Storage` if the database cannot be opened or its current
+/// schema/invariants are invalid.
+#[cfg(feature = "sqlite")]
+pub fn open_store_read_only(sqlite_path: &str) -> Result<Box<dyn EventStore>, CoreError> {
+    sqlite::SqliteStore::open_read_only(sqlite_path)
+        .map(|store| Box::new(store) as Box<dyn EventStore>)
+}
+
 /// Open the SQLite-backed local `OwnTracks` enrollment administration capability.
 ///
 /// This deliberately returns only [`OwnTracksEnrollmentStore`], not generic

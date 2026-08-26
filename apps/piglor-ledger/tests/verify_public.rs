@@ -4,7 +4,23 @@ use pos_core::{
     KeyRoleV1, Kind, SchemaVersion, Seq, WallTime,
 };
 use rusqlite::params;
-use std::fmt::Write as _;
+use std::process::Command;
+
+#[test]
+fn production_ledger_binary_reports_dispatch_errors() -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_piglor-ledger"))
+        .args(["predict", "--source", "csv:/tmp/missing-ledger"])
+        .output()?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Error:"));
+
+    let version = Command::new(env!("CARGO_BIN_EXE_piglor-ledger"))
+        .arg("version")
+        .output()?;
+    assert!(version.status.success());
+    assert!(String::from_utf8_lossy(&version.stdout).contains("piglor-ledger"));
+    Ok(())
+}
 
 #[test]
 fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
@@ -154,90 +170,6 @@ fn public_store_verification_accepts_a_registry_bound_signature(
     ])?;
 
     let report = verify_source(&Source::Store(database_path), None, None)?;
-    assert!(report.to_string().starts_with("OK: store"));
-    Ok(())
-}
-
-#[test]
-fn public_store_verification_accepts_legacy_signature_with_explicit_pubkey(
-) -> Result<(), Box<dyn std::error::Error>> {
-    use ed25519_dalek::Signer;
-
-    let database = tempfile::NamedTempFile::new()?;
-    let database_path = database.path().to_path_buf();
-    let mut store = pos_store::open_store(pos_store::StoreConfig::Sqlite {
-        path: database_path.to_string_lossy().into_owned(),
-    })?;
-    let timeline = store.create_timeline("ledger")?;
-    let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
-    let (registry_signing_key, registry_verifying_key) = pos_crypto::signing::generate_keypair();
-    let registry_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
-    let mut registry = KeyRegistryStateV1::new();
-    registry.register_key(KeyRegistrationV1::new(
-        registry_identity,
-        pos_crypto::key_roles::key_material_digest(&registry_signing_key.to_bytes()),
-        Some(pos_core::PublicKey::from_bytes(
-            registry_verifying_key.to_bytes(),
-        )),
-    ))?;
-    store.save_key_registry(&registry)?;
-    let event_id = EventId::new();
-    let payload = CanonicalBytes::from_static(b"legacy prediction");
-    let bound_payload = CanonicalBytes::from_static(b"registry-bound prediction");
-    let bound_signature = pos_crypto::key_roles::sign_for_registered_role(
-        &mut registry,
-        &registry_signing_key,
-        registry_identity,
-        &bound_payload,
-    )?;
-    store.append_committed(
-        timeline.id(),
-        &[
-            Event {
-                id: event_id,
-                entity: EntityId::new(),
-                event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
-                payload: payload.clone(),
-                wall_time: WallTime::from_micros(1),
-                seq: Seq::from_u64(1),
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: None,
-                signature_identity: None,
-                payload_hash: pos_crypto::chain::hash_payload(&payload),
-            },
-            Event {
-                id: EventId::new(),
-                entity: EntityId::new(),
-                event_type: Kind::new(pos_plugin_ledger::EVENT_TYPE_PREDICTION),
-                payload: bound_payload.clone(),
-                wall_time: WallTime::from_micros(2),
-                seq: Seq::from_u64(2),
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: Some(bound_signature),
-                signature_identity: Some(registry_identity),
-                payload_hash: pos_crypto::chain::hash_payload(&bound_payload),
-            },
-        ],
-    )?;
-    store.save_key_registry(&registry)?;
-    drop(store);
-
-    let signature = signing_key.sign(payload.as_slice()).to_bytes().to_vec();
-    let connection = rusqlite::Connection::open(&database_path)?;
-    connection.execute(
-        "UPDATE events SET signature = ?1 WHERE event_id = ?2",
-        params![signature, event_id.to_string()],
-    )?;
-
-    let mut public_key_hex = String::with_capacity(64);
-    for byte in verifying_key.to_bytes() {
-        write!(&mut public_key_hex, "{byte:02x}")?;
-    }
-    let report = verify_source(&Source::Store(database_path), Some(&public_key_hex), None)?;
     assert!(report.to_string().starts_with("OK: store"));
     Ok(())
 }

@@ -117,6 +117,9 @@ pub enum CliError {
     /// timeline ops).
     #[error("store error: {0}")]
     Store(String),
+    /// Verification completed and found a mismatch.
+    #[error("verification failed: {0}")]
+    VerificationFailed(String),
 }
 
 impl From<pos_core::CoreError> for CliError {

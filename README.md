@@ -179,7 +179,7 @@ trunk git-hooks sync   # once per clone / after enabling actions
 
 Enabled actions (see `.trunk/trunk.yaml`):
 
-- **pre-commit:** `trunk-fmt-pre-commit` + `trunk-check-pre-commit` (runs `rust-test-policy`)
+- **pre-commit:** repository hook runs `cargo fmt`, regenerates and stages `Cargo.lock` when a manifest changes, then runs targeted Clippy; Trunk also runs `trunk-fmt-pre-commit` + `trunk-check-pre-commit` (including `rust-test-policy`)
 - **pre-push:** `trunk-check-pre-push`
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions

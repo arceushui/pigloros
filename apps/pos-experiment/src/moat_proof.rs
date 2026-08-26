@@ -2700,6 +2700,11 @@ mod coverage_entrypoints {
 #[cfg(test)]
 mod run_coverage_entrypoints {
     use super::*;
+    use pos_core::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::SchemaVersion,
+    };
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -2840,5 +2845,187 @@ mod run_coverage_entrypoints {
             }
             .run(),
         );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reaction(output: &StepOutput) -> AgentReaction {
+        test_ok(serde_json::from_slice(output.drafts[0].payload.as_slice()))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn make_observation_event(
+        body: EntityId,
+        observation: &pos_plugin_world::WorldObservationV1,
+        wall_time: u64,
+        seq: u64,
+    ) -> Event {
+        Event {
+            id: EventId::new(),
+            entity: body,
+            event_type: Kind::new(EVENT_TYPE_OBSERVATION_V1),
+            payload: test_ok(observation.encode()),
+            wall_time: WallTime::from_micros(wall_time),
+            seq: Seq::from_u64(seq),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    fn cover_agent_reactions(
+        agent: &mut ProofAgentDriver,
+        timeline: TimelineId,
+        body: EntityId,
+    ) -> (Event, CanonicalBytes) {
+        let empty = test_ok(agent.step(timeline, ObservationView::empty()));
+        assert_eq!(reaction(&empty).action, "wait");
+        agent.commit_step();
+
+        let malformed = Event {
+            id: EventId::new(),
+            entity: body,
+            event_type: Kind::new(EVENT_TYPE_OBSERVATION_V1),
+            payload: CanonicalBytes::from_static(b"not-an-observation"),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        let malformed_output = test_ok(agent.step(
+            timeline,
+            ObservationView::from_events(std::slice::from_ref(&malformed)),
+        ));
+        assert_eq!(reaction(&malformed_output).action, "wait");
+        agent.abort_step();
+
+        let observation = pos_plugin_world::WorldObservationV1 {
+            body_entity_id: body,
+            tick: 4,
+            step_index: 4,
+            pos_x: 0.25,
+            pos_y: 0.0,
+            pos_z: 0.0,
+            orient_w: 1.0,
+            orient_x: 0.0,
+            orient_y: 0.0,
+            orient_z: 0.0,
+            vel_lin_x: 0.0,
+            vel_lin_y: 0.0,
+            vel_lin_z: 0.0,
+            vel_ang_x: 0.0,
+            vel_ang_y: 0.0,
+            vel_ang_z: 0.0,
+            sensor_kind: 0,
+            sensor_value: Vec::new(),
+        };
+        let observation_event = make_observation_event(body, &observation, 2, 2);
+        let below_threshold = test_ok(agent.step(
+            timeline,
+            ObservationView::from_events(std::slice::from_ref(&observation_event)),
+        ));
+        assert_eq!(reaction(&below_threshold).action, "wait");
+        agent.commit_step();
+
+        let above = pos_plugin_world::WorldObservationV1 {
+            pos_x: 1.0,
+            tick: 5,
+            ..observation
+        };
+        let above_event = make_observation_event(body, &above, 3, 3);
+        let above_threshold = test_ok(agent.step(
+            timeline,
+            ObservationView::from_events(std::slice::from_ref(&above_event)),
+        ));
+        assert_eq!(reaction(&above_threshold).action, "accelerate");
+        let reaction_payload = above_threshold.drafts[0].payload.clone();
+        agent.abort_step();
+        (above_event, reaction_payload)
+    }
+
+    fn cover_agent_reducer(
+        agent_entity: EntityId,
+        above_event: &Event,
+        reaction_payload: CanonicalBytes,
+    ) {
+        let mut reducer_state = ProofAgentReducer.initial();
+        ProofAgentReducer.apply(
+            &mut reducer_state,
+            &Event {
+                event_type: Kind::new("other.event"),
+                ..above_event.clone()
+            },
+        );
+        ProofAgentReducer.apply(
+            &mut reducer_state,
+            &Event {
+                payload: CanonicalBytes::from_static(b"malformed"),
+                ..above_event.clone()
+            },
+        );
+        let reaction_event = Event {
+            id: EventId::new(),
+            entity: agent_entity,
+            event_type: Kind::new(AGENT_EVENT_TYPE),
+            payload: reaction_payload,
+            wall_time: WallTime::from_micros(3),
+            seq: Seq::from_u64(4),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        };
+        ProofAgentReducer.apply(&mut reducer_state, &reaction_event);
+        assert_eq!(
+            reducer_state.get("action_count"),
+            Some(&serde_json::json!(1))
+        );
+    }
+
+    fn cover_society_driver(timeline: TimelineId, above_event: &Event) {
+        let mut society = ProofSocietyDriver::new(fixed_id(3));
+        assert_eq!(society.name(), "proof-society-driver");
+        assert_eq!(society.event_subscriptions().len(), 1);
+        let empty_signal = test_ok(society.step(timeline, ObservationView::empty()));
+        assert!(!empty_signal.drafts.is_empty());
+        society.commit_step();
+        let wait_payload = test_ok(serde_json::to_vec(&AgentReaction {
+            tick: 6,
+            action: "wait".to_owned(),
+            confidence: 0.5,
+            observed_x: 0.0,
+        }));
+        let wait_event = Event {
+            event_type: Kind::new(AGENT_EVENT_TYPE),
+            payload: CanonicalBytes::from_vec(wait_payload),
+            ..above_event.clone()
+        };
+        let wait_signal = test_ok(society.step(
+            timeline,
+            ObservationView::from_events(std::slice::from_ref(&wait_event)),
+        ));
+        assert!(!wait_signal.drafts.is_empty());
+        society.abort_step();
+    }
+
+    #[test]
+    fn proof_drivers_cover_empty_malformed_and_thresholded_observations() {
+        let body = fixed_id(1);
+        let agent_entity = fixed_id(2);
+        let timeline = TimelineId::new();
+        let mut agent = ProofAgentDriver::new(agent_entity, 0.5);
+        assert_eq!(agent.name(), "proof-agent-driver");
+        assert_eq!(agent.event_subscriptions().len(), 1);
+        let (above_event, reaction_payload) = cover_agent_reactions(&mut agent, timeline, body);
+        cover_agent_reducer(agent_entity, &above_event, reaction_payload);
+        cover_society_driver(timeline, &above_event);
     }
 }

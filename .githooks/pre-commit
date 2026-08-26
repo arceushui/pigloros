@@ -7,6 +7,18 @@ echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 
 changed_files=$(git diff --cached --name-only --diff-filter=ACDMRT)
+changed_cargo_manifests=$(printf '%s\n' "$changed_files" | awk '
+    $0 == "Cargo.toml" || $0 ~ /\/Cargo\.toml$/
+')
+if [ -n "$changed_cargo_manifests" ]; then
+    echo "pre-commit: cargo generate-lockfile"
+    cargo generate-lockfile
+    git add Cargo.lock
+fi
+
+# Include a generated lockfile in the metadata gate below when the command
+# above added it to the index.
+changed_files=$(git diff --cached --name-only --diff-filter=ACDMRT)
 changed_rust_files=$(printf '%s\n' "$changed_files" | awk '$0 ~ /\.rs$/')
 changed_cargo_files=$(printf '%s\n' "$changed_files" | awk '
     $0 == "Cargo.toml" || $0 == "Cargo.lock" || $0 == "rust-toolchain.toml" ||

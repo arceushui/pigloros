@@ -27,6 +27,10 @@ fn sqlite_public_read_rejects_a_fork_without_a_fork_sequence(
     drop(connection);
 
     let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.read(child.id(), pos_core::SeqRange::all()),
+        Err(CoreError::Storage(message)) if message.contains("missing its Fork sequence")
+    ));
     let bounds = EventReadBounds::new(1, usize::MAX, 1, 1);
     assert!(matches!(
         store.read_bounded(child.id(), pos_core::SeqRange::all(), bounds),

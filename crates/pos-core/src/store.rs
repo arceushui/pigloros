@@ -983,9 +983,8 @@ pub fn import_timeline(
 /// returned (the id may remain occupied).
 ///
 /// Signatures are persisted as opaque blobs; cryptographic verification is the caller's
-/// responsibility (see `pos_crypto::signing::verify_events_all_signed` / store helpers).
-/// For mixed unsigned events or multiple signers, call `verify_events` yourself then
-/// this function — do not use the all-signed store helper.
+/// responsibility. For role-bound Event signatures, resolve the persisted identity and
+/// use `pos_crypto::key_roles::verify_for_role` with the event's role and epoch.
 ///
 /// # Errors
 /// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists,
@@ -1154,10 +1153,8 @@ pub fn validate_committed_batch(
 
 /// Validate the role/epoch binding of a committed event signature.
 ///
-/// An unsigned event has neither field. A current role-bound event must carry
-/// a non-zero Timeline-integrity identity. A signature without an identity is
-/// retained only for the explicit ADR-065 legacy verify-only disposition; an
-/// identity without a signature is never valid.
+/// An unsigned event has neither field. A signed event must carry a non-zero
+/// Timeline-integrity identity; an identity without a signature is never valid.
 ///
 /// # Errors
 ///
@@ -1165,10 +1162,10 @@ pub fn validate_committed_batch(
 /// identity is not eligible to sign.
 pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
     match (event.signature.as_ref(), event.signature_identity) {
-        // ADR-065 legacy signatures predate role metadata. They may be
-        // verified by an explicit legacy verifier, but cannot authorize a new
-        // role-bound operation.
-        (_, None) => Ok(()),
+        (None, None) => Ok(()),
+        (Some(_), None) => Err(CoreError::Storage(
+            "signed event must carry a role/epoch identity".to_owned(),
+        )),
         (Some(_), Some(identity)) => {
             if identity.epoch == 0 || identity.role != crate::KeyRoleV1::TimelineIntegritySigning {
                 return Err(CoreError::Storage(
@@ -2309,14 +2306,14 @@ mod tests {
         let match_hasher = ValidationTestHasher { should_match: true };
         let mut signature_without_identity = validation_test_event(1, crate::ids::EventId::new());
         signature_without_identity.signature = Some(crate::Signature::from_bytes([1; 64]));
-        let legacy = validate_committed_batch(
+        let err = validate_committed_batch(
             Seq::ZERO,
             &[signature_without_identity],
             &mut |_| false,
             &match_hasher,
         )
-        .test_ok()?;
-        assert_eq!(legacy.len(), 1);
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
 
         let mut identity_without_signature = validation_test_event(1, crate::ids::EventId::new());
         identity_without_signature.signature_identity = Some(crate::KeyIdentityV1::new(

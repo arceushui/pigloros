@@ -7,6 +7,7 @@ use pos_core::{
     KeyRegistryStateV1, KeyRoleV1, Kind, PublicKey, SchemaVersion, Seq, SeqRange, Timeline,
     TimelineId, TimelineMeta, WallTime,
 };
+use std::cell::Cell;
 
 struct RegistryStore {
     registry: Option<KeyRegistryStateV1>,
@@ -138,8 +139,10 @@ fn registered_state(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn changed_tombstone_digest(
+fn changed_first_bytes(
     registry: &KeyRegistryStateV1,
+    from: [u8; 32],
+    to: [u8; 32],
 ) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
     fn replace_first_bytes(
         value: &mut ciborium::value::Value,
@@ -164,10 +167,24 @@ fn changed_tombstone_digest(
     let mut bytes = Vec::new();
     ciborium::into_writer(registry, &mut bytes)?;
     let mut value: ciborium::value::Value = ciborium::from_reader(bytes.as_slice())?;
-    assert!(replace_first_bytes(&mut value, &[3; 32], [9; 32]));
+    assert!(replace_first_bytes(&mut value, &from, to));
     let mut changed_bytes = Vec::new();
     ciborium::into_writer(&value, &mut changed_bytes)?;
     Ok(ciborium::from_reader(changed_bytes.as_slice())?)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn changed_tombstone_digest(
+    registry: &KeyRegistryStateV1,
+) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
+    changed_first_bytes(registry, [3; 32], [9; 32])
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn changed_public_key(
+    registry: &KeyRegistryStateV1,
+) -> Result<KeyRegistryStateV1, Box<dyn std::error::Error>> {
+    changed_first_bytes(registry, [4; 32], [9; 32])
 }
 
 fn event_at(seq: Seq) -> Event {
@@ -303,6 +320,7 @@ fn public_registry_traits_and_role_boundaries_are_exercised(
         (4, KeyRoleV1::ExportRecipientEncryption, false, true),
     ];
     for (code, role, signing, encryption) in role_cases {
+        assert_eq!(role.code(), code);
         assert_eq!(KeyRoleV1::from_code(code), Ok(role));
         assert_eq!(role.is_signing(), signing);
         assert_eq!(role.is_encryption(), encryption);
@@ -388,6 +406,90 @@ fn public_registry_traits_and_role_boundaries_are_exercised(
         KeyRegistryPortV1::tombstone(&registry, signing_identity),
         Some(first_tombstone)
     );
+    Ok(())
+}
+
+#[test]
+fn public_registry_covers_destruction_and_replacement_guards(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (live, _, _) = registered_state()?;
+    let changed_material = changed_tombstone_digest(&live)?;
+    assert_eq!(
+        live.validate_replacement(&changed_material),
+        Err(pos_core::KeyRegistryErrorV1::InvalidState)
+    );
+    let changed_public_key = changed_public_key(&live)?;
+    assert_eq!(
+        live.validate_replacement(&changed_public_key),
+        Err(pos_core::KeyRegistryErrorV1::InvalidState)
+    );
+
+    let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let signing_material = Hash::from_bytes([71; 32]);
+    let signing_public_key = PublicKey::from_bytes([72; 32]);
+    let signing_request = KeyDestructionRequestV1::new(
+        signing_identity,
+        signing_material,
+        Hash::from_bytes([73; 32]),
+    );
+    let mut signing_registry = KeyRegistryStateV1::new();
+    signing_registry.register_key(KeyRegistrationV1::new(
+        signing_identity,
+        signing_material,
+        Some(signing_public_key),
+    ))?;
+    signing_registry.destroy_key(signing_request)?;
+    let signing_callback_called = Cell::new(false);
+    assert_eq!(
+        signing_registry.with_signing_authorization(
+            signing_identity,
+            signing_material,
+            signing_public_key,
+            || {
+                signing_callback_called.set(true);
+                "not called"
+            },
+        ),
+        Err(pos_core::KeyRegistryErrorV1::Destroyed)
+    );
+    assert!(!signing_callback_called.get());
+
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+    let encryption_material = Hash::from_bytes([74; 32]);
+    let encryption_request = KeyDestructionRequestV1::new(
+        encryption_identity,
+        encryption_material,
+        Hash::from_bytes([75; 32]),
+    );
+    let mut encryption_registry = KeyRegistryStateV1::new();
+    encryption_registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        encryption_material,
+        None,
+    ))?;
+    encryption_registry.destroy_key(encryption_request)?;
+    let encryption_callback_called = Cell::new(false);
+    assert_eq!(
+        encryption_registry.with_encryption_authorization(
+            encryption_identity,
+            encryption_material,
+            || {
+                encryption_callback_called.set(true);
+                "not called"
+            },
+        ),
+        Err(pos_core::KeyRegistryErrorV1::Destroyed)
+    );
+    assert!(!encryption_callback_called.get());
+    assert_eq!(
+        encryption_registry.register_key(KeyRegistrationV1::new(
+            KeyIdentityV1::new(KeyRoleV1::ExportRecipientEncryption, 1),
+            encryption_material,
+            None,
+        )),
+        Err(pos_core::KeyRegistryErrorV1::MaterialReuse)
+    );
+
     Ok(())
 }
 

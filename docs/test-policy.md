@@ -14,7 +14,7 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Layer | Tool | Notes |
 |---|---|---|
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
-| Git hooks | Trunk pre-commit / pre-push | Run once per clone: `trunk git-hooks sync` |
+| Git hooks | Repository pre-commit regenerates/stages `Cargo.lock` for manifest changes; Trunk pre-commit / pre-push enforce policy | Run once per clone: `git config core.hooksPath .githooks` (or `trunk git-hooks sync` when using Trunk-managed hooks) |
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
 | Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions |

@@ -288,33 +288,65 @@ impl SqliteStore {
         Self::open_with_hasher(path, Box::new(pos_crypto::chain::Blake3Hasher))
     }
 
+    /// Open an existing `SQLite` store without creating or initializing it.
+    ///
+    /// This is intended for read-only consumers such as static-site builds.
+    /// The database must already exist and contain the current schema.
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the database cannot be opened, has an
+    /// unsupported encoding/schema, or fails invariant validation.
+    pub fn open_read_only(path: &str) -> Result<Self, CoreError> {
+        Self::open_with_options(
+            path,
+            Box::new(pos_crypto::chain::Blake3Hasher),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            false,
+        )
+    }
+
     /// Open a `SQLite` WAL store with a custom hasher.
     ///
     /// # Errors
     /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
     pub fn open_with_hasher(path: &str, hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
-        let conn = Connection::open_with_flags(
+        Self::open_with_options(
             path,
+            hasher,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI,
+            true,
         )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+    }
+
+    fn open_with_options(
+        path: &str,
+        hasher: Box<dyn Hasher>,
+        flags: OpenFlags,
+        initialize_schema: bool,
+    ) -> Result<Self, CoreError> {
+        let conn = Connection::open_with_flags(path, flags)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
 
         conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-            .map_err(|e| CoreError::Storage(e.to_string()))
-            .and_then(|()| Self::require_utf8_encoding(&conn))
-            .and_then(|()| {
-                let store = Self {
-                    conn,
-                    hasher,
-                    clock: Box::new(SystemAdmissionClock),
-                    consent_authority_permit: None,
-                };
-                store
-                    .init_schema()
-                    .and_then(|()| store.validate_event_sequence_invariant().map(|()| store))
-            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Self::require_utf8_encoding(&conn)?;
+        let store = Self {
+            conn,
+            hasher,
+            clock: Box::new(SystemAdmissionClock),
+            consent_authority_permit: None,
+            #[cfg(test)]
+            destruction_transaction_hook: None,
+        };
+        if initialize_schema {
+            store.init_schema()?;
+        }
+        store.validate_event_signature_schema()?;
+        store.validate_event_sequence_invariant()?;
+        Ok(store)
     }
 
     /// Open a `SQLite` store with a trusted admission clock.
@@ -522,10 +554,9 @@ impl SqliteStore {
              );",
             )
             .map_err(|error| Self::storage_error(&error))
-            .and_then(|()| self.ensure_event_signature_columns())
     }
 
-    fn ensure_event_signature_columns(&self) -> Result<(), CoreError> {
+    fn validate_event_signature_schema(&self) -> Result<(), CoreError> {
         let mut statement = self
             .conn
             .prepare("PRAGMA table_info(events)")
@@ -538,17 +569,12 @@ impl SqliteStore {
             columns.insert(row.map_err(Self::into_storage_error)?);
         }
         drop(statement);
-        if !columns.contains("signature_role") {
-            self.conn
-                .execute("ALTER TABLE events ADD COLUMN signature_role INTEGER", [])
-                .map_err(|error| Self::storage_error(&error))?;
+        if columns.contains("signature_role") && columns.contains("signature_epoch") {
+            return Ok(());
         }
-        if !columns.contains("signature_epoch") {
-            self.conn
-                .execute("ALTER TABLE events ADD COLUMN signature_epoch INTEGER", [])
-                .map_err(|error| Self::storage_error(&error))?;
-        }
-        Ok(())
+        Err(CoreError::Storage(
+            "SQLite events table is missing required signature identity columns".to_owned(),
+        ))
     }
 
     fn geographic_fence_permits(
@@ -6476,7 +6502,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn open_adds_role_columns_to_a_legacy_events_table() {
+    fn open_rejects_a_legacy_events_table_without_role_columns() {
         let file = tempfile::NamedTempFile::new().test_ok();
         {
             let conn = Connection::open(file.path()).test_ok();
@@ -6500,17 +6526,34 @@ mod tests {
             .test_ok();
         }
 
-        let store = SqliteStore::open(file.path().to_str().test_ok()).test_ok();
-        let mut columns = HashSet::new();
-        let mut statement = store.conn.prepare("PRAGMA table_info(events)").test_ok();
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(1))
+        let error = SqliteStore::open(file.path().to_str().test_ok())
+            .err()
             .test_ok();
-        for row in rows {
-            columns.insert(row.test_ok());
-        }
-        assert!(columns.contains("signature_role"));
-        assert!(columns.contains("signature_epoch"));
+        assert!(matches!(
+            error,
+            CoreError::Storage(message)
+                if message.contains("missing required signature identity columns")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_read_only_requires_and_reads_an_existing_current_schema() {
+        let directory = tempfile::tempdir().test_ok();
+        let missing = directory.path().join("missing.db");
+        let error = SqliteStore::open_read_only(missing.to_str().test_ok())
+            .err()
+            .test_ok();
+        assert!(matches!(error, CoreError::Storage(_)));
+        assert!(!missing.exists());
+
+        let path = directory.path().join("ledger.db");
+        let mut writable = SqliteStore::open(path.to_str().test_ok()).test_ok();
+        writable.create_timeline("ledger").test_ok();
+        drop(writable);
+
+        let readonly = SqliteStore::open_read_only(path.to_str().test_ok()).test_ok();
+        assert_eq!(readonly.list_timelines().test_ok().len(), 1);
     }
 
     #[test]
@@ -9083,8 +9126,10 @@ mod tests {
                 params![timeline.id().to_string()],
             )
             .test_ok();
-        let legacy = store.read(timeline.id(), SeqRange::all()).test_ok();
-        assert_eq!(legacy[0].signature_identity, None);
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Storage(message)) if message.contains("role/epoch identity")
+        ));
         store
             .conn
             .execute(
@@ -11617,18 +11662,5 @@ pub(super) mod key_registry_coverage {
         assert!(destroyed.key_record(identity).is_some());
         sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
         Ok(())
-    }
-
-    pub(super) fn exercise_public_paths() -> Result<(), Box<dyn std::error::Error>> {
-        sqlite_key_registry_public_paths_are_instrumented()
-    }
-}
-
-#[cfg(all(test, feature = "sqlite"))]
-mod instrumented_key_registry_entrypoints {
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_key_registry_paths_are_counted() -> Result<(), Box<dyn std::error::Error>> {
-        super::key_registry_coverage::exercise_public_paths()
     }
 }
