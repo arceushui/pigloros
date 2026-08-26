@@ -890,8 +890,8 @@ pub trait EventStore: Send {
     }
 }
 
-fn persist_registry_after_timeline_creation(
-    store: &mut dyn EventStore,
+fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
+    store: &mut S,
     timeline: Timeline,
     expected_registry: &crate::KeyRegistryStateV1,
 ) -> Result<Timeline, CoreError> {
