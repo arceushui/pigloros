@@ -77,6 +77,7 @@ pub fn schema_id_for_event_type(event_type: &str) -> u32 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod coverage_entrypoints {
     use super::*;
 
