@@ -2574,6 +2574,57 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn evidence_serialization_failures_are_propagated() {
+        let (report, _, _) = test_ok(run_local_and_air_gapped(input()));
+        let expected = ComparisonV1 {
+            equal: true,
+            divergence: DivergenceClassV1::None,
+            left_digest: [0; 32],
+            right_digest: [0; 32],
+        };
+
+        let mut invalid_baseline = report.baseline.clone();
+        invalid_baseline.uncertainty[0].confidence = f64::NAN;
+        assert!(matches!(
+            compare_with_reference(&invalid_baseline, &report.counterfactual, &expected),
+            Err(MoatProofError::Json(_))
+        ));
+        assert!(matches!(
+            verify_independent_fixture_reproduction(
+                &invalid_baseline,
+                &report.counterfactual,
+                &expected,
+            ),
+            Err(MoatProofError::Json(_))
+        ));
+
+        let mut invalid_counterfactual = report.counterfactual.clone();
+        invalid_counterfactual.uncertainty[0].confidence = f64::NAN;
+        assert!(matches!(
+            verify_independent_fixture_reproduction(
+                &report.baseline,
+                &invalid_counterfactual,
+                &expected,
+            ),
+            Err(MoatProofError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn reaction_gate_failure_is_reported_for_a_non_diverging_fork() {
+        let mut input = input();
+        input.fork_velocity = input.initial_velocity;
+        assert!(matches!(
+            MoatProofRun {
+                input,
+                mode: ExecutionModeV1::Local,
+            }
+            .run(),
+            Err(MoatProofError::ReactionGatesFailed)
+        ));
+    }
+
+    #[test]
     fn input_and_helper_edges_are_instrumented() {
         let mut value = input();
         value.scenario_id.clear();
