@@ -594,13 +594,8 @@ pub mod fixtures {
         profile.fixtures[0].provenance.publication_review_digest =
             profile.fixtures[0].provenance.notices_digest;
         profile.profile_digest = profile.digest();
-        let (mut members, expected_result) =
+        let (members, expected_result) =
             candidate_members(&profile, provenance_bytes, authority_members);
-        members.push(BundleMemberV1::supporting(
-            "support/publication-review",
-            include_bytes!("../../../fixtures/conformance/support/NOTICE").to_vec(),
-            BundleMemberRoleV1::Provenance,
-        ));
         Ok(ConformanceBundleV1::materialize(
             &profile,
             BundleModeV1::Local,
@@ -1001,7 +996,11 @@ fn archive_without_first_fixture_input(
             (index, path)
         };
         archive_array(value, 3)?.remove(member_index);
-        let descriptors = archive_array(value, 2)?;
+        let manifest = archive_array(value, 2)?;
+        let descriptors = match manifest.get_mut(4) {
+            Some(Value::Array(descriptors)) => descriptors,
+            _ => return Err("archive descriptors are missing".into()),
+        };
         let descriptor_index = descriptors
             .iter()
             .position(|descriptor| {
