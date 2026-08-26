@@ -129,6 +129,18 @@ mod tests {
     }
 
     #[test]
+    fn verify_path_rejects_a_directory_after_opening_it() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let path =
+            std::env::temp_dir().join(format!("pigloros-directory-cfb1-{}", std::process::id()));
+        fs::create_dir(&path)?;
+        let result = verify_path(&path);
+        fs::remove_dir(&path)?;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
     fn bounded_reader_rejects_declared_and_observed_oversize() {
         assert!(read_bounded(Cursor::new([]), 6, 5).is_err());
         assert!(read_bounded(Cursor::new([0_u8; 6]), 5, 5).is_err());
