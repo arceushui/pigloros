@@ -401,13 +401,16 @@ impl ConformanceBundleV1 {
         mut self,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Result<Self, BundleContractErrorV1> {
-        self.validate_unsigned()?;
-        let bytes = self.manifest_bytes()?;
-        self.signer_public_key = PublicKey::from_bytes(signing_key.verifying_key().to_bytes());
-        self.signature = signing::sign(signing_key, &CanonicalBytes::from_vec(bytes));
-        self.validate()
-            .map(|()| self)
-            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+        self.validate_unsigned().and_then(|()| {
+            self.manifest_bytes().and_then(|bytes| {
+                self.signer_public_key =
+                    PublicKey::from_bytes(signing_key.verifying_key().to_bytes());
+                self.signature = signing::sign(signing_key, &CanonicalBytes::from_vec(bytes));
+                self.validate()
+                    .map(|()| self)
+                    .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+            })
+        })
     }
 
     /// Validate bytes, manifest declarations, profile binding, expected
@@ -418,12 +421,16 @@ impl ConformanceBundleV1 {
     /// Returns a closed error for any content, archive, profile, or signature
     /// violation.
     pub fn validate(&self) -> Result<(), BundleContractErrorV1> {
-        self.validate_unsigned()?;
-        let key = signing::verifying_key_from_public_key(&self.signer_public_key)
-            .map_err(|_| BundleContractErrorV1::SignatureInvalid)?;
-        let bytes = self.manifest_bytes()?;
-        signing::verify(&key, &CanonicalBytes::from_vec(bytes), &self.signature)
-            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+        self.validate_unsigned().and_then(|()| {
+            signing::verifying_key_from_public_key(&self.signer_public_key)
+                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                .and_then(|key| {
+                    self.manifest_bytes().and_then(|bytes| {
+                        signing::verify(&key, &CanonicalBytes::from_vec(bytes), &self.signature)
+                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                    })
+                })
+        })
     }
 
     /// Return the content address of the canonical manifest.
@@ -575,11 +582,11 @@ impl ConformanceBundleV1 {
     /// Returns a closed error when validation, selected hard caps, or canonical
     /// encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
-        self.validate()?;
-        let value = bundle_value(self);
-        let bytes = encode_archive_value(&value)?;
-        validate_archive_caps(self, &value, bytes.len())?;
-        Ok(bytes)
+        self.validate().and_then(|()| {
+            let value = bundle_value(self);
+            encode_archive_value(&value)
+                .and_then(|bytes| validate_archive_caps(self, &value, bytes.len()).map(|()| bytes))
+        })
     }
 
     /// Decode and validate complete canonical public archive bytes.
