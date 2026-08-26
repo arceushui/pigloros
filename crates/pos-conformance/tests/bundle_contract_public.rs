@@ -1039,13 +1039,14 @@ fn replace_member_bytes(
     let path = bundle.members[member_index].path.clone();
     bundle.members[member_index].bytes = bytes;
     bundle.members[member_index].digest = digest;
+    let size_bytes = u64::try_from(bundle.members[member_index].bytes.len())?;
     let descriptor = bundle
         .manifest
         .members
         .iter_mut()
         .find(|descriptor| descriptor.path == path)
         .ok_or("JSON descriptor is missing")?;
-    descriptor.size_bytes = bundle.members[member_index].bytes.len() as u64;
+    descriptor.size_bytes = size_bytes;
     descriptor.digest = digest;
     Ok(())
 }
