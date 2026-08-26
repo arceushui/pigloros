@@ -1568,6 +1568,89 @@ mod tests {
         Ok(())
     }
 
+    fn candidate_authority_inventory(root: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut inventory: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../../fixtures/conformance/expected-authority/inventory.json"
+        ))?;
+        inventory["lifecycle"] = JsonValue::String("Candidate".to_owned());
+        let entries = inventory
+            .get_mut("entries")
+            .and_then(JsonValue::as_array_mut)
+            .ok_or("candidate inventory entries are missing")?;
+        for entry in entries {
+            let fixture_id = entry
+                .get("fixture_id")
+                .and_then(JsonValue::as_str)
+                .ok_or("candidate fixture id is missing")?
+                .to_owned();
+            let fixture_path = format!("fixtures/{fixture_id}.json");
+            let result_path = format!("results/{fixture_id}.json");
+            let fixture_bytes = serde_json::to_vec(&serde_json::json!({
+                "fixture_id": fixture_id,
+                "kind": "fixture"
+            }))?;
+            let result_bytes = serde_json::to_vec(&serde_json::json!({
+                "fixture_id": fixture_id,
+                "kind": "result"
+            }))?;
+            for (path, bytes, path_field, digest_field) in [
+                (
+                    fixture_path.as_str(),
+                    fixture_bytes.as_slice(),
+                    "fixture_bytes_path",
+                    "fixture_bytes_digest",
+                ),
+                (
+                    result_path.as_str(),
+                    result_bytes.as_slice(),
+                    "expected_result_path",
+                    "expected_result_digest",
+                ),
+            ] {
+                let path = root.join(path);
+                assert!(
+                    std::fs::create_dir_all(path.parent().ok_or("authority parent missing")?)
+                        .is_ok()
+                );
+                assert!(std::fs::write(&path, bytes).is_ok());
+                entry[path_field] =
+                    JsonValue::String(path.strip_prefix(root)?.display().to_string());
+                entry[digest_field] = JsonValue::String(hex(blake3::hash(bytes).as_bytes()));
+            }
+            entry["materialization_status"] = JsonValue::String("materialized".to_owned());
+        }
+        serde_json::to_vec(&inventory).map_err(Into::into)
+    }
+
+    #[test]
+    fn materializer_entrypoint_materializes_candidate_authority_bundles(
+    ) -> Result<(), Box<dyn Error>> {
+        let authority_root = output_root("candidate-entrypoint-authority");
+        let inventory = candidate_authority_inventory(&authority_root)?;
+        let output = output_root("candidate-entrypoint-output");
+        let mut arguments = [
+            OsString::from("materialize"),
+            output.clone().into_os_string(),
+        ]
+        .into_iter();
+        let result = run_with_inventory_and_authority(
+            &mut arguments,
+            Ok(signing_key_hex()),
+            &inventory,
+            Some(&authority_root),
+        );
+        let artifact_candidate = output.join("artifact-integrity/candidate").is_dir();
+        let empirical_candidate = output.join("empirical-evaluation/candidate").is_dir();
+        let output_removed = std::fs::remove_dir_all(output);
+        let authority_removed = std::fs::remove_dir_all(authority_root);
+        assert!(result.is_ok());
+        assert!(artifact_candidate);
+        assert!(empirical_candidate);
+        assert!(output_removed.is_ok());
+        assert!(authority_removed.is_ok());
+        Ok(())
+    }
+
     #[test]
     fn helper_validation_seams_cover_materialization_errors() -> Result<(), Box<dyn Error>> {
         let candidate = br#"{"lifecycle":"Candidate"}"#;
@@ -1693,58 +1776,8 @@ mod tests {
     fn canonical_records_bind_fixture_families_and_candidate_authority(
     ) -> Result<(), Box<dyn Error>> {
         assert_canonical_profiles_bind_fixture_families()?;
-        let mut inventory: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../../fixtures/conformance/expected-authority/inventory.json"
-        ))?;
-        inventory["lifecycle"] = JsonValue::String("Candidate".to_owned());
-        let entries = inventory
-            .get_mut("entries")
-            .and_then(JsonValue::as_array_mut)
-            .ok_or("candidate inventory entries are missing")?;
         let root = output_root("candidate-authority");
-        for entry in entries {
-            let fixture_id = entry
-                .get("fixture_id")
-                .and_then(JsonValue::as_str)
-                .ok_or("candidate fixture id is missing")?
-                .to_owned();
-            let fixture_path = format!("fixtures/{fixture_id}.json");
-            let result_path = format!("results/{fixture_id}.json");
-            let fixture_bytes = serde_json::to_vec(&serde_json::json!({
-                "fixture_id": fixture_id,
-                "kind": "fixture"
-            }))?;
-            let result_bytes = serde_json::to_vec(&serde_json::json!({
-                "fixture_id": fixture_id,
-                "kind": "result"
-            }))?;
-            for (path, bytes, path_field, digest_field) in [
-                (
-                    fixture_path.as_str(),
-                    fixture_bytes.as_slice(),
-                    "fixture_bytes_path",
-                    "fixture_bytes_digest",
-                ),
-                (
-                    result_path.as_str(),
-                    result_bytes.as_slice(),
-                    "expected_result_path",
-                    "expected_result_digest",
-                ),
-            ] {
-                let path = root.join(path);
-                assert!(
-                    std::fs::create_dir_all(path.parent().ok_or("authority parent missing")?)
-                        .is_ok()
-                );
-                assert!(std::fs::write(&path, bytes).is_ok());
-                entry[path_field] =
-                    JsonValue::String(path.strip_prefix(&root)?.display().to_string());
-                entry[digest_field] = JsonValue::String(hex(blake3::hash(bytes).as_bytes()));
-            }
-            entry["materialization_status"] = JsonValue::String("materialized".to_owned());
-        }
-        let inventory_bytes = serde_json::to_vec(&inventory)?;
+        let inventory_bytes = candidate_authority_inventory(&root)?;
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         assert!(bundle_inputs_with_authority(
             &profile,
