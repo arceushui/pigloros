@@ -3852,7 +3852,10 @@ mod tests {
         fixture[0] = Value::Text("case-rebound".to_owned());
         replace_profile_bytes(&mut mismatched_path, &encode_archive_value(&profile_value)?)?;
         resign_archive(&mut mismatched_path)?;
-        assert_independent_error(&mismatched_path, BundleContractErrorV1::UndeclaredMember)?;
+        assert_independent_error(
+            &mismatched_path,
+            BundleContractErrorV1::ExpectedResultMismatch,
+        )?;
 
         Ok(())
     }
@@ -4922,7 +4925,7 @@ mod tests {
         unbound_support.rebuild_member_descriptors();
         assert_eq!(
             unbound_support.validate(),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
 
         let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
@@ -5555,7 +5558,7 @@ mod tests {
         // before it reaches Candidate publication-evidence validation.
         assert_eq!(
             materialize_candidate_for_test(&mismatched_review_profile, &approved_members)?,
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::CandidateEvidenceMissing)
         );
         Ok(())
     }
@@ -5646,6 +5649,7 @@ mod tests {
         }
         let candidate_matrix_bytes = serde_json::to_vec(&candidate_matrix)?;
         let candidate_matrix_digest = *blake3::hash(&candidate_matrix_bytes).as_bytes();
+        candidate.bind_execution_matrix_digest(candidate_matrix_digest)?;
 
         let mut provenance: JsonValue = serde_json::from_slice(include_bytes!(
             "../../../fixtures/conformance/support/provenance.json"
@@ -5847,7 +5851,7 @@ mod tests {
             .clear();
         assert_eq!(
             validate_supporting_members(&profile, &empty),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::MemberMissing)
         );
 
         let mut unbound = members;
@@ -5858,7 +5862,7 @@ mod tests {
         ));
         assert_eq!(
             validate_supporting_members(&profile, &unbound),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
         Ok(())
     }
@@ -8733,7 +8737,7 @@ mod coverage_entrypoints {
         empty_support[support_index].bytes.clear();
         assert_eq!(
             validate_supporting_members(&profile, &empty_support),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::MemberMissing)
         );
         let mut invalid_expected = bundle.manifest.clone();
         invalid_expected.expected_results[0].digest = [0; 32];
@@ -8832,7 +8836,7 @@ mod instrumented_candidate_entrypoints {
                 unbound_inventory,
                 expected_results,
             ),
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         Ok(())
     }
