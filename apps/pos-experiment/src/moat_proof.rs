@@ -3028,4 +3028,52 @@ mod run_coverage_entrypoints {
         cover_agent_reducer(agent_entity, &above_event, reaction_payload);
         cover_society_driver(timeline, &above_event);
     }
+
+    #[test]
+    fn reachable_orchestration_error_edges_are_exercised() {
+        let mut invalid = proof_input();
+        invalid.ticks = 0;
+        assert!(matches!(
+            run_local_and_air_gapped(invalid),
+            Err(MoatProofError::Input(
+                pos_conformance::InputError::TicksOutOfRange
+            ))
+        ));
+
+        let mut topology = test_ok(ProofTopology::new(proof_input()));
+        topology.agent_plugin.id = topology.world_plugin.id();
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "duplicate-agent-registration".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        });
+        assert!(register_plugins(&mut experiment, &topology).is_err());
+
+        let plugin = FailureProbePlugin {
+            id: PluginId::new(),
+        };
+        let mut failing_experiment = Experiment::new(ExperimentConfig {
+            name: "finish-propagates-driver-error".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        });
+        assert!(
+            failing_experiment
+                .register(
+                    &plugin,
+                    None,
+                    Some(Box::new(FailureProbeDriver {
+                        class: "unknown",
+                        resource_limit: 100,
+                    })),
+                )
+                .is_ok(),
+            "failure probe registration must succeed"
+        );
+        let mut session = match failing_experiment.start() {
+            Ok(session) => session,
+            Err(error) => panic!("failure probe experiment must start: {error:?}"),
+        };
+        assert!(finish(&mut session).is_err());
+    }
 }

@@ -1888,6 +1888,29 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn ledger_signing_registry_requires_both_key_fingerprints() {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (different_key, _) = pos_crypto::signing::generate_keypair();
+        let persisted_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2);
+        let mut persisted = KeyRegistryStateV1::new();
+        assert!(
+            persisted
+                .register_key(KeyRegistrationV1::new(
+                    persisted_identity,
+                    key_material_digest(&different_key.to_bytes()),
+                    Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+                ))
+                .is_ok(),
+            "test registry registration must succeed"
+        );
+
+        let (_, identity) = ledger_signing_registry(&signing_key, Some(&persisted));
+
+        assert_eq!(identity.epoch, 1);
+    }
+
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
