@@ -71,7 +71,8 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
         ],
     )?;
 
-    let error = match verify_source(&Source::Store(database_path), None, None) {
+    let anchor = "aa".repeat(32);
+    let error = match verify_source(&Source::Store(database_path), Some(&anchor), None) {
         Ok(report) => return Err(format!("malformed identity produced a report: {report}").into()),
         Err(error) => error,
     };
@@ -120,7 +121,15 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
     )?;
     drop(store);
 
-    let error = match verify_source(&Source::Store(database_path), None, None) {
+    let invalid_public_key_hex = invalid_public_key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let error = match verify_source(
+        &Source::Store(database_path),
+        Some(&invalid_public_key_hex),
+        None,
+    ) {
         Ok(report) => {
             return Err(format!("invalid registry key produced a report: {report}").into())
         }
@@ -169,7 +178,9 @@ fn public_store_verification_accepts_a_registry_bound_signature(
         "https://osf.io/example".to_owned(),
     ])?;
 
-    let report = verify_source(&Source::Store(database_path), None, None)?;
+    let secret = std::fs::read_to_string(&key_path)?;
+    let pubkey = piglor_ledger::test_helpers::derive_pubkey_hex(&secret);
+    let report = verify_source(&Source::Store(database_path), Some(&pubkey), None)?;
     assert!(report.to_string().starts_with("OK: store"));
     Ok(())
 }
