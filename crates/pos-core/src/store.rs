@@ -6,7 +6,7 @@
 //! |--------|--------|--------|-------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] | Remints timeline/event ids; converts to drafts (signatures dropped) |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] | Parent first, then child; forks need `parent_fork_hash` |
-//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must carry a role/epoch-bound signature under one key |
+//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must carry an owner/role/epoch-bound signature under one key |
 //!
 //! Prefer [`export_timeline_own`] (alias: [`export_timeline_cow`]) for copy-on-write sync.
 //! [`export_timeline_raw`] is the same function kept for existing call sites.
@@ -765,7 +765,7 @@ pub trait EventStore: Send {
         ))
     }
 
-    /// Load the durable role/epoch registry owned by this store, when present.
+    /// Load the durable owner-scoped key registry owned by this store, when present.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the backend cannot read the registry
@@ -775,7 +775,7 @@ pub trait EventStore: Send {
         Ok(None)
     }
 
-    /// Replace the durable role/epoch registry owned by this store.
+    /// Replace the durable owner-scoped key registry owned by this store.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the adapter cannot persist the
@@ -801,6 +801,7 @@ pub trait EventStore: Send {
     /// Returns [`CoreError::Storage`] when the registry changed since the
     /// caller authorized it, when the backend cannot persist the registry or
     /// create the Timeline, or when rollback itself fails.
+    #[cfg_attr(test, inline(never))]
     fn initialize_timeline_with_key_registry(
         &mut self,
         name: &str,
@@ -838,7 +839,7 @@ pub trait EventStore: Send {
     /// Durable stores must hold their database-wide serialization boundary across
     /// both the registry recheck and the event append.  The default is a closed
     /// snapshot check for small in-memory adapters; `SQLite` overrides it with one
-    /// transaction so another connection cannot destroy the key between the
+    /// transaction so another connection cannot destroy the owner-scoped key between the
     /// authorization callback and append.
     ///
     /// # Errors
@@ -865,25 +866,53 @@ pub trait EventStore: Send {
         self.append_committed(timeline, &[event])
     }
 
-    /// Atomically destroy a registry identity and return the committed state.
+    /// Persist the `DestructionPending` state and return the resulting snapshot.
     ///
-    /// Durable stores must serialize destruction with authorized appends.  The
-    /// default implementation composes the existing snapshot operations for
-    /// adapters without a stronger transaction primitive; `SQLite` overrides it
-    /// with one database transaction.
+    /// This is intentionally separate from [`Self::complete_key_registry_destruction`].
+    /// An owned-material adapter must delete its private bytes between these
+    /// durable commits; a crash in that interval therefore leaves authorization
+    /// revoked and the request recoverable rather than falsely claiming a final
+    /// tombstone.
     ///
     /// # Errors
     /// Returns [`CoreError::Storage`] when the registry is unavailable, the
     /// request is invalid, or persistence fails.
-    fn destroy_key_registry(
+    fn begin_key_registry_destruction(
         &mut self,
         request: crate::KeyDestructionRequestV1,
+    ) -> Result<
+        (
+            crate::KeyDestructionBeginOutcomeV1,
+            crate::KeyRegistryStateV1,
+        ),
+        CoreError,
+    > {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .begin_key_destruction(request)
+            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
+    }
+
+    /// Persist the final `Destroyed` tombstone after private-material deletion
+    /// has been acknowledged by the owned-material adapter.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the registry is unavailable, the
+    /// request/receipt is invalid, or persistence fails.
+    fn complete_key_registry_destruction(
+        &mut self,
+        request: crate::KeyDestructionRequestV1,
+        deletion_receipt: crate::Hash,
     ) -> Result<(crate::KeyDestructionOutcomeV1, crate::KeyRegistryStateV1), CoreError> {
         let mut registry = self
             .load_key_registry()?
             .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
         let outcome = registry
-            .destroy_key(request)
+            .complete_key_destruction(request, deletion_receipt)
             .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
         self.save_key_registry(&registry)?;
         Ok((outcome, registry))
@@ -1044,8 +1073,8 @@ pub fn import_timeline(
 /// returned (the id may remain occupied).
 ///
 /// Signatures are persisted as opaque blobs; cryptographic verification is the caller's
-/// responsibility. For role-bound Event signatures, resolve the persisted identity and
-/// use `pos_crypto::key_roles::verify_for_role` with the event's role and epoch.
+/// responsibility. For owner-scoped role-bound Event signatures, resolve the persisted
+/// identity and use `pos_crypto::key_roles::verify_for_role` with that identity.
 ///
 /// # Errors
 /// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists,
@@ -1226,7 +1255,7 @@ pub fn validate_committed_batch(
     Ok(ordered)
 }
 
-/// Validate the role/epoch binding of a committed event signature.
+/// Validate the owner/role/epoch binding of a committed event signature.
 ///
 /// An unsigned event has neither field. A signed event must carry a non-zero
 /// Timeline-integrity identity; an identity without a signature is never valid.
@@ -1243,19 +1272,19 @@ pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
     match (event.signature.as_ref(), event.signature_identity) {
         (None, None) => Ok(()),
         (Some(_), None) => Err(CoreError::Storage(
-            "signed event must carry a role/epoch identity".to_owned(),
+            "signed event must carry an owner/role/epoch identity".to_owned(),
         )),
         (Some(_), Some(identity)) => {
             if identity.epoch == 0 || identity.role != crate::KeyRoleV1::TimelineIntegritySigning {
                 return Err(CoreError::Storage(
-                    "signed event must carry a TimelineIntegritySigning role/epoch identity"
+                    "signed event must carry a TimelineIntegritySigning owner/role/epoch identity"
                         .to_owned(),
                 ));
             }
             Ok(())
         }
         (None, Some(_)) => Err(CoreError::Storage(
-            "signed event must carry a signature for its role/epoch identity".to_owned(),
+            "signed event must carry a signature for its owner/role/epoch identity".to_owned(),
         )),
     }
 }
@@ -1635,8 +1664,12 @@ mod tests {
         assert!(error.to_string().contains("unavailable"));
 
         let error = store
-            .destroy_key_registry(crate::KeyDestructionRequestV1::new(
-                crate::KeyIdentityV1::new(crate::KeyRoleV1::TimelineIntegritySigning, 1),
+            .begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
+                crate::KeyIdentityV1::new(
+                    "test-owner",
+                    crate::KeyRoleV1::TimelineIntegritySigning,
+                    1,
+                ),
                 crate::Hash::from_bytes([1; 32]),
                 crate::Hash::from_bytes([2; 32]),
             ))
@@ -1648,7 +1681,8 @@ mod tests {
     #[test]
     fn default_key_registry_methods_cover_authorized_paths(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let identity = crate::KeyIdentityV1::new(crate::KeyRoleV1::TimelineIntegritySigning, 1);
+        let identity =
+            crate::KeyIdentityV1::new("test-owner", crate::KeyRoleV1::TimelineIntegritySigning, 1);
         let material_digest = crate::Hash::from_bytes([1; 32]);
         let mut registry = crate::KeyRegistryStateV1::new();
         registry.register_key(crate::KeyRegistrationV1::new(
@@ -1717,7 +1751,10 @@ mod tests {
             material_digest,
             crate::Hash::from_bytes([3; 32]),
         );
-        let (outcome, destroyed) = store.destroy_key_registry(request)?;
+        let (begin, _pending) = store.begin_key_registry_destruction(request)?;
+        assert_eq!(begin, crate::KeyDestructionBeginOutcomeV1::Started);
+        let (outcome, destroyed) =
+            store.complete_key_registry_destruction(request, crate::deletion_receipt(&request))?;
         assert!(matches!(
             outcome,
             crate::KeyDestructionOutcomeV1::Destroyed(_)
@@ -2022,6 +2059,7 @@ mod tests {
             (
                 None,
                 Some(crate::KeyIdentityV1::new(
+                    "test-owner",
                     crate::KeyRoleV1::TimelineIntegritySigning,
                     1,
                 )),
@@ -2483,10 +2521,13 @@ mod tests {
             &match_hasher,
         )
         .test_err()?;
-        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("role/epoch identity")));
+        assert!(
+            matches!(err, CoreError::Storage(ref m) if m.contains("owner/role/epoch identity"))
+        );
 
         let mut identity_without_signature = validation_test_event(1, crate::ids::EventId::new());
         identity_without_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            "test-owner",
             crate::KeyRoleV1::TimelineIntegritySigning,
             1,
         ));
@@ -2502,6 +2543,7 @@ mod tests {
         let mut zero_epoch_signature = validation_test_event(1, crate::ids::EventId::new());
         zero_epoch_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
         zero_epoch_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            "test-owner",
             crate::KeyRoleV1::TimelineIntegritySigning,
             0,
         ));
@@ -2517,6 +2559,7 @@ mod tests {
         let mut encryption_signature = validation_test_event(1, crate::ids::EventId::new());
         encryption_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
         encryption_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            "test-owner",
             crate::KeyRoleV1::SubjectDataEncryption,
             1,
         ));
@@ -3919,7 +3962,7 @@ mod key_registry_coverage {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn registered_state(
     ) -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
-        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let material_digest = Hash::from_bytes([3; 32]);
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
@@ -4000,25 +4043,27 @@ mod key_registry_coverage {
             Hash::from_bytes([2; 32]),
         );
         assert!(matches!(
-            store.destroy_key_registry(invalid_request),
+            store.begin_key_registry_destruction(invalid_request),
             Err(CoreError::Storage(_))
         ));
 
         let mut load_destroy_failure = PersistedStore::new(registry.clone());
         load_destroy_failure.failure = PersistedFailure::Load;
         assert!(matches!(
-            load_destroy_failure.destroy_key_registry(crate::KeyDestructionRequestV1::new(
-                identity,
-                material_digest,
-                Hash::from_bytes([2; 32]),
-            )),
+            load_destroy_failure.begin_key_registry_destruction(
+                crate::KeyDestructionRequestV1::new(
+                    identity,
+                    material_digest,
+                    Hash::from_bytes([2; 32]),
+                )
+            ),
             Err(CoreError::Storage(_))
         ));
 
         let mut save_failure = PersistedStore::new(registry.clone());
         save_failure.failure = PersistedFailure::Save;
         assert!(matches!(
-            save_failure.destroy_key_registry(crate::KeyDestructionRequestV1::new(
+            save_failure.begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
                 identity,
                 material_digest,
                 Hash::from_bytes([2; 32]),
@@ -4048,8 +4093,8 @@ mod key_registry_coverage {
             Err(CoreError::Storage(_))
         ));
         assert!(matches!(
-            store.destroy_key_registry(crate::KeyDestructionRequestV1::new(
-                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+            store.begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
                 Hash::from_bytes([1; 32]),
                 Hash::from_bytes([2; 32]),
             )),
@@ -4097,8 +4142,57 @@ mod key_registry_coverage {
             material_digest,
             Hash::from_bytes([2; 32]),
         );
-        let (_, destroyed) = store.destroy_key_registry(request)?;
+        store.begin_key_registry_destruction(request)?;
+        let (_, destroyed) =
+            store.complete_key_registry_destruction(request, crate::deletion_receipt(&request))?;
         assert!(destroyed.key_record(identity).is_some());
         Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn complete_key_registry_destruction_propagates_load_and_save_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let request = crate::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            Hash::from_bytes([2; 32]),
+        );
+
+        let mut load_failure = PersistedStore::new(registry.clone());
+        load_failure.failure = PersistedFailure::Load;
+        assert!(matches!(
+            load_failure
+                .complete_key_registry_destruction(request, crate::deletion_receipt(&request),),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut save_failure = PersistedStore::new(registry);
+        save_failure.begin_key_registry_destruction(request)?;
+        save_failure.failure = PersistedFailure::Save;
+        assert!(matches!(
+            save_failure
+                .complete_key_registry_destruction(request, crate::deletion_receipt(&request),),
+            Err(CoreError::Storage(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn existing_timeline_without_registry_propagates_save_failure() {
+        let mut store = MinimalStore::new();
+        assert!(store
+            .initialize_timeline_with_key_registry(
+                "minimal-key-registry",
+                &KeyRegistryStateV1::new(),
+            )
+            .is_err());
+
+        let registry = KeyRegistryStateV1::new();
+        let mut persisted = PersistedStore::new(registry.clone());
+        assert!(persisted
+            .initialize_timeline_with_key_registry("persisted-key-registry", &registry)
+            .is_ok());
     }
 }

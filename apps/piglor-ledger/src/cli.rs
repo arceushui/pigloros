@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use pos_core::{ids::TimelineId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1};
+use pos_core::{
+    ids::TimelineId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+};
 use pos_crypto::chain::Blake3Hasher;
 use pos_crypto::{
     key_roles::key_material_digest,
@@ -21,6 +23,8 @@ use pos_store::StoreConfig;
 
 use crate::hex::hex_decode;
 use crate::{hex_encode, render_html, render_json, render_redirect, CliError};
+
+const LEDGER_OWNER_ID: OwnerIdV1 = OwnerIdV1::from_static("piglor-ledger");
 
 /// Parsed `--source toml:DIR|store:DB` value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,14 +84,16 @@ fn ledger_signing_registry(
     let material_digest = key_material_digest(signing_key.as_bytes());
     let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
     let identity = persisted_registry
-        .and_then(|registry| registry.active_key(KeyRoleV1::TimelineIntegritySigning))
+        .and_then(|registry| {
+            registry.active_key(&LEDGER_OWNER_ID, KeyRoleV1::TimelineIntegritySigning)
+        })
         .map_or(
-            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+            KeyIdentityV1::from_parts(LEDGER_OWNER_ID, KeyRoleV1::TimelineIntegritySigning, 1),
             |record| record.identity,
         );
     let mut registry = persisted_registry.cloned().unwrap_or_default();
     if persisted_registry.is_none() {
-        // The initial role/epoch and generated key material are valid by
+        // The initial owner/role/epoch and generated key material are valid by
         // construction. Later epochs come from the durable active registry.
         register_initial_key(
             &mut registry,
@@ -1873,7 +1879,7 @@ mod tests {
     fn ledger_signing_registry_rejects_invalid_identity() -> Result<(), Box<dyn std::error::Error>>
     {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
-        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 0);
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 0);
         let mut registry = KeyRegistryStateV1::new();
         let error = registry
             .register_key(KeyRegistrationV1::new(
@@ -1892,7 +1898,8 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (different_key, _) = pos_crypto::signing::generate_keypair();
-        let persisted_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2);
+        let persisted_identity =
+            KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 2);
         let mut persisted = KeyRegistryStateV1::new();
         assert!(
             persisted
@@ -1921,7 +1928,7 @@ mod tests {
         let key_text = std::fs::read_to_string(&key_path).test_ok()?;
         let bytes = crate::hex::hex_decode(key_text.trim()).test_ok()?;
         let signing_key = ed25519_dalek::SigningKey::from_bytes(bytes.as_slice().try_into()?);
-        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2);
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 2);
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
             identity,
@@ -2533,7 +2540,7 @@ mod coverage_entrypoints {
     #[test]
     fn initial_registration_reports_registry_rejection() -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, _) = generate_keypair();
-        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 0);
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 0);
         let mut registry = KeyRegistryStateV1::new();
         let error = register_initial_key(
             &mut registry,
@@ -2563,5 +2570,26 @@ mod coverage_entrypoints {
         ])
         .test_ok()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_regressions {
+    use super::*;
+
+    #[test]
+    fn initial_registration_failure_is_instrumented() {
+        let (signing_key, _) = generate_keypair();
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 0);
+        let mut registry = KeyRegistryStateV1::new();
+        assert!(register_initial_key(
+            &mut registry,
+            KeyRegistrationV1::new(
+                identity,
+                key_material_digest(signing_key.as_bytes()),
+                Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+            ),
+        )
+        .is_err());
     }
 }

@@ -148,7 +148,7 @@ pub struct MemoryStore {
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     /// Trusted Gateway authority bound to this adapter's protected append port.
     consent_authority_permit: Option<ConsentAppendPermit>,
-    /// Durable-equivalent role/epoch registry for adapter tests.
+    /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
@@ -4885,7 +4885,7 @@ mod tests {
         let mut persisted = KeyRegistryStateV1::new();
         persisted
             .register_key(KeyRegistrationV1::new(
-                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
                 Hash::from_bytes([3; 32]),
                 Some(PublicKey::from_bytes([4; 32])),
             ))
@@ -4982,7 +4982,7 @@ mod coverage_entrypoints {
             }
         }
 
-        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let mut registry = KeyRegistryStateV1::new();
         ok(registry.register_key(KeyRegistrationV1::new(
             identity,

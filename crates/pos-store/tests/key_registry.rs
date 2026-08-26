@@ -48,7 +48,7 @@ fn replace_first_bytes(value: &mut ciborium::value::Value, from: &[u8; 32], to: 
 }
 
 fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
-    let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let material_digest = Hash::from_bytes([3; 32]);
     let mut registry = KeyRegistryStateV1::new();
     registry.register_key(KeyRegistrationV1::new(
@@ -57,6 +57,14 @@ fn registry() -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::
         Some(pos_core::PublicKey::from_bytes([4; 32])),
     ))?;
     Ok((registry, identity, material_digest))
+}
+
+fn destroy_store<S: EventStore>(
+    store: &mut S,
+    request: KeyDestructionRequestV1,
+) -> Result<(pos_core::KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+    store.begin_key_registry_destruction(request)?;
+    store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))
 }
 
 fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, CoreError> {
@@ -133,15 +141,15 @@ fn sqlite_key_registry_public_contract_covers_persistence_and_authorization(
         Hash::from_bytes([2; 32]),
     );
     assert!(matches!(
-        store.destroy_key_registry(invalid_request),
+        store.begin_key_registry_destruction(invalid_request),
         Err(CoreError::Storage(_))
     ));
 
     let valid_request =
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
-    let (_, destroyed) = store.destroy_key_registry(valid_request)?;
+    let (_, destroyed) = destroy_store(&mut store, valid_request)?;
     assert!(destroyed.key_record(identity).is_some());
-    let (already_destroyed, same_state) = store.destroy_key_registry(valid_request)?;
+    let (already_destroyed, same_state) = destroy_store(&mut store, valid_request)?;
     assert!(matches!(
         already_destroyed,
         pos_core::KeyDestructionOutcomeV1::AlreadyDestroyed(_)
@@ -260,7 +268,7 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         }
 
         let destroy_handle = scope.spawn(move || {
-            let result = destruction_store.destroy_key_registry(destruction_request);
+            let result = destroy_store(&mut destruction_store, destruction_request);
             destruction_done_tx.send(()).map_err(|_| {
                 CoreError::Storage("destruction completion signal failed".to_owned())
             })?;
@@ -385,6 +393,44 @@ fn sqlite_key_registry_mutations_reject_read_only_transactions(
     ));
     assert!(matches!(
         read_only.initialize_timeline_with_key_registry("another", &registry),
+        Err(CoreError::Storage(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn sqlite_key_registry_all_mutating_boundaries_reject_read_only_transactions(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (registry, identity, material_digest) = registry()?;
+    let mut setup = SqliteStore::open(path)?;
+    let timeline = setup.initialize_timeline_with_key_registry("ledger", &registry)?;
+    drop(setup);
+
+    let mut read_only = SqliteStore::open_read_only(path)?;
+    assert!(matches!(
+        read_only.initialize_timeline_with_key_registry("another", &registry),
+        Err(CoreError::Storage(_))
+    ));
+    let mut callback = |_: &KeyRegistryStateV1, _: Seq| {
+        Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+    };
+    assert!(matches!(
+        read_only.append_signed_authorized(timeline.id(), &registry, &mut callback),
+        Err(CoreError::Storage(_))
+    ));
+    let request =
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([8; 32]));
+    assert!(matches!(
+        read_only.begin_key_registry_destruction(request),
+        Err(CoreError::Storage(_))
+    ));
+    assert!(matches!(
+        read_only.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request)),
         Err(CoreError::Storage(_))
     ));
     Ok(())
@@ -522,6 +568,32 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
         store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Storage(_))
     ));
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE events SET signature_owner_id = X'0102', signature_role = 1,
+         signature_epoch = 1 WHERE timeline_id = ?1",
+        params![timeline.id().to_string()],
+    )?;
+    drop(connection);
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
+        Err(CoreError::Storage(_))
+    ));
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE events SET signature_owner_id = '', signature_role = 1,
+         signature_epoch = 1 WHERE timeline_id = ?1",
+        params![timeline.id().to_string()],
+    )?;
+    drop(connection);
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
+        Err(CoreError::Serialization(_))
+    ));
     Ok(())
 }
 
@@ -539,11 +611,20 @@ fn sqlite_key_registry_requires_a_persisted_snapshot_for_authorization(
         Err(CoreError::Storage(message)) if message.contains("durable key registry")
     ));
     assert!(matches!(
-        store.destroy_key_registry(KeyDestructionRequestV1::new(
-            KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+        store.begin_key_registry_destruction(KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
             Hash::from_bytes([1; 32]),
             Hash::from_bytes([2; 32]),
         )),
+        Err(CoreError::Storage(message)) if message.contains("durable key registry")
+    ));
+    let request = KeyDestructionRequestV1::new(
+        KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+        Hash::from_bytes([1; 32]),
+        Hash::from_bytes([2; 32]),
+    );
+    assert!(matches!(
+        store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request)),
         Err(CoreError::Storage(message)) if message.contains("durable key registry")
     ));
     Ok(())
@@ -598,14 +679,13 @@ fn memory_key_registry_public_contract_covers_persistence_and_authorization(
         Err(CoreError::TimelineNotFound(_))
     ));
 
-    let (_, destroyed) = store.destroy_key_registry(KeyDestructionRequestV1::new(
-        identity,
-        material_digest,
-        Hash::from_bytes([8; 32]),
-    ))?;
+    let (_, destroyed) = destroy_store(
+        &mut store,
+        KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([8; 32])),
+    )?;
     let request =
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([8; 32]));
-    let (already_destroyed, same_state) = store.destroy_key_registry(request)?;
+    let (already_destroyed, same_state) = destroy_store(&mut store, request)?;
     assert!(matches!(
         already_destroyed,
         pos_core::KeyDestructionOutcomeV1::AlreadyDestroyed(_)

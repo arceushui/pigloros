@@ -1,12 +1,12 @@
-//! Role/epoch-bound cryptographic operations for the key-registry boundary.
+//! Owner-scoped role/epoch-bound cryptographic operations for the key-registry boundary.
 
 use std::fmt;
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
-    CanonicalBytes, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistryEncryptionPortV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1,
-    Signature,
+    deletion_receipt, CanonicalBytes, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
+    KeyRegistrySigningPortV1, Signature,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -144,71 +144,130 @@ impl<E: fmt::Display> fmt::Display for KeyMaterialDestructionError<E> {
 
 impl<E: std::error::Error + 'static> std::error::Error for KeyMaterialDestructionError<E> {}
 
-/// Commit a registry tombstone and then destroy the corresponding owned
-/// signing key.
+/// Persistence boundary used by the private-material destruction helpers.
 ///
-/// The commit callback is the only boundary that can cause the private key to
-/// be destroyed. It must durably commit the supplied request before returning;
-/// if it fails, the key remains available for retry. This keeps logical
-/// revocation and physical destruction in one caller-visible operation.
+/// Implementations must make `begin` durable before returning and must make
+/// `complete` durable only after the caller has destroyed its private
+/// material. Keeping both phases on one mutable object prevents callers from
+/// accidentally constructing two callbacks that borrow the same registry.
+pub trait KeyDestructionPersistence {
+    /// Error returned by the persistence boundary.
+    type Error;
+
+    /// Persist the pending-destruction state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the persistence boundary's error when the pending state cannot
+    /// be durably recorded.
+    fn begin(
+        &mut self,
+        request: KeyDestructionRequestV1,
+    ) -> Result<KeyDestructionBeginOutcomeV1, Self::Error>;
+
+    /// Persist the final tombstone after private material has been destroyed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the persistence boundary's error when the final tombstone
+    /// cannot be durably recorded.
+    fn complete(
+        &mut self,
+        request: KeyDestructionRequestV1,
+        deletion_receipt: Hash,
+    ) -> Result<KeyDestructionOutcomeV1, Self::Error>;
+}
+
+impl KeyDestructionPersistence for pos_core::KeyRegistryStateV1 {
+    type Error = KeyRegistryErrorV1;
+
+    fn begin(
+        &mut self,
+        request: KeyDestructionRequestV1,
+    ) -> Result<KeyDestructionBeginOutcomeV1, Self::Error> {
+        self.begin_key_destruction(request)
+    }
+
+    fn complete(
+        &mut self,
+        request: KeyDestructionRequestV1,
+        deletion_receipt: Hash,
+    ) -> Result<KeyDestructionOutcomeV1, Self::Error> {
+        self.complete_key_destruction(request, deletion_receipt)
+    }
+}
+
+/// Record pending destruction, destroy the corresponding owned signing key,
+/// and then commit the final tombstone.
+///
+/// The first callback must durably persist `DestructionPending` before
+/// returning. The second callback must durably persist the final tombstone
+/// only after the deletion receipt is available. If either callback fails, the
+/// error is returned and the pending state remains the recovery boundary.
 ///
 /// # Errors
 /// Returns [`KeyMaterialDestructionError::MaterialDigestMismatch`]
 /// when the request does not identify this key, or
-/// [`KeyMaterialDestructionError::Commit`] when the registry rejects the
-/// destruction request. Replaying the same request delegates to the registry
-/// and returns its stable [`KeyDestructionOutcomeV1::AlreadyDestroyed`]
-/// outcome.
-pub fn destroy_registered_signing_key<E, F>(
+/// [`KeyMaterialDestructionError::Commit`] when either registry phase rejects
+/// the request. Replaying the same request is idempotent.
+pub fn destroy_registered_signing_key<P: KeyDestructionPersistence>(
     signing_key: &mut SigningKeyMaterial,
     request: KeyDestructionRequestV1,
-    commit: F,
-) -> Result<KeyDestructionOutcomeV1, KeyMaterialDestructionError<E>>
-where
-    F: FnOnce(KeyDestructionRequestV1) -> Result<KeyDestructionOutcomeV1, E>,
-{
+    persistence: &mut P,
+) -> Result<KeyDestructionOutcomeV1, KeyMaterialDestructionError<P::Error>> {
     let material_digest = signing_key.material_digest;
     if request.expected_material_digest != material_digest {
         return Err(KeyMaterialDestructionError::MaterialDigestMismatch);
     }
-    let outcome = commit(request).map_err(KeyMaterialDestructionError::Commit)?;
+    let begin_outcome = persistence
+        .begin(request)
+        .map_err(KeyMaterialDestructionError::Commit)?;
+    if let KeyDestructionBeginOutcomeV1::AlreadyDestroyed(tombstone) = begin_outcome {
+        signing_key.destroy();
+        return Ok(KeyDestructionOutcomeV1::AlreadyDestroyed(*tombstone));
+    }
     signing_key.destroy();
-    Ok(outcome)
+    persistence
+        .complete(request, deletion_receipt(&request))
+        .map_err(KeyMaterialDestructionError::Commit)
 }
 
-/// Commit a registry tombstone and then destroy the corresponding owned
-/// encryption key.
+/// Record pending destruction, destroy the corresponding owned encryption key,
+/// and then commit the final tombstone.
 ///
 /// # Errors
 /// Returns [`KeyMaterialDestructionError::MaterialDigestMismatch`]
 /// when the request does not identify this key, or
-/// [`KeyMaterialDestructionError::Commit`] when the registry rejects the
-/// destruction request. Replaying the same request delegates to the registry
-/// and returns its stable [`KeyDestructionOutcomeV1::AlreadyDestroyed`]
-/// outcome.
-pub fn destroy_registered_encryption_key<E, F>(
+/// [`KeyMaterialDestructionError::Commit`] when either registry phase rejects
+/// the request. Replaying the same request is idempotent.
+pub fn destroy_registered_encryption_key<P: KeyDestructionPersistence>(
     encryption_key: &mut EncryptionKeyMaterial,
     request: KeyDestructionRequestV1,
-    commit: F,
-) -> Result<KeyDestructionOutcomeV1, KeyMaterialDestructionError<E>>
-where
-    F: FnOnce(KeyDestructionRequestV1) -> Result<KeyDestructionOutcomeV1, E>,
-{
+    persistence: &mut P,
+) -> Result<KeyDestructionOutcomeV1, KeyMaterialDestructionError<P::Error>> {
     let material_digest = encryption_key.material_digest;
     if request.expected_material_digest != material_digest {
         return Err(KeyMaterialDestructionError::MaterialDigestMismatch);
     }
-    let outcome = commit(request).map_err(KeyMaterialDestructionError::Commit)?;
+    let begin_outcome = persistence
+        .begin(request)
+        .map_err(KeyMaterialDestructionError::Commit)?;
+    if let KeyDestructionBeginOutcomeV1::AlreadyDestroyed(tombstone) = begin_outcome {
+        encryption_key.destroy();
+        return Ok(KeyDestructionOutcomeV1::AlreadyDestroyed(*tombstone));
+    }
     encryption_key.destroy();
-    Ok(outcome)
+    persistence
+        .complete(request, deletion_receipt(&request))
+        .map_err(KeyMaterialDestructionError::Commit)
 }
 
 /// Fingerprint private key material without retaining the material in core.
 ///
 /// The fingerprint intentionally does not include role or epoch.  That makes
 /// the core registry able to detect one private key being registered for two
-/// roles or two epochs.  Role and epoch are bound separately by the registry
-/// identity and by [`sign_for_registered_role`].
+/// roles or two epochs. Owner, role, and epoch are bound separately by the
+/// registry identity and by [`sign_for_registered_role`].
 #[must_use]
 pub fn key_material_digest(private_material: &[u8; 32]) -> Hash {
     let mut hasher = blake3::Hasher::new();
@@ -219,15 +278,15 @@ pub fn key_material_digest(private_material: &[u8; 32]) -> Hash {
 
 fn sign_for_role_unchecked(
     signing_key: &SigningKey,
-    role: KeyRoleV1,
-    epoch: u64,
+    identity: KeyIdentityV1,
     payload: &CanonicalBytes,
 ) -> Signature {
-    let message = role_bound_message(role, epoch, payload);
+    let message = role_bound_message(identity, payload);
     Signature::from_bytes(signing_key.sign(&message).to_bytes())
 }
 
-/// Sign a role/epoch-bound payload under the registry's atomic authorization.
+/// Sign an owner-scoped role/epoch-bound payload under the registry's atomic
+/// authorization.
 ///
 /// The registry adapter validates that the identity is active and that the
 /// supplied signing key matches its registered public key and private-material
@@ -254,7 +313,7 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     let material_digest = signing_key.material_digest;
     let public_verification_key = signing_key.public_verification_key;
     registry.with_signing_authorization(identity, material_digest, public_verification_key, || {
-        sign_for_role_unchecked(signing_key_ref, identity.role, identity.epoch, payload)
+        sign_for_role_unchecked(signing_key_ref, identity, payload)
     })
 }
 
@@ -292,37 +351,47 @@ where
     registry.with_encryption_authorization(identity, digest, || operation(material))
 }
 
-/// Verify a role/epoch-bound signature.
+/// Verify an owner-scoped role/epoch-bound signature.
+///
+/// The signed preimage is exactly ADR-065's role-signature format: the
+/// domain, the owner's UTF-8 byte length as a four-byte big-endian integer,
+/// the exact owner bytes, the role code, the epoch as a big-endian integer,
+/// and the canonical payload bytes.
 ///
 /// # Errors
 ///
-/// Returns [`pos_core::CoreError::SignatureVerificationFailed`] if the role,
-/// epoch, payload, or signature does not match.
+/// Returns [`pos_core::CoreError::SignatureVerificationFailed`] if the owner,
+/// role, epoch, payload, or signature does not match.
 pub fn verify_for_role(
     verifying_key: &VerifyingKey,
-    role: KeyRoleV1,
-    epoch: u64,
+    identity: KeyIdentityV1,
     payload: &CanonicalBytes,
     signature: &Signature,
 ) -> Result<(), pos_core::CoreError> {
-    if epoch == 0 {
+    if identity.epoch == 0 {
         return Err(pos_core::CoreError::SignatureVerificationFailed);
     }
-    if !role.is_signing() {
+    if !identity.role.is_signing() {
         return Err(pos_core::CoreError::SignatureVerificationFailed);
     }
-    let message = role_bound_message(role, epoch, payload);
+    let message = role_bound_message(identity, payload);
     let signature = ed25519_dalek::Signature::from_bytes(signature.as_bytes());
     verifying_key
         .verify(&message, &signature)
         .map_err(|_| pos_core::CoreError::SignatureVerificationFailed)
 }
 
-fn role_bound_message(role: KeyRoleV1, epoch: u64, payload: &CanonicalBytes) -> Vec<u8> {
-    let mut message = Vec::with_capacity(ROLE_SIGNATURE_DOMAIN.len() + 1 + 8 + payload.len());
+fn role_bound_message(identity: KeyIdentityV1, payload: &CanonicalBytes) -> Vec<u8> {
+    let owner_bytes = identity.owner_id.as_str().as_bytes();
+    let owner_length = u32::try_from(owner_bytes.len()).unwrap_or_default();
+    let mut message = Vec::with_capacity(
+        ROLE_SIGNATURE_DOMAIN.len() + 4 + owner_bytes.len() + 1 + 8 + payload.len(),
+    );
     message.extend_from_slice(ROLE_SIGNATURE_DOMAIN);
-    message.push(role.code());
-    message.extend_from_slice(&epoch.to_be_bytes());
+    message.extend_from_slice(&owner_length.to_be_bytes());
+    message.extend_from_slice(owner_bytes);
+    message.push(identity.role.code());
+    message.extend_from_slice(&identity.epoch.to_be_bytes());
     message.extend_from_slice(payload.as_slice());
     message
 }
@@ -332,7 +401,9 @@ fn role_bound_message(role: KeyRoleV1, epoch: u64, payload: &CanonicalBytes) -> 
 mod tests {
     use super::*;
     use crate::signing::{generate_keypair, public_key_from_verifying_key};
-    use pos_core::{KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1};
+    use pos_core::{
+        KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+    };
 
     fn payload(bytes: &[u8]) -> CanonicalBytes {
         CanonicalBytes::from_vec(bytes.to_vec())
@@ -347,7 +418,8 @@ mod tests {
     }
 
     #[test]
-    fn role_signature_rejects_role_and_epoch_confusion() -> Result<(), Box<dyn std::error::Error>> {
+    fn role_signature_rejects_owner_role_and_epoch_confusion(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, verifying_key) = generate_keypair();
         let signing_key = SigningKeyMaterial::new(signing_key);
         let value = payload(b"attribution");
@@ -356,7 +428,7 @@ mod tests {
         assert!(KeyRoleV1::PluginReleaseSigning.is_signing());
         assert!(!KeyRoleV1::SubjectDataEncryption.is_signing());
         assert!(!KeyRoleV1::ExportRecipientEncryption.is_signing());
-        let identity = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 3);
+        let identity = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectAttributionSigning, 3);
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
             identity,
@@ -364,43 +436,40 @@ mod tests {
             Some(public_key_from_verifying_key(&verifying_key)),
         ))?;
         let signature = sign_for_registered_role(&mut registry, &signing_key, identity, &value)?;
+        assert!(verify_for_role(&verifying_key, identity, &value, &signature).is_ok());
         assert!(verify_for_role(
             &verifying_key,
-            KeyRoleV1::SubjectAttributionSigning,
-            3,
-            &value,
-            &signature
-        )
-        .is_ok());
-        assert!(verify_for_role(
-            &verifying_key,
-            KeyRoleV1::TimelineIntegritySigning,
-            3,
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::TimelineIntegritySigning, 3,),
             &value,
             &signature
         )
         .is_err());
         assert!(verify_for_role(
             &verifying_key,
-            KeyRoleV1::SubjectDataEncryption,
-            3,
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 3),
             &value,
             &signature,
         )
         .is_err());
         assert!(verify_for_role(
             &verifying_key,
-            KeyRoleV1::SubjectAttributionSigning,
-            0,
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectAttributionSigning, 0,),
             &value,
             &signature
+        )
+        .is_err());
+        assert!(verify_for_role(
+            &verifying_key,
+            KeyIdentityV1::new("other-owner", KeyRoleV1::SubjectAttributionSigning, 3),
+            &value,
+            &signature,
         )
         .is_err());
         assert_eq!(
             sign_for_registered_role(
                 &mut registry,
                 &signing_key,
-                KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 0),
+                KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectAttributionSigning, 0,),
                 &value,
             ),
             Err(KeyRegistryErrorV1::InvalidEpoch)
@@ -409,15 +478,14 @@ mod tests {
             sign_for_registered_role(
                 &mut registry,
                 &signing_key,
-                KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1),
+                KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1),
                 &value,
             ),
             Err(KeyRegistryErrorV1::SigningRoleRequired)
         );
         assert!(verify_for_role(
             &verifying_key,
-            KeyRoleV1::SubjectAttributionSigning,
-            4,
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectAttributionSigning, 4,),
             &value,
             &signature
         )
@@ -425,8 +493,7 @@ mod tests {
 
         assert!(verify_for_role(
             &verifying_key,
-            KeyRoleV1::SubjectAttributionSigning,
-            0,
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectAttributionSigning, 0,),
             &value,
             &signature,
         )
@@ -439,11 +506,25 @@ mod tests {
     }
 
     #[test]
+    fn role_signature_preimage_matches_adr_065() {
+        let identity = KeyIdentityV1::new("owner-a", KeyRoleV1::PluginReleaseSigning, 9);
+        let payload = payload(b"canonical payload");
+        let mut expected = ROLE_SIGNATURE_DOMAIN.to_vec();
+        expected.extend_from_slice(&(7_u32).to_be_bytes());
+        expected.extend_from_slice(b"owner-a");
+        expected.push(KeyRoleV1::PluginReleaseSigning.code());
+        expected.extend_from_slice(&9_u64.to_be_bytes());
+        expected.extend_from_slice(payload.as_slice());
+
+        assert_eq!(role_bound_message(identity, &payload), expected);
+    }
+
+    #[test]
     fn historical_role_signature_verifies_after_registry_destruction(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, verifying_key) = generate_keypair();
         let mut signing_key = SigningKeyMaterial::new(signing_key);
-        let identity = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let identity = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectAttributionSigning, 1);
         let material_digest = signing_key.material_digest();
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
@@ -457,7 +538,7 @@ mod tests {
         destroy_registered_signing_key(
             &mut signing_key,
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32])),
-            |request| registry.destroy_key(request),
+            &mut registry,
         )?;
 
         assert_eq!(
@@ -465,14 +546,7 @@ mod tests {
             Err(KeyRegistryErrorV1::Destroyed)
         );
 
-        assert!(verify_for_role(
-            &verifying_key,
-            identity.role,
-            identity.epoch,
-            &value,
-            &signature,
-        )
-        .is_ok());
+        assert!(verify_for_role(&verifying_key, identity, &value, &signature,).is_ok());
         assert_eq!(
             registry
                 .key_record(identity)
@@ -486,7 +560,7 @@ mod tests {
     fn encryption_authorization_is_role_separated_and_destroyable(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut material = EncryptionKeyMaterial::new([11u8; 32]);
-        let identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+        let identity = KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 1);
         let material_digest = material.material_digest();
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(identity, material_digest, None))?;
@@ -503,7 +577,7 @@ mod tests {
         destroy_registered_encryption_key(
             &mut material,
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([12; 32])),
-            |request| registry.destroy_key(request),
+            &mut registry,
         )?;
         assert_eq!(
             with_registered_encryption_authorization(&mut registry, &material, identity, |_| {
@@ -514,7 +588,8 @@ mod tests {
         );
         assert_eq!(callbacks, 1);
 
-        let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let signing_identity =
+            KeyIdentityV1::new("subject-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         assert_eq!(
             with_registered_encryption_authorization(
                 &mut registry,
@@ -528,11 +603,160 @@ mod tests {
             with_registered_encryption_authorization(
                 &mut registry,
                 &material,
-                KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 0),
+                KeyIdentityV1::new("subject-owner", KeyRoleV1::SubjectDataEncryption, 0),
                 |_| (),
             ),
             Err(KeyRegistryErrorV1::InvalidEpoch)
         );
+        Ok(())
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(test)]
+mod key_roles_coverage {
+    use super::*;
+    use crate::signing::{generate_keypair, public_key_from_verifying_key};
+    use pos_core::{
+        KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+    };
+
+    fn payload(bytes: &[u8]) -> CanonicalBytes {
+        CanonicalBytes::from_vec(bytes.to_vec())
+    }
+
+    #[test]
+    fn public_role_operations_cover_destroyed_material_and_invalid_inputs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, verifying_key) = generate_keypair();
+        let mut signing_material = SigningKeyMaterial::new(signing_key);
+        let signing_identity =
+            KeyIdentityV1::new("coverage-owner", KeyRoleV1::SubjectAttributionSigning, 1);
+        let mut signing_registry = KeyRegistryStateV1::new();
+        signing_registry.register_key(KeyRegistrationV1::new(
+            signing_identity,
+            signing_material.material_digest(),
+            Some(public_key_from_verifying_key(&verifying_key)),
+        ))?;
+        let message = payload(b"coverage");
+        let signature = sign_for_registered_role(
+            &mut signing_registry,
+            &signing_material,
+            signing_identity,
+            &message,
+        )?;
+        assert!(verify_for_role(&verifying_key, signing_identity, &message, &signature,).is_ok());
+        assert!(verify_for_role(
+            &verifying_key,
+            KeyIdentityV1::new("coverage-owner", KeyRoleV1::SubjectAttributionSigning, 0,),
+            &message,
+            &signature,
+        )
+        .is_err());
+        assert!(verify_for_role(
+            &verifying_key,
+            KeyIdentityV1::new("coverage-owner", KeyRoleV1::SubjectDataEncryption, 1,),
+            &message,
+            &signature,
+        )
+        .is_err());
+        assert!(verify_for_role(
+            &verifying_key,
+            signing_identity,
+            &payload(b"different"),
+            &signature,
+        )
+        .is_err());
+
+        let signing_request = KeyDestructionRequestV1::new(
+            signing_identity,
+            signing_material.material_digest(),
+            Hash::from_bytes([1; 32]),
+        );
+        assert!(matches!(
+            destroy_registered_signing_key(
+                &mut signing_material,
+                KeyDestructionRequestV1::new(
+                    signing_identity,
+                    Hash::from_bytes([2; 32]),
+                    Hash::from_bytes([1; 32]),
+                ),
+                &mut signing_registry,
+            ),
+            Err(KeyMaterialDestructionError::MaterialDigestMismatch)
+        ));
+        assert!(matches!(
+            destroy_registered_signing_key(
+                &mut signing_material,
+                signing_request,
+                &mut signing_registry,
+            )?,
+            KeyDestructionOutcomeV1::Destroyed(_)
+        ));
+        assert!(signing_material.is_destroyed());
+        assert!(matches!(
+            sign_for_registered_role(
+                &mut signing_registry,
+                &signing_material,
+                signing_identity,
+                &message,
+            ),
+            Err(KeyRegistryErrorV1::Destroyed)
+        ));
+        assert!(matches!(
+            destroy_registered_signing_key(
+                &mut signing_material,
+                signing_request,
+                &mut signing_registry,
+            )?,
+            KeyDestructionOutcomeV1::AlreadyDestroyed(_)
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_operations_cover_destroyed_material() -> Result<(), Box<dyn std::error::Error>> {
+        let mut encryption_material = EncryptionKeyMaterial::new([9; 32]);
+        let encryption_identity =
+            KeyIdentityV1::new("coverage-owner", KeyRoleV1::SubjectDataEncryption, 1);
+        let mut encryption_registry = KeyRegistryStateV1::new();
+        encryption_registry.register_key(KeyRegistrationV1::new(
+            encryption_identity,
+            encryption_material.material_digest(),
+            None,
+        ))?;
+        assert_eq!(
+            with_registered_encryption_authorization(
+                &mut encryption_registry,
+                &encryption_material,
+                encryption_identity,
+                |key| key[0],
+            )?,
+            9
+        );
+        let encryption_request = KeyDestructionRequestV1::new(
+            encryption_identity,
+            encryption_material.material_digest(),
+            Hash::from_bytes([3; 32]),
+        );
+        assert!(matches!(
+            destroy_registered_encryption_key(
+                &mut encryption_material,
+                encryption_request,
+                &mut encryption_registry,
+            )?,
+            KeyDestructionOutcomeV1::Destroyed(_)
+        ));
+        assert!(matches!(
+            with_registered_encryption_authorization(
+                &mut encryption_registry,
+                &encryption_material,
+                encryption_identity,
+                |_| (),
+            ),
+            Err(KeyRegistryErrorV1::Destroyed)
+        ));
         Ok(())
     }
 }

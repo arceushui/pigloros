@@ -4,12 +4,14 @@
 //! TOML tier: recomputes the b3sum-compatible BLAKE3 of each file's raw
 //! bytes and optionally compares against a previously-written [`ExportManifest`].
 //! Store tier: re-reads ledger events from the `SQLite` store and verifies
-//! Ed25519 signatures against the persisted role/epoch registry and caller-
+//! Ed25519 signatures against the persisted owner/role/epoch registry and caller-
 //! supplied public-key trust anchors.
 
 use std::path::Path;
 
-use pos_core::{event::Event, store::SeqRange, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1};
+use pos_core::{
+    event::Event, store::SeqRange, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+};
 use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
 
@@ -58,7 +60,7 @@ impl std::fmt::Display for VerifyReport {
 /// resolves each event identity. Store verification requires `pubkey_hex` as
 /// an external trust anchor. A single bare key is accepted only when all
 /// events use one identity; rotated ledgers must provide explicit
-/// `role-code/epoch=hex` anchors for every identity.
+/// `owner/role-code/epoch=hex` anchors for every identity.
 ///
 /// # Errors
 /// Returns [`CliError`] on adapter failure. Verification *failures* are
@@ -174,7 +176,7 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
         .map_err(|e| CliError::BadSource(e.to_string()))?;
     if registry.is_none() {
         return Err(CliError::BadSource(
-            "store verification requires a persisted role/epoch registry".to_owned(),
+            "store verification requires a persisted owner/role/epoch registry".to_owned(),
         ));
     }
     let supplied_public_keys = supplied_public_keys.ok_or_else(|| {
@@ -207,7 +209,7 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
             n,
             outcome: VerifyOutcome::Mismatch {
                 which: "trust-anchor".to_owned(),
-                reason: "rotated ledger requires role/epoch keyed public-key trust anchors"
+                reason: "rotated ledger requires owner/role/epoch keyed public-key trust anchors"
                     .to_owned(),
             },
         });
@@ -264,14 +266,23 @@ fn parse_supplied_public_keys(
             .map(|entry| {
                 let (identity, public_key) = entry.split_once('=').ok_or_else(|| {
                     CliError::BadKey(
-                        "--pubkey entries must use role-code/epoch=hex format".to_owned(),
+                        "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
                     )
                 })?;
-                let (role, epoch) = identity.split_once('/').ok_or_else(|| {
+                let mut identity_parts = identity.rsplitn(3, '/');
+                let epoch = identity_parts.next().unwrap_or_default();
+                let role = identity_parts.next().ok_or_else(|| {
                     CliError::BadKey(
-                        "--pubkey entries must use role-code/epoch=hex format".to_owned(),
+                        "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
                     )
                 })?;
+                let owner = identity_parts.next().ok_or_else(|| {
+                    CliError::BadKey(
+                        "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
+                    )
+                })?;
+                let owner_id = OwnerIdV1::new(owner.to_owned())
+                    .map_err(|_| CliError::BadKey("--pubkey owner is invalid".to_owned()))?;
                 let role_code = role
                     .parse::<u8>()
                     .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
@@ -286,7 +297,7 @@ fn parse_supplied_public_keys(
                     ));
                 }
                 Ok(TrustedPublicKey {
-                    identity: Some(KeyIdentityV1::new(role, epoch)),
+                    identity: Some(KeyIdentityV1::new(owner_id, role, epoch)),
                     public_key: parse_public_key_hex(public_key)?,
                 })
             })
@@ -315,13 +326,14 @@ fn verify_store_event(
     let Some(identity) = event.signature_identity else {
         return Ok(Some((
             which,
-            "signed event lacks a role/epoch identity".to_owned(),
+            "signed event lacks an owner/role/epoch identity".to_owned(),
         )));
     };
     if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning {
         return Ok(Some((
             which,
-            "signed event must carry a TimelineIntegritySigning role/epoch identity".to_owned(),
+            "signed event must carry a TimelineIntegritySigning owner/role/epoch identity"
+                .to_owned(),
         )));
     }
     let registry_public_key = registry
@@ -344,13 +356,7 @@ fn verify_store_event(
     })?;
     let verifying_key = verifying_key_from_public_key(&public_key)
         .map_err(|error| CliError::BadKey(error.to_string()))?;
-    if let Err(error) = verify_for_role(
-        &verifying_key,
-        identity.role,
-        identity.epoch,
-        &event.payload,
-        signature,
-    ) {
+    if let Err(error) = verify_for_role(&verifying_key, identity, &event.payload, signature) {
         return Ok(Some((which, error.to_string())));
     }
     Ok(None)
@@ -359,7 +365,10 @@ fn verify_store_event(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{run, verify_store_event, Source, VerifyOutcome, VerifyReport};
+    use super::{
+        run, verify_store_event, Source, TrustedPublicKey, VerifyOutcome, VerifyReport,
+        EVENT_TYPE_PREDICTION,
+    };
     use crate::cli::run as cli_run;
     use crate::hex::{hex_decode, nib};
     use crate::test_helpers::{running_as_root, TestOptionExt, TestResultExt};
@@ -399,8 +408,10 @@ mod tests {
             let connection = rusqlite::Connection::open(&db)?;
             if let Some(identity) = signature_identity {
                 connection.execute(
-                    "UPDATE events SET signature = zeroblob(64), signature_role = ?1, signature_epoch = ?2",
+                    "UPDATE events SET signature = zeroblob(64), signature_owner_id = ?1,
+                     signature_role = ?2, signature_epoch = ?3",
                     rusqlite::params![
+                        identity.owner_id.as_str(),
                         i64::from(identity.role.code()),
                         i64::try_from(identity.epoch)?,
                     ],
@@ -709,9 +720,9 @@ mod tests {
         })
         .test_ok()?;
         let err = run(&Source::Store(db.clone()), None, None).test_err()?;
-        assert!(err.to_string().contains("role/epoch registry"));
+        assert!(err.to_string().contains("owner/role/epoch registry"));
         let err = run(&Source::Store(db), Some(&"aa".repeat(32)), None).test_err()?;
-        assert!(err.to_string().contains("role/epoch registry"));
+        assert!(err.to_string().contains("owner/role/epoch registry"));
 
         Ok(())
     }
@@ -838,7 +849,12 @@ mod tests {
     fn verify_store_invalid_ed25519_key_rejected() -> Result<(), Box<dyn std::error::Error>> {
         // Covers L175: `e.to_string()` in verifying_key_from_public_key error.
         // Find a 32-byte value that is invalid for ed25519-dalek by scanning.
-        use pos_core::PublicKey;
+        use pos_core::{
+            clock::{Seq, WallTime},
+            event::{CanonicalBytes, Event, Kind, SchemaVersion},
+            ids::{EntityId, EventId},
+            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey, Signature,
+        };
         use pos_crypto::signing::verifying_key_from_public_key;
 
         // Scan 1..=255 until we find a byte pattern that is an invalid Ed25519
@@ -850,59 +866,37 @@ mod tests {
                 verifying_key_from_public_key(&pk).is_err()
             })
             .test_ok()?;
-        let invalid_hex = format!("{invalid_byte:02x}").repeat(32);
-
-        let tmp = TempDir::new().test_ok()?;
-        let db = tmp.path().join("ledger.db");
-        let key_path = tmp.path().join("sk");
-        cli_run(&[
-            "piglor-ledger".into(),
-            "keygen".into(),
-            "--out".into(),
-            key_path.to_str().test_ok()?.to_owned(),
-        ])
-        .test_ok()?;
-        cli_run(&[
-            "piglor-ledger".into(),
-            "predict".into(),
-            "--source".into(),
-            format!("store:{}", db.display()),
-            "--key".into(),
-            key_path.to_str().test_ok()?.to_owned(),
-            "--title".into(),
-            "T".into(),
-            "--statement".into(),
-            "S".into(),
-            "--predicted-outcome".into(),
-            "O".into(),
-            "--confidence".into(),
-            "0.7".into(),
-            "--made-at".into(),
-            "2026-07-25T12:00:00Z".into(),
-            "--resolve-by".into(),
-            "2026-08-01".into(),
-            "--osf".into(),
-            "https://osf.io/example".into(),
-        ])
-        .test_ok()?;
-        let connection = rusqlite::Connection::open(&db).test_ok()?;
-        let mut invalid_registry = pos_core::KeyRegistryStateV1::new();
+        let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let invalid_key = PublicKey::from_bytes([invalid_byte; 32]);
+        let mut invalid_registry = KeyRegistryStateV1::new();
         invalid_registry
-            .register_key(pos_core::KeyRegistrationV1::new(
-                pos_core::KeyIdentityV1::new(pos_core::KeyRoleV1::TimelineIntegritySigning, 1),
+            .register_key(KeyRegistrationV1::new(
+                identity,
                 pos_crypto::key_roles::key_material_digest(&[0; 32]),
-                Some(PublicKey::from_bytes([invalid_byte; 32])),
+                Some(invalid_key),
             ))
             .test_ok()?;
-        let mut state_cbor = Vec::new();
-        ciborium::into_writer(&invalid_registry, &mut state_cbor).test_ok()?;
-        connection
-            .execute(
-                "UPDATE key_registry SET state_cbor = ?1",
-                rusqlite::params![state_cbor],
-            )
-            .test_ok()?;
-        let err = run(&Source::Store(db), Some(&invalid_hex), None).test_err()?;
+        let payload = CanonicalBytes::from_static(b"invalid public key");
+        let event = Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new(EVENT_TYPE_PREDICTION),
+            payload: payload.clone(),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: Some(Signature::from_bytes([0; 64])),
+            signature_identity: Some(identity),
+            payload_hash: pos_crypto::chain::hash_payload(&payload),
+        };
+        let supplied_public_keys = [TrustedPublicKey {
+            identity: Some(identity),
+            public_key: invalid_key,
+        }];
+        let err = verify_store_event(&event, Some(&supplied_public_keys), Some(&invalid_registry))
+            .test_err()?;
         assert!(err.to_string().contains("invalid --key"), "{err}");
 
         Ok(())
@@ -1262,12 +1256,15 @@ mod tests {
             Some(&KeyRegistryStateV1::new()),
         )?
         .ok_or("expected missing identity mismatch")?;
-        assert!(missing_identity_reason.contains("role/epoch identity"));
+        assert!(missing_identity_reason.contains("owner/role/epoch identity"));
 
         let mut wrong_role_event = event();
         wrong_role_event.signature = Some(Signature::from_bytes([0; 64]));
-        wrong_role_event.signature_identity =
-            Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1));
+        wrong_role_event.signature_identity = Some(KeyIdentityV1::new(
+            "ledger-owner",
+            KeyRoleV1::SubjectDataEncryption,
+            1,
+        ));
         let (_, wrong_role_reason) = verify_store_event(&wrong_role_event, None, None)?
             .ok_or("expected non-Timeline signing role mismatch")?;
         assert!(wrong_role_reason.contains("TimelineIntegritySigning"));
@@ -1276,14 +1273,18 @@ mod tests {
             event(),
             Some(&KeyRegistryStateV1::new()),
             Some(PublicKey::from_bytes([0xaa; 32])),
-            Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1)),
+            Some(KeyIdentityV1::new(
+                "ledger-owner",
+                KeyRoleV1::SubjectDataEncryption,
+                1,
+            )),
             true,
         )?
         .test_err()?;
         assert!(wrong_role.to_string().contains("signed event"));
 
         let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
-        let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+        let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
         let registered_key = PublicKey::from_bytes(verifying_key.to_bytes());
         let mut registry = KeyRegistryStateV1::new();
         registry

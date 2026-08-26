@@ -34,7 +34,7 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
         path: database_path.to_string_lossy().into_owned(),
     })?;
     let timeline = store.create_timeline("ledger")?;
-    let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
     let mut registry = KeyRegistryStateV1::new();
     registry.register_key(KeyRegistrationV1::new(
@@ -66,9 +66,10 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
 
     let connection = rusqlite::Connection::open(&database_path)?;
     connection.execute(
-        "UPDATE events SET signature = zeroblob(64), signature_role = ?1,
-         signature_epoch = 1 WHERE event_id = ?2",
+        "UPDATE events SET signature = zeroblob(64), signature_owner_id = ?1,
+         signature_role = ?2, signature_epoch = 1 WHERE event_id = ?3",
         params![
+            "ledger-owner",
             i64::from(KeyRoleV1::SubjectDataEncryption.code()),
             event_id.to_string(),
         ],
@@ -81,7 +82,7 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
     };
     assert!(error
         .to_string()
-        .contains("signed event must carry a TimelineIntegritySigning role/epoch identity"));
+        .contains("signed event must carry a TimelineIntegritySigning owner/role/epoch identity"));
     Ok(())
 }
 
@@ -94,7 +95,7 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
         path: database_path.to_string_lossy().into_owned(),
     })?;
     let timeline = store.create_timeline("ledger")?;
-    let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
+    let identity = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
     let mut invalid_public_key = [0_u8; 32];
     invalid_public_key[31] = 0xff;
     let mut registry = KeyRegistryStateV1::new();
@@ -197,8 +198,8 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
         path: database_path.to_string_lossy().into_owned(),
     })?;
     let timeline = store.create_timeline("ledger")?;
-    let identity_one = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
-    let identity_two = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2);
+    let identity_one = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+    let identity_two = KeyIdentityV1::new("ledger-owner", KeyRoleV1::TimelineIntegritySigning, 2);
     let material_one = SigningKeyMaterial::new(SigningKey::from_bytes(&[41; 32]));
     let material_two = SigningKeyMaterial::new(SigningKey::from_bytes(&[42; 32]));
     let mut registry = KeyRegistryStateV1::new();
@@ -262,7 +263,7 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
     for byte in material_two.public_verification_key().as_bytes() {
         write!(&mut anchor_two, "{byte:02x}")?;
     }
-    let anchors = format!("2/1={anchor_one},2/2={anchor_two}");
+    let anchors = format!("ledger-owner/2/1={anchor_one},ledger-owner/2/2={anchor_two}");
     let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
     assert!(report.to_string().starts_with("OK: store"));
 
@@ -280,7 +281,7 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
     )?;
     assert!(report
         .to_string()
-        .contains("rotated ledger requires role/epoch keyed public-key trust anchors"));
+        .contains("rotated ledger requires owner/role/epoch keyed public-key trust anchors"));
     Ok(())
 }
 
@@ -290,7 +291,17 @@ fn public_store_verification_rejects_malformed_key_anchor_sets(
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
     for value in [
-        "2/1", "2=aa", "x/1=aa", "2/x=aa", "2/0=aa", "2/1=zz", "2/1=aa",
+        "2/1",
+        "2=aa",
+        "owner/1=aa",
+        "x/1=aa",
+        "/2/1=aa",
+        "owner/x/1=aa",
+        "owner/9/1=aa",
+        "owner/2/0=aa",
+        "owner/2/no=aa",
+        "owner/2/1=zz",
+        "owner/2/1=aa",
     ] {
         let error = match verify_source(&Source::Store(database_path.clone()), Some(value), None) {
             Ok(report) => {
@@ -307,6 +318,6 @@ fn public_store_verification_rejects_malformed_key_anchor_sets(
     };
     assert!(error
         .to_string()
-        .contains("entries must use role-code/epoch=hex format"));
+        .contains("entries must use owner/role-code/epoch=hex format"));
     Ok(())
 }
