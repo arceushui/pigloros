@@ -7,6 +7,10 @@ command -v b3sum >/dev/null || {
   echo "b3sum is required to independently verify BLAKE3 authority digests" >&2
   exit 1
 }
+command -v jq >/dev/null || {
+  echo "jq is required to validate conformance fixture JSON" >&2
+  exit 1
+}
 
 if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/support" ]]; then
   echo "missing conformance fixture directories under ${fixture_root}" >&2
@@ -324,6 +328,11 @@ json_secret_query='
   contains_secret
 '
 for root in "${publishable_roots[@]}"; do
+  while IFS= read -r -d '' symlink_path; do
+    echo "symlinks are not allowed in public conformance fixtures: ${symlink_path}" >&2
+    exit 1
+  done < <(find -P "${root}" -type l -print0)
+
   while IFS= read -r -d '' json_file; do
     if jq -e "${json_secret_query}" "${json_file}" >/dev/null; then
       echo "forbidden secret material found in JSON fixture: ${json_file}" >&2
@@ -335,19 +344,26 @@ for root in "${publishable_roots[@]}"; do
         exit "${scan_status}"
       fi
     fi
-  done < <(find "${root}" -type f -name '*.json' -print0)
+  done < <(find -P "${root}" -type f -name '*.json' -print0)
 done
 
-if grep -R -n -i -I -E -- "${secret_pattern}" "${publishable_roots[@]}"; then
-  echo "forbidden secret material found in public conformance fixtures" >&2
-  exit 1
-else
-  scan_status=$?
-  if (( scan_status != 1 )); then
-    echo "secret scan could not inspect all publishable conformance fixtures" >&2
-    exit "${scan_status}"
+mapfile -d '' publishable_files < <(
+  for root in "${publishable_roots[@]}"; do
+    find -P "${root}" -type f -print0
+  done
+)
+for publishable_file in "${publishable_files[@]}"; do
+  if grep -n -i -I -E -- "${secret_pattern}" "${publishable_file}"; then
+    echo "forbidden secret material found in public conformance fixtures" >&2
+    exit 1
+  else
+    scan_status=$?
+    if (( scan_status != 1 )); then
+      echo "secret scan could not inspect all publishable conformance fixtures" >&2
+      exit "${scan_status}"
+    fi
   fi
-fi
+done
 
 mapfile -t profiles < <(find "${profile_root}" -type f -print | sort)
 if (( ${#profiles[@]} != 7 )); then

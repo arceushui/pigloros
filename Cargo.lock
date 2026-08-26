@@ -4281,6 +4281,7 @@ dependencies = [
  "blake3",
  "ciborium",
  "ed25519-dalek",
+ "libc",
  "pos-core",
  "pos-crypto",
  "serde",

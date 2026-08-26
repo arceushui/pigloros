@@ -10,6 +10,7 @@ publish.workspace = true
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
+libc = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 sha2 = { workspace = true }

@@ -32,7 +32,21 @@ fn run_with_verifier(
 }
 
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
-    let metadata = std::fs::metadata(path)?;
+    let (file, declared_len) = open_regular_file(path)?;
+    let bytes = read_bounded(file, declared_len, MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
+    verify_archive_independently(&bytes).map_err(Into::into)
+}
+
+#[cfg(unix)]
+fn open_regular_file(path: &Path) -> Result<(File, u64), Box<dyn Error>> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -40,9 +54,21 @@ fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
         )
         .into());
     }
+    Ok((file, metadata.len()))
+}
+
+#[cfg(not(unix))]
+fn open_regular_file(path: &Path) -> Result<(File, u64), Box<dyn Error>> {
     let file = File::open(path)?;
-    let bytes = read_bounded(file, metadata.len(), MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
-    verify_archive_independently(&bytes).map_err(Into::into)
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "conformance bundle path is not a regular file",
+        )
+        .into());
+    }
+    Ok((file, metadata.len()))
 }
 
 fn read_bounded(

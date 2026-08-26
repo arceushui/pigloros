@@ -227,10 +227,15 @@ const LAYER_SPECS: [LayerSpec; 7] = [
 ];
 
 fn layer_spec(claim_layer: ClaimLayerV1) -> &'static LayerSpec {
-    LAYER_SPECS
-        .iter()
-        .find(|spec| spec.claim_layer == claim_layer)
-        .expect("every claim layer must have one catalog entry")
+    match claim_layer {
+        ClaimLayerV1::ArtifactIntegrity => &LAYER_SPECS[0],
+        ClaimLayerV1::ReplayConformance => &LAYER_SPECS[1],
+        ClaimLayerV1::KnowledgeNonInterference => &LAYER_SPECS[2],
+        ClaimLayerV1::GatewayClientConformance => &LAYER_SPECS[3],
+        ClaimLayerV1::PluginConformance => &LAYER_SPECS[4],
+        ClaimLayerV1::MetricConformance => &LAYER_SPECS[5],
+        ClaimLayerV1::EmpiricalEvaluation => &LAYER_SPECS[6],
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
