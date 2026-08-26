@@ -300,7 +300,7 @@ impl SqliteStore {
         Self::open_with_options(
             path,
             Box::new(pos_crypto::chain::Blake3Hasher),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_URI),
             false,
         )
     }
@@ -6538,6 +6538,45 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_rejects_events_table_with_only_one_signature_identity_column() {
+        for identity_column in ["signature_role INTEGER", "signature_epoch INTEGER"] {
+            let file = tempfile::NamedTempFile::new().test_ok();
+            {
+                let conn = Connection::open(file.path()).test_ok();
+                conn.execute_batch(&format!(
+                    "CREATE TABLE events (
+                        timeline_id TEXT NOT NULL,
+                        seq INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        entity_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload BLOB NOT NULL,
+                        wall_time INTEGER NOT NULL,
+                        causation_id TEXT,
+                        correlation_id TEXT,
+                        schema_version INTEGER NOT NULL,
+                        payload_hash BLOB NOT NULL,
+                        signature BLOB,
+                        {identity_column},
+                        PRIMARY KEY (timeline_id, seq)
+                    );"
+                ))
+                .test_ok();
+            }
+
+            let error = SqliteStore::open(file.path().to_str().test_ok())
+                .err()
+                .test_ok();
+            assert!(matches!(
+                error,
+                CoreError::Storage(message)
+                    if message.contains("missing required signature identity columns")
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_read_only_requires_and_reads_an_existing_current_schema() {
         let directory = tempfile::tempdir().test_ok();
         let missing = directory.path().join("missing.db");
@@ -6554,6 +6593,10 @@ mod tests {
 
         let readonly = SqliteStore::open_read_only(path.to_str().test_ok()).test_ok();
         assert_eq!(readonly.list_timelines().test_ok().len(), 1);
+
+        let uri = format!("file:{}?mode=ro", path.to_str().test_ok());
+        let readonly_uri = SqliteStore::open_read_only(&uri).test_ok();
+        assert_eq!(readonly_uri.list_timelines().test_ok().len(), 1);
     }
 
     #[test]
