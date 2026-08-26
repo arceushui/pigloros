@@ -1210,6 +1210,7 @@ mod tests {
 
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
+        let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
         assert!(validate_profile_record_bindings(
             ClaimLayerV1::ArtifactIntegrity,
             &canonical_record
