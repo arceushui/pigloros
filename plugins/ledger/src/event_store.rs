@@ -9,12 +9,9 @@ use pos_core::{
     store::{EventStore, SeqRange},
     CoreError, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1,
 };
-use pos_crypto::{
-    key_roles::{
-        destroy_registered_signing_key, key_material_digest, sign_for_registered_role,
-        KeyMaterialDestructionError, SigningKeyMaterial,
-    },
-    signing::public_key_from_verifying_key,
+use pos_crypto::key_roles::{
+    destroy_registered_signing_key, sign_for_registered_role, KeyMaterialDestructionError,
+    SigningKeyMaterial,
 };
 
 use crate::{
@@ -127,11 +124,15 @@ impl EventLedgerStore {
             let store = &mut self.store;
             let registry = &mut *registry;
             let signing_key = &mut self.signing_key;
-            return destroy_registered_signing_key(signing_key, request, |request| {
-                let (outcome, next) = store.destroy_key_registry(request)?;
-                *registry = next;
-                Ok(outcome)
-            })
+            return destroy_registered_signing_key::<CoreError, _>(
+                signing_key,
+                request,
+                |request| {
+                    let (outcome, next) = store.destroy_key_registry(request)?;
+                    *registry = next;
+                    Ok(outcome)
+                },
+            )
             .map_err(|error| match error {
                 KeyMaterialDestructionError::AlreadyDestroyed => LedgerError::Store(
                     "ledger signing key has already been irreversibly destroyed".to_owned(),
@@ -308,7 +309,8 @@ mod tests {
     };
     use pos_crypto::{
         chain::{hash_payload, Blake3Hasher},
-        key_roles::verify_for_role,
+        key_roles::{key_material_digest, verify_for_role},
+        signing::public_key_from_verifying_key,
     };
     use pos_store::memory::MemoryStore;
 
