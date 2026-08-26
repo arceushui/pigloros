@@ -1177,7 +1177,7 @@ mod tests {
         let wrong_role = run_store_event(
             event(),
             Some(&KeyRegistryStateV1::new()),
-            None,
+            Some(PublicKey::from_bytes([0xaa; 32])),
             Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1)),
             true,
         )?
@@ -1210,15 +1210,21 @@ mod tests {
         let no_public_key = run_store_event(
             event(),
             Some(&KeyRegistryStateV1::new()),
-            None,
+            Some(PublicKey::from_bytes([0; 32])),
             Some(identity),
             true,
         )?
         .test_err()?;
         assert!(no_public_key.to_string().contains("no public key"));
 
-        let invalid_signature =
-            run_store_event(event(), Some(&registry), None, Some(identity), true)?.test_ok()?;
+        let invalid_signature = run_store_event(
+            event(),
+            Some(&registry),
+            Some(registered_key),
+            Some(identity),
+            true,
+        )?
+        .test_ok()?;
         let (_, reason) = expect_mismatch(invalid_signature.outcome)?;
         assert!(!reason.is_empty());
 
