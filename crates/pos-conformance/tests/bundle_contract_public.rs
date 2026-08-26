@@ -1037,9 +1037,10 @@ fn assert_json_member_rejected(
     path: &str,
     mutate: impl FnOnce(&mut JsonValue),
     expected: pos_conformance::BundleContractErrorV1,
+    label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let changed = mutate_bound_json_member(bundle, path, mutate)?;
-    assert_eq!(changed.validate(), Err(expected));
+    assert_eq!(changed.validate(), Err(expected), "{label}");
     Ok(())
 }
 
@@ -1796,12 +1797,13 @@ fn public_draft_authority_records_reject_each_malformed_shape(
             value["entries"][0]["fixture_id"] = duplicate;
         }),
     ];
-    for mutate in inventory_cases {
+    for (index, mutate) in inventory_cases.into_iter().enumerate() {
         assert_json_member_rejected(
             &bundle,
             "authority/expected-authority-inventory.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+            &format!("inventory case {index}"),
         )?;
     }
     assert_json_member_rejected(
@@ -1811,12 +1813,14 @@ fn public_draft_authority_records_reject_each_malformed_shape(
             let _ = value["entries"].as_array_mut().map(Vec::pop);
         },
         pos_conformance::BundleContractErrorV1::MemberMissing,
+        "inventory entries length",
     )?;
     assert_json_member_rejected(
         &bundle,
         "authority/expected-authority-inventory.json",
         |value| value["entries"] = JsonValue::Null,
         pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+        "inventory entries shape",
     )?;
 
     let matrix_cases: Vec<JsonMutation> = vec![
@@ -1835,12 +1839,13 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         Box::new(|value| value["cases"][0]["case_id"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["equality_predicates"] = JsonValue::Null),
     ];
-    for mutate in matrix_cases {
+    for (index, mutate) in matrix_cases.into_iter().enumerate() {
         assert_json_member_rejected(
             &bundle,
             "authority/adr-059-execution-matrix.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+            &format!("matrix case {index}"),
         )?;
     }
     Ok(())
