@@ -2009,7 +2009,7 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     );
     assert_eq!(
         fixtures::candidate_bundle_with_invalid_matrix_coordinate()?,
-        Err(pos_conformance::BundleContractErrorV1::CandidateEvidenceMissing)
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
     );
     Ok(())
 }
