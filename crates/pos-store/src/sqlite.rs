@@ -2879,6 +2879,30 @@ impl SqliteStore {
             .map(|_| ())
             .map_err(|error| CoreError::Storage(error.to_string()))
     }
+
+    fn initialize_timeline_with_key_registry_in_transaction(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        let persisted = self.load_key_registry()?;
+        if persisted
+            .as_ref()
+            .is_some_and(|current| current != expected_registry)
+        {
+            return Err(CoreError::Storage(
+                "durable key registry changed during ledger initialization".to_owned(),
+            ));
+        }
+        if persisted.is_none() {
+            self.save_key_registry_in_transaction(expected_registry)?;
+        }
+
+        self.list_timelines()?
+            .into_iter()
+            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+            .map_or_else(|| self.create_timeline(name), Ok)
+    }
 }
 
 impl EventStore for SqliteStore {
@@ -2961,26 +2985,8 @@ impl EventStore for SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let result = (|| {
-            let persisted = self.load_key_registry()?;
-            if persisted
-                .as_ref()
-                .is_some_and(|current| current != expected_registry)
-            {
-                return Err(CoreError::Storage(
-                    "durable key registry changed during ledger initialization".to_owned(),
-                ));
-            }
-            if persisted.is_none() {
-                self.save_key_registry_in_transaction(expected_registry)?;
-            }
-
-            let existing = self
-                .list_timelines()?
-                .into_iter()
-                .find(|timeline| timeline.meta.name.as_deref() == Some(name));
-            existing.map_or_else(|| self.create_timeline(name), Ok)
-        })();
+        let result =
+            self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
         finish_immediate_transaction(&self.conn, result)
     }
 
