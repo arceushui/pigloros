@@ -243,6 +243,15 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
         })?,
         KeyDestructionOutcomeV1::AlreadyDestroyed(tombstone)
     );
+    assert_eq!(
+        sign_for_registered_role(
+            &mut registry,
+            &material,
+            identity,
+            &CanonicalBytes::from_static(b"destroyed material"),
+        ),
+        Err(pos_core::KeyRegistryErrorV1::Destroyed)
+    );
     Ok(())
 }
 

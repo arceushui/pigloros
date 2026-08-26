@@ -4055,6 +4055,13 @@ mod key_registry_coverage {
             )),
             Err(CoreError::Storage(_))
         ));
+        assert!(matches!(
+            store.initialize_timeline_with_key_registry(
+                "minimal-key-registry",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::Storage(_))
+        ));
         Ok(())
     }
 

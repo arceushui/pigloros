@@ -11671,6 +11671,12 @@ pub(super) mod key_registry_coverage {
         store.save_key_registry(&registry)?;
         assert_eq!(store.load_key_registry()?, Some(registry.clone()));
 
+        let mut existing_timeline_store = SqliteStore::open_in_memory()?;
+        let existing_timeline = existing_timeline_store.create_timeline("existing-ledger")?;
+        let initialized_timeline = existing_timeline_store
+            .initialize_timeline_with_key_registry("existing-ledger", &KeyRegistryStateV1::new())?;
+        assert_eq!(initialized_timeline.id(), existing_timeline.id());
+
         let timeline = store.create_timeline("registry-coverage")?;
         let mut event = seed_event(&mut store, timeline.id())?;
         event.id = EventId::new();
