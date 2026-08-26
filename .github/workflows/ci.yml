@@ -103,8 +103,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - name: Install independent BLAKE3 verifier
-        run: sudo apt-get update && sudo apt-get install --yes b3sum
+      - name: Install fixture verification tools
+        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Independently regenerate public fixture records
         run: bash scripts/generate-conformance-fixture-records.sh
       - name: Verify public conformance fixtures
@@ -123,6 +123,8 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: conformance-materialization
+      - name: Install fixture verification tools
+        run: sudo apt-get update && sudo apt-get install --yes jq
       - name: Reject non-main manual materialization
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |

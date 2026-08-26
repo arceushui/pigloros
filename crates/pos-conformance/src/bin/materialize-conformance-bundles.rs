@@ -15,7 +15,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Copy)]
 struct FixtureContext {
@@ -360,14 +360,13 @@ fn materialize_profile_from_profile(
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
     let prefix = format!("{layer_name}/{lifecycle_name}");
-    write_materialized_file(
-        context.output_root,
+    let mut outputs = vec![(
         format!(
             "{prefix}/CPF1-{}.cbor",
             pos_conformance::hex_digest(&profile.profile_digest)
         ),
-        &profile_bytes,
-    )?;
+        profile_bytes,
+    )];
     let mut signed_bundles = Vec::with_capacity(2);
     for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
         let (members, expected_results) =
@@ -386,22 +385,23 @@ fn materialize_profile_from_profile(
         let manifest_bytes = bundle.manifest_bytes()?;
         let bundle_bytes = bundle.to_canonical_cbor()?;
         verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
-        write_materialized_file(
-            context.output_root,
+        outputs.push((
             format!(
                 "{prefix}/manifest-{mode_name}-{}.cbor",
                 pos_conformance::hex_digest(&bundle_digest)
             ),
-            &manifest_bytes,
-        )?;
-        write_materialized_file(
-            context.output_root,
+            manifest_bytes,
+        ));
+        outputs.push((
             format!(
                 "{prefix}/bundle-{mode_name}-{}.cfb1",
                 pos_conformance::hex_digest(&bundle_digest)
             ),
-            &bundle_bytes,
-        )?;
+            bundle_bytes,
+        ));
+    }
+    for (relative_path, bytes) in outputs {
+        write_materialized_file(context.output_root, relative_path, &bytes)?;
     }
     Ok(())
 }
@@ -1081,10 +1081,39 @@ fn write_materialized_file(
     relative: impl AsRef<Path>,
     bytes: &[u8],
 ) -> Result<(), Box<dyn Error>> {
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let relative = relative.as_ref();
+    let root_metadata = std::fs::symlink_metadata(root)?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("materialized output root must be a directory".into());
     }
+    let mut components = relative.components().peekable();
+    let mut parent = root.to_owned();
+    let file_name = loop {
+        let component = components
+            .next()
+            .ok_or("materialized file path must not be empty")?;
+        let Component::Normal(name) = component else {
+            return Err("materialized file path must be relative and normalized".into());
+        };
+        if components.peek().is_none() {
+            break name;
+        }
+        parent.push(name);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("materialized output directory must not contain symlinks".into());
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err("materialized output path component is not a directory".into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&parent)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let path = parent.join(file_name);
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -1667,6 +1696,17 @@ mod tests {
         assert!(std::fs::write(&blocker, b"not a directory").is_ok());
         assert!(write_materialized_file(&blocker, "nested/file", b"bytes").is_err());
         assert!(std::fs::remove_file(blocker).is_ok());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialized_output_rejects_symlinked_parent_directories() -> Result<(), Box<dyn Error>> {
+        let output = output_root("symlink-parent");
+        std::fs::create_dir_all(output.join("real"))?;
+        std::os::unix::fs::symlink(output.join("real"), output.join("link"))?;
+        assert!(write_materialized_file(&output, "link/file", b"bytes").is_err());
+        std::fs::remove_dir_all(output)?;
         Ok(())
     }
 
