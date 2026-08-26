@@ -1,9 +1,8 @@
 use pos_conformance::{ExecutionModeV1, MoatProofInputV1};
 use pos_experiment::moat_proof::run_local_and_air_gapped;
 
-#[test]
-fn public_moat_proof_runs_both_execution_profiles() -> Result<(), Box<dyn std::error::Error>> {
-    let input = MoatProofInputV1 {
+fn public_input() -> MoatProofInputV1 {
+    MoatProofInputV1 {
         scenario_id: "public-moat-proof".to_owned(),
         ticks: 4,
         initial_position: [0.0, 0.0],
@@ -13,8 +12,12 @@ fn public_moat_proof_runs_both_execution_profiles() -> Result<(), Box<dyn std::e
         random_seed: 7,
         resource_limit: 100,
         network_enabled: false,
-    };
-    let (local, air_gapped, comparison) = run_local_and_air_gapped(input)?;
+    }
+}
+
+#[test]
+fn public_moat_proof_runs_both_execution_profiles() -> Result<(), Box<dyn std::error::Error>> {
+    let (local, air_gapped, comparison) = run_local_and_air_gapped(public_input())?;
     assert!(local.passes_reaction_gates());
     assert!(air_gapped.passes_reaction_gates());
     assert!(comparison.equal);
@@ -32,4 +35,15 @@ fn public_moat_proof_runs_both_execution_profiles() -> Result<(), Box<dyn std::e
         ExecutionModeV1::AirGapped
     );
     Ok(())
+}
+
+#[test]
+fn public_moat_proof_rejects_invalid_and_underbudget_inputs() {
+    let mut invalid = public_input();
+    invalid.ticks = 0;
+    assert!(run_local_and_air_gapped(invalid).is_err());
+
+    let mut underbudget = public_input();
+    underbudget.resource_limit = 3;
+    assert!(run_local_and_air_gapped(underbudget).is_err());
 }
