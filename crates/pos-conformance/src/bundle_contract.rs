@@ -6944,7 +6944,7 @@ mod coverage_entrypoints {
                 0,
                 Value::Text("inputs/renamed-member.bin".to_owned()),
             )?),
-            Err(BundleContractErrorV1::NonCanonicalOrder)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
         assert_eq!(
             verify_archive_independently(&replace_archive_member_and_descriptor_path(
