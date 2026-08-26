@@ -1110,7 +1110,13 @@ fn mutate_bound_json_member(
             .ok_or("profile member is missing")?;
         let mut profile =
             ConformanceProfileV1::from_canonical_cbor(&changed.members[profile_index].bytes)?;
-        profile.provenance_digest = changed.members[provenance_index].digest;
+        let provenance_digest = changed.members[provenance_index].digest;
+        profile.provenance_digest = provenance_digest;
+        for fixture in &mut profile.fixtures {
+            fixture.provenance.source_digest = provenance_digest;
+            fixture.provenance.build_digest = provenance_digest;
+            fixture.provenance.publication_review_digest = provenance_digest;
+        }
         profile.profile_digest = profile.digest();
         let profile_bytes = profile.to_canonical_cbor()?;
         replace_member_bytes(&mut changed, profile_index, profile_bytes)?;
