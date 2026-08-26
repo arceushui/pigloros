@@ -70,6 +70,7 @@ struct FixtureContext {
 }
 
 type CanonicalFixtureBytes = (&'static [u8], &'static [u8]);
+type MaterializedBundleArtifacts = (Vec<u8>, [u8; 32], Vec<u8>);
 
 fn main() -> Result<(), Box<dyn Error>> {
     run(
@@ -299,7 +300,7 @@ fn materialized_bundle_artifacts(
     mode: BundleModeV1,
     inventory_bytes: &[u8],
     authority_root: Option<&Path>,
-) -> Result<(Vec<u8>, [u8; 32], Vec<u8>), Box<dyn Error>> {
+) -> Result<MaterializedBundleArtifacts, Box<dyn Error>> {
     bundle_inputs_with_authority(profile, mode, inventory_bytes, authority_root)
         .and_then(|(members, expected_results)| {
             ConformanceBundleV1::materialize(profile, mode, members, expected_results)
