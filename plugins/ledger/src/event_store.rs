@@ -134,28 +134,19 @@ impl EventLedgerStore {
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
         let store = &mut self.store;
         let registry = &mut *registry_guard;
-        let result = if self.signing_key.is_destroyed() {
-            store.destroy_key_registry(request).map(|(outcome, next)| {
-                *registry = next;
-                outcome
-            })
-        } else {
-            let signing_key = &mut self.signing_key;
+        let signing_key = &mut self.signing_key;
+        let result =
             destroy_registered_signing_key::<CoreError, _>(signing_key, request, |request| {
                 let (outcome, next) = store.destroy_key_registry(request)?;
                 *registry = next;
                 Ok(outcome)
             })
             .map_err(|error| match error {
-                KeyMaterialDestructionError::AlreadyDestroyed => CoreError::Storage(
-                    "ledger signing key has already been irreversibly destroyed".to_owned(),
-                ),
                 KeyMaterialDestructionError::MaterialDigestMismatch => CoreError::Storage(
                     "destruction request does not match the ledger signing key".to_owned(),
                 ),
                 KeyMaterialDestructionError::Commit(error) => error,
-            })
-        };
+            });
         drop(registry_guard);
         result.map_err(LedgerError::from)
     }

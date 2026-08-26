@@ -249,6 +249,12 @@ fn verify_store_event(
             "signed event lacks a role/epoch identity".to_owned(),
         )));
     };
+    if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning {
+        return Ok(Some((
+            which,
+            "signed event must carry a TimelineIntegritySigning role/epoch identity".to_owned(),
+        )));
+    }
     let registry_public_key = registry
         .and_then(|value| value.key_record(identity))
         .and_then(|record| record.public_verification_key);
@@ -1142,7 +1148,7 @@ mod tests {
             clock::{Seq, WallTime},
             event::{CanonicalBytes, Event, Kind, SchemaVersion},
             ids::{EntityId, EventId},
-            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey,
+            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, PublicKey, Signature,
         };
         use pos_crypto::{chain::hash_payload, key_roles::key_material_digest};
 
@@ -1173,6 +1179,14 @@ mod tests {
         )?
         .ok_or("expected missing identity mismatch")?;
         assert!(missing_identity_reason.contains("role/epoch identity"));
+
+        let mut wrong_role_event = event();
+        wrong_role_event.signature = Some(Signature::from_bytes([0; 64]));
+        wrong_role_event.signature_identity =
+            Some(KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1));
+        let (_, wrong_role_reason) = verify_store_event(&wrong_role_event, None, None)?
+            .ok_or("expected non-Timeline signing role mismatch")?;
+        assert!(wrong_role_reason.contains("TimelineIntegritySigning"));
 
         let wrong_role = run_store_event(
             event(),

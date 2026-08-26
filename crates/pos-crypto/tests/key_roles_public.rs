@@ -1,7 +1,10 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use ed25519_dalek::SigningKey;
-use pos_core::{CanonicalBytes, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1};
+use pos_core::{
+    CanonicalBytes, KeyDestructionOutcomeV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
+    KeyRoleV1,
+};
 use pos_crypto::key_roles::{
     destroy_registered_encryption_key, destroy_registered_signing_key, key_material_digest,
     sign_for_registered_role, verify_for_role, with_registered_encryption_authorization,
@@ -152,15 +155,14 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
         Err(KeyMaterialDestructionError::Commit("registry unavailable"))
     );
     assert!(!encryption_material.is_destroyed());
-    destroy_registered_encryption_key(
-        &mut encryption_material,
-        pos_core::KeyDestructionRequestV1::new(
-            encryption_identity,
-            material_digest,
-            pos_core::Hash::from_bytes([9; 32]),
-        ),
-        |request| registry.destroy_key(request),
-    )?;
+    let request = pos_core::KeyDestructionRequestV1::new(
+        encryption_identity,
+        material_digest,
+        pos_core::Hash::from_bytes([9; 32]),
+    );
+    destroy_registered_encryption_key(&mut encryption_material, request, |request| {
+        registry.destroy_key(request)
+    })?;
     assert!(encryption_material.is_destroyed());
     assert_eq!(
         with_registered_encryption_authorization(
@@ -170,6 +172,15 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
             || "not called",
         ),
         Err(pos_core::KeyRegistryErrorV1::Destroyed)
+    );
+    let tombstone = registry
+        .tombstone(encryption_identity)
+        .ok_or("destroyed encryption key must retain its tombstone")?;
+    assert_eq!(
+        destroy_registered_encryption_key(&mut encryption_material, request, |request| {
+            registry.destroy_key(request)
+        })?,
+        KeyDestructionOutcomeV1::AlreadyDestroyed(tombstone)
     );
 
     Ok(())
@@ -214,11 +225,14 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
         registry.destroy_key(request)
     })?;
     assert!(material.is_destroyed());
+    let tombstone = registry
+        .tombstone(identity)
+        .ok_or("destroyed signing key must retain its tombstone")?;
     assert_eq!(
-        destroy_registered_signing_key::<&str, _>(&mut material, request, |_| {
-            Err("destroyed material cannot be committed again")
-        }),
-        Err(KeyMaterialDestructionError::AlreadyDestroyed)
+        destroy_registered_signing_key(&mut material, request, |request| {
+            registry.destroy_key(request)
+        })?,
+        KeyDestructionOutcomeV1::AlreadyDestroyed(tombstone)
     );
     Ok(())
 }
@@ -265,10 +279,6 @@ fn public_role_bound_key_mismatch_errors_are_closed() -> Result<(), Box<dyn std:
 
 #[test]
 fn public_destruction_error_messages_identify_each_failure() {
-    assert_eq!(
-        KeyMaterialDestructionError::<&str>::AlreadyDestroyed.to_string(),
-        "key material is already destroyed"
-    );
     assert_eq!(
         KeyMaterialDestructionError::<&str>::MaterialDigestMismatch.to_string(),
         "key material digest does not match the request"

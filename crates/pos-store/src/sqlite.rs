@@ -11517,43 +11517,9 @@ pub(super) mod key_registry_coverage {
             .ok_or_else(|| CoreError::Storage("seed append returned no event".to_owned()))
     }
 
-    #[inline(never)]
-    fn sqlite_load_key_registry(
-        store: &SqliteStore,
-    ) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-        store.load_key_registry()
-    }
-
-    #[inline(never)]
-    fn sqlite_save_key_registry(
-        store: &mut SqliteStore,
-        registry: &KeyRegistryStateV1,
-    ) -> Result<(), CoreError> {
-        store.save_key_registry(registry)
-    }
-
-    #[inline(never)]
-    fn sqlite_append_signed_authorized(
-        store: &mut SqliteStore,
-        timeline: TimelineId,
-        registry: &KeyRegistryStateV1,
-        callback: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
-    ) -> Result<(), CoreError> {
-        store.append_signed_authorized(timeline, registry, callback)
-    }
-
-    #[inline(never)]
-    fn sqlite_destroy_key_registry(
-        store: &mut SqliteStore,
-        request: KeyDestructionRequestV1,
-    ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
-        store.destroy_key_registry(request)
-    }
-
     #[cfg(test)]
     mod sqlite_key_registry_failure_paths {
         use super::{
-            sqlite_append_signed_authorized, sqlite_destroy_key_registry, sqlite_load_key_registry,
             CoreError, Event, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
             KeyRegistryStateV1, Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
         };
@@ -11570,8 +11536,7 @@ pub(super) mod key_registry_coverage {
                 Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
             };
             assert!(matches!(
-                sqlite_append_signed_authorized(
-                    &mut missing_registry,
+                missing_registry.append_signed_authorized(
                     missing_timeline.id(),
                     registry,
                     &mut missing_registry_callback,
@@ -11579,14 +11544,11 @@ pub(super) mod key_registry_coverage {
                 Err(CoreError::Storage(_))
             ));
             assert!(matches!(
-                sqlite_destroy_key_registry(
-                    &mut missing_registry,
-                    KeyDestructionRequestV1::new(
-                        identity,
-                        material_digest,
-                        Hash::from_bytes([2; 32]),
-                    )
-                ),
+                missing_registry.destroy_key_registry(KeyDestructionRequestV1::new(
+                    identity,
+                    material_digest,
+                    Hash::from_bytes([2; 32]),
+                )),
                 Err(CoreError::Storage(_))
             ));
 
@@ -11596,8 +11558,7 @@ pub(super) mod key_registry_coverage {
                 Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
             };
             assert!(matches!(
-                sqlite_append_signed_authorized(
-                    &mut begin_failure,
+                begin_failure.append_signed_authorized(
                     TimelineId::new(),
                     registry,
                     &mut begin_callback,
@@ -11605,14 +11566,11 @@ pub(super) mod key_registry_coverage {
                 Err(CoreError::Storage(_))
             ));
             assert!(matches!(
-                sqlite_destroy_key_registry(
-                    &mut begin_failure,
-                    KeyDestructionRequestV1::new(
-                        identity,
-                        material_digest,
-                        Hash::from_bytes([2; 32]),
-                    )
-                ),
+                begin_failure.destroy_key_registry(KeyDestructionRequestV1::new(
+                    identity,
+                    material_digest,
+                    Hash::from_bytes([2; 32]),
+                )),
                 Err(CoreError::Storage(_))
             ));
             FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
@@ -11623,7 +11581,7 @@ pub(super) mod key_registry_coverage {
                 [],
             )?;
             assert!(matches!(
-                sqlite_load_key_registry(&malformed),
+                malformed.load_key_registry(),
                 Err(CoreError::Serialization(_))
             ));
             Ok(())
@@ -11632,13 +11590,12 @@ pub(super) mod key_registry_coverage {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn sqlite_key_registry_public_paths_are_instrumented() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn sqlite_key_registry_public_paths_are_exercised() -> Result<(), Box<dyn std::error::Error>> {
         let (registry, identity, material_digest) = registered_state()?;
         let mut store = SqliteStore::open_in_memory()?;
-        assert!(sqlite_load_key_registry(&store)?.is_none());
-        sqlite_save_key_registry(&mut store, &registry)?;
-        assert_eq!(sqlite_load_key_registry(&store)?, Some(registry.clone()));
+        assert!(store.load_key_registry()?.is_none());
+        store.save_key_registry(&registry)?;
+        assert_eq!(store.load_key_registry()?, Some(registry.clone()));
 
         let timeline = store.create_timeline("registry-coverage")?;
         let mut event = seed_event(&mut store, timeline.id())?;
@@ -11647,14 +11604,13 @@ pub(super) mod key_registry_coverage {
             event.seq = seq;
             Ok::<Event, CoreError>(event.clone())
         };
-        sqlite_append_signed_authorized(&mut store, timeline.id(), &registry, &mut callback)?;
+        store.append_signed_authorized(timeline.id(), &registry, &mut callback)?;
 
         let mut mismatch_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(matches!(
-            sqlite_append_signed_authorized(
-                &mut store,
+            store.append_signed_authorized(
                 timeline.id(),
                 &KeyRegistryStateV1::new(),
                 &mut mismatch_callback,
@@ -11666,12 +11622,7 @@ pub(super) mod key_registry_coverage {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(matches!(
-            sqlite_append_signed_authorized(
-                &mut store,
-                TimelineId::new(),
-                &registry,
-                &mut missing_callback,
-            ),
+            store.append_signed_authorized(TimelineId::new(), &registry, &mut missing_callback,),
             Err(CoreError::TimelineNotFound(_))
         ));
 
@@ -11679,12 +11630,7 @@ pub(super) mod key_registry_coverage {
             Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
         };
         assert!(matches!(
-            sqlite_append_signed_authorized(
-                &mut store,
-                timeline.id(),
-                &registry,
-                &mut callback_failure,
-            ),
+            store.append_signed_authorized(timeline.id(), &registry, &mut callback_failure,),
             Err(CoreError::Storage(_))
         ));
 
@@ -11694,13 +11640,13 @@ pub(super) mod key_registry_coverage {
             Hash::from_bytes([2; 32]),
         );
         assert!(matches!(
-            sqlite_destroy_key_registry(&mut store, invalid_request),
+            store.destroy_key_registry(invalid_request),
             Err(CoreError::Storage(_))
         ));
 
         let valid_request =
             KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
-        let (_, destroyed) = sqlite_destroy_key_registry(&mut store, valid_request)?;
+        let (_, destroyed) = store.destroy_key_registry(valid_request)?;
         assert!(destroyed.key_record(identity).is_some());
         sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
         Ok(())

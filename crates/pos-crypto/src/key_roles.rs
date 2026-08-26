@@ -134,8 +134,6 @@ impl EncryptionKeyMaterial {
 /// owned private material.
 #[derive(Debug, Eq, PartialEq)]
 pub enum KeyMaterialDestructionError<E> {
-    /// The owned material had already been destroyed.
-    AlreadyDestroyed,
     /// The request did not identify this owned material.
     MaterialDigestMismatch,
     /// The registry commit failed; the material remains available.
@@ -145,7 +143,6 @@ pub enum KeyMaterialDestructionError<E> {
 impl<E: fmt::Display> fmt::Display for KeyMaterialDestructionError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AlreadyDestroyed => formatter.write_str("key material is already destroyed"),
             Self::MaterialDigestMismatch => {
                 formatter.write_str("key material digest does not match the request")
             }
@@ -165,11 +162,12 @@ impl<E: std::error::Error + 'static> std::error::Error for KeyMaterialDestructio
 /// revocation and physical destruction in one caller-visible operation.
 ///
 /// # Errors
-/// Returns [`KeyMaterialDestructionError::AlreadyDestroyed`] when the key has
-/// already been destroyed, [`KeyMaterialDestructionError::MaterialDigestMismatch`]
+/// Returns [`KeyMaterialDestructionError::MaterialDigestMismatch`]
 /// when the request does not identify this key, or
 /// [`KeyMaterialDestructionError::Commit`] when the registry rejects the
-/// destruction request.
+/// destruction request. Replaying the same request delegates to the registry
+/// and returns its stable [`KeyDestructionOutcomeV1::AlreadyDestroyed`]
+/// outcome.
 pub fn destroy_registered_signing_key<E, F>(
     signing_key: &mut SigningKeyMaterial,
     request: KeyDestructionRequestV1,
@@ -178,9 +176,7 @@ pub fn destroy_registered_signing_key<E, F>(
 where
     F: FnOnce(KeyDestructionRequestV1) -> Result<KeyDestructionOutcomeV1, E>,
 {
-    let material_digest = signing_key
-        .material_digest()
-        .map_err(|_| KeyMaterialDestructionError::AlreadyDestroyed)?;
+    let material_digest = signing_key.material_digest;
     if request.expected_material_digest != material_digest {
         return Err(KeyMaterialDestructionError::MaterialDigestMismatch);
     }
@@ -193,11 +189,12 @@ where
 /// encryption key.
 ///
 /// # Errors
-/// Returns [`KeyMaterialDestructionError::AlreadyDestroyed`] when the key has
-/// already been destroyed, [`KeyMaterialDestructionError::MaterialDigestMismatch`]
+/// Returns [`KeyMaterialDestructionError::MaterialDigestMismatch`]
 /// when the request does not identify this key, or
 /// [`KeyMaterialDestructionError::Commit`] when the registry rejects the
-/// destruction request.
+/// destruction request. Replaying the same request delegates to the registry
+/// and returns its stable [`KeyDestructionOutcomeV1::AlreadyDestroyed`]
+/// outcome.
 pub fn destroy_registered_encryption_key<E, F>(
     encryption_key: &mut EncryptionKeyMaterial,
     request: KeyDestructionRequestV1,
@@ -206,9 +203,7 @@ pub fn destroy_registered_encryption_key<E, F>(
 where
     F: FnOnce(KeyDestructionRequestV1) -> Result<KeyDestructionOutcomeV1, E>,
 {
-    let material_digest = encryption_key
-        .material_digest()
-        .map_err(|_| KeyMaterialDestructionError::AlreadyDestroyed)?;
+    let material_digest = encryption_key.material_digest;
     if request.expected_material_digest != material_digest {
         return Err(KeyMaterialDestructionError::MaterialDigestMismatch);
     }

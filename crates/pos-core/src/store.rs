@@ -1172,8 +1172,10 @@ pub fn validate_committed_batch(
 ///
 /// An unsigned event has neither field. A signed event must carry a non-zero
 /// Timeline-integrity identity; an identity without a signature is never valid.
-/// The former unbound signed-event shape is rejected rather than interpreted as
-/// a compatibility case.
+/// The former ADR-041 subject-data-key signed-event shape is rejected rather
+/// than interpreted as a compatibility case. Existing historical signatures
+/// remain mathematically verifiable through their retained public keys, but
+/// no private key migration or re-issuance is supported.
 ///
 /// # Errors
 ///
@@ -3839,57 +3841,6 @@ mod key_registry_coverage {
         }
     }
 
-    #[inline(never)]
-    fn default_load_key_registry(
-        store: &MinimalStore,
-    ) -> Result<Option<KeyRegistryStateV1>, CoreError> {
-        store.load_key_registry()
-    }
-
-    #[inline(never)]
-    fn default_save_key_registry(
-        store: &mut MinimalStore,
-        registry: &KeyRegistryStateV1,
-    ) -> Result<(), CoreError> {
-        store.save_key_registry(registry)
-    }
-
-    #[inline(never)]
-    fn default_append_signed_authorized(
-        store: &mut MinimalStore,
-        timeline: TimelineId,
-        registry: &KeyRegistryStateV1,
-        callback: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
-    ) -> Result<(), CoreError> {
-        store.append_signed_authorized(timeline, registry, callback)
-    }
-
-    #[inline(never)]
-    fn default_destroy_key_registry(
-        store: &mut MinimalStore,
-        request: crate::KeyDestructionRequestV1,
-    ) -> Result<(crate::KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
-        store.destroy_key_registry(request)
-    }
-
-    #[inline(never)]
-    fn authorized_append_signed_authorized(
-        store: &mut PersistedStore,
-        timeline: TimelineId,
-        registry: &KeyRegistryStateV1,
-        callback: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
-    ) -> Result<(), CoreError> {
-        store.append_signed_authorized(timeline, registry, callback)
-    }
-
-    #[inline(never)]
-    fn authorized_destroy_key_registry(
-        store: &mut PersistedStore,
-        request: crate::KeyDestructionRequestV1,
-    ) -> Result<(crate::KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
-        store.destroy_key_registry(request)
-    }
-
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn authorized_registry_error_paths(
         store: &mut PersistedStore,
@@ -3904,12 +3855,7 @@ mod key_registry_coverage {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(matches!(
-            authorized_append_signed_authorized(
-                &mut load_failure,
-                timeline,
-                registry,
-                &mut load_callback,
-            ),
+            load_failure.append_signed_authorized(timeline, registry, &mut load_callback,),
             Err(CoreError::Storage(_))
         ));
 
@@ -3919,12 +3865,7 @@ mod key_registry_coverage {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(matches!(
-            authorized_append_signed_authorized(
-                &mut timeline_failure,
-                timeline,
-                registry,
-                &mut timeline_callback,
-            ),
+            timeline_failure.append_signed_authorized(timeline, registry, &mut timeline_callback,),
             Err(CoreError::Storage(_))
         ));
 
@@ -3934,12 +3875,7 @@ mod key_registry_coverage {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(matches!(
-            authorized_append_signed_authorized(
-                &mut missing_timeline,
-                timeline,
-                registry,
-                &mut missing_callback,
-            ),
+            missing_timeline.append_signed_authorized(timeline, registry, &mut missing_callback,),
             Err(CoreError::TimelineNotFound(_))
         ));
 
@@ -3947,7 +3883,7 @@ mod key_registry_coverage {
             Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
         };
         assert!(matches!(
-            authorized_append_signed_authorized(store, timeline, registry, &mut callback_failure),
+            store.append_signed_authorized(timeline, registry, &mut callback_failure),
             Err(CoreError::Storage(_))
         ));
 
@@ -3957,54 +3893,47 @@ mod key_registry_coverage {
             Hash::from_bytes([2; 32]),
         );
         assert!(matches!(
-            authorized_destroy_key_registry(store, invalid_request),
+            store.destroy_key_registry(invalid_request),
             Err(CoreError::Storage(_))
         ));
 
         let mut load_destroy_failure = PersistedStore::new(registry.clone());
         load_destroy_failure.failure = PersistedFailure::Load;
         assert!(matches!(
-            authorized_destroy_key_registry(
-                &mut load_destroy_failure,
-                crate::KeyDestructionRequestV1::new(
-                    identity,
-                    material_digest,
-                    Hash::from_bytes([2; 32]),
-                )
-            ),
+            load_destroy_failure.destroy_key_registry(crate::KeyDestructionRequestV1::new(
+                identity,
+                material_digest,
+                Hash::from_bytes([2; 32]),
+            )),
             Err(CoreError::Storage(_))
         ));
 
         let mut save_failure = PersistedStore::new(registry.clone());
         save_failure.failure = PersistedFailure::Save;
         assert!(matches!(
-            authorized_destroy_key_registry(
-                &mut save_failure,
-                crate::KeyDestructionRequestV1::new(
-                    identity,
-                    material_digest,
-                    Hash::from_bytes([2; 32]),
-                )
-            ),
+            save_failure.destroy_key_registry(crate::KeyDestructionRequestV1::new(
+                identity,
+                material_digest,
+                Hash::from_bytes([2; 32]),
+            )),
             Err(CoreError::Storage(_))
         ));
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn default_key_registry_methods_are_instrumented() -> Result<(), CoreError> {
+    fn default_key_registry_trait_contracts() -> Result<(), CoreError> {
         let mut store = MinimalStore::new();
-        assert!(default_load_key_registry(&store)?.is_none());
+        assert!(store.load_key_registry()?.is_none());
         assert!(matches!(
-            default_save_key_registry(&mut store, &KeyRegistryStateV1::new()),
+            store.save_key_registry(&KeyRegistryStateV1::new()),
             Err(CoreError::Storage(_))
         ));
         let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(matches!(
-            default_append_signed_authorized(
-                &mut store,
+            store.append_signed_authorized(
                 TimelineId::new(),
                 &KeyRegistryStateV1::new(),
                 &mut callback,
@@ -4012,14 +3941,11 @@ mod key_registry_coverage {
             Err(CoreError::Storage(_))
         ));
         assert!(matches!(
-            default_destroy_key_registry(
-                &mut store,
-                crate::KeyDestructionRequestV1::new(
-                    KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
-                    Hash::from_bytes([1; 32]),
-                    Hash::from_bytes([2; 32]),
-                )
-            ),
+            store.destroy_key_registry(crate::KeyDestructionRequestV1::new(
+                KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([1; 32]),
+                Hash::from_bytes([2; 32]),
+            )),
             Err(CoreError::Storage(_))
         ));
         Ok(())
@@ -4027,8 +3953,7 @@ mod key_registry_coverage {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authorized_key_registry_methods_are_instrumented() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn authorized_key_registry_trait_contracts() -> Result<(), Box<dyn std::error::Error>> {
         let (registry, identity, material_digest) = registered_state()?;
         let mut store = PersistedStore::new(registry.clone());
         let timeline = store
@@ -4037,15 +3962,14 @@ mod key_registry_coverage {
             .map(Timeline::id)
             .ok_or("missing coverage timeline")?;
         let mut callback = |_registry: &KeyRegistryStateV1, seq: Seq| Ok(event_at(seq));
-        authorized_append_signed_authorized(&mut store, timeline, &registry, &mut callback)?;
+        store.append_signed_authorized(timeline, &registry, &mut callback)?;
         assert!(store.committed);
 
         let mut mismatch_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
             Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
         };
         assert!(matches!(
-            authorized_append_signed_authorized(
-                &mut store,
+            store.append_signed_authorized(
                 timeline,
                 &KeyRegistryStateV1::new(),
                 &mut mismatch_callback,
@@ -4059,7 +3983,7 @@ mod key_registry_coverage {
             material_digest,
             Hash::from_bytes([2; 32]),
         );
-        let (_, destroyed) = authorized_destroy_key_registry(&mut store, request)?;
+        let (_, destroyed) = store.destroy_key_registry(request)?;
         assert!(destroyed.key_record(identity).is_some());
         Ok(())
     }
