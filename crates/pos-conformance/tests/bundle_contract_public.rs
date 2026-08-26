@@ -440,12 +440,23 @@ pub mod fixtures {
         for row in matrix["rows"].as_array_mut().ok_or("missing rows")? {
             row["executed_case_count"] = JsonValue::Number(16_u64.into());
         }
-        let result_digest = authority_members
-            .iter()
-            .find(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
-            .ok_or("missing authority result")?
-            .digest;
-        for case in matrix["cases"].as_array_mut().ok_or("missing cases")? {
+        for (index, case) in matrix["cases"]
+            .as_array_mut()
+            .ok_or("missing cases")?
+            .iter_mut()
+            .enumerate()
+        {
+            let fixture_id = AUTHORITY_FIXTURE_IDS[index % AUTHORITY_FIXTURE_IDS.len()];
+            let result_path = format!("authority/results/{fixture_id}.json");
+            let result_digest = authority_members
+                .iter()
+                .find(|member| {
+                    member.role == BundleMemberRoleV1::AuthorityExpectedResult
+                        && member.path == result_path
+                })
+                .ok_or("missing authority result")?
+                .digest;
+            case["authority_fixture_id"] = JsonValue::String(fixture_id.to_owned());
             case["executed"] = JsonValue::Bool(true);
             case["expected_result_digest"] = JsonValue::String(hex(&result_digest));
         }
@@ -763,9 +774,16 @@ pub mod fixtures {
 #[test]
 fn public_candidate_materialization_reaches_fail_closed_authority_gate(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let candidate = match fixtures::candidate_bundle()? {
+        Ok(bundle) => bundle,
+        Err(error) => return Err(format!("valid Candidate fixture rejected: {error:?}").into()),
+    };
+    let signed = candidate.sign(&signing_key)?;
+    let archive = signed.to_canonical_cbor()?;
     assert_eq!(
-        fixtures::candidate_bundle()?,
-        Err(pos_conformance::BundleContractErrorV1::CandidateEvidenceMissing)
+        pos_conformance::verify_archive_independently(&archive),
+        Ok(())
     );
     Ok(())
 }
