@@ -1460,6 +1460,18 @@ fn assert_independent_profile_shape_rejections(
             }
         })
     })?;
+    let invalid_text_profile = signed_archive_variant(bundle, signing_key, |value| {
+        let invalid_profile = vec![0x61, 0xff];
+        archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(invalid_profile.clone());
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
+        descriptor[1] = Value::Integer((invalid_profile.len() as u64).into());
+        descriptor[2] = Value::Bytes(blake3::hash(&invalid_profile).as_bytes().to_vec());
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&invalid_text_profile),
+        Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+    );
     Ok(())
 }
 
@@ -1780,6 +1792,17 @@ fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
             pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid,
         )?;
     }
+
+    let mut invalid_utf8_magic = bundle.to_canonical_cbor()?;
+    replace_first_byte(&mut invalid_utf8_magic, b'C', &[0xff])?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&invalid_utf8_magic),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+    );
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&invalid_utf8_magic),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+    );
     assert_post_signed_archive_decoder_rejected(&bundle, &signing_key, |value| {
         top_fields(value)?[4] = Value::Bytes(vec![0]);
         Ok(())

@@ -3903,6 +3903,12 @@ mod tests {
             ]),
             Err(ConformanceContractError::InvalidEncoding)
         );
+        // The structural preflight accepts text by length; the canonical
+        // decoder must still reject invalid UTF-8 in that text item.
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&[0x61, 0xff]),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
         let mut too_deep = vec![0x81; usize::from(MAX_STRUCTURAL_NESTING) + 2];
         too_deep.push(0xf6);
         assert_eq!(
@@ -5613,11 +5619,23 @@ mod tests {
                 Err(ConformanceContractError::IndependenceEvidenceMissing)
             );
         }
+
+        let mut invalid_identity = stable_evidence("alpha", 30);
+        invalid_identity.implementation.source_digest = [0; 32];
+        let mut invalid_profile = profile_value;
+        invalid_profile.stable_evidence = vec![invalid_identity, stable_evidence("beta", 40)];
+        assert_eq!(
+            validate_stable_evidence(&invalid_profile, Some(&trusted_root_policy())),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn stable_implementation_coordinate_cap_is_enforced() {
         let mut constrained = candidate();
+        constrained.fixtures[0]
+            .modes
+            .extend([ExecutionModeV1::Replay, ExecutionModeV1::Fork]);
         constrained
             .evaluator_protocol
             .hard_caps
@@ -5640,6 +5658,12 @@ mod tests {
         assert_eq!(
             validate_stable_implementation(&at_limit, &constrained, None),
             Ok(())
+        );
+
+        constrained.evaluator_protocol.hard_caps.max_cases = 0;
+        assert_eq!(
+            validate_stable_implementation(&at_limit, &constrained, None),
+            Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
 
@@ -5700,6 +5724,17 @@ mod tests {
         wrong_nonzero_root.trust_root_digest = digest(99);
         assert_eq!(
             validate_stable_attestation_fields(&wrong_nonzero_root, &requirements, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
+
+        let mut invalid_key_evidence = stable_evidence("alpha", 30);
+        invalid_key_evidence.attestation.signer_public_key = [0xff; 32];
+        invalid_key_evidence.attestation.trust_root_digest = digest_bytes(
+            b"PiglorOS.ConformanceTrustRoot.v1",
+            &Value::Bytes(vec![0xff; 32]),
+        );
+        assert_eq!(
+            validate_stable_attestation(&invalid_key_evidence, &requirements, None),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
     }

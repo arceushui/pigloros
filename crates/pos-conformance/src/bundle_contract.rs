@@ -1992,8 +1992,8 @@ fn validate_authority_inventory(
     }
     if json_text(inventory, "lifecycle")? == "Draft" {
         let mut fixture_ids = BTreeSet::new();
-        for entry in entries {
-            if !fixture_ids.insert(json_text(entry, "fixture_id")?)
+        for (entry, fixture_id) in entries.iter().zip(AUTHORITY_FIXTURE_IDS) {
+            if !fixture_ids.insert(fixture_id)
                 || json_text(entry, "materialization_status")? != "pending"
                 || !entry
                     .get("fixture_bytes_path")
@@ -2027,8 +2027,7 @@ fn validate_authority_inventory(
         return Err(BundleContractErrorV1::MemberMissing);
     }
     let mut fixture_ids = BTreeSet::new();
-    for entry in entries {
-        let fixture_id = json_text(entry, "fixture_id")?;
+    for (entry, fixture_id) in entries.iter().zip(AUTHORITY_FIXTURE_IDS) {
         if !fixture_ids.insert(fixture_id)
             || json_text(entry, "materialization_status")? != "materialized"
         {
@@ -5487,6 +5486,15 @@ mod tests {
         invalid_status["entries"][0]["materialization_status"] = JsonValue::Null;
         assert_eq!(
             validate_authority_inventory(&invalid_status, &members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut missing_status = candidate_inventory.clone();
+        if let Some(entry) = missing_status["entries"][0].as_object_mut() {
+            entry.remove("materialization_status");
+        }
+        assert_eq!(
+            validate_authority_inventory(&missing_status, &members),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
