@@ -556,7 +556,7 @@ impl ConformanceProfileV1 {
     ///
     /// The digest is carried in a structured profile-ID suffix because the
     /// CPF1 V1 record has no spare wire field. The suffix is not free-form
-    /// metadata: it is parsed, bounded, and included in profile_digest.
+    /// metadata: it is parsed, bounded, and included in `profile_digest`.
     ///
     /// # Errors
     ///
@@ -588,7 +588,7 @@ impl ConformanceProfileV1 {
     /// Return the bound ADR-059 matrix digest, if this profile carries one.
     ///
     /// Unbound profiles remain valid for generic CPF1 callers. Materialized
-    /// Wave 8 profiles are required to use the bind_execution_matrix_digest
+    /// Wave 8 profiles are required to use the `bind_execution_matrix_digest`
     /// method.
     ///
     /// # Errors

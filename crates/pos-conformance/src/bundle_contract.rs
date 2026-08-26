@@ -1124,19 +1124,41 @@ fn independent_verify_authority_members(
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     if lifecycle == 0 {
-        if entries.iter().any(|entry| {
-            json_text(entry, "materialization_status") != Ok("pending")
-                || !entry
-                    .get("fixture_bytes_path")
-                    .is_some_and(JsonValue::is_null)
-                || !entry
-                    .get("expected_result_path")
-                    .is_some_and(JsonValue::is_null)
-        }) {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
-        return Ok(());
+        return independent_validate_draft_authority_entries(entries);
     }
+    independent_validate_candidate_authority_members(
+        members,
+        &inventory_json,
+        &matrix_json,
+        &provenance_json,
+        entries,
+    )
+}
+
+fn independent_validate_draft_authority_entries(
+    entries: &[JsonValue],
+) -> Result<(), BundleContractErrorV1> {
+    if entries.iter().any(|entry| {
+        json_text(entry, "materialization_status") != Ok("pending")
+            || !entry
+                .get("fixture_bytes_path")
+                .is_some_and(JsonValue::is_null)
+            || !entry
+                .get("expected_result_path")
+                .is_some_and(JsonValue::is_null)
+    }) {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    Ok(())
+}
+
+fn independent_validate_candidate_authority_members(
+    members: &[IndependentMember<'_>],
+    inventory: &JsonValue,
+    matrix: &JsonValue,
+    provenance: &JsonValue,
+    entries: &[JsonValue],
+) -> Result<(), BundleContractErrorV1> {
     if members
         .iter()
         .filter(|member| member.role == BundleMemberRoleV1::AuthorityFixture)
@@ -1151,58 +1173,62 @@ fn independent_verify_authority_members(
         return Err(BundleContractErrorV1::MemberMissing);
     }
     for (entry, fixture_id) in entries.iter().zip(AUTHORITY_FIXTURE_IDS) {
-        if json_text(entry, "materialization_status")? != "materialized" {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
-        for (path_field, digest_field, role) in [
-            (
-                "fixture_bytes_path",
-                "fixture_bytes_digest",
-                BundleMemberRoleV1::AuthorityFixture,
-            ),
-            (
-                "expected_result_path",
-                "expected_result_digest",
-                BundleMemberRoleV1::AuthorityExpectedResult,
-            ),
-        ] {
-            let source_path = json_text(entry, path_field)?;
-            let archive_path = format!("authority/{source_path}");
-            let Some(member) = members
-                .iter()
-                .find(|member| member.role == role && member.path == archive_path)
-            else {
-                return Err(BundleContractErrorV1::MemberMissing);
-            };
-            let artifact = parse_authority_json(member.bytes)?;
-            if member.digest
-                != decode_blake3_hex(json_text(entry, digest_field)?)
-                    .ok_or(BundleContractErrorV1::MemberDigestMismatch)?
-                || json_text(&artifact, "fixture_id")? != fixture_id
-                || json_text(&artifact, "execution_class")? != json_text(entry, "execution_class")?
-                || json_text(&artifact, "expected_outcome")?
-                    != json_text(entry, "expected_outcome")?
-            {
-                return Err(BundleContractErrorV1::MemberDigestMismatch);
-            }
-        }
+        independent_validate_candidate_authority_entry(members, entry, fixture_id)?;
     }
     let authority_result_digests = members
         .iter()
         .filter(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
         .map(|member| member.digest)
         .collect::<BTreeSet<_>>();
-    validate_execution_matrix_for_lifecycle(
-        &matrix_json,
-        "Candidate",
-        Some(&authority_result_digests),
-    )?;
-    independent_validate_candidate_matrix_bindings(&matrix_json, &inventory_json, members)?;
-    if json_text(&provenance_json, "candidate_status")? != "approved"
-        || json_text(&provenance_json, "deletion_review")? != "approved"
-        || json_text(&provenance_json, "secret_scan")? != "clean"
+    validate_execution_matrix_for_lifecycle(matrix, "Candidate", Some(&authority_result_digests))?;
+    independent_validate_candidate_matrix_bindings(matrix, inventory, members)?;
+    if json_text(provenance, "candidate_status")? != "approved"
+        || json_text(provenance, "deletion_review")? != "approved"
+        || json_text(provenance, "secret_scan")? != "clean"
     {
         return Err(BundleContractErrorV1::CandidateEvidenceMissing);
+    }
+    Ok(())
+}
+
+fn independent_validate_candidate_authority_entry(
+    members: &[IndependentMember<'_>],
+    entry: &JsonValue,
+    fixture_id: &str,
+) -> Result<(), BundleContractErrorV1> {
+    if json_text(entry, "materialization_status")? != "materialized" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    for (path_field, digest_field, role) in [
+        (
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            BundleMemberRoleV1::AuthorityFixture,
+        ),
+        (
+            "expected_result_path",
+            "expected_result_digest",
+            BundleMemberRoleV1::AuthorityExpectedResult,
+        ),
+    ] {
+        let source_path = json_text(entry, path_field)?;
+        let archive_path = format!("authority/{source_path}");
+        let Some(member) = members
+            .iter()
+            .find(|member| member.role == role && member.path == archive_path)
+        else {
+            return Err(BundleContractErrorV1::MemberMissing);
+        };
+        let artifact = parse_authority_json(member.bytes)?;
+        if member.digest
+            != decode_blake3_hex(json_text(entry, digest_field)?)
+                .ok_or(BundleContractErrorV1::MemberDigestMismatch)?
+            || json_text(&artifact, "fixture_id")? != fixture_id
+            || json_text(&artifact, "execution_class")? != json_text(entry, "execution_class")?
+            || json_text(&artifact, "expected_outcome")? != json_text(entry, "expected_outcome")?
+        {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
     }
     Ok(())
 }
@@ -2259,10 +2285,9 @@ fn validate_supporting_members(
         .count()
         != REQUIRED_MEMBERS.len()
     {
-        Err(BundleContractErrorV1::UndeclaredMember)
-    } else {
-        Ok(())
+        return Err(BundleContractErrorV1::UndeclaredMember);
     }
+    Ok(())
 }
 
 fn validate_authority_members(
