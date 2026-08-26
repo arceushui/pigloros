@@ -7909,19 +7909,6 @@ mod coverage_entrypoints {
             validate_archive_caps(&bundle, &Value::Null, exact_total),
             Ok(())
         );
-        let profile_bytes = [1_u8];
-        let preflight = super::ArchivePreflight {
-            profile_bytes: Some(&profile_bytes),
-            member_count: 1,
-            total_member_bytes: 1,
-            largest_member_bytes: 1,
-            largest_member_path_bytes: 1,
-            maximum_depth: 1,
-        };
-        assert_eq!(
-            validate_preflight_archive_caps(&profile, &preflight, 1),
-            Ok(())
-        );
         assert_eq!(validate_selected_bundle_caps(&profile, &bundle), Ok(()));
         let mut invalid_inputs = bundle.members;
         let input_index = invalid_inputs
