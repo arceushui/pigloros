@@ -714,17 +714,22 @@ fn independent_verify_signature(
     public_key: &Value,
     signature: &Value,
 ) -> Result<(), BundleContractErrorV1> {
-    let manifest_bytes = encode_archive_value(manifest)?;
-    let public_key = independent_digest::<32>(public_key)?;
-    let signature = independent_digest::<64>(signature)?;
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
-        .map_err(|_| BundleContractErrorV1::SignatureInvalid)?;
-    verifying_key
-        .verify(
-            &manifest_bytes,
-            &ed25519_dalek::Signature::from_bytes(&signature),
-        )
-        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+    encode_archive_value(manifest).and_then(|manifest_bytes| {
+        independent_digest::<32>(public_key).and_then(|public_key| {
+            independent_digest::<64>(signature).and_then(|signature| {
+                ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+                    .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                    .and_then(|verifying_key| {
+                        verifying_key
+                            .verify(
+                                &manifest_bytes,
+                                &ed25519_dalek::Signature::from_bytes(&signature),
+                            )
+                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                    })
+            })
+        })
+    })
 }
 
 fn independent_member_paths_and_profile<'a>(
@@ -1417,16 +1422,20 @@ fn decode_manifest(value: &Value) -> Result<BundleManifestV1, BundleContractErro
 }
 
 fn decode_member(value: &Value) -> Result<BundleMemberV1, BundleContractErrorV1> {
-    let fields = archive_array_exact(value, 3)?;
-    let path = archive_text(&fields[0])?.to_owned();
-    let bytes = archive_bytes(&fields[1])?.to_vec();
-    let role = decode_member_role(archive_u64(&fields[2])?)?;
-    Ok(BundleMemberV1 {
-        path,
-        digest: *blake3::hash(&bytes).as_bytes(),
-        bytes,
-        role,
-        expected_result: role == BundleMemberRoleV1::ExpectedResult,
+    archive_array_exact(value, 3).and_then(|fields| {
+        archive_text(&fields[0]).and_then(|path| {
+            archive_bytes(&fields[1]).and_then(|bytes| {
+                archive_u64(&fields[2])
+                    .and_then(decode_member_role)
+                    .map(|role| BundleMemberV1 {
+                        path: path.to_owned(),
+                        digest: *blake3::hash(bytes).as_bytes(),
+                        bytes: bytes.to_vec(),
+                        role,
+                        expected_result: role == BundleMemberRoleV1::ExpectedResult,
+                    })
+            })
+        })
     })
 }
 
