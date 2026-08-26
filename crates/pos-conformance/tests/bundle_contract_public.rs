@@ -3,11 +3,12 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
-    BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
-    ClaimLayerV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
-    EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
-    FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
-    RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1,
+    BundleModeV1, CapabilityPolicyV1, ClaimLayerV1, ConformanceBundleV1, ConformanceProfileV1,
+    EvaluatorHardCapsV1, EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1,
+    FixtureDescriptorV1, FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1,
+    ProfileLifecycleV1, RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1,
+    VerificationOutcomeV1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -995,6 +996,84 @@ fn signed_draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Erro
     Ok(fixtures::draft_bundle()?.sign(&signing_key)?)
 }
 
+fn assert_archive_decoder_rejected(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+    mutate: impl FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>,
+    expected: pos_conformance::BundleContractErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let archive = signed_archive_variant(bundle, signing_key, mutate)?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&archive),
+        Err(expected)
+    );
+    Ok(())
+}
+
+fn assert_json_member_rejected(
+    bundle: &ConformanceBundleV1,
+    path: &str,
+    mutate: impl FnOnce(&mut JsonValue),
+    expected: pos_conformance::BundleContractErrorV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let changed = mutate_json_member(bundle, path, mutate)?;
+    assert_eq!(changed.validate(), Err(expected));
+    Ok(())
+}
+
+fn mutate_json_member(
+    bundle: &ConformanceBundleV1,
+    path: &str,
+    mutate: impl FnOnce(&mut JsonValue),
+) -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
+    let mut changed = bundle.clone();
+    let member_index = changed
+        .members
+        .iter()
+        .position(|member| member.path == path)
+        .ok_or("JSON member is missing")?;
+    let mut json: JsonValue = serde_json::from_slice(&changed.members[member_index].bytes)?;
+    mutate(&mut json);
+    let bytes = serde_json::to_vec(&json)?;
+    let digest = *blake3::hash(&bytes).as_bytes();
+    changed.members[member_index].bytes = bytes;
+    changed.members[member_index].digest = digest;
+    let descriptor = changed
+        .manifest
+        .members
+        .iter_mut()
+        .find(|descriptor| descriptor.path == path)
+        .ok_or("JSON descriptor is missing")?;
+    descriptor.size_bytes = changed.members[member_index].bytes.len() as u64;
+    descriptor.digest = digest;
+    Ok(changed)
+}
+
+fn public_bundle_inputs(
+    bundle: &ConformanceBundleV1,
+) -> Result<
+    (
+        ConformanceProfileV1,
+        Vec<BundleMemberV1>,
+        Vec<BundleExpectedResultV1>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let profile_member = bundle
+        .members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or("profile member is missing")?;
+    let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)?;
+    let members = bundle
+        .members
+        .iter()
+        .filter(|member| member.role != BundleMemberRoleV1::Profile)
+        .cloned()
+        .collect();
+    Ok((profile, members, bundle.manifest.expected_results.clone()))
+}
+
 fn assert_archive_rejected(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
@@ -1322,5 +1401,366 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
         fixtures::candidate_bundle_with_invalid_matrix_coordinate()?,
         Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn public_archive_decoder_rejects_each_manifest_field_shape(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let mutations: Vec<Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>> = vec![
+        Box::new(|value| {
+            top_fields(value)?[0] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value| {
+            top_fields(value)?[1] = Value::Integer(2_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_array(value, 2)?[0] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_array(value, 2)?[1] = Value::Integer(9_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_array(value, 2)?[2] = Value::Integer(9_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_array(value, 2)?[3] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_array(value, 2)?[4] = Value::Array(vec![Value::Null]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_array(value, 2)?[5] = Value::Array(vec![Value::Null]);
+            Ok(())
+        }),
+    ];
+    for mutate in mutations {
+        assert_archive_decoder_rejected(
+            &bundle,
+            &signing_key,
+            mutate,
+            pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let mutations: Vec<Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>> = vec![
+        Box::new(|value| {
+            archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(99_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_descriptor(value, "profile/CPF1.cbor")?[0] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_descriptor(value, "profile/CPF1.cbor")?[1] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_descriptor(value, "profile/CPF1.cbor")?[2] = Value::Bytes(vec![0]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Integer(99_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[0] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[1] = Value::Integer(99_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[2] = Value::Bytes(vec![0]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[3] = Value::Integer(99_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[4] = Value::Null;
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[5] = Value::Bytes(vec![0]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            top_fields(value)?[4] = Value::Bytes(vec![0]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            top_fields(value)?[5] = Value::Bytes(vec![0]);
+            Ok(())
+        }),
+    ];
+    for mutate in mutations {
+        assert_archive_decoder_rejected(
+            &bundle,
+            &signing_key,
+            mutate,
+            pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn public_expected_result_validation_rejects_each_bound_mismatch(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = signed_draft_bundle()?;
+    let expected_member_index = bundle
+        .members
+        .iter()
+        .position(|member| member.role == BundleMemberRoleV1::ExpectedResult)
+        .ok_or("expected-result member is missing")?;
+    let expected_path = bundle.members[expected_member_index].path.clone();
+
+    let mut wrong_mode = bundle.clone();
+    wrong_mode.manifest.mode = BundleModeV1::AirGapped;
+    wrong_mode.manifest.expected_results[0].mode = BundleModeV1::AirGapped;
+    assert_eq!(
+        wrong_mode.validate(),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let mut zero_digest = bundle.clone();
+    zero_digest.manifest.expected_results[0].digest = [0; 32];
+    assert_eq!(
+        zero_digest.validate(),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let mut wrong_digest = bundle.clone();
+    wrong_digest.manifest.expected_results[0].digest = [1; 32];
+    assert_eq!(
+        wrong_digest.validate(),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let mut missing_member = bundle.clone();
+    missing_member.members.remove(expected_member_index);
+    missing_member
+        .manifest
+        .members
+        .retain(|descriptor| descriptor.path != expected_path);
+    assert_eq!(
+        missing_member.validate(),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    let mut empty_member = bundle.clone();
+    empty_member.members[expected_member_index].bytes.clear();
+    let empty_digest = *blake3::hash(&[]).as_bytes();
+    empty_member.members[expected_member_index].digest = empty_digest;
+    let descriptor = empty_member
+        .manifest
+        .members
+        .iter_mut()
+        .find(|descriptor| descriptor.path == expected_path)
+        .ok_or("expected-result descriptor is missing")?;
+    descriptor.size_bytes = 0;
+    descriptor.digest = empty_digest;
+    assert_eq!(
+        empty_member.validate(),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let mut missing_fixture = bundle.clone();
+    missing_fixture.manifest.expected_results[0].case_id = "missing-fixture".to_owned();
+    assert_eq!(
+        missing_fixture.validate(),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let replacement_path = "expected/alternate.bin".to_owned();
+    let mut undeclared_path = bundle.clone();
+    undeclared_path.members[expected_member_index].path = replacement_path.clone();
+    undeclared_path.manifest.members[expected_member_index].path = replacement_path.clone();
+    undeclared_path.manifest.expected_results[0].member_path = replacement_path;
+    undeclared_path
+        .members
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    undeclared_path
+        .manifest
+        .members
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    assert_eq!(
+        undeclared_path.validate(),
+        Err(pos_conformance::BundleContractErrorV1::UndeclaredMember)
+    );
+
+    let expected_member = bundle.members[expected_member_index].clone();
+    let duplicate_path = "expected/duplicate.bin".to_owned();
+    let duplicate_member = BundleMemberV1::new(duplicate_path.clone(), expected_member.bytes, true);
+    let duplicate_descriptor = BundleMemberDescriptorV1 {
+        path: duplicate_path.clone(),
+        size_bytes: duplicate_member.bytes.len() as u64,
+        digest: duplicate_member.digest,
+        role: BundleMemberRoleV1::ExpectedResult,
+    };
+    let mut unordered = bundle;
+    unordered.members.push(duplicate_member);
+    unordered.manifest.members.push(duplicate_descriptor);
+    let mut duplicate_expected = unordered.manifest.expected_results[0].clone();
+    duplicate_expected.member_path = duplicate_path;
+    unordered.manifest.expected_results.push(duplicate_expected);
+    unordered
+        .members
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    unordered
+        .manifest
+        .members
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    unordered.manifest.expected_results.sort_unstable();
+    unordered.manifest.expected_results.reverse();
+    assert_eq!(
+        unordered.validate(),
+        Err(pos_conformance::BundleContractErrorV1::NonCanonicalOrder)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_materialization_caps_reject_bundle_shape_overflows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let base = signed_draft_bundle()?;
+    let (profile, members, expected_results) = public_bundle_inputs(&base)?;
+    let input_size = profile.fixtures[0].inputs[0].size_bytes;
+    let input_path_bytes = profile.fixtures[0].inputs[0].member_id.len() as u16;
+    let mutations: [fn(&mut EvaluatorHardCapsV1); 4] = [
+        |caps: &mut EvaluatorHardCapsV1| caps.max_bundle_members = 1,
+        |caps: &mut EvaluatorHardCapsV1| caps.max_member_path_bytes = input_path_bytes,
+        |caps: &mut EvaluatorHardCapsV1| caps.max_member_bytes = input_size,
+        |caps: &mut EvaluatorHardCapsV1| caps.max_total_bundle_bytes = input_size,
+    ];
+    for mutate in mutations {
+        let mut limited = profile.clone();
+        mutate(&mut limited.evaluator_protocol.hard_caps);
+        limited.profile_digest = limited.digest();
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &limited,
+                BundleModeV1::Local,
+                members.clone(),
+                expected_results.clone(),
+            ),
+            Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_each_zero_archive_cap(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    for cap_index in [1_usize, 2, 3, 4, 6, 7] {
+        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+            mutate_profile(value, |fields| {
+                if let Some(Value::Array(protocol)) = fields.get_mut(10) {
+                    if let Some(Value::Array(caps)) = protocol.get_mut(4) {
+                        caps[cap_index] = Value::Integer(0_u64.into());
+                    }
+                }
+            })
+        })?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_draft_authority_records_reject_each_malformed_shape(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bundle = signed_draft_bundle()?;
+    let inventory_cases: Vec<Box<dyn FnOnce(&mut JsonValue)>> = vec![
+        Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
+        Box::new(|value| value["lifecycle"] = JsonValue::String("Stable".to_owned())),
+        Box::new(|value| value["digest_algorithm"] = JsonValue::String("SHA-256".to_owned())),
+        Box::new(|value| value["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| {
+            value["entries"][0]["materialization_status"] =
+                JsonValue::String("materialized".to_owned())
+        }),
+        Box::new(|value| {
+            value["entries"][0]["fixture_bytes_path"] = JsonValue::String("x".to_owned())
+        }),
+        Box::new(|value| {
+            let duplicate = value["entries"][1]["fixture_id"].clone();
+            value["entries"][0]["fixture_id"] = duplicate;
+        }),
+    ];
+    for mutate in inventory_cases {
+        assert_json_member_rejected(
+            &bundle,
+            "authority/expected-authority-inventory.json",
+            mutate,
+            pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+        )?;
+    }
+    assert_json_member_rejected(
+        &bundle,
+        "authority/expected-authority-inventory.json",
+        |value| {
+            value["entries"].as_array_mut().map(|entries| entries.pop());
+        },
+        pos_conformance::BundleContractErrorV1::MemberMissing,
+    )?;
+    assert_json_member_rejected(
+        &bundle,
+        "authority/expected-authority-inventory.json",
+        |value| value["entries"] = JsonValue::Null,
+        pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+    )?;
+
+    let matrix_cases: Vec<Box<dyn FnOnce(&mut JsonValue)>> = vec![
+        Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
+        Box::new(|value| value["lifecycle"] = JsonValue::String("Candidate".to_owned())),
+        Box::new(|value| value["row_count"] = JsonValue::Number(11_u64.into())),
+        Box::new(|value| value["case_count"] = JsonValue::Number(191_u64.into())),
+        Box::new(|value| value["rows"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["rows"][0]["variants"] = JsonValue::Array(Vec::new())),
+        Box::new(|value| value["rows"][0]["modes"] = JsonValue::Array(Vec::new())),
+        Box::new(|value| value["rows"][0]["executed_case_count"] = JsonValue::Number(1_u64.into())),
+        Box::new(|value| value["cases"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["cases"][0]["variant"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["cases"][0]["mode"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["cases"][0]["case_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["equality_predicates"] = JsonValue::Null),
+    ];
+    for mutate in matrix_cases {
+        assert_json_member_rejected(
+            &bundle,
+            "authority/adr-059-execution-matrix.json",
+            mutate,
+            pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+        )?;
+    }
     Ok(())
 }
