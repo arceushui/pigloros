@@ -21,7 +21,7 @@ fi
 echo "pre-commit: cargo clippy (changed packages)"
 declare -A packages=()
 needs_workspace=false
-if [ -z "$changed_rust_files" ]; then
+if [ -n "$changed_cargo_files" ] || [ -z "$changed_rust_files" ]; then
     needs_workspace=true
 fi
 package_name() {

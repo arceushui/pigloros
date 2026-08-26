@@ -111,7 +111,7 @@ jobs:
 
   conformance-fixtures:
     name: conformance-fixtures
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -124,8 +124,6 @@ jobs:
     name: materialize-conformance-bundles
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      PIGLOROS_CONFORMANCE_SIGNING_KEY: ${{ secrets.CONFORMANCE_BUNDLE_SIGNING_KEY }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -134,34 +132,30 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: conformance-materialization
-      - name: Check trusted materialization key availability
-        id: signing-key
-        env:
-          SIGNING_KEY: ${{ secrets.CONFORMANCE_BUNDLE_SIGNING_KEY }}
+      - name: Reject non-main manual materialization
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |
           set -euo pipefail
-          if [[ -n "${SIGNING_KEY}" ]]; then
-            echo 'available=true' >> "${GITHUB_OUTPUT}"
-          elif [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            echo 'available=false' >> "${GITHUB_OUTPUT}"
-            echo 'No repository signing key is exposed to this pull request; Draft publication remains deferred.'
-          else
-            echo 'CONFORMANCE_BUNDLE_SIGNING_KEY is required on trusted materialization runs.' >&2
-            exit 1
-          fi
-      - name: Materialize deterministic Draft/Candidate CPF1 bundles
-        if: steps.signing-key.outputs.available == 'true'
+          echo 'trusted conformance materialization is only permitted from main' >&2
+          exit 1
+      - name: Materialize trusted Draft/Candidate CPF1 bundles
+        if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+        env:
+          # Repository signing material is available only to a push or manual
+          # run explicitly targeting protected main. It is never present in a
+          # pull-request runner environment.
+          PIGLOROS_CONFORMANCE_SIGNING_KEY: ${{ secrets.CONFORMANCE_BUNDLE_SIGNING_KEY }}
         run: bash scripts/materialize-conformance-bundles.sh
-      - name: Materialize Draft bundles for pull-request verification
-        if: steps.signing-key.outputs.available == 'false' && github.event_name == 'pull_request'
+      - name: Materialize non-trusted Draft bundles for pull-request verification
+        if: ${{ github.event_name == 'pull_request' }}
         env:
           # Public, non-trusted key used only to exercise deterministic Draft
-          # materialization when pull-request secrets are unavailable.
+          # materialization. This job never receives the repository signing key.
           PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
           PIGLOROS_CONFORMANCE_PUBLICATION_ID: ci-draft-${{ github.run_id }}-${{ github.run_attempt }}
         run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
       - name: Upload materialized conformance bundles
-        if: steps.signing-key.outputs.available == 'true'
+        if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conformance-bundles-${{ github.sha }}
@@ -169,7 +163,7 @@ jobs:
           retention-days: 90
           if-no-files-found: error
       - name: Upload pull-request Draft verification artifact
-        if: steps.signing-key.outputs.available == 'false' && github.event_name == 'pull_request'
+        if: ${{ github.event_name == 'pull_request' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: conformance-bundles-pr-draft-${{ github.sha }}
@@ -531,3 +525,61 @@ jobs:
         with:
           name: depgraph
           path: artifacts/depgraph.svg
+
+  # Branch protection should require this single fan-in check instead of a
+  # mutable list of individual jobs. The informational report jobs above are
+  # intentionally excluded from this blocking set.
+  ci-gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - fmt
+      - rustdoc
+      - test
+      - conformance-fixtures
+      - materialize-conformance-bundles
+      - clippy
+      - coverage
+      - audit
+      - deny
+      - cargo-shear
+      - geiger
+      - asan
+      - docker-build
+      - world-client-wasm
+      - world-client-browser-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every blocking CI job to pass
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          RUSTDOC_RESULT: ${{ needs.rustdoc.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          CONFORMANCE_FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
+          MATERIALIZE_CONFORMANCE_BUNDLES_RESULT: ${{ needs.materialize-conformance-bundles.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
+          DENY_RESULT: ${{ needs.deny.result }}
+          CARGO_SHEAR_RESULT: ${{ needs.cargo-shear.result }}
+          GEIGER_RESULT: ${{ needs.geiger.result }}
+          ASAN_RESULT: ${{ needs.asan.result }}
+          DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
+          WORLD_CLIENT_WASM_RESULT: ${{ needs.world-client-wasm.result }}
+          WORLD_CLIENT_BROWSER_PARITY_RESULT: ${{ needs.world-client-browser-parity.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for result_name in \
+            FMT_RESULT RUSTDOC_RESULT TEST_RESULT CONFORMANCE_FIXTURES_RESULT \
+            MATERIALIZE_CONFORMANCE_BUNDLES_RESULT CLIPPY_RESULT COVERAGE_RESULT \
+            AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
+            DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT; do
+            result="${!result_name}"
+            if [[ "${result}" != "success" ]]; then
+              echo "${result_name}=${result}" >&2
+              failed=1
+            fi
+          done
+          exit "${failed}"
