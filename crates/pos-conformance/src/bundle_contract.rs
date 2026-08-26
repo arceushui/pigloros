@@ -2346,12 +2346,12 @@ fn validate_authority_members(
     if profile.lifecycle == ProfileLifecycleV1::Candidate && matrix_lifecycle != "Candidate" {
         return Err(BundleContractErrorV1::CandidateEvidenceMissing);
     }
+    validate_provenance_authority_binding_for_lifecycle(
+        &provenance,
+        inventory_lifecycle,
+        matrix_lifecycle,
+    )?;
     if profile.lifecycle == ProfileLifecycleV1::Candidate {
-        validate_provenance_authority_binding_for_lifecycle(
-            &provenance,
-            inventory_lifecycle,
-            matrix_lifecycle,
-        )?;
         // The current authority inventory identifies expected-result artifacts
         // by fixture id, but does not provide a canonical binding for every
         // matrix coordinate. Set membership is useful for checking the shape
@@ -2369,11 +2369,6 @@ fn validate_authority_members(
         )?;
         validate_candidate_matrix_authority_bindings(&matrix_json, &inventory_json, members)?;
     } else {
-        validate_provenance_authority_binding_for_lifecycle(
-            &provenance,
-            inventory_lifecycle,
-            matrix_lifecycle,
-        )?;
         if matrix_lifecycle == "Candidate" {
             let authority_result_digests = members
                 .iter()
@@ -2775,37 +2770,7 @@ fn validate_execution_matrix_for_lifecycle(
                         0
                     })
         })
-        || cases.iter().any(|case| {
-            if expected_lifecycle == "Candidate" {
-                case.get("executed").and_then(JsonValue::as_bool) != Some(true)
-                    || case
-                        .get("expected_result_digest")
-                        .and_then(JsonValue::as_str)
-                        .and_then(crate::decode_hex_digest)
-                        .is_none()
-                    || case
-                        .get("authority_result_digest")
-                        .and_then(JsonValue::as_str)
-                        .and_then(crate::decode_hex_digest)
-                        .is_none()
-                    || case
-                        .get("expected_result")
-                        .and_then(JsonValue::as_str)
-                        .is_none()
-                    || !case
-                        .get("authority_result_digest")
-                        .and_then(JsonValue::as_str)
-                        .and_then(crate::decode_hex_digest)
-                        .is_some_and(|digest| {
-                            candidate_result_digests.is_some_and(|known| known.contains(&digest))
-                        })
-            } else {
-                case.get("executed").and_then(JsonValue::as_bool) != Some(false)
-                    || !case
-                        .get("expected_result_digest")
-                        .is_some_and(JsonValue::is_null)
-            }
-        })
+        || !matrix_cases_match_lifecycle(cases, expected_lifecycle, candidate_result_digests)
     {
         Err(BundleContractErrorV1::MemberDigestMismatch)
     } else {
@@ -2826,6 +2791,44 @@ fn validate_execution_matrix_for_lifecycle(
             Ok(())
         }
     }
+}
+
+fn matrix_cases_match_lifecycle(
+    cases: &[JsonValue],
+    expected_lifecycle: &str,
+    candidate_result_digests: Option<&BTreeSet<[u8; 32]>>,
+) -> bool {
+    cases.iter().all(|case| {
+        if expected_lifecycle == "Candidate" {
+            case.get("executed").and_then(JsonValue::as_bool) == Some(true)
+                && case
+                    .get("expected_result_digest")
+                    .and_then(JsonValue::as_str)
+                    .and_then(crate::decode_hex_digest)
+                    .is_some()
+                && case
+                    .get("authority_result_digest")
+                    .and_then(JsonValue::as_str)
+                    .and_then(crate::decode_hex_digest)
+                    .is_some()
+                && case
+                    .get("expected_result")
+                    .and_then(JsonValue::as_str)
+                    .is_some()
+                && case
+                    .get("authority_result_digest")
+                    .and_then(JsonValue::as_str)
+                    .and_then(crate::decode_hex_digest)
+                    .is_some_and(|digest| {
+                        candidate_result_digests.is_some_and(|known| known.contains(&digest))
+                    })
+        } else {
+            case.get("executed").and_then(JsonValue::as_bool) == Some(false)
+                && case
+                    .get("expected_result_digest")
+                    .is_some_and(JsonValue::is_null)
+        }
+    })
 }
 
 fn json_string_array<'a>(
