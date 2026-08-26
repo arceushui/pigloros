@@ -6837,6 +6837,136 @@ mod coverage_entrypoints {
         Ok(encode_archive_value(&profile)?)
     }
 
+    fn independent_archive_member_identity_rejections(
+        bundle: &ConformanceBundleV1,
+        first_input: usize,
+        second_input: usize,
+        first_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                first_input,
+                0,
+                Value::Text("inputs/renamed-member.bin".to_owned()),
+            )?),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                second_input,
+                0,
+                Value::Text(first_path.to_owned()),
+            )?),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                first_input,
+                2,
+                Value::Integer(1_u64.into()),
+            )?),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                first_input,
+                2,
+                Value::Integer(99_u64.into()),
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
+    fn independent_archive_member_shape_rejections(
+        bundle: &ConformanceBundleV1,
+        first_input: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut changed_bytes = bundle.members[first_input].bytes.clone();
+        changed_bytes[0] ^= 1;
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                first_input,
+                1,
+                Value::Bytes(Vec::new()),
+            )?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                first_input,
+                1,
+                Value::Bytes(changed_bytes),
+            )?),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member(
+                bundle,
+                first_input,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                first_input,
+                0,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_member_field(
+                bundle,
+                first_input,
+                1,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
+    fn independent_archive_descriptor_rejections(
+        bundle: &ConformanceBundleV1,
+        first_descriptor: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            verify_archive_independently(&replace_archive_descriptor(
+                bundle,
+                first_descriptor,
+                Value::Null,
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_descriptor_field(
+                bundle,
+                first_descriptor,
+                3,
+                Value::Integer(99_u64.into()),
+            )?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&replace_archive_top_field(
+                bundle,
+                4,
+                Value::Bytes(vec![0xff; 32]),
+            )?),
+            Err(BundleContractErrorV1::SignatureInvalid)
+        );
+        Ok(())
+    }
+
     #[test]
     fn independent_archive_rejection_matrix_is_instrumented(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6859,114 +6989,14 @@ mod coverage_entrypoints {
             .position(|member| member.path == first_path)
             .ok_or("missing first member descriptor")?;
 
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                first_input,
-                0,
-                Value::Text("inputs/renamed-member.bin".to_owned()),
-            )?),
-            Err(BundleContractErrorV1::UndeclaredMember)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                second_input,
-                0,
-                Value::Text(first_path.clone()),
-            )?),
-            Err(BundleContractErrorV1::UndeclaredMember)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                first_input,
-                2,
-                Value::Integer(1_u64.into()),
-            )?),
-            Err(BundleContractErrorV1::UndeclaredMember)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                first_input,
-                2,
-                Value::Integer(99_u64.into()),
-            )?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-
-        let mut changed_bytes = bundle.members[first_input].bytes.clone();
-        changed_bytes[0] ^= 1;
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                first_input,
-                1,
-                Value::Bytes(Vec::new()),
-            )?),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                first_input,
-                1,
-                Value::Bytes(changed_bytes),
-            )?),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member(
-                &bundle,
-                first_input,
-                Value::Null,
-            )?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                first_input,
-                0,
-                Value::Null,
-            )?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_member_field(
-                &bundle,
-                first_input,
-                1,
-                Value::Null,
-            )?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_descriptor(
-                &bundle,
-                first_descriptor,
-                Value::Null,
-            )?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_descriptor_field(
-                &bundle,
-                first_descriptor,
-                3,
-                Value::Integer(99_u64.into()),
-            )?),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-        assert_eq!(
-            verify_archive_independently(&replace_archive_top_field(
-                &bundle,
-                4,
-                Value::Bytes(vec![0xff; 32]),
-            )?),
-            Err(BundleContractErrorV1::SignatureInvalid)
-        );
+        independent_archive_member_identity_rejections(
+            &bundle,
+            first_input,
+            second_input,
+            &first_path,
+        )?;
+        independent_archive_member_shape_rejections(&bundle, first_input)?;
+        independent_archive_descriptor_rejections(&bundle, first_descriptor)?;
 
         Ok(())
     }
@@ -7023,7 +7053,7 @@ mod coverage_entrypoints {
                 3,
                 Value::Integer(0_u64.into()),
             )?),
-            Err(BundleContractErrorV1::ExpectedResultMismatch)
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
         assert_eq!(
             verify_archive_independently(&replace_archive_expected_result_field(
@@ -7094,6 +7124,36 @@ mod coverage_entrypoints {
                 Err(BundleContractErrorV1::ArchiveEncodingInvalid)
             );
         }
+
+        // The public verifier rejects this role mismatch earlier as an
+        // undeclared member. Keep the direct call for the defensive branch
+        // that classifies a descriptor found by the expected-result checker.
+        let expected_path = "expected/member.bin".to_owned();
+        let expected_bytes = b"expected".to_vec();
+        let expected_digest = *blake3::hash(&expected_bytes).as_bytes();
+        let expected = Value::Array(vec![
+            Value::Text("case".to_owned()),
+            Value::Integer(0_u64.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Integer(0_u64.into()),
+            Value::Text(expected_path.clone()),
+            Value::Bytes(expected_digest.to_vec()),
+        ]);
+        let wrong_role_descriptor = Value::Array(vec![
+            Value::Text(expected_path.clone()),
+            Value::Integer(u64::try_from(expected_bytes.len())?.into()),
+            Value::Bytes(expected_digest.to_vec()),
+            Value::Integer(0_u64.into()),
+        ]);
+        let expected_paths = [expected_path].into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(
+            super::independent_verify_expected_results(
+                std::slice::from_ref(&expected),
+                std::slice::from_ref(&wrong_role_descriptor),
+                &expected_paths,
+            ),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
 
         Ok(())
     }
@@ -7175,10 +7235,18 @@ mod coverage_entrypoints {
             super::archive_preflight::scan(&truncated_archive_member_path()),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         ));
+        assert_eq!(
+            verify_archive_independently(&truncated_archive_member_path()),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
         assert!(matches!(
             super::archive_preflight::scan(&raw_archive(&[0x60], &[0x81, 0x82, 0x60, 0x40],)),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         ));
+        assert_eq!(
+            verify_archive_independently(&raw_archive(&[0x60], &[0x81, 0x82, 0x60, 0x40],)),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
         Ok(())
     }
 
