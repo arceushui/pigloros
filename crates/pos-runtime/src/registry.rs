@@ -146,6 +146,7 @@ mod coverage_paths {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let mut location = event.clone();
@@ -398,6 +399,7 @@ mod coverage_entrypoints {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         }
     }
@@ -2710,6 +2712,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         bound
@@ -2947,6 +2950,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let mut consent = ordinary.clone();
