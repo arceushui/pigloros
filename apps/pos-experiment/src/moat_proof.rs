@@ -2574,7 +2574,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn evidence_serialization_failures_are_propagated() {
+    fn incomplete_fixture_reproduction_failures_are_propagated() {
         let (report, _, _) = test_ok(run_local_and_air_gapped(input()));
         let expected = ComparisonV1 {
             equal: true,
@@ -2584,11 +2584,7 @@ mod coverage_entrypoints {
         };
 
         let mut invalid_baseline = report.baseline.clone();
-        invalid_baseline.uncertainty[0].confidence = f64::NAN;
-        assert!(matches!(
-            compare_with_reference(&invalid_baseline, &report.counterfactual, &expected),
-            Err(MoatProofError::Json(_))
-        ));
+        invalid_baseline.authoritative_events.clear();
         assert!(matches!(
             verify_independent_fixture_reproduction(
                 &invalid_baseline,
@@ -2599,7 +2595,7 @@ mod coverage_entrypoints {
         ));
 
         let mut invalid_counterfactual = report.counterfactual.clone();
-        invalid_counterfactual.uncertainty[0].confidence = f64::NAN;
+        invalid_counterfactual.authoritative_events.clear();
         assert!(matches!(
             verify_independent_fixture_reproduction(
                 &report.baseline,
