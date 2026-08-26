@@ -1563,13 +1563,13 @@ fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
             Ok(())
         }),
     ];
-    for mutate in mutations {
-        assert_archive_decoder_rejected(
-            &bundle,
-            &signing_key,
-            mutate,
-            pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid,
-        )?;
+    for (index, mutate) in mutations.into_iter().enumerate() {
+        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&archive),
+            Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid),
+            "member/expected archive mutation {index} was accepted",
+        );
     }
     Ok(())
 }
@@ -1797,7 +1797,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         |value| {
             let _ = value["entries"].as_array_mut().map(Vec::pop);
         },
-        pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+        pos_conformance::BundleContractErrorV1::MemberMissing,
     )?;
     assert_json_member_rejected(
         &bundle,
