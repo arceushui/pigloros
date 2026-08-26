@@ -5641,10 +5641,7 @@ mod tests {
             .ok_or("missing provenance member")?;
         approved_members[provenance_index].bytes = approved_provenance;
         approved_members[provenance_index].digest = approved_provenance_digest;
-        assert_eq!(
-            materialize_candidate_for_test(&approved_profile, &approved_members)?,
-            Ok(_)
-        );
+        assert!(materialize_candidate_for_test(&approved_profile, &approved_members)?.is_ok());
         let mut mismatched_review_profile = approved_profile.clone();
         mismatched_review_profile.fixtures[0]
             .provenance
@@ -6337,7 +6334,7 @@ mod tests {
             .ok_or("missing provenance member")?;
         provenance.bytes = approved_bytes;
         provenance.digest = approved_digest;
-        assert_eq!(materialize_candidate_for_test(&candidate, &members)?, Ok(_));
+        assert!(materialize_candidate_for_test(&candidate, &members)?.is_ok());
         for field in ["candidate_status", "deletion_review", "secret_scan"] {
             let mut invalid = approved.clone();
             invalid[field] = JsonValue::String("pending".to_owned());
@@ -9095,15 +9092,13 @@ mod instrumented_candidate_entrypoints {
         candidate_profile.profile_digest = candidate_profile.digest();
         let (candidate_members, candidate_expected) =
             tests::bundle_inputs(&candidate_profile, BundleModeV1::Local)?;
-        assert_eq!(
-            ConformanceBundleV1::materialize(
-                &candidate_profile,
-                BundleModeV1::Local,
-                candidate_members,
-                candidate_expected,
-            ),
-            Ok(_)
-        );
+        assert!(ConformanceBundleV1::materialize(
+            &candidate_profile,
+            BundleModeV1::Local,
+            candidate_members,
+            candidate_expected,
+        )
+        .is_ok());
         Ok(())
     }
 
