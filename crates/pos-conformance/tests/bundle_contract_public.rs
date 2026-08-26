@@ -1192,8 +1192,10 @@ fn public_independent_verifier_rejects_unknown_matching_member_role(
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
     let archive = signed_archive_variant(&bundle, &signing_key, |value| {
-        archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(14_u64.into());
-        archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Integer(14_u64.into());
+        archive_member(value, "support/normative-requirements.md")?[2] =
+            Value::Integer(14_u64.into());
+        archive_descriptor(value, "support/normative-requirements.md")?[3] =
+            Value::Integer(14_u64.into());
         Ok(())
     })?;
     assert_eq!(
@@ -1209,7 +1211,8 @@ fn public_independent_verifier_classifies_role_mismatch_as_undeclared(
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
     let archive = signed_archive_variant(&bundle, &signing_key, |value| {
-        archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(0_u64.into());
+        archive_member(value, "support/normative-requirements.md")?[2] =
+            Value::Integer(0_u64.into());
         Ok(())
     })?;
     assert_eq!(
