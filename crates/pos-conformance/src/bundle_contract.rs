@@ -8411,14 +8411,12 @@ mod instrumented_candidate_entrypoints {
         }
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         let mut manifest_bytes = Vec::new();
-        ciborium::into_writer(&fields[2], &mut manifest_bytes)
-            .expect("encoding the mutated manifest must succeed");
+        ciborium::into_writer(&fields[2], &mut manifest_bytes)?;
         fields[4] = ciborium::value::Value::Bytes(signing_key.verifying_key().to_bytes().to_vec());
         fields[5] =
             ciborium::value::Value::Bytes(signing_key.sign(&manifest_bytes).to_bytes().to_vec());
         let mut encoded = Vec::new();
-        ciborium::into_writer(&value, &mut encoded)
-            .expect("encoding the signed unknown-role archive must succeed");
+        ciborium::into_writer(&value, &mut encoded)?;
         assert_eq!(
             verify_archive_independently(&encoded),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
@@ -8470,8 +8468,7 @@ mod instrumented_candidate_entrypoints {
             ciborium::value::Value::Array(vec![ciborium::value::Value::Null]),
         ]);
         let mut encoded = Vec::new();
-        ciborium::into_writer(&malformed, &mut encoded)
-            .expect("encoding the malformed archive fixture must succeed");
+        ciborium::into_writer(&malformed, &mut encoded)?;
 
         assert!(public_archive_decode_boundaries(&encoded).is_err());
         assert!(public_archive_rejects_unknown_member_role(&encoded).is_err());
@@ -8528,8 +8525,7 @@ mod instrumented_candidate_entrypoints {
         limited_profiles[0]
             .evaluator_protocol
             .hard_caps
-            .max_member_path_bytes = u16::try_from(max_input_path_bytes)
-            .expect("fixture member paths fit the public path cap type");
+            .max_member_path_bytes = u16::try_from(max_input_path_bytes)?;
         limited_profiles[1]
             .evaluator_protocol
             .hard_caps
@@ -8541,8 +8537,7 @@ mod instrumented_candidate_entrypoints {
         for mut limited_profile in limited_profiles {
             limited_profile.profile_digest = limited_profile.digest();
             let (limited_members, limited_expected) =
-                tests::bundle_inputs(&limited_profile, BundleModeV1::Local)
-                    .expect("bounded profile fixture inputs must materialize");
+                tests::bundle_inputs(&limited_profile, BundleModeV1::Local)?;
             assert_eq!(
                 ConformanceBundleV1::materialize(
                     &limited_profile,
@@ -8568,19 +8563,11 @@ mod instrumented_candidate_entrypoints {
             members,
             expected_results,
         )?
-        .sign(&signing_key)
-        .expect("valid public bundle must be signed");
-        let archive = bundle
-            .to_canonical_cbor()
-            .expect("valid public bundle must encode");
-        assert_eq!(
-            ConformanceBundleV1::from_canonical_cbor(&archive)
-                .expect("valid public bundle must decode"),
-            bundle
-        );
+        .sign(&signing_key)?;
+        let archive = bundle.to_canonical_cbor()?;
+        assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
         assert_eq!(verify_archive_independently(&archive), Ok(()));
-        public_archive_decode_boundaries(&archive)
-            .expect("valid public archive must reach all decoder boundaries");
+        public_archive_decode_boundaries(&archive)?;
         public_archive_malformed_shapes_are_rejected();
         public_archive_validation_boundaries(&bundle);
         public_archive_cap_boundaries(profile)
@@ -8589,8 +8576,7 @@ mod instrumented_candidate_entrypoints {
     #[test]
     fn public_archive_boundaries_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
         let profile = tests::profile();
-        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)
-            .expect("public archive fixture inputs must materialize");
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
         let mut invalid_profile = profile.clone();
         invalid_profile.lifecycle = ProfileLifecycleV1::Stable;
         assert!(exercise_public_archive_boundaries(
