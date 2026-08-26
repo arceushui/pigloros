@@ -73,9 +73,7 @@ impl EventLedgerStore {
         let mut registry = key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
-        let mut candidate_registry = persisted_registry
-            .clone()
-            .unwrap_or_else(|| registry.clone());
+        let mut candidate_registry = persisted_registry.unwrap_or_else(|| registry.clone());
         let signing_key = SigningKeyMaterial::new(signing_key);
         let public_verification_key = signing_key.public_verification_key().map_err(|error| {
             LedgerError::Store(format!("ledger signing material unavailable: {error}"))
