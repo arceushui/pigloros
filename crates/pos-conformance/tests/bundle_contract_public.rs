@@ -1647,11 +1647,11 @@ fn public_materialization_caps_reject_bundle_shape_overflows(
     let (profile, members, expected_results) = public_bundle_inputs(&base)?;
     let input_size = profile.fixtures[0].inputs[0].size_bytes;
     let input_path_bytes = profile.fixtures[0].inputs[0].member_id.len() as u16;
-    let mutations: [fn(&mut EvaluatorHardCapsV1); 4] = [
-        |caps: &mut EvaluatorHardCapsV1| caps.max_bundle_members = 1,
-        |caps: &mut EvaluatorHardCapsV1| caps.max_member_path_bytes = input_path_bytes,
-        |caps: &mut EvaluatorHardCapsV1| caps.max_member_bytes = input_size,
-        |caps: &mut EvaluatorHardCapsV1| caps.max_total_bundle_bytes = input_size,
+    let mutations: Vec<Box<dyn Fn(&mut EvaluatorHardCapsV1)>> = vec![
+        Box::new(|caps| caps.max_bundle_members = 1),
+        Box::new(move |caps| caps.max_member_path_bytes = input_path_bytes),
+        Box::new(move |caps| caps.max_member_bytes = input_size),
+        Box::new(move |caps| caps.max_total_bundle_bytes = input_size),
     ];
     for mutate in mutations {
         let mut limited = profile.clone();
