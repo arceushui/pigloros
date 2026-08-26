@@ -3211,7 +3211,7 @@ mod tests {
             BundleContractErrorV1::ExpectedResultMismatch,
         )?;
 
-        let mut invalid_modes = profile_value.clone();
+        let mut invalid_modes = profile_value;
         if let Value::Array(fields) = &mut invalid_modes {
             let Value::Array(fixtures) = &mut fields[8] else {
                 return Err("fixtures must be an array".into());
