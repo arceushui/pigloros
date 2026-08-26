@@ -2607,9 +2607,7 @@ mod coverage_entrypoints {
         let mut input = input();
         input.fork_velocity = input.initial_velocity;
         assert!(matches!(
-            MoatProofRun::new(input, ExecutionModeV1::Local)
-                .test_ok()
-                .run(),
+            test_ok(MoatProofRun::new(input, ExecutionModeV1::Local)).run(),
             Err(MoatProofError::ReactionGatesFailed)
         ));
     }
