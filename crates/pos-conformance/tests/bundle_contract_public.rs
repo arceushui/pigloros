@@ -1574,9 +1574,7 @@ fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
     Ok(())
 }
 
-fn assert_expected_scalar_bound_mismatches(
-    bundle: &ConformanceBundleV1,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_expected_scalar_bound_mismatches(bundle: &ConformanceBundleV1) {
     let mut wrong_mode = bundle.clone();
     wrong_mode.manifest.expected_results[0].mode = BundleModeV1::AirGapped;
     assert_eq!(
@@ -1599,12 +1597,11 @@ fn assert_expected_scalar_bound_mismatches(
     );
 
     let mut missing_fixture = bundle.clone();
-    missing_fixture.manifest.expected_results[0].case_id = "missing-fixture".to_owned();
+    "missing-fixture".clone_into(&mut missing_fixture.manifest.expected_results[0].case_id);
     assert_eq!(
         missing_fixture.validate(),
         Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
     );
-    Ok(())
 }
 
 fn assert_expected_member_bound_mismatches(
@@ -1642,8 +1639,8 @@ fn assert_expected_member_bound_mismatches(
 
     let replacement_path = "expected/alternate.bin".to_owned();
     let mut undeclared_path = bundle.clone();
-    undeclared_path.members[expected_member_index].path = replacement_path.clone();
-    undeclared_path.manifest.members[expected_member_index].path = replacement_path.clone();
+    replacement_path.clone_into(&mut undeclared_path.members[expected_member_index].path);
+    replacement_path.clone_into(&mut undeclared_path.manifest.members[expected_member_index].path);
     undeclared_path.manifest.expected_results[0].member_path = replacement_path;
     undeclared_path
         .members
@@ -1659,10 +1656,7 @@ fn assert_expected_member_bound_mismatches(
     Ok(())
 }
 
-fn assert_expected_order_mismatch(
-    bundle: ConformanceBundleV1,
-    expected_member_index: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_expected_order_mismatch(bundle: ConformanceBundleV1, expected_member_index: usize) {
     let expected_member = bundle.members[expected_member_index].clone();
     let duplicate_path = "expected/duplicate.bin".to_owned();
     let duplicate_member = BundleMemberV1::new(duplicate_path.clone(), expected_member.bytes, true);
@@ -1691,7 +1685,6 @@ fn assert_expected_order_mismatch(
         unordered.validate(),
         Err(pos_conformance::BundleContractErrorV1::NonCanonicalOrder)
     );
-    Ok(())
 }
 
 #[test]
@@ -1704,9 +1697,9 @@ fn public_expected_result_validation_rejects_each_bound_mismatch(
         .position(|member| member.role == BundleMemberRoleV1::ExpectedResult)
         .ok_or("expected-result member is missing")?;
     let expected_path = bundle.members[expected_member_index].path.clone();
-    assert_expected_scalar_bound_mismatches(&bundle)?;
+    assert_expected_scalar_bound_mismatches(&bundle);
     assert_expected_member_bound_mismatches(&bundle, expected_member_index, &expected_path)?;
-    assert_expected_order_mismatch(bundle, expected_member_index)?;
+    assert_expected_order_mismatch(bundle, expected_member_index);
     Ok(())
 }
 
