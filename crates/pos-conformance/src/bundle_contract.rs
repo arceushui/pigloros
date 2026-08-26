@@ -3179,6 +3179,100 @@ mod tests {
         )
     }
 
+    fn independent_expected_fixture_shape_rejections(
+        bundle: &ConformanceBundleV1,
+        valid: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile_bytes = bundle
+            .members
+            .iter()
+            .find(|member| member.path == PROFILE_MEMBER_PATH)
+            .ok_or("missing profile member")?
+            .bytes
+            .clone();
+        let profile_value: Value = ciborium::from_reader(Cursor::new(profile_bytes))?;
+
+        let mut invalid_fixture = profile_value.clone();
+        if let Value::Array(fields) = &mut invalid_fixture {
+            let Value::Array(fixtures) = &mut fields[8] else {
+                return Err("fixtures must be an array".into());
+            };
+            fixtures[0] = Value::Null;
+            fixtures.truncate(1);
+        }
+        let mut invalid_fixture_archive = valid.clone();
+        replace_profile_bytes(
+            &mut invalid_fixture_archive,
+            &encode_archive_value(&invalid_fixture)?,
+        )?;
+        resign_archive(&mut invalid_fixture_archive)?;
+        assert_independent_error(
+            &invalid_fixture_archive,
+            BundleContractErrorV1::ExpectedResultMismatch,
+        )?;
+
+        let mut invalid_modes = profile_value.clone();
+        if let Value::Array(fields) = &mut invalid_modes {
+            let Value::Array(fixtures) = &mut fields[8] else {
+                return Err("fixtures must be an array".into());
+            };
+            let Value::Array(mut fixture) = fixtures[0].clone() else {
+                return Err("fixture must be an array".into());
+            };
+            fixture[5] = Value::Null;
+            fixtures[0] = Value::Array(fixture);
+            fixtures.truncate(1);
+        }
+        let mut invalid_modes_archive = valid.clone();
+        replace_profile_bytes(
+            &mut invalid_modes_archive,
+            &encode_archive_value(&invalid_modes)?,
+        )?;
+        resign_archive(&mut invalid_modes_archive)?;
+        assert_independent_error(
+            &invalid_modes_archive,
+            BundleContractErrorV1::ExpectedResultMismatch,
+        )?;
+
+        let mut mismatched_path = valid.clone();
+        if let Value::Array(fields) = &mut mismatched_path {
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("manifest must be an array".into());
+            };
+            let Value::Array(expected_results) = &mut manifest[5] else {
+                return Err("expected results must be an array".into());
+            };
+            let Value::Array(expected) = &mut expected_results[0] else {
+                return Err("expected result must be an array".into());
+            };
+            expected[0] = Value::Text("case-rebound".to_owned());
+        }
+
+        let profile_bytes = bundle
+            .members
+            .iter()
+            .find(|member| member.path == PROFILE_MEMBER_PATH)
+            .ok_or("missing profile member")?
+            .bytes
+            .clone();
+        let mut profile_value: Value = ciborium::from_reader(Cursor::new(&profile_bytes))?;
+        let Value::Array(profile_fields) = &mut profile_value else {
+            return Err("profile must be an array".into());
+        };
+        let Value::Array(fixtures) = &mut profile_fields[8] else {
+            return Err("fixtures must be an array".into());
+        };
+        let Value::Array(fixture) = &mut fixtures[0] else {
+            return Err("fixture must be an array".into());
+        };
+        fixture[0] = Value::Text("case-rebound".to_owned());
+        replace_profile_bytes(&mut mismatched_path, &encode_archive_value(&profile_value)?)?;
+        resign_archive(&mut mismatched_path)?;
+        assert_independent_error(&mismatched_path, BundleContractErrorV1::UndeclaredMember)?;
+
+        Ok(())
+    }
+
     fn independent_profile_rejections(
         bundle: &ConformanceBundleV1,
         valid: &Value,
@@ -3256,6 +3350,7 @@ mod tests {
         );
         independent_envelope_rejections(&valid)?;
         independent_expected_result_rejections(&valid)?;
+        independent_expected_fixture_shape_rejections(&bundle, &valid)?;
         independent_profile_rejections(&bundle, &valid)?;
 
         let mut candidate = valid;
