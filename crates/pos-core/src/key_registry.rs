@@ -1913,3 +1913,286 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    fn record(identity: KeyIdentityV1, material: u8) -> KeyRecordV1 {
+        KeyRecordV1 {
+            identity,
+            private_material_digest: Some(Hash::from_bytes([material; 32])),
+            public_verification_key: Some(PublicKey::from_bytes([material; 32])),
+        }
+    }
+
+    fn destroyed_record(identity: KeyIdentityV1, material: u8) -> KeyRecordV1 {
+        KeyRecordV1 {
+            identity,
+            private_material_digest: None,
+            public_verification_key: Some(PublicKey::from_bytes([material; 32])),
+        }
+    }
+
+    fn active_state(identity: KeyIdentityV1, material: u8) -> KeyRegistryStateV1 {
+        let mut state = KeyRegistryStateV1::new();
+        state.records.insert(identity, record(identity, material));
+        state.active.insert(identity.role, identity);
+        state.highest_epoch.insert(identity.role, identity.epoch);
+        state
+    }
+
+    #[test]
+    fn validation_entrypoints_cover_each_snapshot_invariant() {
+        let signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let next_signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
+
+        let mut zero_epoch = KeyRegistryStateV1::new();
+        let zero = KeyIdentityV1::new(signing.role, 0);
+        zero_epoch.records.insert(zero, record(zero, 1));
+        assert_eq!(zero_epoch.validate(), Err(KeyRegistryErrorV1::InvalidState));
+
+        let mut missing_public_key = KeyRegistryStateV1::new();
+        missing_public_key.records.insert(
+            signing,
+            KeyRecordV1 {
+                identity: signing,
+                private_material_digest: Some(Hash::from_bytes([2; 32])),
+                public_verification_key: None,
+            },
+        );
+        assert_eq!(
+            missing_public_key.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut missing_highest_epoch = KeyRegistryStateV1::new();
+        missing_highest_epoch
+            .records
+            .insert(signing, record(signing, 3));
+        assert_eq!(
+            missing_highest_epoch.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut duplicate_material = active_state(signing, 4);
+        duplicate_material
+            .records
+            .insert(next_signing, record(next_signing, 4));
+        duplicate_material
+            .active
+            .insert(next_signing.role, next_signing);
+        duplicate_material
+            .highest_epoch
+            .insert(next_signing.role, next_signing.epoch);
+        assert_eq!(
+            duplicate_material.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut missing_tombstone = KeyRegistryStateV1::new();
+        missing_tombstone
+            .records
+            .insert(signing, destroyed_record(signing, 5));
+        assert_eq!(
+            missing_tombstone.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut orphaned_highest_epoch = KeyRegistryStateV1::new();
+        orphaned_highest_epoch.highest_epoch.insert(signing.role, 1);
+        assert_eq!(
+            orphaned_highest_epoch.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut mismatched_highest_epoch = active_state(signing, 6);
+        mismatched_highest_epoch
+            .highest_epoch
+            .insert(signing.role, 2);
+        assert_eq!(
+            mismatched_highest_epoch.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut wrong_active_role = active_state(signing, 7);
+        wrong_active_role
+            .active
+            .insert(KeyRoleV1::SubjectDataEncryption, signing);
+        assert_eq!(
+            wrong_active_role.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut active_tombstone = KeyRegistryStateV1::new();
+        active_tombstone
+            .records
+            .insert(signing, destroyed_record(signing, 8));
+        active_tombstone.tombstones.insert(
+            signing,
+            KeyTombstoneV1 {
+                identity: signing,
+                destroyed_material_digest: Hash::from_bytes([8; 32]),
+                destruction_digest: Hash::from_bytes([9; 32]),
+            },
+        );
+        active_tombstone.active.insert(signing.role, signing);
+        active_tombstone.highest_epoch.insert(signing.role, 1);
+        assert_eq!(
+            active_tombstone.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut missing_active_record = KeyRegistryStateV1::new();
+        missing_active_record.active.insert(signing.role, signing);
+        assert_eq!(
+            missing_active_record.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut inactive_active_record = active_state(signing, 10);
+        inactive_active_record
+            .records
+            .insert(next_signing, record(next_signing, 11));
+        inactive_active_record
+            .highest_epoch
+            .insert(signing.role, next_signing.epoch);
+        assert_eq!(
+            inactive_active_record.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut missing_active_for_highest = active_state(signing, 12);
+        missing_active_for_highest.active.clear();
+        assert_eq!(
+            missing_active_for_highest.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut orphaned_tombstone = KeyRegistryStateV1::new();
+        orphaned_tombstone.tombstones.insert(
+            signing,
+            KeyTombstoneV1 {
+                identity: signing,
+                destroyed_material_digest: Hash::from_bytes([13; 32]),
+                destruction_digest: Hash::from_bytes([14; 32]),
+            },
+        );
+        assert_eq!(
+            orphaned_tombstone.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut mismatched_tombstone_identity = KeyRegistryStateV1::new();
+        mismatched_tombstone_identity
+            .records
+            .insert(signing, destroyed_record(signing, 15));
+        mismatched_tombstone_identity.tombstones.insert(
+            signing,
+            KeyTombstoneV1 {
+                identity: next_signing,
+                destroyed_material_digest: Hash::from_bytes([15; 32]),
+                destruction_digest: Hash::from_bytes([16; 32]),
+            },
+        );
+        mismatched_tombstone_identity
+            .highest_epoch
+            .insert(signing.role, signing.epoch);
+        assert_eq!(
+            mismatched_tombstone_identity.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut live_record_with_tombstone = active_state(signing, 17);
+        live_record_with_tombstone.tombstones.insert(
+            signing,
+            KeyTombstoneV1 {
+                identity: signing,
+                destroyed_material_digest: Hash::from_bytes([17; 32]),
+                destruction_digest: Hash::from_bytes([18; 32]),
+            },
+        );
+        live_record_with_tombstone.active.clear();
+        assert_eq!(
+            live_record_with_tombstone.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut duplicate_tombstone_material = KeyRegistryStateV1::new();
+        duplicate_tombstone_material
+            .records
+            .insert(signing, destroyed_record(signing, 19));
+        duplicate_tombstone_material
+            .records
+            .insert(next_signing, record(next_signing, 19));
+        duplicate_tombstone_material.tombstones.insert(
+            signing,
+            KeyTombstoneV1 {
+                identity: signing,
+                destroyed_material_digest: Hash::from_bytes([19; 32]),
+                destruction_digest: Hash::from_bytes([20; 32]),
+            },
+        );
+        duplicate_tombstone_material
+            .active
+            .insert(next_signing.role, next_signing);
+        duplicate_tombstone_material
+            .highest_epoch
+            .insert(next_signing.role, next_signing.epoch);
+        assert_eq!(
+            duplicate_tombstone_material.validate(),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+    }
+
+    #[test]
+    fn replacement_entrypoints_cover_snapshot_and_history_guards() {
+        let signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let next_signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
+        let valid = active_state(signing, 21);
+
+        let mut invalid_previous = KeyRegistryStateV1::new();
+        invalid_previous
+            .records
+            .insert(signing, destroyed_record(signing, 22));
+        assert_eq!(
+            invalid_previous.validate_replacement(&valid),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut invalid_next = valid.clone();
+        invalid_next.active.clear();
+        assert_eq!(
+            valid.validate_replacement(&invalid_next),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let previous_latest = active_state(next_signing, 23);
+        let mut stale_next = previous_latest.clone();
+        stale_next.records.insert(signing, record(signing, 24));
+        assert_eq!(
+            previous_latest.validate_replacement(&stale_next),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut wrong_tombstone = valid.clone();
+        wrong_tombstone
+            .records
+            .get_mut(&signing)
+            .expect("test record exists")
+            .private_material_digest = None;
+        wrong_tombstone.tombstones.insert(
+            signing,
+            KeyTombstoneV1 {
+                identity: signing,
+                destroyed_material_digest: Hash::from_bytes([25; 32]),
+                destruction_digest: Hash::from_bytes([26; 32]),
+            },
+        );
+        wrong_tombstone.active.clear();
+        assert_eq!(
+            valid.validate_replacement(&wrong_tombstone),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+    }
+}

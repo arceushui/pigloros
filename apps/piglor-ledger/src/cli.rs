@@ -85,9 +85,7 @@ fn ledger_signing_registry(
                 material_digest,
                 Some(public_verification_key),
             ))
-            .map_err(|error| {
-                CliError::BadSource(format!("ledger signing registration: {error}"))
-            })?;
+            .expect("initial ledger signing registration must satisfy the registry contract");
     }
     registry
         .with_signing_authorization(identity, material_digest, public_verification_key, || ())

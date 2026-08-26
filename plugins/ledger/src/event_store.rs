@@ -769,6 +769,40 @@ mod tests {
     }
 
     #[test]
+    fn destruction_rejects_a_mismatched_material_digest() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (registry, identity) = registry_for(&signing_key)?;
+        let material_digest = key_material_digest(&signing_key.to_bytes());
+        let mut memory = MemoryStore::new();
+        let timeline = memory.create_timeline("ledger")?;
+        let mut store = EventLedgerStore::new(
+            Box::new(memory),
+            timeline.id(),
+            EntityId::new(),
+            signing_key,
+            registry,
+            identity,
+            Box::new(Blake3Hasher),
+        )?;
+
+        let error = store
+            .destroy_signing_key(pos_core::KeyDestructionRequestV1::new(
+                identity,
+                pos_core::Hash::from_bytes([0; 32]),
+                pos_core::Hash::from_bytes([1; 32]),
+            ))
+            .err()
+            .ok_or("mismatched material digest was accepted")?;
+        assert!(error
+            .to_string()
+            .contains("does not match the ledger signing key"));
+        assert!(!store.signing_key.is_destroyed());
+        assert_eq!(store.signing_key.material_digest(), material_digest);
+        Ok(())
+    }
+
+    #[test]
     fn destroyed_registry_state_survives_sqlite_reopen() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let db = temp.path().join("ledger.db");
