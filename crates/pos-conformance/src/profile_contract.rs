@@ -5626,7 +5626,7 @@ mod tests {
         invalid_profile.stable_evidence = vec![invalid_identity, stable_evidence("beta", 40)];
         assert_eq!(
             validate_stable_evidence(&invalid_profile, Some(&trusted_root_policy())),
-            Err(ConformanceContractError::IndependenceEvidenceMissing)
+            Err(ConformanceContractError::ProvenanceMissing)
         );
     }
 
