@@ -265,6 +265,22 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
     let anchors = format!("2/1={anchor_one},2/2={anchor_two}");
     let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
     assert!(report.to_string().starts_with("OK: store"));
+
+    let single_anchor = material_one
+        .public_verification_key()
+        .as_bytes()
+        .iter()
+        .try_fold(String::with_capacity(64), |mut value, byte| {
+            write!(&mut value, "{byte:02x}").map(|()| value)
+        })?;
+    let report = verify_source(
+        &Source::Store(database.path().to_path_buf()),
+        Some(&single_anchor),
+        None,
+    )?;
+    assert!(report
+        .to_string()
+        .contains("rotated ledger requires role/epoch keyed public-key trust anchors"));
     Ok(())
 }
 
@@ -282,5 +298,13 @@ fn public_store_verification_rejects_malformed_key_anchor_sets(
         };
         assert!(error.to_string().contains("--pubkey"), "{error}");
     }
+    let two_bare_keys = format!("{},{}", "aa".repeat(32), "bb".repeat(32));
+    let error = match verify_source(&Source::Store(database_path), Some(&two_bare_keys), None) {
+        Ok(report) => return Err(format!("multiple bare keys produced a report: {report}").into()),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("entries must use role/epoch=hex format"));
     Ok(())
 }
