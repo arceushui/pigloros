@@ -1623,8 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn materializer_entrypoint_materializes_candidate_authority_bundles(
-    ) -> Result<(), Box<dyn Error>> {
+    fn materializer_entrypoint_rejects_unbound_candidate_authority() -> Result<(), Box<dyn Error>> {
         let authority_root = output_root("candidate-entrypoint-authority");
         let inventory = candidate_authority_inventory(&authority_root)?;
         let output = output_root("candidate-entrypoint-output");
@@ -1639,17 +1638,13 @@ mod tests {
             &inventory,
             Some(&authority_root),
         );
-        let artifact_candidate = output.join("artifact-integrity/candidate").is_dir();
-        let empirical_candidate = output.join("empirical-evaluation/candidate").is_dir();
         let output_removed = std::fs::remove_dir_all(output);
         let authority_removed = std::fs::remove_dir_all(authority_root);
         assert!(
-            result.is_ok(),
-            "candidate materialization failed: {:?}",
+            result.is_err(),
+            "unbound candidate authority unexpectedly materialized: {:?}",
             result.as_ref().err()
         );
-        assert!(artifact_candidate);
-        assert!(empirical_candidate);
         assert!(output_removed.is_ok());
         assert!(authority_removed.is_ok());
         Ok(())
