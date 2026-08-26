@@ -832,6 +832,7 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]
