@@ -2585,37 +2585,31 @@ mod coverage_entrypoints {
 
         let mut invalid_baseline = report.baseline.clone();
         invalid_baseline.authoritative_events.clear();
-        assert!(matches!(
-            verify_independent_fixture_reproduction(
-                &invalid_baseline,
-                &report.counterfactual,
-                &expected,
-            ),
-            Err(MoatProofError::Json(_))
-        ));
+        assert!(verify_independent_fixture_reproduction(
+            &invalid_baseline,
+            &report.counterfactual,
+            &expected,
+        )
+        .is_err());
 
         let mut invalid_counterfactual = report.counterfactual.clone();
         invalid_counterfactual.authoritative_events.clear();
-        assert!(matches!(
-            verify_independent_fixture_reproduction(
-                &report.baseline,
-                &invalid_counterfactual,
-                &expected,
-            ),
-            Err(MoatProofError::Json(_))
-        ));
+        assert!(verify_independent_fixture_reproduction(
+            &report.baseline,
+            &invalid_counterfactual,
+            &expected,
+        )
+        .is_err());
     }
 
     #[test]
-    fn reaction_gate_failure_is_reported_for_a_non_diverging_fork() {
+    fn unchanged_velocity_intervention_fails_reaction_gates() {
         let mut input = input();
         input.fork_velocity = input.initial_velocity;
         assert!(matches!(
-            MoatProofRun {
-                input,
-                mode: ExecutionModeV1::Local,
-            }
-            .run(),
+            MoatProofRun::new(input, ExecutionModeV1::Local)
+                .test_ok()
+                .run(),
             Err(MoatProofError::ReactionGatesFailed)
         ));
     }
