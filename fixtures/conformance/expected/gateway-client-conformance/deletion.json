@@ -3,5 +3,9 @@
   "case_id": "gateway-client-conformance-deletion",
   "family": "deletion",
   "result": "destroyed",
-  "status": "pending"
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "typed-failure",
+    "error_code": "ProvenanceMissing"
+  }
 }

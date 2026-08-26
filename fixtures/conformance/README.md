@@ -26,6 +26,9 @@ ExecutionProfile while the paired bundles retain identical expected bytes.
 The `result` value in a checked-in expected record is descriptive fixture
 metadata only; `status: "pending"` and the CPF1 unavailable outcome prevent it
 from being interpreted as executed conformance evidence.
+Each expected record also declares the exact Draft-unavailable typed result
+(`ProvenanceMissing`) that the materializer encodes into the bundle, so the
+packaged result cannot silently diverge from the public record.
 Draft CPF1 bundles encode the unavailable outcome as the typed
 `ProvenanceMissing` expected result; they do not copy the descriptive `result`
 field into an evidence-bearing bundle member.
@@ -79,8 +82,9 @@ performs a structural cross-check of the resulting public archives. It does
 not execute the matrix or claim that descriptive metadata is conformance
 evidence; the independently produced execution evidence belongs to #193.
 
-CI also independently regenerates the 49 expected-result records from the
-public input identities and fixture-family contract before running the Rust
+CI also independently regenerates the 49 input/result records from the public
+input identities and fixture-family contract, reconstructs the Draft authority
+inventory, and rebuilds both byte inventories before running the Rust
 materializer. This check does not import the materializer or execute a claim;
-it ensures the checked-in Draft records are reproducible by a separate,
-small verifier.
+it ensures the checked-in Draft handoff is reproducible by a separate, small
+verifier.

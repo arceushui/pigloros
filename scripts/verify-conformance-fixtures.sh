@@ -184,7 +184,9 @@ for index in "${!profile_layers[@]}"; do
       '.case_id == $case_id and .claim_layer == $fixture_layer and
        .family == $family and
        ((.result | type) == "string") and (.result != "") and
-       .status == "pending" and (has("verification") | not) and
+       .status == "pending" and
+       .draft_expected_result == {kind: "typed-failure", error_code: "ProvenanceMissing"} and
+       (has("verification") | not) and
        (has("source") | not)' \
       "${fixture_root}/${expected_path}" >/dev/null || {
       echo "invalid pending expected fixture record for ${layer}: ${expected_path}" >&2

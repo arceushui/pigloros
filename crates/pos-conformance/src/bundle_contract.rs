@@ -3471,7 +3471,7 @@ mod tests {
             )
         });
         let mut profile = ConformanceProfileV1 {
-            profile_id: "pigloros.w8.conformance-bundle".to_owned(),
+            profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(12),
@@ -3534,7 +3534,7 @@ mod tests {
                     .as_bytes(),
                 )
                 .is_ok(),
-            "test profile matrix binding must succeed"
+            "knowledge test profile matrix binding must succeed"
         );
         profile
     }
@@ -3574,17 +3574,21 @@ mod tests {
         profile.fixtures.retain(|fixture| {
             fixture.claim_layer == claim_layer && fixture.modes == [ExecutionModeV1::Local]
         });
-        assert!(
-            profile
-                .bind_execution_matrix_digest(
-                    *blake3::hash(include_bytes!(
-                        "../../../fixtures/conformance/matrix/execution-matrix.json"
-                    ))
-                    .as_bytes(),
-                )
-                .is_ok(),
-            "test profile matrix binding must succeed"
-        );
+        if claim_layer == ClaimLayerV1::KnowledgeNonInterference {
+            assert!(
+                profile
+                    .bind_execution_matrix_digest(
+                        *blake3::hash(include_bytes!(
+                            "../../../fixtures/conformance/matrix/execution-matrix.json"
+                        ))
+                        .as_bytes(),
+                    )
+                    .is_ok(),
+                "knowledge test profile matrix binding must succeed"
+            );
+        } else {
+            profile.profile_digest = profile.digest();
+        }
         profile
     }
 
@@ -3594,17 +3598,21 @@ mod tests {
         for fixture in &mut profile.fixtures {
             fixture.claim_layer = claim_layer;
         }
-        assert!(
-            profile
-                .bind_execution_matrix_digest(
-                    *blake3::hash(include_bytes!(
-                        "../../../fixtures/conformance/matrix/execution-matrix.json"
-                    ))
-                    .as_bytes(),
-                )
-                .is_ok(),
-            "test profile matrix binding must succeed"
-        );
+        if claim_layer == ClaimLayerV1::KnowledgeNonInterference {
+            assert!(
+                profile
+                    .bind_execution_matrix_digest(
+                        *blake3::hash(include_bytes!(
+                            "../../../fixtures/conformance/matrix/execution-matrix.json"
+                        ))
+                        .as_bytes(),
+                    )
+                    .is_ok(),
+                "knowledge test profile matrix binding must succeed"
+            );
+        } else {
+            profile.profile_digest = profile.digest();
+        }
         profile
     }
 

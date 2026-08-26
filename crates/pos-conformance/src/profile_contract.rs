@@ -619,6 +619,9 @@ impl ConformanceProfileV1 {
         } else {
             self.profile_id.as_str()
         };
+        if base_profile_id != KNOWLEDGE_PROFILE_ID {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
         let suffix = format!(
             "{EXECUTION_MATRIX_BINDING_MARKER}{}",
             crate::hex_digest(&binding.digest)
@@ -634,8 +637,8 @@ impl ConformanceProfileV1 {
 
     /// Return the bound ADR-059 matrix digest.
     ///
-    /// The knowledge-non-interference profile requires this binding. Other
-    /// profiles may omit it because ADR-059 execution belongs to #193.
+    /// Only the knowledge-non-interference profile may carry this binding.
+    /// Other profiles omit it because ADR-059 execution belongs to #193.
     ///
     /// # Errors
     ///
@@ -1784,6 +1787,7 @@ fn matrix_binding_parts(
     if base.is_empty()
         || encoded_digest.contains(EXECUTION_MATRIX_BINDING_MARKER)
         || encoded_digest.len() != 64
+        || base != KNOWLEDGE_PROFILE_ID
     {
         return Err(ConformanceContractError::FieldOutOfBounds);
     }
@@ -2828,7 +2832,7 @@ mod tests {
             compatibility_digest: digest(11),
         };
         let mut profile = ConformanceProfileV1 {
-            profile_id: "pigloros.w8.artifact-integrity#matrix=0101010101010101010101010101010101010101010101010101010101010101".to_owned(),
+            profile_id: "pigloros.w8.knowledge-non-interference.1.0.0#matrix=0101010101010101010101010101010101010101010101010101010101010101".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(12),

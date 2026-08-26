@@ -3,5 +3,9 @@
   "case_id": "plugin-conformance-downgrade",
   "family": "downgrade",
   "result": "not-authorized",
-  "status": "pending"
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "typed-failure",
+    "error_code": "ProvenanceMissing"
+  }
 }

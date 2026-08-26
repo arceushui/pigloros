@@ -3,5 +3,9 @@
   "case_id": "metric-conformance-malformed",
   "family": "malformed",
   "result": "typed-failure",
-  "status": "pending"
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "typed-failure",
+    "error_code": "ProvenanceMissing"
+  }
 }
