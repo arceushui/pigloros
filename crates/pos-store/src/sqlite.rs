@@ -9366,13 +9366,14 @@ mod tests {
                     signing_store.append_signed_authorized(timeline_id, &registry, &mut callback);
                 assert!(signing_result_tx.send(result).is_ok());
             });
-            let signing_result = signing_result_rx
-                .recv_timeout(Duration::from_secs(1))
-                .test_ok();
-            release_destruction_tx.send(()).test_ok();
-            signing_handle.join().test_ok();
+            let signing_result = signing_result_rx.recv_timeout(Duration::from_secs(1));
+            let release_result = release_destruction_tx.send(());
+            let signing_join = signing_handle.join();
+            let destruction_join = destruction_handle.join();
 
-            (destruction_handle.join().test_ok(), signing_result)
+            release_result.test_ok();
+            signing_join.test_ok();
+            (destruction_join.test_ok(), signing_result.test_ok())
         });
 
         assert!(destruction_result.is_ok());
