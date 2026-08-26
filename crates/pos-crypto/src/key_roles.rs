@@ -20,7 +20,7 @@ const ROLE_SIGNATURE_DOMAIN: &[u8] = b"pigloros/role-signature/v1";
 /// The cached digest and public key avoid creating another private-byte copy
 /// for every authorization check.
 pub struct SigningKeyMaterial {
-    signing_key: Option<SigningKey>,
+    signing_key: Option<Box<SigningKey>>,
     material_digest: Hash,
     public_verification_key: pos_core::PublicKey,
 }
@@ -35,7 +35,7 @@ impl SigningKeyMaterial {
         let public_verification_key =
             crate::signing::public_key_from_verifying_key(&signing_key.verifying_key());
         Self {
-            signing_key: Some(signing_key),
+            signing_key: Some(Box::new(signing_key)),
             material_digest,
             public_verification_key,
         }
@@ -74,11 +74,12 @@ impl SigningKeyMaterial {
     fn as_key(&self) -> Result<&SigningKey, KeyRegistryErrorV1> {
         self.signing_key
             .as_ref()
+            .map(Box::as_ref)
             .ok_or(KeyRegistryErrorV1::Destroyed)
     }
 
     fn destroy(&mut self) {
-        let _ = self.signing_key.take();
+        drop(self.signing_key.take());
     }
 }
 
@@ -122,9 +123,10 @@ impl EncryptionKeyMaterial {
     }
 
     fn destroy(&mut self) {
-        if let Some(mut key) = self.private_material.take() {
+        if let Some(key) = self.private_material.as_mut() {
             key.zeroize();
         }
+        self.private_material = None;
     }
 }
 
