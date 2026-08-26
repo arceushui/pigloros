@@ -3267,14 +3267,17 @@ mod tests {
             fixture.provenance.publication_review_digest = provenance_digest;
             fixture.provenance.limitations_digest = limitations_digest;
         }
-        profile
-            .bind_execution_matrix_digest(
-                *blake3::hash(include_bytes!(
-                    "../../../fixtures/conformance/matrix/adr-059-complete.json"
-                ))
-                .as_bytes(),
-            )
-            .unwrap_or_else(|error| panic!("test profile matrix binding failed: {error:?}"));
+        assert!(
+            profile
+                .bind_execution_matrix_digest(
+                    *blake3::hash(include_bytes!(
+                        "../../../fixtures/conformance/matrix/adr-059-complete.json"
+                    ))
+                    .as_bytes(),
+                )
+                .is_ok(),
+            "test profile matrix binding must succeed"
+        );
         profile
     }
 
@@ -3313,14 +3316,17 @@ mod tests {
         profile.fixtures.retain(|fixture| {
             fixture.claim_layer == claim_layer && fixture.modes == [ExecutionModeV1::Local]
         });
-        profile
-            .bind_execution_matrix_digest(
-                *blake3::hash(include_bytes!(
-                    "../../../fixtures/conformance/matrix/adr-059-complete.json"
-                ))
-                .as_bytes(),
-            )
-            .unwrap_or_else(|error| panic!("test profile matrix binding failed: {error:?}"));
+        assert!(
+            profile
+                .bind_execution_matrix_digest(
+                    *blake3::hash(include_bytes!(
+                        "../../../fixtures/conformance/matrix/adr-059-complete.json"
+                    ))
+                    .as_bytes(),
+                )
+                .is_ok(),
+            "test profile matrix binding must succeed"
+        );
         profile
     }
 
@@ -3330,14 +3336,17 @@ mod tests {
         for fixture in &mut profile.fixtures {
             fixture.claim_layer = claim_layer;
         }
-        profile
-            .bind_execution_matrix_digest(
-                *blake3::hash(include_bytes!(
-                    "../../../fixtures/conformance/matrix/adr-059-complete.json"
-                ))
-                .as_bytes(),
-            )
-            .unwrap_or_else(|error| panic!("test profile matrix binding failed: {error:?}"));
+        assert!(
+            profile
+                .bind_execution_matrix_digest(
+                    *blake3::hash(include_bytes!(
+                        "../../../fixtures/conformance/matrix/adr-059-complete.json"
+                    ))
+                    .as_bytes(),
+                )
+                .is_ok(),
+            "test profile matrix binding must succeed"
+        );
         profile
     }
 
