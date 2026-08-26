@@ -200,7 +200,7 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
     })?;
     assert!(material.is_destroyed());
     assert_eq!(
-        destroy_registered_signing_key(&mut material, request, |_| {
+        destroy_registered_signing_key::<(), _>(&mut material, request, |_| {
             unreachable!("destroyed material cannot be committed again")
         }),
         Err(KeyMaterialDestructionError::AlreadyDestroyed)
