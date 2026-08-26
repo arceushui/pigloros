@@ -790,8 +790,8 @@ fn independent_verify_expected_results(
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
         let case_id = archive_text(&expected[0])?;
-        let claim_layer = archive_u64(&expected[1])?;
-        decode_claim_layer(claim_layer)?;
+        let claim_layer_code = archive_u64(&expected[1])?;
+        let claim_layer = decode_claim_layer(claim_layer_code)?;
         let execution_profile_digest = independent_digest::<32>(&expected[2])?;
         let expected_mode = archive_u64(&expected[3])?;
         decode_bundle_mode(expected_mode)?;
@@ -804,7 +804,7 @@ fn independent_verify_expected_results(
                     return false;
                 };
                 archive_text(&fixture[0]).ok() == Some(case_id)
-                    && archive_u64(&fixture[2]).ok() == Some(claim_layer)
+                    && archive_u64(&fixture[2]).ok() == Some(claim_layer_code)
                     && independent_digest::<32>(&fixture[3]).ok() == Some(execution_profile_digest)
                     && modes
                         .iter()
@@ -813,8 +813,7 @@ fn independent_verify_expected_results(
         {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
-        if path
-            != independent_expected_member_path(case_id, claim_layer, &execution_profile_digest)?
+        if path != independent_expected_member_path(case_id, claim_layer, &execution_profile_digest)
         {
             return Err(BundleContractErrorV1::UndeclaredMember);
         }
@@ -827,17 +826,15 @@ fn independent_verify_expected_results(
 
 fn independent_expected_member_path(
     case_id: &str,
-    claim_layer: u64,
+    claim_layer: ClaimLayerV1,
     execution_profile_digest: &[u8; 32],
-) -> Result<String, BundleContractErrorV1> {
-    let claim_layer =
-        u8::try_from(claim_layer).map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+) -> String {
     let mut input = Vec::new();
     input.extend_from_slice(b"PiglorOS.CPF1ExpectedPath.v1\0");
     append_path_component(&mut input, case_id);
-    input.push(claim_layer);
+    input.push(claim_layer_code(claim_layer));
     input.extend_from_slice(execution_profile_digest);
-    Ok(format!("expected/{}.bin", blake3::hash(&input).to_hex()))
+    format!("expected/{}.bin", blake3::hash(&input).to_hex())
 }
 
 fn independent_verify_profile(

@@ -1591,34 +1591,56 @@ impl MoatProofEvidenceV1 {
     /// Returns a serialization error when the evidence is invalid or cannot
     /// be represented by the closed result record.
     pub fn to_verification_result(&self) -> Result<VerificationResultV1, pos_core::CoreError> {
-        verify_evidence(self).map_err(|error| {
-            pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
-        })?;
-        let fixture_domain = b"PiglorOS.AuthoritativeFixture.v1";
-        let fixture_digest = typed_digest(fixture_domain, &self.authoritative_events)?;
-        let mut result = VerificationResultV1 {
-            request_digest: self.manifest.input_digest,
-            manifest_digest: typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest)?,
-            execution_profile_digest: self.manifest.execution_profile_digest,
-            trust_policy_snapshot_digest: self.manifest.trust_policy_snapshot_digest,
-            artifact_closure_digest: self.manifest.artifact_closure_digest,
-            fixture_digest: Some(fixture_digest),
-            evaluator_digest: self.manifest.evaluator_digest,
-            reproducibility_class: self.manifest.reproducibility_class,
-            verification_outcome: VerificationOutcomeV1::VerifiedExact,
-            replay_claim: self.manifest.replay_claim,
-            authoritative_result_digest: Some(self.digest()?),
-            divergence_report_digest: None,
-            first_error: None,
-            checked_artifact_count: u64::try_from(
-                self.authoritative_events.len() + self.projections.len() + self.causal_trace.len(),
-            )
-            .unwrap_or(u64::MAX),
-            provenance_digest: self.contract.conformance_report.provenance_digest,
-            result_digest: [0; 32],
-        };
-        result.result_digest = result.digest()?;
-        Ok(result)
+        verify_evidence(self)
+            .map_err(|error| {
+                pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
+            })
+            .and_then(|()| {
+                typed_digest(
+                    b"PiglorOS.AuthoritativeFixture.v1",
+                    &self.authoritative_events,
+                )
+            })
+            .and_then(|fixture_digest| {
+                typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest).and_then(
+                    |manifest_digest| {
+                        self.digest().and_then(|evidence_digest| {
+                            let mut result = VerificationResultV1 {
+                                request_digest: self.manifest.input_digest,
+                                manifest_digest,
+                                execution_profile_digest: self.manifest.execution_profile_digest,
+                                trust_policy_snapshot_digest: self
+                                    .manifest
+                                    .trust_policy_snapshot_digest,
+                                artifact_closure_digest: self.manifest.artifact_closure_digest,
+                                fixture_digest: Some(fixture_digest),
+                                evaluator_digest: self.manifest.evaluator_digest,
+                                reproducibility_class: self.manifest.reproducibility_class,
+                                verification_outcome: VerificationOutcomeV1::VerifiedExact,
+                                replay_claim: self.manifest.replay_claim,
+                                authoritative_result_digest: Some(evidence_digest),
+                                divergence_report_digest: None,
+                                first_error: None,
+                                checked_artifact_count: u64::try_from(
+                                    self.authoritative_events.len()
+                                        + self.projections.len()
+                                        + self.causal_trace.len(),
+                                )
+                                .unwrap_or(u64::MAX),
+                                provenance_digest: self
+                                    .contract
+                                    .conformance_report
+                                    .provenance_digest,
+                                result_digest: [0; 32],
+                            };
+                            result.digest().map(|result_digest| {
+                                result.result_digest = result_digest;
+                                result
+                            })
+                        })
+                    },
+                )
+            })
     }
 
     /// Export the closed verification result as exact deterministic CBOR.
@@ -5246,11 +5268,15 @@ pub fn compare_authoritative_outputs(
     } else {
         DivergenceClassV1::None
     };
-    Ok(ComparisonV1 {
-        equal: divergence == DivergenceClassV1::None,
-        divergence,
-        left_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &left_output)?,
-        right_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &right_output)?,
+    typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &left_output).and_then(|left_digest| {
+        typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &right_output).map(|right_digest| {
+            ComparisonV1 {
+                equal: divergence == DivergenceClassV1::None,
+                divergence,
+                left_digest,
+                right_digest,
+            }
+        })
     })
 }
 
