@@ -1155,6 +1155,8 @@ pub fn validate_committed_batch(
 ///
 /// An unsigned event has neither field. A signed event must carry a non-zero
 /// Timeline-integrity identity; an identity without a signature is never valid.
+/// The former unbound signed-event shape is rejected rather than interpreted as
+/// a compatibility case.
 ///
 /// # Errors
 ///

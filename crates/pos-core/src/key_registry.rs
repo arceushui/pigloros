@@ -2,8 +2,8 @@
 //!
 //! The core boundary deliberately carries no private key bytes.  A registry
 //! records a role/epoch identity, a fingerprint of the private material, and
-//! (for signing roles) the public verification key.  Destruction clears the
-//! private-material fingerprint from the live record and leaves an immutable
+//! (for signing roles) the public verification key. Destruction removes the
+//! material from the live authorization record and leaves an immutable
 //! tombstone so that the identity cannot be restored or reused.
 
 use std::collections::{BTreeMap, HashSet};

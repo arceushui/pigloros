@@ -1078,11 +1078,12 @@ mod tests {
             KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
         };
         use pos_crypto::{
-            key_roles::{key_material_digest, sign_for_registered_role},
+            key_roles::{key_material_digest, sign_for_registered_role, SigningKeyMaterial},
             signing::{generate_keypair, public_key_from_verifying_key},
         };
 
         let (sk, vk) = generate_keypair();
+        let signing_material = SigningKeyMaterial::new(sk.clone());
         let pk = public_key_from_verifying_key(&vk);
         let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
         let mut registry = KeyRegistryStateV1::new();
@@ -1094,7 +1095,8 @@ mod tests {
             ))
             .test_ok();
         let payload = CanonicalBytes::from_vec(b"signed".to_vec());
-        let sig = sign_for_registered_role(&mut registry, &sk, identity, &payload).test_ok();
+        let sig = sign_for_registered_role(&mut registry, &signing_material, identity, &payload)
+            .test_ok();
         let entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1112,7 +1114,8 @@ mod tests {
         };
         let second_payload = CanonicalBytes::from_vec(b"signed-second".to_vec());
         let second_sig =
-            sign_for_registered_role(&mut registry, &sk, identity, &second_payload).test_ok();
+            sign_for_registered_role(&mut registry, &signing_material, identity, &second_payload)
+                .test_ok();
         let mut second_event = event.clone();
         second_event.id = EventId::new();
         second_event.payload = second_payload.clone();

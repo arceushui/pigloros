@@ -6502,7 +6502,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn open_rejects_a_legacy_events_table_without_role_columns() {
+    fn open_rejects_an_events_table_without_role_columns() {
         let file = tempfile::NamedTempFile::new().test_ok();
         {
             let conn = Connection::open(file.path()).test_ok();

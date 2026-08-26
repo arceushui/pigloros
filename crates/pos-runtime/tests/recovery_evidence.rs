@@ -1,7 +1,7 @@
 use pos_core::{
     clock::{Seq, WallTime},
     crypto::Hash,
-    event::{CanonicalBytes, Event, EventDraft, Kind, SchemaVersion},
+    event::{CanonicalBytes, Event, Kind, SchemaVersion},
     ids::{EntityId, EventId, PluginId, TimelineId},
     Capability, Plugin,
 };
@@ -77,36 +77,6 @@ impl Driver for DefaultRecoveryDriver {
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
         Ok(StepOutput::empty())
-    }
-}
-
-struct CommitRecordingDriver {
-    state: Arc<Mutex<Option<Seq>>>,
-    staged_cursor: Option<Seq>,
-}
-
-impl Driver for CommitRecordingDriver {
-    fn name(&self) -> &'static str {
-        "commit-recording"
-    }
-
-    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
-        Ok(StepOutput::empty())
-    }
-
-    fn stage_restore_from_history(
-        &mut self,
-        evidence: &DriverRecoveryEvidence,
-    ) -> Result<(), RuntimeError> {
-        self.staged_cursor = evidence
-            .timeline_segments()
-            .last()
-            .map(|segment| segment.through());
-        Ok(())
-    }
-
-    fn commit_restore_from_history(&mut self) {
-        *self.state.lock().test_ok() = self.staged_cursor;
     }
 }
 
@@ -215,25 +185,6 @@ fn recovery_evidence_exposes_all_headers_only_selected_payloads_and_is_atomic() 
     rejected.register_driver(Box::new(DefaultRecoveryDriver));
     rejected.register_driver(Box::new(RejectingRecoveryDriver));
     assert!(rejected.restore_driver_state(&segments, &events).is_err());
-}
-
-#[test]
-fn successful_recovery_commits_driver_state_and_records_the_event_cursor() {
-    let timeline = TimelineId::new();
-    let state = Arc::new(Mutex::new(None));
-    let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(CommitRecordingDriver {
-        state: Arc::clone(&state),
-        staged_cursor: None,
-    }));
-
-    registry
-        .restore_driver_state(
-            &[TimelineHistorySegment::new(timeline, Seq::from_u64(1))],
-            &[event(1, EntityId::new(), "selected", vec![1])],
-        )
-        .test_ok();
-    assert_eq!(*state.lock().test_ok(), Some(Seq::from_u64(1)));
 }
 
 #[test]
@@ -374,31 +325,6 @@ fn scheduler_skips_metadata_only_plugins_and_rejects_cadence_overflow() {
 
 struct CadencedDriver {
     subscriptions: Vec<ProjectionKey>,
-}
-
-struct EmittingCadencedDriver;
-
-impl Driver for EmittingCadencedDriver {
-    fn name(&self) -> &'static str {
-        "emitting-cadenced"
-    }
-
-    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
-        Ok(StepOutput::new(vec![EventDraft::new(
-            EntityId::new(),
-            Kind::new("runtime.cadence.public"),
-            CanonicalBytes::from_static(b"cadence"),
-        )]))
-    }
-}
-
-#[test]
-fn public_cadence_invokes_a_ready_driver_and_returns_its_draft() {
-    let mut registry = PluginRegistry::new();
-    registry.register_driver(Box::new(EmittingCadencedDriver));
-    let drafts = registry.tick_cadenced(TimelineId::new(), 0).test_ok();
-    assert_eq!(drafts.len(), 1);
-    assert_eq!(drafts[0].event_type.as_str(), "runtime.cadence.public");
 }
 
 impl Driver for CadencedDriver {

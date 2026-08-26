@@ -10,7 +10,10 @@ use pos_core::{
     CoreError, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1,
 };
 use pos_crypto::{
-    key_roles::{key_material_digest, sign_for_registered_role},
+    key_roles::{
+        destroy_registered_signing_key, key_material_digest, sign_for_registered_role,
+        KeyMaterialDestructionError, SigningKeyMaterial,
+    },
     signing::public_key_from_verifying_key,
 };
 
@@ -36,7 +39,7 @@ pub struct EventLedgerStore {
     store: Box<dyn EventStore>,
     timeline_id: pos_core::ids::TimelineId,
     entity: EntityId,
-    signing_key: Option<SigningKey>,
+    signing_key: SigningKeyMaterial,
     key_registry: Arc<Mutex<KeyRegistryStateV1>>,
     signing_identity: KeyIdentityV1,
     hasher: Box<dyn Hasher>,
@@ -74,11 +77,16 @@ impl EventLedgerStore {
                 .save_key_registry(&initial_registry)
                 .map_err(LedgerError::from)?;
         }
-        let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
+        let signing_key = SigningKeyMaterial::new(signing_key);
+        let public_verification_key = signing_key.public_verification_key().map_err(|error| {
+            LedgerError::Store(format!("ledger signing material unavailable: {error}"))
+        })?;
         registry
             .with_signing_authorization(
                 signing_identity,
-                key_material_digest(&signing_key.to_bytes()),
+                signing_key.material_digest().map_err(|error| {
+                    LedgerError::Store(format!("ledger signing material unavailable: {error}"))
+                })?,
                 public_verification_key,
                 || (),
             )
@@ -90,7 +98,7 @@ impl EventLedgerStore {
             store,
             timeline_id,
             entity,
-            signing_key: Some(signing_key),
+            signing_key,
             key_registry,
             signing_identity,
             hasher,
@@ -115,18 +123,30 @@ impl EventLedgerStore {
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
-        let destroys_owned_key = self.signing_key.as_ref().is_some_and(|signing_key| {
-            request.identity == self.signing_identity
-                && key_material_digest(&signing_key.to_bytes()) == request.expected_material_digest
-        });
+        if request.identity == self.signing_identity && !self.signing_key.is_destroyed() {
+            let store = &mut self.store;
+            let registry = &mut *registry;
+            let signing_key = &mut self.signing_key;
+            return destroy_registered_signing_key(signing_key, request, |request| {
+                let (outcome, next) = store.destroy_key_registry(request)?;
+                *registry = next;
+                Ok(outcome)
+            })
+            .map_err(|error| match error {
+                KeyMaterialDestructionError::AlreadyDestroyed => LedgerError::Store(
+                    "ledger signing key has already been irreversibly destroyed".to_owned(),
+                ),
+                KeyMaterialDestructionError::MaterialDigestMismatch => LedgerError::Store(
+                    "destruction request does not match the ledger signing key".to_owned(),
+                ),
+                KeyMaterialDestructionError::Commit(error) => LedgerError::from(error),
+            });
+        }
         let (outcome, next) = self
             .store
             .destroy_key_registry(request)
             .map_err(LedgerError::from)?;
         *registry = next;
-        if destroys_owned_key {
-            self.signing_key = None;
-        }
         drop(registry);
         Ok(outcome)
     }
@@ -152,9 +172,12 @@ impl EventLedgerStore {
             .key_registry
             .lock()
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
-        let signing_key = self.signing_key.as_ref().ok_or_else(|| {
-            LedgerError::Store("ledger signing key has been irreversibly destroyed".to_owned())
-        })?;
+        if self.signing_key.is_destroyed() {
+            return Err(LedgerError::Store(
+                "ledger signing key has been irreversibly destroyed".to_owned(),
+            ));
+        }
+        let signing_key = &self.signing_key;
         let signing_identity = self.signing_identity;
         let entity = self.entity;
         let mut create_event = move |registry: &KeyRegistryStateV1, seq: Seq| {
@@ -557,7 +580,7 @@ mod tests {
             material_digest,
             pos_core::Hash::from_bytes([8; 32]),
         ))?;
-        assert!(store.signing_key.is_none());
+        assert!(store.signing_key.is_destroyed());
         let error = store
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
@@ -590,7 +613,7 @@ mod tests {
             material_digest,
             pos_core::Hash::from_bytes([8; 32]),
         ))?;
-        assert!(store.signing_key.is_some());
+        assert!(!store.signing_key.is_destroyed());
         Ok(())
     }
 
@@ -627,7 +650,7 @@ mod tests {
         assert!(store_error.to_string().contains("registry destroy failed"));
 
         let (other_signing_key, _) = pos_crypto::signing::generate_keypair();
-        store.signing_key = Some(other_signing_key);
+        store.signing_key = SigningKeyMaterial::new(other_signing_key);
         let authorization_error = store
             .register(crate::contract::sample_new_prediction("2026-08-01"))
             .err()
@@ -868,11 +891,8 @@ mod tests {
         assert_eq!(ledger.entries()[0].prediction.prediction_id, id);
         let events = store.store.read(store.timeline_id, SeqRange::all())?;
         let signature = events[0].signature.as_ref().ok_or("missing signature")?;
-        let verifying_key = store
-            .signing_key
-            .as_ref()
-            .ok_or("signing key unexpectedly destroyed")?
-            .verifying_key();
+        let public_key = store.signing_key.public_verification_key()?;
+        let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&public_key)?;
         verify_for_role(
             &verifying_key,
             KeyRoleV1::TimelineIntegritySigning,
