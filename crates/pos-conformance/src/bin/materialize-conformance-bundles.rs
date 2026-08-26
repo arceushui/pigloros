@@ -1380,6 +1380,17 @@ mod tests {
 
     #[test]
     fn helper_validation_seams_cover_alternate_records() -> Result<(), Box<dyn Error>> {
+        helper_validation_seams_cover_codecs();
+        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
+        let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
+        let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
+        helper_validation_seams_reject_profile_binding_changes(&canonical_record);
+        helper_validation_seams_cover_fixture_variants(&canonical_record, &context)?;
+        helper_validation_seams_cover_protocol_caps();
+        Ok(())
+    }
+
+    fn helper_validation_seams_cover_codecs() {
         assert_eq!(pos_conformance::decode_hex_digest("00"), None);
         assert_eq!(pos_conformance::decode_hex_digest(&"gg".repeat(32)), None);
         assert_eq!(pos_conformance::decode_hex_digest(&"0g".repeat(32)), None);
@@ -1403,13 +1414,12 @@ mod tests {
         assert!(json_text(&JsonValue::Null, "missing").is_err());
         assert!(json_string_array(&JsonValue::Null, "missing").is_err());
         assert!(json_string_array(&serde_json::json!({"values": ["ok", 7]}), "values").is_err());
+    }
 
-        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
-        let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
-        let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
+    fn helper_validation_seams_reject_profile_binding_changes(canonical_record: &JsonValue) {
         assert!(validate_profile_record_bindings(
             ClaimLayerV1::ArtifactIntegrity,
-            &canonical_record
+            canonical_record
         )
         .is_ok());
         for field in [
@@ -1450,7 +1460,12 @@ mod tests {
             &invalid_matrix_digest
         )
         .is_err());
+    }
 
+    fn helper_validation_seams_cover_fixture_variants(
+        canonical_record: &JsonValue,
+        context: &FixtureContext,
+    ) -> Result<(), Box<dyn Error>> {
         let fixture_records = canonical_record["fixtures"]
             .as_array()
             .ok_or("canonical fixture records are missing")?;
@@ -1460,7 +1475,7 @@ mod tests {
             .ok_or("canonical deletion fixture is missing")?;
         let deletion = fixture(
             deletion_record,
-            &context,
+            context,
             context.local_execution_profile_digest,
             ExecutionModeV1::Local,
         )?;
@@ -1479,7 +1494,7 @@ mod tests {
             .ok_or("canonical positive fixture is missing")?;
         let positive = fixture(
             positive_record,
-            &context,
+            context,
             context.local_execution_profile_digest,
             ExecutionModeV1::Local,
         )?;
@@ -1488,14 +1503,16 @@ mod tests {
             positive.redaction_state,
             pos_conformance::RedactionStateV1::None
         );
+        Ok(())
+    }
 
+    fn helper_validation_seams_cover_protocol_caps() {
         let protocol = evaluator_protocol([42; 32]);
         assert_eq!(protocol.hard_caps.max_profile_bytes, 16_777_216);
         assert_eq!(protocol.hard_caps.max_member_path_bytes, 256);
         assert_eq!(protocol.hard_caps.max_member_bytes, 67_108_864);
         assert_eq!(protocol.hard_caps.max_total_bundle_bytes, 1_073_741_824);
         assert_eq!(protocol.hard_caps.max_diagnostic_bytes, 1_048_576);
-        Ok(())
     }
 
     #[test]
