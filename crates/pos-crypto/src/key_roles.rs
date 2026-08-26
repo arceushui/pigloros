@@ -1,5 +1,7 @@
 //! Role/epoch-bound cryptographic operations for the key-registry boundary.
 
+use std::fmt;
+
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
     CanonicalBytes, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
@@ -41,7 +43,7 @@ impl SigningKeyMaterial {
 
     /// Return whether this material has been destroyed.
     #[must_use]
-    pub fn is_destroyed(&self) -> bool {
+    pub const fn is_destroyed(&self) -> bool {
         self.signing_key.is_none()
     }
 
@@ -103,7 +105,7 @@ impl EncryptionKeyMaterial {
 
     /// Return whether this material has been destroyed.
     #[must_use]
-    pub fn is_destroyed(&self) -> bool {
+    pub const fn is_destroyed(&self) -> bool {
         self.private_material.is_none()
     }
 
@@ -146,6 +148,20 @@ pub enum KeyMaterialDestructionError<E> {
     Commit(E),
 }
 
+impl<E: fmt::Display> fmt::Display for KeyMaterialDestructionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyDestroyed => formatter.write_str("key material is already destroyed"),
+            Self::MaterialDigestMismatch => {
+                formatter.write_str("key material digest does not match the request")
+            }
+            Self::Commit(error) => write!(formatter, "key registry commit failed: {error}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for KeyMaterialDestructionError<E> {}
+
 /// Commit a registry tombstone and then destroy the corresponding owned
 /// signing key.
 ///
@@ -153,6 +169,13 @@ pub enum KeyMaterialDestructionError<E> {
 /// be destroyed. It must durably commit the supplied request before returning;
 /// if it fails, the key remains available for retry. This keeps logical
 /// revocation and physical destruction in one caller-visible operation.
+///
+/// # Errors
+/// Returns [`KeyMaterialDestructionError::AlreadyDestroyed`] when the key has
+/// already been destroyed, [`KeyMaterialDestructionError::MaterialDigestMismatch`]
+/// when the request does not identify this key, or
+/// [`KeyMaterialDestructionError::Commit`] when the registry rejects the
+/// destruction request.
 pub fn destroy_registered_signing_key<E, F>(
     signing_key: &mut SigningKeyMaterial,
     request: KeyDestructionRequestV1,
@@ -174,6 +197,13 @@ where
 
 /// Commit a registry tombstone and then destroy the corresponding owned
 /// encryption key.
+///
+/// # Errors
+/// Returns [`KeyMaterialDestructionError::AlreadyDestroyed`] when the key has
+/// already been destroyed, [`KeyMaterialDestructionError::MaterialDigestMismatch`]
+/// when the request does not identify this key, or
+/// [`KeyMaterialDestructionError::Commit`] when the registry rejects the
+/// destruction request.
 pub fn destroy_registered_encryption_key<E, F>(
     encryption_key: &mut EncryptionKeyMaterial,
     request: KeyDestructionRequestV1,
