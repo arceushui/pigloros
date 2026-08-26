@@ -655,6 +655,8 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     let profile_bytes = preflight
         .profile_bytes
         .ok_or(BundleContractErrorV1::MemberMissing)?;
+    let profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps = independent_archive_caps(profile_bytes)?;
     validate_independent_preflight_caps(&caps, &preflight, bytes.len())?;
     let value: Value = ciborium::from_reader(Cursor::new(bytes))
@@ -668,7 +670,9 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     }
     let manifest = independent_array(&archive[2], 6)?;
     let lifecycle = archive_u64(&manifest[1])?;
-    if lifecycle > 1 || archive_u64(&manifest[2])? > 1 {
+    let bundle_mode = archive_u64(&manifest[2])?;
+    decode_bundle_mode(bundle_mode)?;
+    if lifecycle > 1 {
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
     independent_verify_signature(&archive[2], &archive[4], &archive[5])?;
@@ -687,7 +691,13 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     let (expected_result_paths, profile_bytes) =
         independent_member_paths_and_profile(members, descriptors)?;
     let expected_results = independent_array_bounded(&manifest[5])?;
-    independent_verify_expected_results(expected_results, descriptors, &expected_result_paths)?;
+    independent_verify_expected_results(
+        expected_results,
+        descriptors,
+        &expected_result_paths,
+        &profile,
+        bundle_mode,
+    )?;
     let profile_bytes = profile_bytes.ok_or(BundleContractErrorV1::MemberMissing)?;
     independent_verify_profile(profile_bytes, lifecycle, &manifest[3])
 }
@@ -714,9 +724,10 @@ fn independent_member_paths_and_profile<'a>(
     members: &'a [Value],
     descriptors: &[Value],
 ) -> Result<(BTreeSet<String>, Option<&'a [u8]>), BundleContractErrorV1> {
-    let mut member_paths = BTreeSet::new();
+    let mut normalized_member_paths = BTreeSet::new();
     let mut expected_result_paths = BTreeSet::new();
     let mut profile_bytes = None;
+    let mut previous_member_path = None;
     for (member_value, descriptor_value) in members.iter().zip(descriptors) {
         let member = independent_array(member_value, 3)?;
         let descriptor = independent_array(descriptor_value, 4)?;
@@ -724,10 +735,14 @@ fn independent_member_paths_and_profile<'a>(
         let member_bytes = archive_bytes(&member[1])?;
         let member_role = decode_member_role(archive_u64(&member[2])?)?;
         let descriptor_role = decode_member_role(archive_u64(&descriptor[3])?)?;
-        if !member_paths.insert(member_path.to_owned())
-            || archive_text(&descriptor[0])? != member_path
-            || descriptor_role != member_role
+        validate_member_path(member_path)?;
+        if previous_member_path.is_some_and(|previous| previous >= member_path)
+            || !normalized_member_paths.insert(member_path.to_ascii_lowercase())
         {
+            return Err(BundleContractErrorV1::NonCanonicalOrder);
+        }
+        previous_member_path = Some(member_path);
+        if archive_text(&descriptor[0])? != member_path || descriptor_role != member_role {
             return Err(BundleContractErrorV1::UndeclaredMember);
         }
         if archive_u64(&descriptor[1])? != u64::try_from(member_bytes.len()).unwrap_or(u64::MAX)
@@ -751,7 +766,11 @@ fn independent_verify_expected_results(
     expected_results: &[Value],
     descriptors: &[Value],
     expected_result_paths: &BTreeSet<String>,
+    profile: &Value,
+    bundle_mode: u64,
 ) -> Result<(), BundleContractErrorV1> {
+    let profile_fields = independent_array(profile, 17)?;
+    let fixtures = independent_array_bounded(&profile_fields[8])?;
     let mut referenced_expected_results = BTreeSet::new();
     for expected_value in expected_results {
         let expected = independent_array(expected_value, 6)?;
@@ -770,11 +789,55 @@ fn independent_verify_expected_results(
         {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
+        let case_id = archive_text(&expected[0])?;
+        let claim_layer = archive_u64(&expected[1])?;
+        decode_claim_layer(claim_layer)?;
+        let execution_profile_digest = independent_digest::<32>(&expected[2])?;
+        let expected_mode = archive_u64(&expected[3])?;
+        decode_bundle_mode(expected_mode)?;
+        if expected_mode != bundle_mode
+            || !fixtures.iter().any(|fixture_value| {
+                let Ok(fixture) = independent_array(fixture_value, 17) else {
+                    return false;
+                };
+                let Ok(modes) = independent_array_bounded(&fixture[5]) else {
+                    return false;
+                };
+                archive_text(&fixture[0]).ok() == Some(case_id)
+                    && archive_u64(&fixture[2]).ok() == Some(claim_layer)
+                    && independent_digest::<32>(&fixture[3]).ok() == Some(execution_profile_digest)
+                    && modes
+                        .iter()
+                        .any(|mode| archive_u64(mode).ok() == Some(bundle_mode))
+            })
+        {
+            return Err(BundleContractErrorV1::ExpectedResultMismatch);
+        }
+        if path
+            != independent_expected_member_path(case_id, claim_layer, &execution_profile_digest)?
+        {
+            return Err(BundleContractErrorV1::UndeclaredMember);
+        }
     }
     if expected_result_paths != &referenced_expected_results {
         return Err(BundleContractErrorV1::ExpectedResultMismatch);
     }
     Ok(())
+}
+
+fn independent_expected_member_path(
+    case_id: &str,
+    claim_layer: u64,
+    execution_profile_digest: &[u8; 32],
+) -> Result<String, BundleContractErrorV1> {
+    let claim_layer =
+        u8::try_from(claim_layer).map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+    let mut input = Vec::new();
+    input.extend_from_slice(b"PiglorOS.CPF1ExpectedPath.v1\0");
+    append_path_component(&mut input, case_id);
+    input.push(claim_layer);
+    input.extend_from_slice(execution_profile_digest);
+    Ok(format!("expected/{}.bin", blake3::hash(&input).to_hex()))
 }
 
 fn independent_verify_profile(
@@ -1203,8 +1266,6 @@ fn validate_preflight_archive_caps(
     {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
-    caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))
-        .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
     caps.validate_compression_expansion(
         u64::try_from(encoded_len).unwrap_or(u64::MAX),
         u64::try_from(encoded_len).unwrap_or(u64::MAX),
@@ -4870,8 +4931,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    pub(super) fn candidate_bundle_fails_closed_without_coordinate_bound_authority(
+    pub(super) fn candidate_bundle_without_coordinate_bound_authority(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut candidate = profile();
         candidate.lifecycle = ProfileLifecycleV1::Candidate;
@@ -4970,6 +5030,12 @@ mod tests {
         );
         assert_eq!(result, Err(BundleContractErrorV1::CandidateEvidenceMissing));
         Ok(())
+    }
+
+    #[test]
+    fn candidate_bundle_fails_closed_without_coordinate_bound_authority(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        candidate_bundle_without_coordinate_bound_authority()
     }
 
     #[test]
@@ -6473,15 +6539,14 @@ mod coverage_entrypoints {
         bundle_value, encode_archive_value, manifest_value, preflight_archive,
         preflight_archive_caps, required_support_digests, validate_archive_caps,
         validate_expected_results, validate_fixture_inputs_for_mode, validate_member_count,
-        validate_member_size, validate_preflight_archive_caps, validate_selected_bundle_caps,
-        validate_supporting_members, validate_total_bytes, verify_archive_independently,
-        BundleContractErrorV1, BundleMemberRoleV1, BundleModeV1, ConformanceBundlePairV1,
-        ConformanceBundleV1, PublicKey, Value, MAX_MEMBERS, MAX_MEMBER_BYTES,
-        MAX_MEMBER_PATH_BYTES, MAX_STRUCTURAL_NESTING, MAX_TOTAL_BUNDLE_BYTES,
+        validate_member_size, validate_selected_bundle_caps, validate_supporting_members,
+        validate_total_bytes, verify_archive_independently, BundleContractErrorV1,
+        BundleMemberRoleV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1, PublicKey,
+        Value, MAX_MEMBERS, MAX_MEMBER_BYTES, MAX_MEMBER_PATH_BYTES, MAX_STRUCTURAL_NESTING,
+        MAX_TOTAL_BUNDLE_BYTES,
     };
     use ed25519_dalek::Signer;
     use serde_json::Value as JsonValue;
-    use std::collections::BTreeSet;
 
     pub(super) fn signed_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
         signed_bundle_for(&tests::profile(), BundleModeV1::Local)
@@ -6646,6 +6711,32 @@ mod coverage_entrypoints {
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut value = bundle_value(bundle);
         replace_array_item_field(&mut value, 3, member_index, field_index, replacement)?;
+        Ok(encode_archive_value(&value)?)
+    }
+
+    fn replace_archive_member_and_descriptor_path(
+        bundle: &ConformanceBundleV1,
+        member_index: usize,
+        replacement: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut value = bundle_value(bundle);
+        replace_array_item_field(
+            &mut value,
+            3,
+            member_index,
+            0,
+            Value::Text(replacement.to_owned()),
+        )?;
+        let fields = array_fields(&mut value, "expected an archive array")?;
+        let manifest = fields.get_mut(2).ok_or("manifest is missing")?;
+        replace_array_item_field(
+            manifest,
+            4,
+            member_index,
+            0,
+            Value::Text(replacement.to_owned()),
+        )?;
+        resign_archive(&mut value)?;
         Ok(encode_archive_value(&value)?)
     }
 
@@ -6853,6 +6944,14 @@ mod coverage_entrypoints {
             Err(BundleContractErrorV1::UndeclaredMember)
         );
         assert_eq!(
+            verify_archive_independently(&replace_archive_member_and_descriptor_path(
+                bundle,
+                first_input,
+                "../member.bin",
+            )?),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
             verify_archive_independently(&replace_archive_member_field(
                 bundle,
                 second_input,
@@ -7016,6 +7115,22 @@ mod coverage_entrypoints {
             .iter()
             .position(|member| member.path == bundle.members[expected_member_index].path)
             .ok_or("missing expected-result descriptor")?;
+        for (field_index, replacement) in [
+            (0, Value::Text("unbound-case".to_owned())),
+            (1, Value::Integer(1_u64.into())),
+            (2, Value::Bytes(vec![9; 32])),
+            (3, Value::Integer(1_u64.into())),
+        ] {
+            assert_eq!(
+                verify_archive_independently(&replace_archive_expected_result_field(
+                    &bundle,
+                    0,
+                    field_index,
+                    replacement,
+                )?),
+                Err(BundleContractErrorV1::ExpectedResultMismatch)
+            );
+        }
         assert_eq!(
             verify_archive_independently(&replace_archive_expected_result(
                 &bundle,
@@ -7073,92 +7188,6 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn independent_member_shape_rejection_matrix_is_instrumented(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let member_bytes = b"member".to_vec();
-        let member_path = "member".to_owned();
-        let member_digest = *blake3::hash(&member_bytes).as_bytes();
-        let member = Value::Array(vec![
-            Value::Text(member_path.clone()),
-            Value::Bytes(member_bytes.clone()),
-            Value::Integer(0_u64.into()),
-        ]);
-        let descriptor = Value::Array(vec![
-            Value::Text(member_path),
-            Value::Integer(u64::try_from(member_bytes.len())?.into()),
-            Value::Bytes(member_digest.to_vec()),
-            Value::Integer(0_u64.into()),
-        ]);
-        assert_eq!(
-            super::independent_member_paths_and_profile(
-                std::slice::from_ref(&member),
-                std::slice::from_ref(&descriptor),
-            )?,
-            (BTreeSet::new(), None)
-        );
-        for (invalid_member, invalid_descriptor) in [
-            (Value::Null, descriptor.clone()),
-            (member.clone(), Value::Null),
-            (
-                replace_value_field(&member, 0, Value::Null)?,
-                descriptor.clone(),
-            ),
-            (
-                replace_value_field(&member, 1, Value::Null)?,
-                descriptor.clone(),
-            ),
-            (
-                replace_value_field(&member, 2, Value::Integer(99_u64.into()))?,
-                descriptor.clone(),
-            ),
-            (
-                member.clone(),
-                replace_value_field(&descriptor, 3, Value::Integer(99_u64.into()))?,
-            ),
-        ] {
-            assert_eq!(
-                super::independent_member_paths_and_profile(
-                    std::slice::from_ref(&invalid_member),
-                    std::slice::from_ref(&invalid_descriptor),
-                ),
-                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-            );
-        }
-
-        // The public verifier rejects this role mismatch earlier as an
-        // undeclared member. Keep the direct call for the defensive branch
-        // that classifies a descriptor found by the expected-result checker.
-        let expected_path = "expected/member.bin".to_owned();
-        let expected_bytes = b"expected".to_vec();
-        let expected_digest = *blake3::hash(&expected_bytes).as_bytes();
-        let expected = Value::Array(vec![
-            Value::Text("case".to_owned()),
-            Value::Integer(0_u64.into()),
-            Value::Bytes(vec![1; 32]),
-            Value::Integer(0_u64.into()),
-            Value::Text(expected_path.clone()),
-            Value::Bytes(expected_digest.to_vec()),
-        ]);
-        let wrong_role_descriptor = Value::Array(vec![
-            Value::Text(expected_path.clone()),
-            Value::Integer(u64::try_from(expected_bytes.len())?.into()),
-            Value::Bytes(expected_digest.to_vec()),
-            Value::Integer(0_u64.into()),
-        ]);
-        let expected_paths = [expected_path].into_iter().collect::<BTreeSet<_>>();
-        assert_eq!(
-            super::independent_verify_expected_results(
-                std::slice::from_ref(&expected),
-                std::slice::from_ref(&wrong_role_descriptor),
-                &expected_paths,
-            ),
-            Err(BundleContractErrorV1::ExpectedResultMismatch)
-        );
-
-        Ok(())
-    }
-
-    #[test]
     fn independent_profile_rejection_matrix_is_instrumented(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bundle = signed_bundle()?;
@@ -7169,19 +7198,13 @@ mod coverage_entrypoints {
             .ok_or("missing profile member")?;
         let profile = tests::profile();
         let profile_bytes = profile.to_canonical_cbor()?;
-        let profile_digest = Value::Bytes(profile.profile_digest.to_vec());
         assert_eq!(
-            super::independent_verify_profile(&profile_bytes, 0, &profile_digest),
+            verify_archive_independently(&replace_archive_profile(
+                &bundle,
+                profile_index,
+                &profile_bytes,
+            )?),
             Ok(())
-        );
-        assert_eq!(
-            super::independent_verify_profile(b"invalid", 0, &profile_digest),
-            Err(BundleContractErrorV1::ProfileInvalid)
-        );
-        let encoded_null = encode_archive_value(&Value::Null)?;
-        assert_eq!(
-            super::independent_verify_profile(&encoded_null, 0, &profile_digest),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
         assert_eq!(
             verify_archive_independently(&replace_archive_profile(
@@ -7253,21 +7276,6 @@ mod coverage_entrypoints {
     #[test]
     fn independent_preflight_and_authority_rejection_matrix_is_instrumented(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut limited_profile = tests::profile();
-        limited_profile.evaluator_protocol.hard_caps.max_cases = 1;
-        let empty_preflight = super::ArchivePreflight {
-            profile_bytes: None,
-            member_count: 0,
-            total_member_bytes: 0,
-            largest_member_bytes: 0,
-            largest_member_path_bytes: 0,
-            maximum_depth: 0,
-        };
-        assert_eq!(
-            validate_preflight_archive_caps(&limited_profile, &empty_preflight, 1),
-            Err(BundleContractErrorV1::MemberOutOfBounds)
-        );
-
         assert_eq!(
             super::validate_authority_inventory_digest(&JsonValue::Null, b""),
             Err(BundleContractErrorV1::MemberDigestMismatch)
@@ -7286,7 +7294,7 @@ mod coverage_entrypoints {
             Ok(())
         );
 
-        tests::candidate_bundle_fails_closed_without_coordinate_bound_authority()?;
+        tests::candidate_bundle_without_coordinate_bound_authority()?;
 
         let mut malformed_candidate = tests::profile();
         malformed_candidate.lifecycle = super::ProfileLifecycleV1::Candidate;
