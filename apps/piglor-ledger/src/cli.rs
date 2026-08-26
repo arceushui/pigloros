@@ -66,15 +66,11 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
 fn ledger_signing_registry(
     signing_key: &ed25519_dalek::SigningKey,
     persisted_registry: Option<&KeyRegistryStateV1>,
-) -> (Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1) {
+) -> Result<(Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1), CliError> {
     let material_digest = key_material_digest(signing_key.as_bytes());
     let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
     let identity = persisted_registry
         .and_then(|registry| registry.active_key(KeyRoleV1::TimelineIntegritySigning))
-        .filter(|record| {
-            record.private_material_digest == Some(material_digest)
-                && record.public_verification_key == Some(public_verification_key)
-        })
         .map_or(
             KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1),
             |record| record.identity,
@@ -83,13 +79,20 @@ fn ledger_signing_registry(
     if persisted_registry.is_none() {
         // The initial role/epoch and generated key material are valid by
         // construction. Later epochs come from the durable active registry.
-        let _registration_result = registry.register_key(KeyRegistrationV1::new(
-            identity,
-            material_digest,
-            Some(public_verification_key),
-        ));
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                material_digest,
+                Some(public_verification_key),
+            ))
+            .map_err(|error| {
+                CliError::BadSource(format!("ledger signing registration: {error}"))
+            })?;
     }
-    (Arc::new(Mutex::new(registry)), identity)
+    registry
+        .with_signing_authorization(identity, material_digest, public_verification_key, || ())
+        .map_err(|error| CliError::BadSource(format!("ledger signing authorization: {error}")))?;
+    Ok((Arc::new(Mutex::new(registry)), identity))
 }
 
 /// Open the source as a `Box<dyn LedgerStore>`. Store tier requires
@@ -114,7 +117,7 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 .load_key_registry()
                 .map_err(|e| CliError::BadSource(e.to_string()))?;
             let (registry, identity) =
-                ledger_signing_registry(&signing_key, persisted_registry.as_ref());
+                ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
             let timeline_id = find_or_create_ledger_timeline(&mut *event_store)?;
             Ok(Box::new(
                 EventLedgerStore::new(
@@ -242,7 +245,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             output_stderr!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
             output_stderr!("  export --source toml:DIR|store:DB [--out FILE] [--today YYYY-MM-DD] [--pubkey HEX]");
             output_stderr!("  build  --source toml:DIR|store:DB --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
-            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX (required trust anchor for store:)] [--manifest FILE]");
+            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX|ROLE/EPOCH=HEX,... (required trust anchor for store:)] [--manifest FILE]");
             Ok(())
         }
     }
@@ -1890,7 +1893,8 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn ledger_signing_registry_requires_both_key_fingerprints() {
+    fn ledger_signing_registry_requires_both_key_fingerprints(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let (signing_key, _) = pos_crypto::signing::generate_keypair();
         let (different_key, _) = pos_crypto::signing::generate_keypair();
         let persisted_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 2);
@@ -1906,9 +1910,9 @@ mod tests {
             "test registry registration must succeed"
         );
 
-        let (_, identity) = ledger_signing_registry(&signing_key, Some(&persisted));
-
-        assert_eq!(identity.epoch, 1);
+        let error = ledger_signing_registry(&signing_key, Some(&persisted)).test_err()?;
+        assert!(error.to_string().contains("authorization"), "{error}");
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -2043,13 +2047,17 @@ mod tests {
         let key_path = tmp.path().join("sk");
         run_keygen(&key_path)?;
         let mut raw = pos_store::sqlite::SqliteStore::open(db.to_str().test_ok()?).test_ok()?;
-        raw.create_timeline("ledger").test_ok()?;
         raw.save_key_registry(&KeyRegistryStateV1::new())
             .test_ok()?;
         drop(raw);
 
         let error = open_store(&Source::Store(db), Some(&key_path)).test_err()?;
         assert!(error.to_string().contains("authorization"), "{error}");
+        let reopened = pos_store::sqlite::SqliteStore::open(
+            tmp.path().join("mismatched.db").to_str().test_ok()?,
+        )
+        .test_ok()?;
+        assert!(reopened.list_timelines()?.is_empty());
         Ok(())
     }
 

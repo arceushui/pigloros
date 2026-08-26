@@ -310,6 +310,31 @@ fn replacement_rejects_tombstone_rewrite_at_public_boundary(
 }
 
 #[test]
+fn replacement_rejects_a_new_already_destroyed_identity() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (previous, identity, _) = registered_state()?;
+    let next_identity = KeyIdentityV1::new(identity.role, identity.epoch + 1);
+    let mut next = previous.clone();
+    let next_material = Hash::from_bytes([71; 32]);
+    next.register_key(KeyRegistrationV1::new(
+        next_identity,
+        next_material,
+        Some(PublicKey::from_bytes([72; 32])),
+    ))?;
+    next.destroy_key(KeyDestructionRequestV1::new(
+        next_identity,
+        next_material,
+        Hash::from_bytes([73; 32]),
+    ))?;
+
+    assert_eq!(
+        previous.validate_replacement(&next),
+        Err(pos_core::KeyRegistryErrorV1::InvalidState)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_registry_traits_and_role_boundaries_are_exercised(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let role_cases = [

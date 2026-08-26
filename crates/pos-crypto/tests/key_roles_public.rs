@@ -105,7 +105,10 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
             &mut registry,
             &encryption_material,
             encryption_identity,
-            || "authorized",
+            |material| {
+                assert_eq!(material, &[32; 32]);
+                "authorized"
+            },
         )?,
         "authorized"
     );
@@ -114,7 +117,7 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
             &mut registry,
             &encryption_material,
             KeyIdentityV1::new(encryption_identity.role, 0),
-            || "not called",
+            |_| "not called",
         ),
         Err(pos_core::KeyRegistryErrorV1::InvalidEpoch)
     );
@@ -124,7 +127,7 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
             &mut registry,
             &encryption_material,
             signing_identity,
-            || "not called",
+            |_| "not called",
         ),
         Err(pos_core::KeyRegistryErrorV1::EncryptionRoleRequired)
     );
@@ -170,7 +173,7 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
             &mut registry,
             &encryption_material,
             encryption_identity,
-            || "not called",
+            |_| "not called",
         ),
         Err(pos_core::KeyRegistryErrorV1::Destroyed)
     );
@@ -276,7 +279,7 @@ fn public_role_bound_key_mismatch_errors_are_closed() -> Result<(), Box<dyn std:
             &mut registry,
             &EncryptionKeyMaterial::new([35; 32]),
             encryption_identity,
-            || "not called",
+            |_| "not called",
         ),
         Err(pos_core::KeyRegistryErrorV1::EncryptionKeyMismatch)
     );

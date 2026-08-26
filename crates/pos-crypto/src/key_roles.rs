@@ -260,9 +260,10 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
 
 /// Authorize one encryption operation under an active registry identity.
 ///
-/// The callback is the adapter-owned encryption operation and receives no
-/// private bytes. Destruction and the callback are ordered by the registry
-/// adapter's serialization boundary.
+/// The callback is the adapter-owned encryption operation and receives a
+/// temporary borrow of the private material. The borrow cannot escape the
+/// call, and the material is never cloned. Destruction and the callback are
+/// ordered by the registry adapter's serialization boundary.
 ///
 /// # Errors
 ///
@@ -276,7 +277,7 @@ pub fn with_registered_encryption_authorization<R, T, F>(
 ) -> Result<T, KeyRegistryErrorV1>
 where
     R: KeyRegistryEncryptionPortV1,
-    F: FnOnce() -> T,
+    F: FnOnce(&[u8; 32]) -> T,
 {
     if identity.epoch == 0 {
         return Err(KeyRegistryErrorV1::InvalidEpoch);
@@ -284,11 +285,11 @@ where
     if !identity.role.is_encryption() {
         return Err(KeyRegistryErrorV1::EncryptionRoleRequired);
     }
-    if private_material.private_material.is_none() {
+    let Some(material) = private_material.private_material.as_ref() else {
         return Err(KeyRegistryErrorV1::Destroyed);
-    }
+    };
     let digest = private_material.material_digest;
-    registry.with_encryption_authorization(identity, digest, operation)
+    registry.with_encryption_authorization(identity, digest, || operation(material.as_ref()))
 }
 
 /// Verify a role/epoch-bound signature.
@@ -492,7 +493,7 @@ mod tests {
 
         let mut callbacks = 0;
         assert_eq!(
-            with_registered_encryption_authorization(&mut registry, &material, identity, || {
+            with_registered_encryption_authorization(&mut registry, &material, identity, |_| {
                 callbacks += 1;
                 7u8
             },)?,
@@ -505,7 +506,7 @@ mod tests {
             |request| registry.destroy_key(request),
         )?;
         assert_eq!(
-            with_registered_encryption_authorization(&mut registry, &material, identity, || {
+            with_registered_encryption_authorization(&mut registry, &material, identity, |_| {
                 callbacks += 1;
                 8u8
             },),
@@ -519,7 +520,7 @@ mod tests {
                 &mut registry,
                 &material,
                 signing_identity,
-                || (),
+                |_| (),
             ),
             Err(KeyRegistryErrorV1::EncryptionRoleRequired)
         );
@@ -528,7 +529,7 @@ mod tests {
                 &mut registry,
                 &material,
                 KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 0),
-                || (),
+                |_| (),
             ),
             Err(KeyRegistryErrorV1::InvalidEpoch)
         );

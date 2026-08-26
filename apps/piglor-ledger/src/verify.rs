@@ -4,12 +4,12 @@
 //! TOML tier: recomputes the b3sum-compatible BLAKE3 of each file's raw
 //! bytes and optionally compares against a previously-written [`ExportManifest`].
 //! Store tier: re-reads ledger events from the `SQLite` store and verifies
-//! Ed25519 signatures against the persisted role/epoch registry and a caller-
-//! supplied public-key trust anchor.
+//! Ed25519 signatures against the persisted role/epoch registry and caller-
+//! supplied public-key trust anchors.
 
 use std::path::Path;
 
-use pos_core::{event::Event, store::SeqRange, KeyRegistryStateV1};
+use pos_core::{event::Event, store::SeqRange, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1};
 use pos_crypto::{key_roles::verify_for_role, signing::verifying_key_from_public_key};
 use pos_plugin_ledger::EVENT_TYPE_PREDICTION;
 
@@ -56,7 +56,9 @@ impl std::fmt::Display for VerifyReport {
 /// If `manifest_path` is provided (TOML tier), the recomputed hashes are
 /// compared against that manifest. For the store tier, the persisted registry
 /// resolves each event identity. Store verification requires `pubkey_hex` as
-/// an external trust anchor and compares it with the resolved public key.
+/// an external trust anchor. A single bare key is accepted only when all
+/// events use one identity; rotated ledgers must provide explicit
+/// `role-code/epoch=hex` anchors for every identity.
 ///
 /// # Errors
 /// Returns [`CliError`] on adapter failure. Verification *failures* are
@@ -163,7 +165,7 @@ fn collect_hashes(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
 }
 
 fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, CliError> {
-    let supplied_public_key = parse_supplied_public_key(pubkey_hex)?;
+    let supplied_public_keys = parse_supplied_public_keys(pubkey_hex)?;
 
     let store = pos_store::open_store_read_only(&db.to_string_lossy())
         .map_err(|e| CliError::BadSource(e.to_string()))?;
@@ -175,7 +177,7 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
             "store verification requires a persisted role/epoch registry".to_owned(),
         ));
     }
-    let supplied_public_key = supplied_public_key.ok_or_else(|| {
+    let supplied_public_keys = supplied_public_keys.ok_or_else(|| {
         CliError::BadSource(
             "store verification requires --pubkey as an external trust anchor".to_owned(),
         )
@@ -192,9 +194,27 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
         ));
     }
     let n = events.len();
+    let identities: std::collections::BTreeSet<KeyIdentityV1> = events
+        .iter()
+        .filter_map(|event| event.signature_identity)
+        .collect();
+    if supplied_public_keys.len() == 1
+        && supplied_public_keys[0].identity.is_none()
+        && identities.len() > 1
+    {
+        return Ok(VerifyReport {
+            tier: "store".to_owned(),
+            n,
+            outcome: VerifyOutcome::Mismatch {
+                which: "trust-anchor".to_owned(),
+                reason: "rotated ledger requires role/epoch keyed public-key trust anchors"
+                    .to_owned(),
+            },
+        });
+    }
     for event in &events {
         if let Some((which, reason)) =
-            verify_store_event(event, Some(supplied_public_key), registry.as_ref())?
+            verify_store_event(event, Some(&supplied_public_keys), registry.as_ref())?
         {
             return Ok(VerifyReport {
                 tier: "store".to_owned(),
@@ -210,25 +230,74 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
     })
 }
 
-fn parse_supplied_public_key(
+#[derive(Clone, Copy)]
+struct TrustedPublicKey {
+    identity: Option<KeyIdentityV1>,
+    public_key: pos_core::PublicKey,
+}
+
+fn parse_public_key_hex(value: &str) -> Result<pos_core::PublicKey, CliError> {
+    let bytes =
+        hex_decode(value).map_err(|error| CliError::BadKey(format!("--pubkey: {error}")))?;
+    let array: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
+    Ok(pos_core::PublicKey::from_bytes(array))
+}
+
+fn parse_supplied_public_keys(
     pubkey_hex: Option<&str>,
-) -> Result<Option<pos_core::PublicKey>, CliError> {
-    pubkey_hex
-        .map(|value| {
-            let bytes = hex_decode(value)
-                .map_err(|error| CliError::BadKey(format!("--pubkey: {error}")))?;
-            let array: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| CliError::BadKey("--pubkey must be 32 bytes".to_owned()))?;
-            Ok(pos_core::PublicKey::from_bytes(array))
-        })
-        .transpose()
+) -> Result<Option<Vec<TrustedPublicKey>>, CliError> {
+    let Some(value) = pubkey_hex else {
+        return Ok(None);
+    };
+    let entries: Vec<&str> = value.split(',').collect();
+    let anchors = if entries.len() == 1 && !entries[0].contains('=') {
+        vec![TrustedPublicKey {
+            identity: None,
+            public_key: parse_public_key_hex(entries[0])?,
+        }]
+    } else {
+        entries
+            .into_iter()
+            .map(|entry| {
+                let (identity, public_key) = entry.split_once('=').ok_or_else(|| {
+                    CliError::BadKey(
+                        "--pubkey entries must use role-code/epoch=hex format".to_owned(),
+                    )
+                })?;
+                let (role, epoch) = identity.split_once('/').ok_or_else(|| {
+                    CliError::BadKey(
+                        "--pubkey entries must use role-code/epoch=hex format".to_owned(),
+                    )
+                })?;
+                let role_code = role
+                    .parse::<u8>()
+                    .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
+                let role = KeyRoleV1::from_code(role_code)
+                    .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
+                let epoch = epoch
+                    .parse::<u64>()
+                    .map_err(|_| CliError::BadKey("--pubkey epoch is invalid".to_owned()))?;
+                if epoch == 0 {
+                    return Err(CliError::BadKey(
+                        "--pubkey epoch must be greater than zero".to_owned(),
+                    ));
+                }
+                Ok(TrustedPublicKey {
+                    identity: Some(KeyIdentityV1::new(role, epoch)),
+                    public_key: parse_public_key_hex(public_key)?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(Some(anchors))
 }
 
 fn verify_store_event(
     event: &Event,
-    supplied_public_key: Option<pos_core::PublicKey>,
+    supplied_public_keys: Option<&[TrustedPublicKey]>,
     registry: Option<&KeyRegistryStateV1>,
 ) -> Result<Option<(String, String)>, CliError> {
     let which = format!("seq={}", event.seq.as_u64());
@@ -258,8 +327,12 @@ fn verify_store_event(
     let registry_public_key = registry
         .and_then(|value| value.key_record(identity))
         .and_then(|record| record.public_verification_key);
-    if let (Some(supplied), Some(registered)) = (supplied_public_key, registry_public_key) {
-        if supplied != registered {
+    if let Some(supplied) = supplied_public_keys {
+        let trusted = supplied.iter().any(|anchor| {
+            anchor.identity.is_none_or(|expected| expected == identity)
+                && Some(anchor.public_key) == registry_public_key
+        });
+        if !trusted {
             return Ok(Some((
                 which,
                 "supplied public key does not match the persisted registry".to_owned(),

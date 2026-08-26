@@ -484,6 +484,9 @@ impl KeyRegistryStateV1 {
             if self.records.contains_key(identity) {
                 continue;
             }
+            if next.tombstones.contains_key(identity) {
+                return Err(KeyRegistryErrorV1::InvalidState);
+            }
             if self
                 .highest_epoch
                 .get(&identity.role)
@@ -620,14 +623,14 @@ impl KeyRegistryStateV1 {
     where
         F: FnOnce() -> T,
     {
-        self.validate()
-            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
         if identity.epoch == 0 {
             return Err(KeyRegistryErrorV1::InvalidEpoch);
         }
         if !identity.role.is_signing() {
             return Err(KeyRegistryErrorV1::SigningRoleRequired);
         }
+        self.validate()
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
         let record = self
             .records
             .get(&identity)
@@ -668,14 +671,14 @@ impl KeyRegistryStateV1 {
     where
         F: FnOnce() -> T,
     {
-        self.validate()
-            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
         if identity.epoch == 0 {
             return Err(KeyRegistryErrorV1::InvalidEpoch);
         }
         if !identity.role.is_encryption() {
             return Err(KeyRegistryErrorV1::EncryptionRoleRequired);
         }
+        self.validate()
+            .map_err(|_| KeyRegistryErrorV1::RegistryUnavailable)?;
         let record = self
             .records
             .get(&identity)
@@ -1570,6 +1573,19 @@ mod tests {
         assert_eq!(
             invalid.validate_replacement(&valid),
             Err(KeyRegistryErrorV1::InvalidState)
+        );
+        assert_eq!(
+            invalid.with_signing_authorization(
+                KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 0),
+                digest(58),
+                PublicKey::from_bytes([58; 32]),
+                || (),
+            ),
+            Err(KeyRegistryErrorV1::InvalidEpoch)
+        );
+        assert_eq!(
+            invalid.with_encryption_authorization(ATTRIBUTION, digest(58), || ()),
+            Err(KeyRegistryErrorV1::EncryptionRoleRequired)
         );
         let mut invalid_next = valid.clone();
         invalid_next.active.clear();
