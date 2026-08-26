@@ -201,9 +201,10 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
     let (callback_entered_tx, callback_entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (destruction_done_tx, destruction_done_rx) = std::sync::mpsc::channel();
     let live_registry = registry.clone();
 
-    let (sign_result, destroy_result) = std::thread::scope(|scope| {
+    let (sign_result, destroy_result, destruction_waited) = std::thread::scope(|scope| {
         let sign_handle = scope.spawn(move || {
             let mut callback_event = event;
             let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
@@ -242,9 +243,10 @@ fn sqlite_key_registry_signing_and_destruction_are_ordered_across_handles(
         let destroy_result = destroy_handle
             .join()
             .map_err(|_| std::io::Error::other("destruction thread panicked"))?;
-        Ok::<_, Box<dyn std::error::Error>>((sign_result, destroy_result))
+        Ok::<_, Box<dyn std::error::Error>>((sign_result, destroy_result, destruction_waited))
     })?;
 
+    assert!(destruction_waited);
     assert!(sign_result.is_ok());
     assert!(destroy_result.is_ok());
 
