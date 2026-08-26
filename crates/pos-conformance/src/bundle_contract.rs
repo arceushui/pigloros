@@ -7314,10 +7314,10 @@ mod instrumented_candidate_entrypoints {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut value: ciborium::value::Value =
             ciborium::from_reader(std::io::Cursor::new(archive))?;
+        let ciborium::value::Value::Array(fields) = &mut value else {
+            return Err("encoded bundle is not an array".into());
+        };
         {
-            let ciborium::value::Value::Array(fields) = &mut value else {
-                return Err("encoded bundle is not an array".into());
-            };
             let ciborium::value::Value::Array(members) = &mut fields[3] else {
                 return Err("encoded members are not an array".into());
             };
@@ -7336,9 +7336,6 @@ mod instrumented_candidate_entrypoints {
             };
             descriptor[3] = ciborium::value::Value::Integer(14_u64.into());
         }
-        let ciborium::value::Value::Array(fields) = &mut value else {
-            return Err("encoded bundle is not an array".into());
-        };
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         let mut manifest_bytes = Vec::new();
         ciborium::into_writer(&fields[2], &mut manifest_bytes)?;
@@ -7351,6 +7348,57 @@ mod instrumented_candidate_entrypoints {
             verify_archive_independently(&encoded),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
+        Ok(())
+    }
+
+    fn public_archive_malformed_shapes_are_rejected() {
+        for malformed in [
+            &[0x00][..],
+            &[0x84, 0x00, 0x00, 0x00, 0x00][..],
+            &[0x84, 0x00, 0x00, 0x81, 0x00][..],
+        ] {
+            assert_eq!(
+                verify_archive_independently(malformed),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+            assert!(public_archive_decode_boundaries(malformed).is_err());
+        }
+
+        for malformed in [
+            &[0x00][..],
+            &[0x84, 0x00, 0x00, 0x00, 0x00][..],
+            &[0x84, 0x00, 0x00, 0x81, 0x00][..],
+            &[0x84, 0x00, 0x00, 0x00, 0x81, 0x83, 0x60, 0x40, 0x00][..],
+            &[
+                0x84, 0x00, 0x00, 0x85, 0x00, 0x00, 0x00, 0x00, 0x00, 0x81, 0x83, 0x60, 0x40, 0x00,
+            ][..],
+            &[
+                0x84, 0x00, 0x00, 0x85, 0x00, 0x00, 0x00, 0x00, 0x81, 0x00, 0x81, 0x83, 0x60, 0x40,
+                0x00,
+            ][..],
+        ] {
+            assert_eq!(
+                verify_archive_independently(malformed),
+                Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+            );
+            assert!(public_archive_rejects_unknown_member_role(malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn public_archive_helpers_reject_a_non_array_member_shape(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let malformed = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Array(vec![ciborium::value::Value::Null]),
+        ]);
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&malformed, &mut encoded)?;
+
+        assert!(public_archive_decode_boundaries(&encoded).is_err());
+        assert!(public_archive_rejects_unknown_member_role(&encoded).is_err());
         Ok(())
     }
 
@@ -7430,13 +7478,14 @@ mod instrumented_candidate_entrypoints {
         Ok(())
     }
 
-    #[test]
-    fn public_archive_boundaries_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
-        let profile = tests::profile();
-        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+    fn exercise_public_archive_boundaries(
+        profile: &super::ConformanceProfileV1,
+        members: Vec<super::BundleMemberV1>,
+        expected_results: Vec<super::BundleExpectedResultV1>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
         let bundle = ConformanceBundleV1::materialize(
-            &profile,
+            profile,
             BundleModeV1::Local,
             members,
             expected_results,
@@ -7446,7 +7495,24 @@ mod instrumented_candidate_entrypoints {
         assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
         assert_eq!(verify_archive_independently(&archive), Ok(()));
         public_archive_decode_boundaries(&archive)?;
+        public_archive_malformed_shapes_are_rejected();
         public_archive_validation_boundaries(&bundle);
-        public_archive_cap_boundaries(&profile)
+        public_archive_cap_boundaries(profile)
+    }
+
+    #[test]
+    fn public_archive_boundaries_are_instrumented() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let (members, expected_results) = tests::bundle_inputs(&profile, BundleModeV1::Local)?;
+        let mut invalid_profile = profile.clone();
+        invalid_profile.lifecycle = ProfileLifecycleV1::Stable;
+        assert!(exercise_public_archive_boundaries(
+            &invalid_profile,
+            members.clone(),
+            expected_results.clone(),
+        )
+        .is_err());
+        assert!(exercise_public_archive_boundaries(&profile, members, expected_results).is_ok());
+        Ok(())
     }
 }
