@@ -42,4 +42,6 @@ shipped inside the CFB1 archive.
 Candidate authority records are bundled as typed immutable members only after
 the inventory reaches Candidate with concrete bytes and digests. Until then,
 the ADR-059 matrix and #172 inventory remain Draft; their unexecuted slots do
-not count as conformance evidence.
+not count as conformance evidence. Every executed Candidate coordinate must
+also identify its authority fixture and exact expected-result digest; merely
+reusing a digest that happens to occur in the archive is not sufficient.

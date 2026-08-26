@@ -32,7 +32,7 @@ fixture = [
   expected: expected-result,
   verification-outcome: 0..5,
   verification-error: null / uint,
-  replay-claim: 0..5,
+  replay-claim: 0..4,
   redaction-state: 0..3,
   bounds: [8* uint],
   capability-policy: [bool, [* tstr]],

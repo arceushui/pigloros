@@ -71,6 +71,7 @@ inventory and includes its own `SHA256SUMS`.
 
 Candidate materialization reads the eleven inventory fixture/result paths from
 `PIGLOROS_CONFORMANCE_AUTHORITY_ROOT`, rejects traversal or digest mismatches,
-and binds each loaded JSON record back to its inventory `fixture_id`. CI keeps
-the checked-in Draft inventory, so it cannot silently synthesize Candidate
-authority evidence.
+binds each loaded JSON record back to its inventory `fixture_id`, and requires
+each Candidate matrix coordinate to name its `authority_fixture_id` and match
+that inventory entry's expected-result digest. CI keeps the checked-in Draft
+inventory, so it cannot silently synthesize Candidate authority evidence.

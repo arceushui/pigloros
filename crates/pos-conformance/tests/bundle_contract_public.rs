@@ -3,12 +3,12 @@
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
-    BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1,
-    BundleModeV1, CapabilityPolicyV1, ClaimLayerV1, ConformanceBundleV1, ConformanceProfileV1,
-    EvaluatorHardCapsV1, EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1,
-    FixtureDescriptorV1, FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1,
-    ProfileLifecycleV1, RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1,
+    expected_result_member_path, fixture_input_member_path, BundleExpectedResultV1,
+    BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
+    ClaimLayerV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
+    EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
+    FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
+    RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -234,28 +234,17 @@ pub mod fixtures {
         output
     }
 
-    fn append_path_component(input: &mut Vec<u8>, value: &str) {
-        input.extend_from_slice(&(value.len() as u64).to_be_bytes());
-        input.extend_from_slice(value.as_bytes());
-    }
-
     fn input_path(case_id: &str, profile_digest: &[u8; 32], member_id: &str) -> String {
-        let mut input = Vec::new();
-        input.extend_from_slice(b"PiglorOS.CPF1InputPath.v1\0");
-        append_path_component(&mut input, case_id);
-        input.push(0);
-        input.extend_from_slice(profile_digest);
-        append_path_component(&mut input, member_id);
-        format!("inputs/{}.bin", blake3::hash(&input).to_hex())
+        fixture_input_member_path(
+            case_id,
+            ClaimLayerV1::ArtifactIntegrity,
+            profile_digest,
+            member_id,
+        )
     }
 
     fn expected_path(case_id: &str, profile_digest: &[u8; 32]) -> String {
-        let mut input = Vec::new();
-        input.extend_from_slice(b"PiglorOS.CPF1ExpectedPath.v1\0");
-        append_path_component(&mut input, case_id);
-        input.push(0);
-        input.extend_from_slice(profile_digest);
-        format!("expected/{}.bin", blake3::hash(&input).to_hex())
+        expected_result_member_path(case_id, ClaimLayerV1::ArtifactIntegrity, profile_digest)
     }
 
     fn fixture(
@@ -390,10 +379,25 @@ pub mod fixtures {
         let mut members = Vec::with_capacity(entries.len() * 2);
         for (index, entry) in entries.iter_mut().enumerate() {
             let fixture_id = AUTHORITY_FIXTURE_IDS[index];
-            let fixture_bytes = serde_json::to_vec(&serde_json::json!({"fixture_id": fixture_id}))?;
-            let result_bytes = serde_json::to_vec(
-                &serde_json::json!({"fixture_id": fixture_id, "expected": true}),
-            )?;
+            let execution_class = entry
+                .get("execution_class")
+                .and_then(JsonValue::as_str)
+                .ok_or("authority execution class is missing")?;
+            let expected_outcome = entry
+                .get("expected_outcome")
+                .and_then(JsonValue::as_str)
+                .ok_or("authority expected outcome is missing")?;
+            let fixture_bytes = serde_json::to_vec(&serde_json::json!({
+                "fixture_id": fixture_id,
+                "execution_class": execution_class,
+                "expected_outcome": expected_outcome
+            }))?;
+            let result_bytes = serde_json::to_vec(&serde_json::json!({
+                "fixture_id": fixture_id,
+                "execution_class": execution_class,
+                "expected_outcome": expected_outcome,
+                "expected": true
+            }))?;
             let fixture_digest = digest(&fixture_bytes);
             let result_digest = digest(&result_bytes);
             let fixture_path = format!("fixtures/{fixture_id}.json");
@@ -539,6 +543,18 @@ pub mod fixtures {
         (members, expected_result)
     }
 
+    fn bind_profile_to_matrix(
+        profile: &mut ConformanceProfileV1,
+        authority_members: &[BundleMemberV1],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let matrix = authority_members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing execution matrix")?;
+        profile.bind_execution_matrix_digest(matrix.digest)?;
+        Ok(())
+    }
+
     /// Construct the Candidate bundle used by the public materialization test.
     ///
     /// # Errors
@@ -550,7 +566,8 @@ pub mod fixtures {
         Box<dyn std::error::Error>,
     > {
         let (authority_members, provenance_bytes) = candidate_authority_data()?;
-        let profile = profile(digest(&provenance_bytes));
+        let mut profile = profile(digest(&provenance_bytes));
+        bind_profile_to_matrix(&mut profile, &authority_members)?;
         let (members, expected_result) =
             candidate_members(&profile, provenance_bytes, authority_members);
         Ok(ConformanceBundleV1::materialize(
@@ -573,6 +590,7 @@ pub mod fixtures {
     > {
         let (authority_members, provenance_bytes) = candidate_authority_data()?;
         let mut profile = profile(digest(&provenance_bytes));
+        bind_profile_to_matrix(&mut profile, &authority_members)?;
         profile.fixtures[0].provenance.publication_review_digest =
             profile.fixtures[0].provenance.notices_digest;
         profile.profile_digest = profile.digest();
@@ -605,7 +623,8 @@ pub mod fixtures {
         let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
         provenance["authority_inventory"]["path"] = JsonValue::String("wrong.json".to_owned());
         let provenance_bytes = serde_json::to_vec(&provenance)?;
-        let profile = profile(digest(&provenance_bytes));
+        let mut profile = profile(digest(&provenance_bytes));
+        bind_profile_to_matrix(&mut profile, &authority_members)?;
         let (members, expected_result) =
             candidate_members(&profile, provenance_bytes, authority_members);
         Ok(ConformanceBundleV1::materialize(
@@ -644,7 +663,8 @@ pub mod fixtures {
         provenance["adr_059_execution_matrix"]["sha256_digest"] =
             JsonValue::String(hex(&Sha256::digest(&matrix_bytes)));
         let provenance_bytes = serde_json::to_vec(&provenance)?;
-        let profile = profile(digest(&provenance_bytes));
+        let mut profile = profile(digest(&provenance_bytes));
+        bind_profile_to_matrix(&mut profile, &authority_members)?;
         let (members, expected_result) =
             candidate_members(&profile, provenance_bytes, authority_members);
         Ok(ConformanceBundleV1::materialize(
@@ -732,6 +752,7 @@ pub mod fixtures {
 
         let mut profile = profile(digest(&provenance_bytes));
         profile.lifecycle = ProfileLifecycleV1::Draft;
+        bind_profile_to_matrix(&mut profile, &authority_members)?;
         profile.profile_digest = profile.digest();
         let (members, expected_result) =
             candidate_members(&profile, provenance_bytes, authority_members);
@@ -887,6 +908,120 @@ fn public_draft_archive_round_trip_and_independent_verification(
         Ok(())
     );
     assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+
+    let changed_expected = signed_archive_variant(&bundle, &signing_key, |value| {
+        let expected = archive_expected(value)?;
+        let path = match &expected[4] {
+            Value::Text(path) => path.clone(),
+            _ => return Err("expected path is not text".into()),
+        };
+        let member = archive_member(value, &path)?;
+        let Value::Bytes(bytes) = &mut member[1] else {
+            return Err("expected member bytes are missing".into());
+        };
+        bytes.push(0);
+        let descriptor = archive_descriptor(value, &path)?;
+        descriptor[1] = Value::Integer((bytes.len() as u64).into());
+        descriptor[2] = Value::Bytes(blake3::hash(bytes).as_bytes().to_vec());
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&changed_expected),
+        Err(pos_conformance::BundleContractErrorV1::ExpectedResultMismatch)
+    );
+
+    let missing_input = signed_archive_variant(&bundle, &signing_key, |value| {
+        let (member_index, path) = {
+            let members = archive_array(value, 3)?;
+            let index = members
+                .iter()
+                .position(|member| {
+                    matches!(
+                        member,
+                        Value::Array(fields)
+                            if fields.get(2) == Some(&Value::Integer(0_u64.into()))
+                    )
+                })
+                .ok_or("fixture input is missing")?;
+            let path = match &members[index] {
+                Value::Array(fields) => match &fields[0] {
+                    Value::Text(path) => path.clone(),
+                    _ => return Err("fixture input path is missing".into()),
+                },
+                _ => return Err("fixture input is malformed".into()),
+            };
+            (index, path)
+        };
+        archive_array(value, 3)?.remove(member_index);
+        let descriptors = archive_array(value, 2)?;
+        let descriptor_index = descriptors
+            .iter()
+            .position(|descriptor| {
+                matches!(
+                    descriptor,
+                    Value::Array(fields) if fields.first() == Some(&Value::Text(path.clone()))
+                )
+            })
+            .ok_or("fixture input descriptor is missing")?;
+        descriptors.remove(descriptor_index);
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&missing_input),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    let misplaced_support = signed_archive_variant(&bundle, &signing_key, |value| {
+        let member = archive_member(value, "support/normative-requirements.md")?;
+        member[0] = Value::Text("support/normative-requirements.txt".to_owned());
+        let descriptor = archive_descriptor(value, "support/normative-requirements.md")?;
+        descriptor[0] = Value::Text("support/normative-requirements.txt".to_owned());
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&misplaced_support),
+        Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+    );
+
+    let mixed_case_secret = signed_archive_variant(&bundle, &signing_key, |value| {
+        let member = archive_member(value, "support/normative-requirements.md")?;
+        member[1] = Value::Bytes(b"\"PaSsWoRd\"".to_vec());
+        let descriptor = archive_descriptor(value, "support/normative-requirements.md")?;
+        descriptor[1] = Value::Integer((b"\"PaSsWoRd\"".len() as u64).into());
+        descriptor[2] = Value::Bytes(blake3::hash(b"\"PaSsWoRd\"").as_bytes().to_vec());
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&mixed_case_secret),
+        Err(pos_conformance::BundleContractErrorV1::SecretMaterialDetected)
+    );
+
+    let stale_matrix_binding = signed_archive_variant(&bundle, &signing_key, |value| {
+        let matrix_bytes = {
+            let member = archive_member(value, EXECUTION_MATRIX_MEMBER_PATH)?;
+            let Value::Bytes(bytes) = &mut member[1] else {
+                return Err("execution matrix bytes are missing".into());
+            };
+            bytes.push(b' ');
+            bytes.clone()
+        };
+        let descriptor = archive_descriptor(value, EXECUTION_MATRIX_MEMBER_PATH)?;
+        descriptor[1] = Value::Integer((matrix_bytes.len() as u64).into());
+        descriptor[2] = Value::Bytes(blake3::hash(&matrix_bytes).as_bytes().to_vec());
+        Ok(())
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&stale_matrix_binding),
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
     Ok(())
 }
 
@@ -1838,7 +1973,7 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     );
     assert_eq!(
         fixtures::candidate_bundle_with_invalid_matrix_coordinate()?,
-        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        Err(pos_conformance::BundleContractErrorV1::CandidateEvidenceMissing)
     );
     Ok(())
 }
