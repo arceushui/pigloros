@@ -2,19 +2,67 @@
   "profile_id": "pigloros.w8.gateway-client-conformance.1.0.0",
   "claim_layer": "gateway-client-conformance",
   "fixtures": [
-    {"case_id": "positive", "family": "positive", "input": "inputs/artifact-positive.json", "expected": "expected/artifact-positive.json"},
-    {"case_id": "negative", "family": "negative", "input": "inputs/replay-negative.json", "expected": "expected/replay-negative.json"},
-    {"case_id": "malformed", "family": "malformed", "input": "inputs/knowledge-malformed.json", "expected": "expected/knowledge-malformed.json"},
-    {"case_id": "resource", "family": "resource", "input": "inputs/gateway-resource-limit.json", "expected": "expected/gateway-resource-limit.json"},
-    {"case_id": "deletion", "family": "deletion", "input": "inputs/plugin-deletion.json", "expected": "expected/plugin-deletion.json"},
-    {"case_id": "downgrade", "family": "downgrade", "input": "inputs/metric-downgrade.json", "expected": "expected/metric-downgrade.json"},
-    {"case_id": "independent-evaluation", "family": "independent-evaluation", "input": "inputs/empirical-independent.json", "expected": "expected/empirical-independent.json"}
+    {
+      "claim_layer": "gateway-client-conformance",
+      "case_id": "gateway-client-conformance-positive",
+      "family": "positive",
+      "input": "inputs/gateway-client-conformance/positive.json",
+      "expected": "expected/gateway-client-conformance/positive.json"
+    },
+    {
+      "claim_layer": "gateway-client-conformance",
+      "case_id": "gateway-client-conformance-negative",
+      "family": "negative",
+      "input": "inputs/gateway-client-conformance/negative.json",
+      "expected": "expected/gateway-client-conformance/negative.json"
+    },
+    {
+      "claim_layer": "gateway-client-conformance",
+      "case_id": "gateway-client-conformance-malformed",
+      "family": "malformed",
+      "input": "inputs/gateway-client-conformance/malformed.json",
+      "expected": "expected/gateway-client-conformance/malformed.json"
+    },
+    {
+      "claim_layer": "gateway-client-conformance",
+      "case_id": "gateway-client-conformance-resource",
+      "family": "resource",
+      "input": "inputs/gateway-client-conformance/resource.json",
+      "expected": "expected/gateway-client-conformance/resource.json"
+    },
+    {
+      "claim_layer": "gateway-client-conformance",
+      "case_id": "gateway-client-conformance-deletion",
+      "family": "deletion",
+      "input": "inputs/gateway-client-conformance/deletion.json",
+      "expected": "expected/gateway-client-conformance/deletion.json"
+    },
+    {
+      "claim_layer": "gateway-client-conformance",
+      "case_id": "gateway-client-conformance-downgrade",
+      "family": "downgrade",
+      "input": "inputs/gateway-client-conformance/downgrade.json",
+      "expected": "expected/gateway-client-conformance/downgrade.json"
+    },
+    {
+      "claim_layer": "gateway-client-conformance",
+      "case_id": "gateway-client-conformance-independent-evaluation",
+      "family": "independent-evaluation",
+      "input": "inputs/gateway-client-conformance/independent-evaluation.json",
+      "expected": "expected/gateway-client-conformance/independent-evaluation.json"
+    }
   ],
   "authority_inventory": "expected-authority/inventory.json",
-  "authority_inventory_sha256_digest": "5f60065a0cc39dd43e74eb0a373424006e4d23db8affa60a22bfa7ed12ab20c8",
+  "authority_inventory_sha256_digest": "9ad1ed560599169407a39281bc4986a77115014f0b226e122a5c8a34165438fe",
   "adr_059_execution_matrix": "matrix/execution-matrix.json",
-  "adr_059_execution_matrix_blake3_digest": "bee73dd569a240dcc00a07aa625f88b793fdc03f59941ad579e5ca0e4622046c",
-  "adr_059_execution_matrix_status": "Draft",
-  "execution_profiles": ["deterministic-local-v1", "deterministic-air-gapped-v1"],
-  "bundle_modes": ["local", "air-gapped"]
+  "adr_059_execution_matrix_blake3_digest": "ae536df3381af8b166b906471d1764b07c8691775c37710cd5d8638aa51a43c1",
+  "adr_059_execution_matrix_status": "Candidate",
+  "execution_profiles": [
+    "deterministic-local-v1",
+    "deterministic-air-gapped-v1"
+  ],
+  "bundle_modes": [
+    "local",
+    "air-gapped"
+  ]
 }

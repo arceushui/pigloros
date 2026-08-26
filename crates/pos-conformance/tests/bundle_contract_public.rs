@@ -458,7 +458,19 @@ pub mod fixtures {
                 .digest;
             case["authority_fixture_id"] = JsonValue::String(fixture_id.to_owned());
             case["executed"] = JsonValue::Bool(true);
-            case["expected_result_digest"] = JsonValue::String(hex(&result_digest));
+            case["authority_result_digest"] = JsonValue::String(hex(&result_digest));
+            let coordinate_result = serde_json::to_string(&serde_json::json!({
+                "case_id": case["case_id"],
+                "fixture_id": case["fixture_id"],
+                "variant": case["variant"],
+                "mode": case["mode"],
+                "authority_fixture_id": fixture_id,
+                "outcome": "VerifiedExact",
+                "verification": "independent-public-record"
+            }))?;
+            case["expected_result_digest"] =
+                JsonValue::String(hex(&digest(coordinate_result.as_bytes())));
+            case["expected_result"] = JsonValue::String(coordinate_result);
         }
         let matrix_bytes = serde_json::to_vec(&matrix)?;
         let matrix_digest = digest(&matrix_bytes);
@@ -666,8 +678,8 @@ pub mod fixtures {
         authority_members[matrix_index].digest = digest(&matrix_bytes);
 
         let mut provenance: JsonValue = serde_json::from_slice(&provenance_bytes)?;
-        provenance["adr_059_execution_matrix"]["sha256_digest"] =
-            JsonValue::String(hex(&Sha256::digest(&matrix_bytes)));
+        provenance["adr_059_execution_matrix"]["blake3_digest"] =
+            JsonValue::String(hex(&digest(&matrix_bytes)));
         let provenance_bytes = serde_json::to_vec(&provenance)?;
         let mut profile = profile(digest(&provenance_bytes));
         bind_profile_to_matrix(&mut profile, &authority_members)?;

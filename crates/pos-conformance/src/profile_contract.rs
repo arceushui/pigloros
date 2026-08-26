@@ -118,6 +118,27 @@ pub enum ProfileLifecycleV1 {
     Retired,
 }
 
+impl ProfileLifecycleV1 {
+    pub(crate) const fn from_wire_code(code: u64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Draft),
+            1 => Some(Self::Candidate),
+            2 => Some(Self::Stable),
+            3 => Some(Self::Retired),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn wire_code(self) -> u64 {
+        match self {
+            Self::Draft => 0,
+            Self::Candidate => 1,
+            Self::Stable => 2,
+            Self::Retired => 3,
+        }
+    }
+}
+
 /// A public adapter used by an evaluator; private Rust and storage access are absent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum SubjectAdapterKindV1 {
@@ -574,7 +595,7 @@ impl ConformanceProfileV1 {
             .map_or(self.profile_id.as_str(), |(base, _)| base);
         let suffix = format!(
             "{EXECUTION_MATRIX_BINDING_MARKER}{}",
-            encode_digest_hex(&binding.digest)
+            crate::hex_digest(&binding.digest)
         );
         if base_profile_id.len() + suffix.len() > MAX_STRING_BYTES {
             return Err(ConformanceContractError::FieldOutOfBounds);
@@ -1722,44 +1743,13 @@ fn matrix_binding_parts(
     {
         return Err(ConformanceContractError::FieldOutOfBounds);
     }
-    let digest =
-        decode_digest_hex(encoded_digest).ok_or(ConformanceContractError::FieldOutOfBounds)?;
+    let digest = crate::decode_hex_digest(encoded_digest)
+        .ok_or(ConformanceContractError::FieldOutOfBounds)?;
     let binding = ExecutionMatrixBindingV1::from_digest(digest);
     if binding.is_valid() {
         Ok(Some((base, binding)))
     } else {
         Err(ConformanceContractError::FieldOutOfBounds)
-    }
-}
-
-fn encode_digest_hex(digest: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(64);
-    for byte in digest {
-        let byte = *byte;
-        encoded.push(HEX[usize::from(byte >> 4)] as char);
-        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
-
-fn decode_digest_hex(encoded: &str) -> Option<[u8; 32]> {
-    if encoded.len() != 64 {
-        return None;
-    }
-    let mut digest = [0_u8; 32];
-    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
-        digest[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
-    }
-    Some(digest)
-}
-
-const fn hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
     }
 }
 
@@ -2502,21 +2492,11 @@ fn strings(values: &[String]) -> Value {
 }
 
 fn lifecycle(value: ProfileLifecycleV1) -> Value {
-    uint(match value {
-        ProfileLifecycleV1::Draft => 0,
-        ProfileLifecycleV1::Candidate => 1,
-        ProfileLifecycleV1::Stable => 2,
-        ProfileLifecycleV1::Retired => 3,
-    })
+    uint(value.wire_code())
 }
 fn decode_lifecycle(value: &Value) -> Result<ProfileLifecycleV1, ConformanceContractError> {
-    match uint_value(value)? {
-        0 => Ok(ProfileLifecycleV1::Draft),
-        1 => Ok(ProfileLifecycleV1::Candidate),
-        2 => Ok(ProfileLifecycleV1::Stable),
-        3 => Ok(ProfileLifecycleV1::Retired),
-        _ => Err(ConformanceContractError::UnsupportedVersion),
-    }
+    ProfileLifecycleV1::from_wire_code(uint_value(value)?)
+        .ok_or(ConformanceContractError::UnsupportedVersion)
 }
 fn adapter(value: SubjectAdapterKindV1) -> Value {
     uint(match value {
@@ -5737,7 +5717,11 @@ mod tests {
                 vec![first, changed_second]
             };
             assert_eq!(
-                validate_stable_evidence(&changed_profile, Some(&trusted_root_policy())),
+                changed_profile.transition_to_with_trust_policy(
+                    ProfileLifecycleV1::Stable,
+                    changed_profile.stable_evidence.clone(),
+                    &trusted_root_policy(),
+                ),
                 Err(ConformanceContractError::IndependenceEvidenceMissing)
             );
         }
@@ -5747,7 +5731,11 @@ mod tests {
         let mut invalid_profile = profile_value;
         invalid_profile.stable_evidence = vec![invalid_identity, stable_evidence("beta", 40)];
         assert_eq!(
-            validate_stable_evidence(&invalid_profile, Some(&trusted_root_policy())),
+            invalid_profile.transition_to_with_trust_policy(
+                ProfileLifecycleV1::Stable,
+                invalid_profile.stable_evidence.clone(),
+                &trusted_root_policy(),
+            ),
             Err(ConformanceContractError::ProvenanceMissing)
         );
 
@@ -5757,7 +5745,11 @@ mod tests {
         invalid_second_profile.stable_evidence =
             vec![stable_evidence("alpha", 30), invalid_second_identity];
         assert_eq!(
-            validate_stable_evidence(&invalid_second_profile, Some(&trusted_root_policy()),),
+            invalid_second_profile.transition_to_with_trust_policy(
+                ProfileLifecycleV1::Stable,
+                invalid_second_profile.stable_evidence.clone(),
+                &trusted_root_policy(),
+            ),
             Err(ConformanceContractError::ProvenanceMissing)
         );
     }
@@ -5788,14 +5780,18 @@ mod tests {
             case.fixture_digest = fixture_digest(&constrained.fixtures[0]);
         }
         refresh_stable_report_for_profile(&mut at_limit, &constrained);
-        assert_eq!(
-            validate_stable_implementation(&at_limit, &constrained, None),
-            Ok(())
-        );
+        let mut second = stable_evidence("beta", 40);
+        refresh_stable_report_for_profile(&mut second, &constrained);
+        assert!(constrained
+            .transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![at_limit.clone(), second.clone()]
+            )
+            .is_ok());
 
         constrained.evaluator_protocol.hard_caps.max_cases = 0;
         assert_eq!(
-            validate_stable_implementation(&at_limit, &constrained, None),
+            constrained.transition_to(ProfileLifecycleV1::Stable, vec![at_limit, second]),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
@@ -5867,7 +5863,10 @@ mod tests {
             &Value::Bytes(vec![0xff; 32]),
         );
         assert_eq!(
-            validate_stable_attestation(&invalid_key_evidence, &requirements, None),
+            candidate().transition_to(
+                ProfileLifecycleV1::Stable,
+                vec![invalid_key_evidence, stable_evidence("beta", 40)],
+            ),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
     }
@@ -6923,17 +6922,17 @@ mod tests {
         );
         assert!(ConformanceProfileV1::from_canonical_cbor(&[0x7f_u8, 0xff]).is_err());
         assert_eq!(
-            preflight_cbor(&[0x58, 0x02, 0]),
+            ConformanceProfileV1::from_canonical_cbor(&[0x58, 0x02, 0]),
             Err(ConformanceContractError::InvalidEncoding)
         );
         assert_eq!(
-            preflight_cbor(&[0x58]),
+            ConformanceProfileV1::from_canonical_cbor(&[0x58]),
             Err(ConformanceContractError::InvalidEncoding)
         );
         let mut overflowing_bytes = vec![0x5b_u8];
         overflowing_bytes.extend([0xff; 8]);
         assert_eq!(
-            preflight_cbor(&overflowing_bytes),
+            ConformanceProfileV1::from_canonical_cbor(&overflowing_bytes),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 

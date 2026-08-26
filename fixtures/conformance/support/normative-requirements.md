@@ -43,8 +43,11 @@ The #172 inventory is a separate authority handoff. Its declared SHA-256
 inventory digest is checked against the actual inventory bytes; each concrete
 fixture and expected-result digest is checked with BLAKE3 before Candidate.
 The ADR-059 matrix must contain the canonical 12 row IDs, four variants, four
-modes, 192 ordered case identities, and explicit equality declarations. Open
-matrix or authority slots never count as a passing result.
+modes, 192 ordered case identities, and explicit equality declarations. Every
+Candidate coordinate carries an exact JSON expected-result record and its own
+BLAKE3 digest; a separate authority-result digest must match the inventory
+entry named by that coordinate. Open matrix or authority slots never count as
+a passing result.
 
 ## Public evaluation boundary
 

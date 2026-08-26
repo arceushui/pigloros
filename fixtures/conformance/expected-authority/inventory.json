@@ -1,7 +1,7 @@
 {
   "magic": "W8H1",
   "version": 1,
-  "lifecycle": "Draft",
+  "lifecycle": "Candidate",
   "digest_algorithm": "BLAKE3-256",
   "source": "#172 wave8-execution-repro-handoff-v1",
   "entries": [
@@ -9,112 +9,112 @@
       "fixture_id": "RPL-001",
       "execution_class": "RecordedReplay",
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/RPL-001.json",
+      "fixture_bytes_digest": "6077cf0be5b68a7c71b255db25a913294c7320a5d9adb014545c91e64d5756a2",
+      "expected_result_path": "authority-results/RPL-001.json",
+      "expected_result_digest": "e139f0c5372d6ecb1235cda6d520372967c20ed6528031aa107ba477135d3d96",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "PRF-001",
       "execution_class": "ProfileRecomputation",
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/PRF-001.json",
+      "fixture_bytes_digest": "9f4549bc57bb333b146b5470dc8ddb88b60a10f01908713dcd51c22c4a924c31",
+      "expected_result_path": "authority-results/PRF-001.json",
+      "expected_result_digest": "575fc86312a1b3367e70dff1684405455b65d9239fd370c8d27e2e57944a2046",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "PRF-002",
       "execution_class": "CrossProfileConformance",
       "expected_outcome": "VerifiedExact",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/PRF-002.json",
+      "fixture_bytes_digest": "d9b7ec3ed0418d9160572a20fcb6144031c0497954a9178740fc3e9c180a48bb",
+      "expected_result_path": "authority-results/PRF-002.json",
+      "expected_result_digest": "57e9e06bc87907f18bd22ef1a7e0b40558e8bc34f20fbdcdb8f8469b257757a6",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "DIV-001",
       "execution_class": "ProfileRecomputation",
       "expected_outcome": "Diverged",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/DIV-001.json",
+      "fixture_bytes_digest": "c101883529c51da244bcef3ed6ea27707a2e029ce9bd4a104a1c4b669d124583",
+      "expected_result_path": "authority-results/DIV-001.json",
+      "expected_result_digest": "77b0a68e0eb0b9564ce4e99822ab593cf0d4b982c8df8f038af3cca7ffe3b1b2",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "INV-001",
-      "execution_class": "Any deterministic profile",
+      "execution_class": "DeterministicProfile",
       "expected_outcome": "InvalidManifest",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/INV-001.json",
+      "fixture_bytes_digest": "934c76cb3c9780ebcb81568e45718c2dda5ba69a82bf72bcf0e9aba522c930ca",
+      "expected_result_path": "authority-results/INV-001.json",
+      "expected_result_digest": "67d3a4763db06dbd6544c17855fc1efb0fdce05300a8c899dc8b5519df6d537b",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "INV-002",
-      "execution_class": "Any deterministic profile",
+      "execution_class": "DeterministicProfile",
       "expected_outcome": "UnverifiableArtifactsMissing",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/INV-002.json",
+      "fixture_bytes_digest": "eeb08611a639e4d5bdb03e9cd46a68565a95eecc78ce20e53e95969298a46639",
+      "expected_result_path": "authority-results/INV-002.json",
+      "expected_result_digest": "3fa545a6f8906fa2ab8955c4f2467740e85ce47f8ac86b2315ad3876048d2858",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "INV-003",
-      "execution_class": "Any deterministic profile",
+      "execution_class": "DeterministicProfile",
       "expected_outcome": "IncompatibleProfile",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/INV-003.json",
+      "fixture_bytes_digest": "e71d88caa61d216565c79cfa2324e2a7f63949b4b31f86d1578fa03ba89abe7f",
+      "expected_result_path": "authority-results/INV-003.json",
+      "expected_result_digest": "006a3272861d2b442abf1d08f2ed5c67c97064abdca898c5566293aa039df1e1",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "RES-001",
       "execution_class": "ProfileRecomputation",
       "expected_outcome": "ResourceLimitExceeded",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "fixture_bytes_path": "authority-fixtures/RES-001.json",
+      "fixture_bytes_digest": "51fea98f696af4fbda1d8e7e8d72e1f3f4e46963b248a33c6d60c61eeaae30d5",
+      "expected_result_path": "authority-results/RES-001.json",
+      "expected_result_digest": "454cc8dd27140bc0b9cf14d6108bfe81d044ed62238c2378e45002dede118517",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "LIVE-001",
       "execution_class": "LiveUnverified",
-      "expected_outcome": "Non-deterministic admission",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "expected_outcome": "NonDeterministicAdmission",
+      "fixture_bytes_path": "authority-fixtures/LIVE-001.json",
+      "fixture_bytes_digest": "cdb1f2389434630b96d908b07772b4875708479992df1c70019db4122ef4664f",
+      "expected_result_path": "authority-results/LIVE-001.json",
+      "expected_result_digest": "6b993a874d43200e68e34b9642155d2c63b8625d5fd8f75c7460846c6b60c277",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "ERA-001",
-      "execution_class": "RecordedReplay plus erasure state",
-      "expected_outcome": "Outcome preserved; ReplayClaim degraded",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "execution_class": "RecordedReplay",
+      "expected_outcome": "OutcomePreservedReplayClaimDegraded",
+      "fixture_bytes_path": "authority-fixtures/ERA-001.json",
+      "fixture_bytes_digest": "875c6c8f90a803df17a0b4ab5f1487964e5d14497184b872447bf98cc5128c96",
+      "expected_result_path": "authority-results/ERA-001.json",
+      "expected_result_digest": "a1ffa40f6ec3e7e623f769bf6d21299d7d472a32cf80955b5bee6d6973ef3fc5",
+      "materialization_status": "materialized"
     },
     {
       "fixture_id": "SEC-001",
-      "execution_class": "Deterministic profile",
-      "expected_outcome": "InvalidManifest or typed failure",
-      "fixture_bytes_path": null,
-      "fixture_bytes_digest": null,
-      "expected_result_path": null,
-      "expected_result_digest": null,
-      "materialization_status": "pending"
+      "execution_class": "DeterministicProfile",
+      "expected_outcome": "TypedFailure",
+      "fixture_bytes_path": "authority-fixtures/SEC-001.json",
+      "fixture_bytes_digest": "f6df8e54b9861323d68c2bcfd41e334c025e0b872d10d92ebc5d8eef10b192ee",
+      "expected_result_path": "authority-results/SEC-001.json",
+      "expected_result_digest": "70106ab7c375f6756e3c3848e955d0345b12f09b0a81e7325edd7e32104c1a5f",
+      "materialization_status": "materialized"
     }
   ],
-  "publication_gate": "Candidate publication rejects any open digest slot and requires real fixture bytes plus BLAKE3 expected-result digests."
+  "publication_gate": "Candidate publication requires independently verified fixture bytes, expected-result bytes, and complete matrix bindings."
 }

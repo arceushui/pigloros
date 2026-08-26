@@ -6605,6 +6605,33 @@ pub fn hex_digest(bytes: &[u8; 32]) -> String {
     hash.to_hex().to_string()
 }
 
+/// Decode a fixed-width hexadecimal 256-bit digest.
+///
+/// Digest fields in the CPF1 and CFB1 wire representations use exactly 64
+/// hexadecimal characters. Both ASCII letter cases are accepted.
+#[must_use]
+pub fn decode_hex_digest(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = decode_hex_nibble(pair[0])?;
+        let low = decode_hex_nibble(pair[1])?;
+        digest[index] = (high << 4) | low;
+    }
+    Some(digest)
+}
+
+const fn decode_hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod tests {
@@ -9117,7 +9144,13 @@ pub mod tests {
         assert_eq!(MoatProofEvidenceV1::from_json(&json)?, value);
         let cbor = value.to_canonical_cbor()?;
         assert_eq!(MoatProofEvidenceV1::from_canonical_cbor(&cbor)?, value);
-        assert_eq!(hex_digest(&value.digest()?).len(), 64);
+        let digest = value.digest()?;
+        let encoded = hex_digest(&digest);
+        assert_eq!(encoded.len(), 64);
+        assert_eq!(decode_hex_digest(&encoded), Some(digest));
+        assert_eq!(decode_hex_digest(&"0".repeat(64)), Some([0; 32]));
+        assert_eq!(decode_hex_digest(&"0".repeat(63)), None);
+        assert_eq!(decode_hex_digest(&format!("{}g", "0".repeat(63))), None);
         Ok(())
     }
 
