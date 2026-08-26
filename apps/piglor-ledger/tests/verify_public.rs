@@ -289,7 +289,9 @@ fn public_store_verification_rejects_malformed_key_anchor_sets(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let database_path = database.path().to_path_buf();
-    for value in ["2/1", "x/1=aa", "2/x=aa", "2/0=aa", "2/1=zz", "2/1=aa"] {
+    for value in [
+        "2/1", "2=aa", "x/1=aa", "2/x=aa", "2/0=aa", "2/1=zz", "2/1=aa",
+    ] {
         let error = match verify_source(&Source::Store(database_path.clone()), Some(value), None) {
             Ok(report) => {
                 return Err(format!("malformed anchor produced a report: {report}").into())

@@ -338,6 +338,59 @@ fn sqlite_key_registry_load_rejects_malformed_persisted_state(
 }
 
 #[test]
+fn sqlite_key_registry_initialization_rejects_malformed_persisted_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (registry, _, _) = registry()?;
+    let mut store = SqliteStore::open(path)?;
+    store.save_key_registry(&registry)?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE key_registry SET state_cbor = X'01' WHERE singleton = 1",
+        [],
+    )?;
+    drop(connection);
+
+    let mut store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.initialize_timeline_with_key_registry("ledger", &registry),
+        Err(CoreError::Serialization(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn sqlite_key_registry_mutations_reject_read_only_transactions(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let mut store = SqliteStore::open(path)?;
+    let registry = KeyRegistryStateV1::new();
+    store.initialize_timeline_with_key_registry("ledger", &registry)?;
+    drop(store);
+
+    let mut read_only = SqliteStore::open_read_only(path)?;
+    assert!(matches!(
+        read_only.save_key_registry(&registry),
+        Err(CoreError::Storage(_))
+    ));
+    assert!(matches!(
+        read_only.initialize_timeline_with_key_registry("another", &registry),
+        Err(CoreError::Storage(_))
+    ));
+    Ok(())
+}
+
+#[test]
 fn sqlite_key_registry_rejects_a_decodable_invalid_snapshot(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
@@ -419,6 +472,32 @@ fn sqlite_public_read_rejects_invalid_signature_identity() -> Result<(), Box<dyn
     assert!(matches!(
         store.read(timeline.id(), pos_core::SeqRange::all()),
         Err(CoreError::Serialization(_))
+    ));
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE events SET signature_role = X'0102', signature_epoch = 1
+         WHERE timeline_id = ?1",
+        params![timeline.id().to_string()],
+    )?;
+    drop(connection);
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
+        Err(CoreError::Storage(_))
+    ));
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE events SET signature_role = 1, signature_epoch = X'0102'
+         WHERE timeline_id = ?1",
+        params![timeline.id().to_string()],
+    )?;
+    drop(connection);
+    let store = SqliteStore::open(path)?;
+    assert!(matches!(
+        store.read(timeline.id(), pos_core::SeqRange::all()),
+        Err(CoreError::Storage(_))
     ));
     Ok(())
 }

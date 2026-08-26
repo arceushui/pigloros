@@ -315,9 +315,24 @@ fn event_store_initialization_defaults_cover_each_state_transition(
 
     let mut existing = RegistryStore::new(None);
     existing.timeline = Some(Timeline::new(TimelineMeta::root("ledger")));
+    let existing_id = existing
+        .timeline
+        .as_ref()
+        .map(Timeline::id)
+        .ok_or("existing timeline missing")?;
     let reused = existing.initialize_timeline_with_key_registry("ledger", &empty)?;
     assert_eq!(reused.meta.name.as_deref(), Some("ledger"));
+    assert_eq!(reused.id(), existing_id);
     assert_eq!(existing.registry, Some(empty.clone()));
+
+    let mut existing_save_failure = RegistryStore::new(None);
+    existing_save_failure.timeline = Some(Timeline::new(TimelineMeta::root("ledger")));
+    existing_save_failure.fail_save = true;
+    let save_error = existing_save_failure
+        .initialize_timeline_with_key_registry("ledger", &empty)
+        .err()
+        .ok_or("existing-timeline registry save failure was accepted")?;
+    assert!(save_error.to_string().contains("registry save failed"));
 
     let mut persisted = RegistryStore::new(Some(registry.clone()));
     persisted.timeline = None;

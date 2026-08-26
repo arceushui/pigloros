@@ -1305,6 +1305,18 @@ mod tests {
         let (_, reason) = expect_mismatch(no_public_key.outcome)?;
         assert!(reason.contains("persisted registry"), "{reason}");
 
+        let mut no_registry_key_event = event();
+        no_registry_key_event.signature = Some(Signature::from_bytes([0; 64]));
+        no_registry_key_event.signature_identity = Some(identity);
+        let no_registry_key_error = verify_store_event(
+            &no_registry_key_event,
+            None,
+            Some(&KeyRegistryStateV1::new()),
+        )
+        .err()
+        .ok_or("missing registry public key was accepted")?;
+        assert!(no_registry_key_error.to_string().contains("no public key"));
+
         let invalid_signature = run_store_event(
             event(),
             Some(&registry),
