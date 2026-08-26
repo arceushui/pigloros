@@ -524,6 +524,115 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
 }
 
 #[test]
+fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
+    let mut bound = profile_for_digest();
+    let unbound_digest = bound.digest();
+    let matrix_digest = *blake3::hash(b"adr-059-execution-matrix").as_bytes();
+
+    assert_eq!(bound.execution_matrix_digest(), Ok(None));
+    assert_eq!(
+        bound.bind_execution_matrix_digest([0; 32]),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+    assert_eq!(bound.execution_matrix_digest(), Ok(None));
+
+    assert_eq!(bound.bind_execution_matrix_digest(matrix_digest), Ok(()));
+    assert!(bound.profile_id.starts_with("pigloros.test#matrix="));
+    assert_eq!(bound.execution_matrix_digest(), Ok(Some(matrix_digest)));
+    assert_ne!(bound.profile_digest, unbound_digest);
+    let encoded = bound.to_canonical_cbor();
+    assert_eq!(
+        ConformanceProfileV1::from_canonical_cbor(&encoded.unwrap_or_default()),
+        Ok(bound.clone())
+    );
+
+    let mut different_matrix = profile_for_digest();
+    assert_eq!(
+        different_matrix.bind_execution_matrix_digest([7; 32]),
+        Ok(())
+    );
+    assert_ne!(bound.profile_digest, different_matrix.profile_digest);
+
+    let mut mismatched = bound.clone();
+    assert_eq!(mismatched.bind_execution_matrix_digest([8; 32]), Ok(()));
+    mismatched.profile_digest = bound.profile_digest;
+    assert_eq!(
+        mismatched.validate(),
+        Err(ConformanceContractError::FixtureDigestMismatch)
+    );
+}
+
+#[test]
+fn public_profile_matrix_binding_rejects_malformed_suffixes() {
+    let mut malformed = profile_for_digest();
+    malformed.profile_id.push_str("#matrix=not-a-digest");
+    malformed.profile_digest = malformed.digest();
+    assert_eq!(
+        malformed.execution_matrix_digest(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+    assert_eq!(
+        malformed.validate(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn public_profile_matrix_binding_rejects_invalid_hex_zero_and_overlong_ids() {
+    let mut invalid_hex = profile_for_digest();
+    invalid_hex.profile_id.push_str("#matrix=");
+    invalid_hex.profile_id.push_str(&"g".repeat(64));
+    invalid_hex.profile_digest = invalid_hex.digest();
+    assert_eq!(
+        invalid_hex.execution_matrix_digest(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+
+    let mut uppercase = profile_for_digest();
+    uppercase.profile_id = format!("pigloros.test#matrix={}", "AB".repeat(32));
+    assert_eq!(uppercase.execution_matrix_digest(), Ok(Some([0xab; 32])));
+
+    let mut duplicate_marker = profile_for_digest();
+    duplicate_marker.profile_id.push_str("#matrix=");
+    duplicate_marker.profile_id.push_str(&"0".repeat(32));
+    duplicate_marker.profile_id.push_str("#matrix=");
+    assert_eq!(
+        duplicate_marker.execution_matrix_digest(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+
+    let mut empty_base = profile_for_digest();
+    empty_base.profile_id = "#matrix=".to_owned();
+    assert_eq!(
+        empty_base.execution_matrix_digest(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+
+    let mut zero = profile_for_digest();
+    zero.profile_id.push_str("#matrix=");
+    zero.profile_id.push_str(&"0".repeat(64));
+    zero.profile_digest = zero.digest();
+    assert_eq!(
+        zero.execution_matrix_digest(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+
+    let mut overlong = profile_for_digest();
+    overlong.profile_id = "p".repeat(256);
+    assert_eq!(
+        overlong.bind_execution_matrix_digest([1; 32]),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+
+    let mut malformed_rebind = profile_for_digest();
+    malformed_rebind.profile_id.push_str("#matrix=short");
+    assert_eq!(
+        malformed_rebind.bind_execution_matrix_digest([1; 32]),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+}
+
+#[test]
 fn public_stable_evidence_decoder_rejects_oversized_profile_before_policy_use() {
     let oversized = vec![0_u8; 16 * 1024 * 1024 + 1];
     let policy = TrustedRootPolicyV1 {

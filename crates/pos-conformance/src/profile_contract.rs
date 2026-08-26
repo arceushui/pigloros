@@ -31,6 +31,27 @@ const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_COMPRESSION_EXPANSION: u32 = 100;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
+const EXECUTION_MATRIX_BINDING_MARKER: &str = "#matrix=";
+
+/// Typed content identity for the ADR-059 execution matrix.
+///
+/// The CPF1 V1 wire record predates a dedicated matrix field. To preserve its
+/// canonical 17-field encoding, materialized profiles carry this value in the
+/// profile-ID binding suffix and validate it as part of the profile identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExecutionMatrixBindingV1 {
+    digest: [u8; 32],
+}
+
+impl ExecutionMatrixBindingV1 {
+    const fn from_digest(digest: [u8; 32]) -> Self {
+        Self { digest }
+    }
+
+    const fn is_valid(self) -> bool {
+        self.digest != [0; 32]
+    }
+}
 
 /// Closed safe errors exposed by the CPF1 and evaluator-request interfaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -531,6 +552,52 @@ impl ConformanceProfileV1 {
         })
     }
 
+    /// Bind the canonical ADR-059 execution matrix to this profile identity.
+    ///
+    /// The digest is carried in a structured profile-ID suffix because the
+    /// CPF1 V1 record has no spare wire field. The suffix is not free-form
+    /// metadata: it is parsed, bounded, and included in profile_digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when the digest is zero, the existing
+    /// profile-ID binding is malformed, or the resulting profile is invalid.
+    pub fn bind_execution_matrix_digest(
+        &mut self,
+        matrix_digest: [u8; 32],
+    ) -> Result<(), ConformanceContractError> {
+        let binding = ExecutionMatrixBindingV1::from_digest(matrix_digest);
+        if !binding.is_valid() {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
+        let base_profile_id = matrix_binding_parts(&self.profile_id)?
+            .map_or(self.profile_id.as_str(), |(base, _)| base);
+        let suffix = format!(
+            "{EXECUTION_MATRIX_BINDING_MARKER}{}",
+            encode_digest_hex(&binding.digest)
+        );
+        if base_profile_id.len() + suffix.len() > MAX_STRING_BYTES {
+            return Err(ConformanceContractError::FieldOutOfBounds);
+        }
+        let mut bound = self.clone();
+        bound.profile_id = format!("{base_profile_id}{suffix}");
+        bound.profile_digest = bound.digest();
+        bound.validate().map(|()| *self = bound)
+    }
+
+    /// Return the bound ADR-059 matrix digest, if this profile carries one.
+    ///
+    /// Unbound profiles remain valid for generic CPF1 callers. Materialized
+    /// Wave 8 profiles are required to use the bind_execution_matrix_digest
+    /// method.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed safe error when a profile-ID binding is malformed.
+    pub fn execution_matrix_digest(&self) -> Result<Option<[u8; 32]>, ConformanceContractError> {
+        matrix_binding_parts(&self.profile_id).map(|parts| parts.map(|(_, binding)| binding.digest))
+    }
+
     /// Digest the immutable CPF fields and the attached Stable-evidence commitment.
     ///
     /// Stable evidence contains reports that attest the selected-profile digest,
@@ -868,6 +935,7 @@ fn validate_profile(
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
+    matrix_binding_parts(&profile.profile_id)?;
     validate_protocol(&profile.evaluator_protocol)
         .and_then(|()| validate_independence_requirements(&profile.independence_requirements))
         .and_then(|()| validate_fixtures(profile))
@@ -1639,6 +1707,60 @@ fn valid_identifiers(value: &str, numeric_leading_zero_forbidden: bool) -> bool 
 
 fn zero_digest(value: &[u8; 32]) -> bool {
     *value == [0; 32]
+}
+
+fn matrix_binding_parts(
+    profile_id: &str,
+) -> Result<Option<(&str, ExecutionMatrixBindingV1)>, ConformanceContractError> {
+    let Some((base, encoded_digest)) = profile_id.split_once(EXECUTION_MATRIX_BINDING_MARKER)
+    else {
+        return Ok(None);
+    };
+    if base.is_empty()
+        || encoded_digest.contains(EXECUTION_MATRIX_BINDING_MARKER)
+        || encoded_digest.len() != 64
+    {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
+    let digest =
+        decode_digest_hex(encoded_digest).ok_or(ConformanceContractError::FieldOutOfBounds)?;
+    let binding = ExecutionMatrixBindingV1::from_digest(digest);
+    if binding.is_valid() {
+        Ok(Some((base, binding)))
+    } else {
+        Err(ConformanceContractError::FieldOutOfBounds)
+    }
+}
+
+fn encode_digest_hex(digest: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        let byte = *byte;
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
+fn decode_digest_hex(encoded: &str) -> Option<[u8; 32]> {
+    if encoded.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Some(digest)
+}
+
+const fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
