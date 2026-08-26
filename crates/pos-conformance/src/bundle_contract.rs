@@ -7171,14 +7171,14 @@ mod coverage_entrypoints {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        assert_eq!(
+        assert!(matches!(
             super::archive_preflight::scan(&truncated_archive_member_path()),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             super::archive_preflight::scan(&raw_archive(&[0x60], &[0x81, 0x82, 0x60, 0x40],)),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
+        ));
         Ok(())
     }
 
