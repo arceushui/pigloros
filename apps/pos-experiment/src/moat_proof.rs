@@ -3070,9 +3070,13 @@ mod run_coverage_entrypoints {
                 .is_ok(),
             "failure probe registration must succeed"
         );
-        let mut session = match failing_experiment.start() {
-            Ok(session) => session,
-            Err(error) => panic!("failure probe experiment must start: {error:?}"),
+        let session_result = failing_experiment.start();
+        assert!(
+            session_result.is_ok(),
+            "failure probe experiment must start"
+        );
+        let Some(mut session) = session_result.ok() else {
+            return;
         };
         assert!(finish(&mut session).is_err());
     }
