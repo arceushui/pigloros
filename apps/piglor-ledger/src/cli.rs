@@ -67,7 +67,7 @@ fn ledger_signing_registry(
     signing_key: &ed25519_dalek::SigningKey,
     persisted_registry: Option<&KeyRegistryStateV1>,
 ) -> (Arc<Mutex<KeyRegistryStateV1>>, KeyIdentityV1) {
-    let material_digest = key_material_digest(&signing_key.to_bytes());
+    let material_digest = key_material_digest(signing_key.as_bytes());
     let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
     let identity = persisted_registry
         .and_then(|registry| registry.active_key(KeyRoleV1::TimelineIntegritySigning))
@@ -242,7 +242,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             output_stderr!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
             output_stderr!("  export --source toml:DIR|store:DB [--out FILE] [--today YYYY-MM-DD] [--pubkey HEX]");
             output_stderr!("  build  --source toml:DIR|store:DB --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
-            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX (optional trust check for store:)] [--manifest FILE]");
+            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX (required trust anchor for store:)] [--manifest FILE]");
             Ok(())
         }
     }

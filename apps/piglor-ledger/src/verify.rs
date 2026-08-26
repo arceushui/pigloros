@@ -4,8 +4,8 @@
 //! TOML tier: recomputes the b3sum-compatible BLAKE3 of each file's raw
 //! bytes and optionally compares against a previously-written [`ExportManifest`].
 //! Store tier: re-reads ledger events from the `SQLite` store and verifies
-//! Ed25519 signatures against the persisted role/epoch registry. An optional
-//! `--pubkey` is an additional trust check for role-bound signatures.
+//! Ed25519 signatures against the persisted role/epoch registry and a caller-
+//! supplied public-key trust anchor.
 
 use std::path::Path;
 
@@ -55,8 +55,8 @@ impl std::fmt::Display for VerifyReport {
 ///
 /// If `manifest_path` is provided (TOML tier), the recomputed hashes are
 /// compared against that manifest. For the store tier, the persisted registry
-/// resolves each event identity; `pubkey_hex`, when provided, is an additional
-/// trust check against the resolved public key.
+/// resolves each event identity. Store verification requires `pubkey_hex` as
+/// an external trust anchor and compares it with the resolved public key.
 ///
 /// # Errors
 /// Returns [`CliError`] on adapter failure. Verification *failures* are
@@ -175,6 +175,11 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
             "store verification requires a persisted role/epoch registry".to_owned(),
         ));
     }
+    let supplied_public_key = supplied_public_key.ok_or_else(|| {
+        CliError::BadSource(
+            "store verification requires --pubkey as an external trust anchor".to_owned(),
+        )
+    })?;
     let timeline = store
         .list_timelines()?
         .into_iter()
@@ -592,10 +597,13 @@ mod tests {
             "https://osf.io/example".into(),
         ])
         .test_ok()?;
-        let report = run(&Source::Store(db), Some(&pubkey), None).test_ok()?;
+        let report = run(&Source::Store(db.clone()), Some(&pubkey), None).test_ok()?;
         assert_eq!(report.tier, "store");
         assert_eq!(report.outcome, VerifyOutcome::Ok);
         assert!(report.n >= 1);
+
+        let error = run(&Source::Store(db), None, None).test_err()?;
+        assert!(error.to_string().contains("external trust anchor"));
 
         Ok(())
     }

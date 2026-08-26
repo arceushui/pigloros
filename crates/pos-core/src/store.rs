@@ -938,7 +938,8 @@ pub fn export_timeline_raw(
 ///
 /// Creates a fresh [`TimelineId`], converts events to [`EventDraft`]s, and appends
 /// via [`EventStore::append`] — so **event ids are reminted**, seqs restart from the
-/// store, and **signatures are not carried** (`EventDraft` has no signature field).
+/// store, and signed exports are rejected rather than silently stripping their
+/// signatures (`EventDraft` has no signature field).
 ///
 /// For identity-preserving `CoW` sync, use [`export_timeline_own`] +
 /// [`import_timeline_with_id`] instead. For crypto-checked identity import, see
@@ -956,12 +957,14 @@ pub fn import_timeline(
         parent_fork_hash: _,
     } = export;
     let name = timeline.meta.name.unwrap_or_default();
-    ensure_import_events_are_non_geographic(&events).and_then(|()| {
-        let create_result = store.create_timeline(&name);
-        import_timeline_using(create_result, events, |timeline_id, drafts| {
-            store.append(timeline_id, drafts)
+    ensure_import_events_are_non_geographic(&events)
+        .and_then(|()| ensure_import_events_are_unsigned(&events))
+        .and_then(|()| {
+            let create_result = store.create_timeline(&name);
+            import_timeline_using(create_result, events, |timeline_id, drafts| {
+                store.append(timeline_id, drafts)
+            })
         })
-    })
 }
 
 /// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
@@ -1027,6 +1030,20 @@ fn ensure_import_events_are_non_geographic(events: &[Event]) -> Result<(), CoreE
     {
         Err(CoreError::Storage(
             "generic import of geographic evidence is disabled".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Refuse signed events before a generic import can discard their signature fields.
+fn ensure_import_events_are_unsigned(events: &[Event]) -> Result<(), CoreError> {
+    if events
+        .iter()
+        .any(|event| event.signature.is_some() || event.signature_identity.is_some())
+    {
+        Err(CoreError::Storage(
+            "generic import of signed events is disabled; use verified identity import".to_owned(),
         ))
     } else {
         Ok(())
@@ -1883,6 +1900,48 @@ mod tests {
         let imported = import_timeline(&mut store, export).test_ok()?;
         assert!(!imported.id().to_string().is_empty());
 
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn generic_import_rejects_signed_events_before_stripping_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let entity = EntityId::new();
+        for (signature, signature_identity) in [
+            (Some(crate::Signature::from_bytes([1u8; 64])), None),
+            (
+                None,
+                Some(crate::KeyIdentityV1::new(
+                    crate::KeyRoleV1::TimelineIntegritySigning,
+                    1,
+                )),
+            ),
+        ] {
+            let event = Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new("test.event"),
+                payload: CanonicalBytes::from_vec(b"signed payload".to_vec()),
+                wall_time: WallTime::from_micros(1_000),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature,
+                signature_identity,
+                payload_hash: Hash::from_bytes([0u8; 32]),
+            };
+            let export = TimelineExport {
+                timeline: Timeline::new(TimelineMeta::root("signed-events")),
+                events: vec![event],
+                parent_fork_hash: None,
+            };
+            let error = import_timeline(&mut TrivialStore::new(), export).test_err()?;
+            assert!(error
+                .to_string()
+                .contains("generic import of signed events is disabled"));
+        }
         Ok(())
     }
 
