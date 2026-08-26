@@ -3344,9 +3344,12 @@ impl EventStore for SqliteStore {
                 for (i, &(tid, _)) in chain.iter().enumerate() {
                     let logical_prefix = chain[i].1.map_or(0, Seq::as_u64);
                     if i + 1 < chain.len() {
-                        let logical_fork = chain[i + 1]
-                            .1
-                            .expect("fork_chain guarantees a fork sequence for non-root entries");
+                        let logical_fork = match chain[i + 1].1 {
+                            Some(logical_fork) => logical_fork,
+                            None => unreachable!(
+                                "fork_chain guarantees a fork sequence for non-root entries"
+                            ),
+                        };
                         let fork_point_error = CoreError::Storage(format!(
                             "Fork point precedes inherited history for timeline {tid}"
                         ));

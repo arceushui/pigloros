@@ -1943,14 +1943,14 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn validation_entrypoints_cover_each_snapshot_invariant() {
+    fn validation_entrypoints_cover_record_invariants() {
         let signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
         let next_signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
 
         let mut zero_epoch = KeyRegistryStateV1::new();
         let zero = KeyIdentityV1::new(signing.role, 0);
         zero_epoch.records.insert(zero, record(zero, 1));
-        assert_eq!(zero_epoch.validate(), Err(KeyRegistryErrorV1::InvalidState));
+        assert_invalid_state(&zero_epoch);
 
         let mut missing_public_key = KeyRegistryStateV1::new();
         missing_public_key.records.insert(
@@ -1961,19 +1961,13 @@ mod coverage_entrypoints {
                 public_verification_key: None,
             },
         );
-        assert_eq!(
-            missing_public_key.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&missing_public_key);
 
         let mut missing_highest_epoch = KeyRegistryStateV1::new();
         missing_highest_epoch
             .records
             .insert(signing, record(signing, 3));
-        assert_eq!(
-            missing_highest_epoch.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&missing_highest_epoch);
 
         let mut duplicate_material = active_state(signing, 4);
         duplicate_material
@@ -1985,44 +1979,34 @@ mod coverage_entrypoints {
         duplicate_material
             .highest_epoch
             .insert(next_signing.role, next_signing.epoch);
-        assert_eq!(
-            duplicate_material.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&duplicate_material);
 
         let mut missing_tombstone = KeyRegistryStateV1::new();
         missing_tombstone
             .records
             .insert(signing, destroyed_record(signing, 5));
-        assert_eq!(
-            missing_tombstone.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&missing_tombstone);
+    }
+
+    #[test]
+    fn validation_entrypoints_cover_index_invariants() {
+        let signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
 
         let mut orphaned_highest_epoch = KeyRegistryStateV1::new();
         orphaned_highest_epoch.highest_epoch.insert(signing.role, 1);
-        assert_eq!(
-            orphaned_highest_epoch.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&orphaned_highest_epoch);
 
         let mut mismatched_highest_epoch = active_state(signing, 6);
         mismatched_highest_epoch
             .highest_epoch
             .insert(signing.role, 2);
-        assert_eq!(
-            mismatched_highest_epoch.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&mismatched_highest_epoch);
 
         let mut wrong_active_role = active_state(signing, 7);
         wrong_active_role
             .active
             .insert(KeyRoleV1::SubjectDataEncryption, signing);
-        assert_eq!(
-            wrong_active_role.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&wrong_active_role);
 
         let mut active_tombstone = KeyRegistryStateV1::new();
         active_tombstone
@@ -2038,17 +2022,17 @@ mod coverage_entrypoints {
         );
         active_tombstone.active.insert(signing.role, signing);
         active_tombstone.highest_epoch.insert(signing.role, 1);
-        assert_eq!(
-            active_tombstone.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&active_tombstone);
 
         let mut missing_active_record = KeyRegistryStateV1::new();
         missing_active_record.active.insert(signing.role, signing);
-        assert_eq!(
-            missing_active_record.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&missing_active_record);
+    }
+
+    #[test]
+    fn validation_entrypoints_cover_active_history_invariants() {
+        let signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let next_signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
 
         let mut inactive_active_record = active_state(signing, 10);
         inactive_active_record
@@ -2057,17 +2041,17 @@ mod coverage_entrypoints {
         inactive_active_record
             .highest_epoch
             .insert(signing.role, next_signing.epoch);
-        assert_eq!(
-            inactive_active_record.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&inactive_active_record);
 
         let mut missing_active_for_highest = active_state(signing, 12);
         missing_active_for_highest.active.clear();
-        assert_eq!(
-            missing_active_for_highest.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&missing_active_for_highest);
+    }
+
+    #[test]
+    fn validation_entrypoints_cover_tombstone_invariants() {
+        let signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
+        let next_signing = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 2);
 
         let mut orphaned_tombstone = KeyRegistryStateV1::new();
         orphaned_tombstone.tombstones.insert(
@@ -2078,10 +2062,7 @@ mod coverage_entrypoints {
                 destruction_digest: Hash::from_bytes([14; 32]),
             },
         );
-        assert_eq!(
-            orphaned_tombstone.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&orphaned_tombstone);
 
         let mut mismatched_tombstone_identity = KeyRegistryStateV1::new();
         mismatched_tombstone_identity
@@ -2098,10 +2079,7 @@ mod coverage_entrypoints {
         mismatched_tombstone_identity
             .highest_epoch
             .insert(signing.role, signing.epoch);
-        assert_eq!(
-            mismatched_tombstone_identity.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&mismatched_tombstone_identity);
 
         let mut live_record_with_tombstone = active_state(signing, 17);
         live_record_with_tombstone.tombstones.insert(
@@ -2113,10 +2091,7 @@ mod coverage_entrypoints {
             },
         );
         live_record_with_tombstone.active.clear();
-        assert_eq!(
-            live_record_with_tombstone.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&live_record_with_tombstone);
 
         let mut duplicate_tombstone_material = KeyRegistryStateV1::new();
         duplicate_tombstone_material
@@ -2139,10 +2114,11 @@ mod coverage_entrypoints {
         duplicate_tombstone_material
             .highest_epoch
             .insert(next_signing.role, next_signing.epoch);
-        assert_eq!(
-            duplicate_tombstone_material.validate(),
-            Err(KeyRegistryErrorV1::InvalidState)
-        );
+        assert_invalid_state(&duplicate_tombstone_material);
+    }
+
+    fn assert_invalid_state(state: &KeyRegistryStateV1) {
+        assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
     }
 
     #[test]
@@ -2178,9 +2154,7 @@ mod coverage_entrypoints {
         let mut wrong_tombstone = valid.clone();
         wrong_tombstone
             .records
-            .get_mut(&signing)
-            .expect("test record exists")
-            .private_material_digest = None;
+            .insert(signing, destroyed_record(signing, 25));
         wrong_tombstone.tombstones.insert(
             signing,
             KeyTombstoneV1 {
