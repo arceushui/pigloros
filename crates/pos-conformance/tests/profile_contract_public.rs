@@ -872,7 +872,7 @@ fn public_profile_validation_covers_transition_and_authority_failures() {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut invalid_protocol = profile.evaluator_protocol;
+    let mut invalid_protocol = profile.evaluator_protocol.clone();
     invalid_protocol.protocol_id.clear();
     assert_eq!(
         request.validate_with_protocol(&invalid_protocol),
