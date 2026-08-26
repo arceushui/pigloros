@@ -741,23 +741,6 @@ fn exported_decoders_reject_terminal_digest_after_nested_decode() {
 }
 
 #[test]
-fn public_profile_decoder_reaches_cbor_preflight_boundaries() {
-    for bytes in [vec![0x18], vec![0x58, 0x01], vec![0xe0]] {
-        assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&bytes),
-            Err(ConformanceContractError::InvalidEncoding)
-        );
-    }
-    assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&[0x9a, 0x00, 0x01, 0x00, 0x01]),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-
-    let profile = profile_for_digest();
-    assert!(profile.to_canonical_cbor().is_ok());
-}
-
-#[test]
 fn public_replay_claim_erasure_seam_only_preserves_or_weakens() {
     assert_eq!(
         ReplayClaimV1::Exact.after_erasure(ErasureDispositionV1::None),

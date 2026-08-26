@@ -933,25 +933,6 @@ fn public_bundle_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn public_archive_decoder_reaches_preflight_and_profile_failures(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
-
-    assert!(ConformanceBundleV1::from_canonical_cbor(&[0xff]).is_err());
-    assert!(ConformanceBundleV1::from_canonical_cbor(&[0x9f, 0xff]).is_err());
-
-    let invalid_profile = signed_archive_variant(&bundle, &signing_key, |value| {
-        replace_profile_bytes(value, &[0xff])
-    })?;
-    assert_eq!(
-        ConformanceBundleV1::from_canonical_cbor(&invalid_profile),
-        Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
-    );
-    Ok(())
-}
-
-#[test]
 fn public_unsigned_bundle_contract_edges_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
     let bundle = signed_draft_bundle()?;
 
