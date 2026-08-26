@@ -1,4 +1,4 @@
-//! Signed, content-addressed Draft/Candidate conformance bundles.
+//! Signed, content-addressed Draft conformance bundles.
 //!
 //! This boundary materializes public bytes and expected results. It never
 //! invokes the implementation under test: callers provide fixture and
@@ -101,10 +101,9 @@ pub enum BundleContractErrorV1 {
     /// A public fixture contains a private-key or secret marker.
     #[error("conformance bundle contains forbidden subject secret material")]
     SecretMaterialDetected,
-    /// Only Draft and Candidate bundles are valid for this contract. The #190
-    /// materializer emits Draft bundles; Candidate publication is governed by
-    /// the separate evidence workflow.
-    #[error("conformance bundle lifecycle is not Draft or Candidate")]
+    /// Only Draft bundles are valid for this contract. Candidate publication
+    /// is governed by the separate #198 evidence workflow.
+    #[error("conformance bundle lifecycle is not Draft")]
     LifecycleInvalid,
     /// The member manifest is not canonical.
     #[error("conformance bundle manifest is not in canonical order")]
@@ -312,7 +311,7 @@ pub struct BundleExpectedResultV1 {
 pub struct BundleManifestV1 {
     /// Bundle magic.
     pub magic: String,
-    /// Draft or Candidate lifecycle.
+    /// Draft lifecycle.
     pub lifecycle: ProfileLifecycleV1,
     /// Local or Air-Gapped execution mode.
     pub mode: BundleModeV1,
@@ -338,7 +337,11 @@ pub struct BundleMemberDescriptorV1 {
     pub role: BundleMemberRoleV1,
 }
 
-/// One signed, immutable Draft or Candidate bundle.
+/// One signed, immutable Draft bundle.
+///
+/// Candidate publication is intentionally outside this contract. The #198
+/// governance workflow must provide the protected review, trusted-key
+/// admission, and publication evidence before a Candidate bundle exists.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceBundleV1 {
     /// Signed manifest.
@@ -358,17 +361,14 @@ impl ConformanceBundleV1 {
     /// # Errors
     ///
     /// Returns a closed error when the profile, members, or expected-result
-    /// pointers cannot form a valid Draft/Candidate bundle.
+    /// pointers cannot form a valid Draft bundle.
     pub fn materialize(
         profile: &ConformanceProfileV1,
         mode: BundleModeV1,
         mut members: Vec<BundleMemberV1>,
         expected_results: Vec<BundleExpectedResultV1>,
     ) -> Result<Self, BundleContractErrorV1> {
-        if !matches!(
-            profile.lifecycle,
-            ProfileLifecycleV1::Draft | ProfileLifecycleV1::Candidate
-        ) {
+        if profile.lifecycle != ProfileLifecycleV1::Draft {
             return Err(BundleContractErrorV1::LifecycleInvalid);
         }
         let profile_bytes = profile
@@ -452,10 +452,7 @@ impl ConformanceBundleV1 {
 
     fn validate_unsigned(&self) -> Result<(), BundleContractErrorV1> {
         if self.manifest.magic != CONFORMANCE_BUNDLE_MAGIC_V1
-            || !matches!(
-                self.manifest.lifecycle,
-                ProfileLifecycleV1::Draft | ProfileLifecycleV1::Candidate
-            )
+            || !matches!(self.manifest.lifecycle, ProfileLifecycleV1::Draft)
             || self.members.is_empty()
         {
             return Err(BundleContractErrorV1::LifecycleInvalid);
@@ -538,9 +535,6 @@ impl ConformanceBundleV1 {
         }
         validate_total_bytes(total_bytes)?;
         validate_supporting_members(&profile, &self.members)?;
-        if profile.lifecycle == ProfileLifecycleV1::Candidate {
-            validate_candidate_publication(&profile, &self.members)?;
-        }
         validate_authority_members(&profile, &self.members)?;
         validate_selected_bundle_caps(&profile, self)?;
         validate_expected_results(&profile, &self.manifest, &self.members)
@@ -681,7 +675,7 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     let lifecycle = archive_u64(&manifest[1])?;
     let bundle_mode = archive_u64(&manifest[2])?;
     decode_bundle_mode(bundle_mode)?;
-    if lifecycle > 1 {
+    if lifecycle != 0 {
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
     independent_verify_signature(&archive[2], &archive[4], &archive[5])?;
@@ -2200,10 +2194,9 @@ fn bundle_pair_payloads(
                     .find(|expected| expected.member_path == member.path)
                     .map(|expected| {
                         format!(
-                            "expected-result/{}/{}/{}",
+                            "expected-result/{}/{}",
                             expected.case_id,
-                            claim_layer_code(expected.claim_layer),
-                            crate::hex_digest(&expected.execution_profile_digest)
+                            claim_layer_code(expected.claim_layer)
                         )
                     })
                     .unwrap_or_else(|| member.path.clone())
@@ -3167,6 +3160,7 @@ fn contains_jwt(bytes: &[u8]) -> bool {
     })
 }
 
+#[cfg(test)]
 fn validate_candidate_publication(
     profile: &ConformanceProfileV1,
     members: &[BundleMemberV1],
@@ -5793,7 +5787,7 @@ mod tests {
         missing_review_members[provenance_index].digest = malformed_provenance_digest;
         assert_eq!(
             materialize_candidate_for_test(&missing_review_profile, &missing_review_members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
         let mut missing_deletion = missing_review_profile.clone();
@@ -5802,7 +5796,7 @@ mod tests {
         missing_deletion.profile_digest = missing_deletion.digest();
         assert_eq!(
             materialize_candidate_for_test(&missing_deletion, &missing_review_members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
         let mut approved_profile = missing_review_profile;
@@ -5831,7 +5825,10 @@ mod tests {
             .ok_or("missing provenance member")?;
         approved_members[provenance_index].bytes = approved_provenance;
         approved_members[provenance_index].digest = approved_provenance_digest;
-        assert!(materialize_candidate_for_test(&approved_profile, &approved_members)?.is_ok());
+        assert_eq!(
+            materialize_candidate_for_test(&approved_profile, &approved_members)?,
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
         let mut mismatched_review_profile = approved_profile.clone();
         mismatched_review_profile.fixtures[0]
             .provenance
@@ -5841,7 +5838,7 @@ mod tests {
         // before it reaches Candidate publication-evidence validation.
         assert_eq!(
             materialize_candidate_for_test(&mismatched_review_profile, &approved_members)?,
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
         Ok(())
     }
@@ -5883,7 +5880,7 @@ mod tests {
             members,
             expected_results,
         );
-        assert_eq!(result, Err(BundleContractErrorV1::CandidateEvidenceMissing));
+        assert_eq!(result, Err(BundleContractErrorV1::LifecycleInvalid));
         Ok(())
     }
 
@@ -5952,7 +5949,7 @@ mod tests {
         );
         assert_eq!(
             draft_inventory_result,
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
         let matrix_member = members
             .iter_mut()
@@ -5966,7 +5963,7 @@ mod tests {
             members,
             expected_results,
         );
-        assert_eq!(result, Err(BundleContractErrorV1::CandidateEvidenceMissing));
+        assert_eq!(result, Err(BundleContractErrorV1::LifecycleInvalid));
         Ok(())
     }
 
@@ -6062,7 +6059,7 @@ mod tests {
         missing_provenance.retain(|member| member.role != BundleMemberRoleV1::Provenance);
         assert_eq!(
             materialize_candidate_for_test(&candidate, &missing_provenance)?,
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
         let mut malformed_provenance = members;
@@ -6074,7 +6071,7 @@ mod tests {
         provenance.digest = candidate.provenance_digest;
         assert_eq!(
             materialize_candidate_for_test(&candidate, &malformed_provenance)?,
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
         Ok(())
     }
@@ -6524,7 +6521,10 @@ mod tests {
             .ok_or("missing provenance member")?;
         provenance.bytes = approved_bytes;
         provenance.digest = approved_digest;
-        assert!(materialize_candidate_for_test(&candidate, &members)?.is_ok());
+        assert_eq!(
+            materialize_candidate_for_test(&candidate, &members)?,
+            Err(BundleContractErrorV1::LifecycleInvalid)
+        );
         for field in ["candidate_status", "deletion_review", "secret_scan"] {
             let mut invalid = approved.clone();
             invalid[field] = JsonValue::String("pending".to_owned());
@@ -6547,7 +6547,7 @@ mod tests {
             invalid_candidate.profile_digest = invalid_candidate.digest();
             assert_eq!(
                 materialize_candidate_for_test(&invalid_candidate, &invalid_members)?,
-                Err(BundleContractErrorV1::CandidateEvidenceMissing)
+                Err(BundleContractErrorV1::LifecycleInvalid)
             );
         }
         Ok(())
@@ -7265,7 +7265,7 @@ mod tests {
         members.retain(|member| member.role != BundleMemberRoleV1::Provenance);
         assert_eq!(
             materialize_candidate_for_test(&candidate, &members)?,
-            Err(BundleContractErrorV1::MemberMissing)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
         let (mut malformed_members, _) = bundle_inputs(&candidate, BundleModeV1::Local)?;
         let provenance = malformed_members
@@ -7276,7 +7276,7 @@ mod tests {
         provenance.digest = candidate.provenance_digest;
         assert_eq!(
             materialize_candidate_for_test(&candidate, &malformed_members)?,
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
         Ok(())
     }
@@ -8388,7 +8388,7 @@ mod coverage_entrypoints {
                 malformed_members,
                 expected_results,
             ),
-            Err(BundleContractErrorV1::CandidateEvidenceMissing)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
         Ok(())
@@ -9198,7 +9198,7 @@ mod instrumented_candidate_entrypoints {
                 members,
                 expected_results,
             ),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
+            Err(BundleContractErrorV1::LifecycleInvalid)
         );
         Ok(())
     }
@@ -9288,7 +9288,7 @@ mod instrumented_candidate_entrypoints {
             candidate_members,
             candidate_expected,
         )
-        .is_ok());
+        .is_err());
         Ok(())
     }
 

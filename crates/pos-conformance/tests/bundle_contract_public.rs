@@ -784,18 +784,11 @@ pub mod fixtures {
 }
 
 #[test]
-fn public_candidate_materialization_reaches_fail_closed_authority_gate(
+fn public_candidate_materialization_is_reserved_for_governance(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-    let candidate = match fixtures::candidate_bundle()? {
-        Ok(bundle) => bundle,
-        Err(error) => return Err(format!("valid Candidate fixture rejected: {error:?}").into()),
-    };
-    let signed = candidate.sign(&signing_key)?;
-    let archive = signed.to_canonical_cbor()?;
     assert_eq!(
-        pos_conformance::verify_archive_independently(&archive),
-        Ok(())
+        fixtures::candidate_bundle()?,
+        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
     );
     Ok(())
 }
@@ -2031,15 +2024,15 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
 
     assert_eq!(
         fixtures::candidate_bundle_with_review_mismatch()?,
-        Err(pos_conformance::BundleContractErrorV1::CandidateEvidenceMissing)
+        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
     );
     assert_eq!(
         fixtures::candidate_bundle_with_invalid_provenance_binding()?,
-        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
     );
     assert_eq!(
         fixtures::candidate_bundle_with_invalid_matrix_coordinate()?,
-        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        Err(pos_conformance::BundleContractErrorV1::LifecycleInvalid)
     );
     Ok(())
 }

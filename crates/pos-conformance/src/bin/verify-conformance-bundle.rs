@@ -50,7 +50,10 @@ fn read_bounded(
         )
         .into());
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(declared_len).unwrap_or(0));
+    const INITIAL_READ_CAPACITY: u64 = 64 * 1024;
+    let initial_capacity = usize::try_from(declared_len.min(INITIAL_READ_CAPACITY))
+        .unwrap_or(INITIAL_READ_CAPACITY as usize);
+    let mut bytes = Vec::with_capacity(initial_capacity);
     reader
         .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)?;
@@ -144,6 +147,7 @@ mod tests {
     fn bounded_reader_rejects_declared_and_observed_oversize() {
         assert!(read_bounded(Cursor::new([]), 6, 5).is_err());
         assert!(read_bounded(Cursor::new([0_u8; 6]), 5, 5).is_err());
+        assert!(read_bounded(Cursor::new([]), 1024 * 1024 * 1024, 1024 * 1024 * 1024).is_ok());
         assert!(read_bounded(Cursor::new([]), 5, 5).is_ok());
         assert!(read_bounded(Cursor::new([0_u8; 5]), 5, 5).is_ok());
         assert!(read_bounded(FailingReader, 0, 5).is_err());
