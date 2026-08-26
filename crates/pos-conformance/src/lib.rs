@@ -522,11 +522,12 @@ impl MoatProofInputV1 {
     /// represented by the shared deterministic codec.
     #[must_use = "the input digest is needed for deterministic identity"]
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        let bytes = pos_crypto::canonical::encode(self)?;
-        let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
-        input.extend_from_slice(&[b'P', b'I', b'1', 0]);
-        input.extend_from_slice(bytes.as_slice());
-        Ok(*blake3::hash(&input).as_bytes())
+        pos_crypto::canonical::encode(self).map(|bytes| {
+            let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
+            input.extend_from_slice(&[b'P', b'I', b'1', 0]);
+            input.extend_from_slice(bytes.as_slice());
+            *blake3::hash(&input).as_bytes()
+        })
     }
 }
 
@@ -1354,14 +1355,17 @@ impl ConformanceReportV1 {
     /// Returns [`EvidenceError::InvalidConformanceReport`] when the record is
     /// not a complete, self-consistent report.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, EvidenceError> {
-        self.validate()?;
-        let bytes = strict_codec::encode_conformance_report(self)
-            .map_err(|_| EvidenceError::InvalidConformanceReport)?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            Err(EvidenceError::InvalidConformanceReport)
-        } else {
-            Ok(bytes)
-        }
+        self.validate().and_then(|()| {
+            strict_codec::encode_conformance_report(self)
+                .map_err(|_| EvidenceError::InvalidConformanceReport)
+                .and_then(|bytes| {
+                    if bytes.len() > 16 * 1024 * 1024 {
+                        Err(EvidenceError::InvalidConformanceReport)
+                    } else {
+                        Ok(bytes)
+                    }
+                })
+        })
     }
 
     /// Decode and validate an exact canonical CNR1 array.
@@ -1717,12 +1721,13 @@ impl DivergenceReportV1 {
 }
 
 fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<[u8; 32], pos_core::CoreError> {
-    let bytes = pos_crypto::canonical::encode(value)?;
-    let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());
-    input.extend_from_slice(domain);
-    input.push(0);
-    input.extend_from_slice(bytes.as_slice());
-    Ok(*blake3::hash(&input).as_bytes())
+    pos_crypto::canonical::encode(value).map(|bytes| {
+        let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());
+        input.extend_from_slice(domain);
+        input.push(0);
+        input.extend_from_slice(bytes.as_slice());
+        *blake3::hash(&input).as_bytes()
+    })
 }
 
 /// Strict portable wire codec for the Wave 8 records.
@@ -1876,8 +1881,8 @@ pub mod strict_codec {
     pub(crate) fn verification_result_digest(
         result: &VerificationResultV1,
     ) -> Result<[u8; 32], StrictCborError> {
-        let bytes = encode_value(&encode_verification_result_value(result, false))?;
-        Ok(domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
+        encode_value(&encode_verification_result_value(result, false))
+            .map(|bytes| domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
     }
 
     fn encode_verification_result_value(
@@ -2088,8 +2093,8 @@ pub mod strict_codec {
     pub(crate) fn divergence_report_digest(
         report: &DivergenceReportV1,
     ) -> Result<[u8; 32], StrictCborError> {
-        let bytes = encode_value(&encode_divergence_report_value(report, false))?;
-        Ok(domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
+        encode_value(&encode_divergence_report_value(report, false))
+            .map(|bytes| domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -3814,8 +3819,8 @@ pub mod strict_codec {
     pub(crate) fn conformance_report_digest(
         report: &ConformanceReportV1,
     ) -> Result<[u8; 32], StrictCborError> {
-        let bytes = encode_value(&encode_report_value(report, false))?;
-        Ok(domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes))
+        encode_value(&encode_report_value(report, false))
+            .map(|bytes| domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes))
     }
 
     pub(crate) fn encode_report_value(report: &ConformanceReportV1, include_digest: bool) -> Value {
