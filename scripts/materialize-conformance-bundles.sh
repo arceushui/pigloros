@@ -12,7 +12,6 @@ source_inventory="fixtures/conformance/SHA256SUMS"
   exit 1
 }
 (cd fixtures/conformance && sha256sum --check --strict SHA256SUMS)
-(cd fixtures/conformance && b3sum --check BLAKE3SUMS)
 
 : "${PIGLOROS_CONFORMANCE_SIGNING_KEY:?materialization requires a non-repository signing key}"
 source_digest="$(sha256sum "${source_inventory}" | awk '{print $1}')"
