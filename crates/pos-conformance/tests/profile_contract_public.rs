@@ -876,6 +876,13 @@ fn public_profile_validation_covers_transition_and_authority_failures() {
     invalid_protocol.protocol_id.clear();
     assert_eq!(
         request.validate_with_protocol(&invalid_protocol),
+        Err(ConformanceContractError::ProvenanceMissing)
+    );
+
+    let mut invalid_protocol_caps = profile.evaluator_protocol;
+    invalid_protocol_caps.hard_caps.max_profile_bytes = 0;
+    assert_eq!(
+        request.validate_with_protocol(&invalid_protocol_caps),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 }

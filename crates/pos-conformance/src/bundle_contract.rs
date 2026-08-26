@@ -8342,14 +8342,12 @@ mod instrumented_candidate_entrypoints {
         };
         member[2] = ciborium::value::Value::Integer(14_u64.into());
         let mut invalid_member_role = Vec::new();
-        ciborium::into_writer(&encoded_value, &mut invalid_member_role)
-            .expect("encoding the deliberately invalid member role must succeed");
+        ciborium::into_writer(&encoded_value, &mut invalid_member_role)?;
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&invalid_member_role),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
-        public_archive_rejects_unknown_member_role(archive)
-            .expect("the valid archive must be mutable for the role rejection case");
+        public_archive_rejects_unknown_member_role(archive)?;
 
         let mut nested = vec![0x81; 34];
         nested.push(0xf6);
