@@ -10,23 +10,22 @@ use pos_crypto::key_roles::{
 use pos_crypto::signing::public_key_from_verifying_key;
 
 #[test]
-fn public_role_bound_signing_and_encryption_cover_authorization_edges(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_role_bound_signing_covers_authorization_edges() -> Result<(), Box<dyn std::error::Error>>
+{
     let signing_key = SigningKey::from_bytes(&[31; 32]);
     let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     let signing_public_key = public_key_from_verifying_key(&signing_key.verifying_key());
     let signing_material = SigningKeyMaterial::new(signing_key.clone());
-    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
-    let mut encryption_material = EncryptionKeyMaterial::new([32; 32]);
     let mut registry = KeyRegistryStateV1::new();
     registry.register_key(KeyRegistrationV1::new(
         signing_identity,
         key_material_digest(&signing_key.to_bytes()),
         Some(signing_public_key),
     ))?;
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
     registry.register_key(KeyRegistrationV1::new(
         encryption_identity,
-        encryption_material.material_digest()?,
+        key_material_digest(&[32; 32]),
         None,
     ))?;
 
@@ -83,6 +82,21 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
         ),
         Err(pos_core::KeyRegistryErrorV1::SigningRoleRequired)
     );
+
+    Ok(())
+}
+
+#[test]
+fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn std::error::Error>>
+{
+    let encryption_identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
+    let mut encryption_material = EncryptionKeyMaterial::new([32; 32]);
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        encryption_identity,
+        encryption_material.material_digest()?,
+        None,
+    ))?;
     assert_eq!(
         with_registered_encryption_authorization(
             &mut registry,
@@ -101,6 +115,7 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
         ),
         Err(pos_core::KeyRegistryErrorV1::InvalidEpoch)
     );
+    let signing_identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
     assert_eq!(
         with_registered_encryption_authorization(
             &mut registry,
@@ -113,14 +128,14 @@ fn public_role_bound_signing_and_encryption_cover_authorization_edges(
 
     let material_digest = encryption_material.material_digest()?;
     assert_eq!(
-        destroy_registered_encryption_key::<(), _>(
+        destroy_registered_encryption_key::<&str, _>(
             &mut encryption_material,
             pos_core::KeyDestructionRequestV1::new(
                 encryption_identity,
                 pos_core::Hash::from_bytes([33; 32]),
                 pos_core::Hash::from_bytes([9; 32]),
             ),
-            |_| unreachable!("the material digest must be checked first"),
+            |_| Err("the material digest must be checked first"),
         ),
         Err(KeyMaterialDestructionError::MaterialDigestMismatch)
     );
@@ -172,8 +187,8 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
         pos_core::Hash::from_bytes([9; 32]),
     );
     assert_eq!(
-        destroy_registered_signing_key::<(), _>(&mut material, wrong_request, |_| {
-            unreachable!("the material digest must be checked first")
+        destroy_registered_signing_key::<&str, _>(&mut material, wrong_request, |_| {
+            Err("the material digest must be checked first")
         }),
         Err(KeyMaterialDestructionError::MaterialDigestMismatch)
     );
@@ -200,8 +215,8 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
     })?;
     assert!(material.is_destroyed());
     assert_eq!(
-        destroy_registered_signing_key::<(), _>(&mut material, request, |_| {
-            unreachable!("destroyed material cannot be committed again")
+        destroy_registered_signing_key::<&str, _>(&mut material, request, |_| {
+            Err("destroyed material cannot be committed again")
         }),
         Err(KeyMaterialDestructionError::AlreadyDestroyed)
     );
