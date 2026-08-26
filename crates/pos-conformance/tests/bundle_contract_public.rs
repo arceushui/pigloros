@@ -1509,11 +1509,10 @@ fn assert_independent_profile_shape_rejections(
     Ok(())
 }
 
-#[test]
-fn public_independent_verifier_rejects_each_expected_result_shape(
+fn assert_independent_expected_result_field_rejections(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let bundle = signed_draft_bundle()?;
     let mutations: Vec<ArchiveMutation> = vec![
         Box::new(|value| {
             archive_expected(value)?[0] = Value::Integer(1_u64.into());
@@ -1561,10 +1560,16 @@ fn public_independent_verifier_rejects_each_expected_result_shape(
         }),
     ];
     for mutate in mutations {
-        assert_archive_rejected(&bundle, &signing_key, mutate)?;
+        assert_archive_rejected(bundle, signing_key, mutate)?;
     }
+    Ok(())
+}
 
-    let malformed_fixtures = signed_archive_variant(&bundle, &signing_key, |value| {
+fn assert_independent_profile_archive_rejections(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let malformed_fixtures = signed_archive_variant(bundle, signing_key, |value| {
         let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err("profile bytes are missing".into()),
@@ -1586,7 +1591,7 @@ fn public_independent_verifier_rejects_each_expected_result_shape(
         Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
     );
 
-    let cap_limited_archive = signed_archive_variant(&bundle, &signing_key, |value| {
+    let cap_limited_archive = signed_archive_variant(bundle, signing_key, |value| {
         let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err("profile bytes are missing".into()),
@@ -1620,6 +1625,15 @@ fn public_independent_verifier_rejects_each_expected_result_shape(
         Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
     );
     Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_each_expected_result_shape(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    assert_independent_expected_result_field_rejections(&bundle, &signing_key)?;
+    assert_independent_profile_archive_rejections(&bundle, &signing_key)
 }
 
 fn raw_archive_with_header(top_header: &[u8], first: &[u8], members: &[u8]) -> Vec<u8> {
