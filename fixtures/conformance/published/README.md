@@ -19,10 +19,9 @@ private key; the archive's public verification key and signature remain part of
 the immutable CFB1 bytes.
 
 GitHub Actions artifacts are a temporary transport copy and are not the
-retention authority. A release or externally managed immutable object store
-must retain every source-addressed publication for at least 24 months and the
-latest two Stable major versions, whichever is longer. The source and output
-SHA256SUMS files make that handoff verifiable.
+retention authority. Candidate publication and any release-retention policy
+are owned by the #198 governance workflow. The source and output SHA256SUMS
+files make the Draft handoff verifiable without turning it into a release.
 
 The bundled SBOM is scoped to this data-only publication. It deliberately
 does not claim to enumerate the CI runner, Rust workspace, or materializer

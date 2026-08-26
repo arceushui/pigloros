@@ -1,1 +1,7 @@
-{"claim_layer":"plugin-conformance","case_id":"plugin-conformance-deletion","family":"deletion","result":"destroyed","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "plugin-conformance",
+  "case_id": "plugin-conformance-deletion",
+  "family": "deletion",
+  "result": "destroyed",
+  "status": "pending"
+}

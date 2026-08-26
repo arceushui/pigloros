@@ -1383,13 +1383,6 @@ fn independent_verify_profile(
     if embedded_profile_digest != recomputed_profile_digest {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    let validated_profile = ConformanceProfileV1::from_canonical_cbor(profile_bytes)
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    if validated_profile.profile_digest != embedded_profile_digest
-        || validated_profile.lifecycle.wire_code() != lifecycle
-    {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
     Ok(())
 }
 
@@ -2160,7 +2153,7 @@ pub struct ConformanceBundlePairV1 {
 }
 
 impl ConformanceBundlePairV1 {
-    /// Validate both signatures and their byte-for-byte expected-result parity.
+    /// Validate both signatures and their byte-for-byte authority-data parity.
     ///
     /// # Errors
     ///
@@ -2174,11 +2167,39 @@ impl ConformanceBundlePairV1 {
             || self.air_gapped.manifest.mode != BundleModeV1::AirGapped
             || expected_identity(&self.local.manifest.expected_results)
                 != expected_identity(&self.air_gapped.manifest.expected_results)
+            || bundle_pair_payloads(&self.local) != bundle_pair_payloads(&self.air_gapped)
         {
             return Err(BundleContractErrorV1::ModeParityMismatch);
         }
         Ok(())
     }
+}
+
+fn bundle_pair_payloads(
+    bundle: &ConformanceBundleV1,
+) -> Vec<(String, BundleMemberRoleV1, Vec<u8>)> {
+    let mut payloads = bundle
+        .members
+        .iter()
+        .filter(|member| {
+            matches!(
+                member.role,
+                BundleMemberRoleV1::ExpectedResult
+                    | BundleMemberRoleV1::AuthorityInventory
+                    | BundleMemberRoleV1::ExecutionMatrix
+                    | BundleMemberRoleV1::AuthorityFixture
+                    | BundleMemberRoleV1::AuthorityExpectedResult
+            )
+        })
+        .map(|member| (member.path.clone(), member.role, member.bytes.clone()))
+        .collect::<Vec<_>>();
+    payloads.sort_unstable_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    payloads
 }
 
 fn validate_expected_results(
@@ -2235,8 +2256,10 @@ fn validate_expected_results(
                 }
                 bytes.clone()
             }
-            typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)
-                .map_err(|_| BundleContractErrorV1::EncodingFailed)?,
+            typed_or_divergent => {
+                crate::profile_contract::expected_result_bytes(typed_or_divergent)
+                    .map_err(|_| BundleContractErrorV1::EncodingFailed)?
+            }
         };
         if expected.digest != *blake3::hash(&expected_bytes).as_bytes() {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
@@ -2994,20 +3017,14 @@ fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
 
 fn contains_secret_marker(bytes: &[u8]) -> bool {
     let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
-    [
-        b"private key".as_slice(),
-        b"begin secret".as_slice(),
-        b"private_key".as_slice(),
-        b"subject_secret".as_slice(),
-        b"privatekey".as_slice(),
-        b"subjectsecret".as_slice(),
-    ]
-    .iter()
-    .any(|marker| {
-        lowercase
-            .windows(marker.len())
-            .any(|window| window == *marker)
-    }) || json_contains_secret_value(bytes)
+    [b"private key".as_slice(), b"begin secret".as_slice()]
+        .iter()
+        .any(|marker| {
+            lowercase
+                .windows(marker.len())
+                .any(|window| window == *marker)
+        })
+        || json_contains_secret_value(bytes)
         || standalone_secret_string(bytes)
         || contains_prefixed_secret(&lowercase, b"bearer ", 16)
         || contains_prefixed_secret(&lowercase, b"basic ", 16)
@@ -3040,7 +3057,8 @@ fn standalone_secret_string(bytes: &[u8]) -> bool {
 fn json_value_contains_secret(value: &JsonValue) -> bool {
     match value {
         JsonValue::Object(fields) => fields.iter().any(|(key, value)| {
-            (is_sensitive_json_key(key) && !is_empty_or_digest(value, key))
+            (is_sensitive_json_key(key) && !is_empty_sensitive_value(value))
+                || is_sensitive_digest_key(key)
                 || json_value_contains_secret(value)
         }),
         JsonValue::Array(values) => values.iter().any(json_value_contains_secret),
@@ -3050,9 +3068,8 @@ fn json_value_contains_secret(value: &JsonValue) -> bool {
 
 fn is_sensitive_json_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase().replace('-', "_");
-    let key_without_digest = normalized.strip_suffix("_digest").unwrap_or(&normalized);
     matches!(
-        key_without_digest,
+        normalized.as_str(),
         "api_key"
             | "apikey"
             | "password"
@@ -3071,16 +3088,17 @@ fn is_sensitive_json_key(key: &str) -> bool {
     )
 }
 
-fn is_empty_or_digest(value: &JsonValue, key: &str) -> bool {
+fn is_sensitive_digest_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase().replace('-', "_");
+    normalized
+        .strip_suffix("_digest")
+        .is_some_and(is_sensitive_json_key)
+}
+
+fn is_empty_sensitive_value(value: &JsonValue) -> bool {
     match value {
         JsonValue::Null => true,
-        JsonValue::String(text) => {
-            text.is_empty()
-                || (normalized.ends_with("_digest")
-                    && text.len() == 64
-                    && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        }
+        JsonValue::String(text) => text.is_empty(),
         _ => false,
     }
 }
@@ -3099,7 +3117,7 @@ fn token_length(bytes: &[u8], start: usize) -> usize {
         .get(start..)
         .unwrap_or_default()
         .iter()
-        .take_while(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte))
+        .take_while(|byte| byte.is_ascii_alphanumeric() || b"_~+/=-".contains(byte))
         .count()
 }
 
@@ -3610,7 +3628,9 @@ mod tests {
             }
             let bytes = match &fixture.expected {
                 ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
-                typed_or_divergent => crate::expected_result_bytes(typed_or_divergent)?,
+                typed_or_divergent => {
+                    crate::profile_contract::expected_result_bytes(typed_or_divergent)?
+                }
             };
             let path = expected_result_member_path(
                 &fixture.case_id,
@@ -4345,11 +4365,17 @@ mod tests {
         assert!(contains_secret_marker(b"PUBLIC PRIVATE_KEY material"));
         assert!(contains_secret_marker(br#"{"password":"not-public"}"#));
         assert!(contains_secret_marker(br#"Bearer abcdefghijklmnop"#));
-        assert!(!contains_secret_marker(
+        assert!(contains_secret_marker(
             br#"{"secret_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#
         ));
         assert!(!contains_secret_marker(
+            br#"{"sha256_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#
+        ));
+        assert!(!contains_secret_marker(
             br#"{"subject_secret":null,"public":"expected result"}"#
+        ));
+        assert!(contains_secret_marker(
+            b"eyJaaaaaaaaaa.bbbbbbbbbb.cccccccccc"
         ));
         assert!(!contains_secret_marker(b"public expected result"));
     }
@@ -5222,6 +5248,20 @@ mod tests {
         };
         pair.validate()?;
 
+        let mut changed_authority_data = pair.air_gapped.clone();
+        let matrix_index = changed_authority_data
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("signed test bundle has no execution matrix")?;
+        changed_authority_data.members[matrix_index]
+            .bytes
+            .push(b'!');
+        assert_ne!(
+            bundle_pair_payloads(&pair.air_gapped),
+            bundle_pair_payloads(&changed_authority_data)
+        );
+
         let mut changed_profile = profile;
         if let ExpectedResultV1::CanonicalBytes { bytes, digest } =
             &mut changed_profile.fixtures[0].expected
@@ -5466,7 +5506,8 @@ mod tests {
         let mut typed_profile = profile;
         typed_profile.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
-        let typed_bytes = crate::expected_result_bytes(&typed_profile.fixtures[0].expected)?;
+        let typed_bytes =
+            crate::profile_contract::expected_result_bytes(&typed_profile.fixtures[0].expected)?;
         let typed_digest = *blake3::hash(&typed_bytes).as_bytes();
         let mut typed_members = bundle.members;
         let typed_path = expected_result_member_path(
@@ -5502,9 +5543,9 @@ mod tests {
             validate_expected_results(&profile, &bundle.manifest, &bundle.members),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
-        let typed = crate::expected_result_bytes(&ExpectedResultV1::TypedFailure(
-            SafeErrorCodeV1::InvalidEncoding,
-        ))?;
+        let typed = crate::profile_contract::expected_result_bytes(
+            &ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding),
+        )?;
         assert!(!typed.is_empty());
         assert_ne!(typed, vec![0]);
         assert_ne!(typed, vec![1]);

@@ -1,1 +1,7 @@
-{"claim_layer":"artifact-integrity","case_id":"artifact-integrity-independent-evaluation","family":"independent-evaluation","result":"corroborated","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "artifact-integrity",
+  "case_id": "artifact-integrity-independent-evaluation",
+  "family": "independent-evaluation",
+  "result": "corroborated",
+  "status": "pending"
+}

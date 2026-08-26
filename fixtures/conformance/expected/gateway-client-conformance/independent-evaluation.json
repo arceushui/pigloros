@@ -1,1 +1,7 @@
-{"claim_layer":"gateway-client-conformance","case_id":"gateway-client-conformance-independent-evaluation","family":"independent-evaluation","result":"corroborated","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-independent-evaluation",
+  "family": "independent-evaluation",
+  "result": "corroborated",
+  "status": "pending"
+}

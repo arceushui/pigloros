@@ -1,1 +1,7 @@
-{"claim_layer":"empirical-evaluation","case_id":"empirical-evaluation-deletion","family":"deletion","result":"destroyed","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "empirical-evaluation",
+  "case_id": "empirical-evaluation-deletion",
+  "family": "deletion",
+  "result": "destroyed",
+  "status": "pending"
+}

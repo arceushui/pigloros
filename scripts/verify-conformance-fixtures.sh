@@ -142,7 +142,7 @@ for index in "${!profile_layers[@]}"; do
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
   }
-  while IFS=$'\t' read -r input_path expected_path; do
+  while IFS=$'\t' read -r case_id fixture_layer family input_path expected_path; do
     for path in "${input_path}" "${expected_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
         echo "unsafe profile fixture path for ${layer}: ${path}" >&2
@@ -153,7 +153,32 @@ for index in "${!profile_layers[@]}"; do
         exit 1
       }
     done
-  done < <(jq -r '.fixtures[] | [.input, .expected] | @tsv' "${profile}")
+    jq -e \
+      --arg case_id "${case_id}" \
+      --arg fixture_layer "${fixture_layer}" \
+      --arg family "${family}" \
+      '.case_id == $case_id and .claim_layer == $fixture_layer and
+       .family == $family and
+       ((.subject | type) == "string") and (.subject != "") and
+       ((.assertion | type) == "string") and (.assertion != "")' \
+      "${fixture_root}/${input_path}" >/dev/null || {
+      echo "invalid input fixture record for ${layer}: ${input_path}" >&2
+      exit 1
+    }
+    jq -e \
+      --arg case_id "${case_id}" \
+      --arg fixture_layer "${fixture_layer}" \
+      --arg family "${family}" \
+      '.case_id == $case_id and .claim_layer == $fixture_layer and
+       .family == $family and
+       ((.result | type) == "string") and (.result != "") and
+       .status == "pending" and (has("verification") | not) and
+       (has("source") | not)' \
+      "${fixture_root}/${expected_path}" >/dev/null || {
+      echo "invalid pending expected fixture record for ${layer}: ${expected_path}" >&2
+      exit 1
+    }
+  done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .input, .expected] | @tsv' "${profile}")
 done
 
 mapfile -t declared_inputs < <(
@@ -250,7 +275,7 @@ publishable_roots=(
   "${fixture_root}/expected-authority"
   "${fixture_root}/support"
 )
-secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|"(api[_-]?key|apikey|password|credential|credentials|access[_-]?token|refresh[_-]?token|authorization|bearer[_-]?token|client[_-]?secret|subject[_-]?secret|private[_-]?key|privatekey|secret)"[[:space:]]*:[[:space:]]*"[^"[:space:]]+"|(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{16,}|(AKIA|ASIA)[0-9A-Z]{16}|(gh[pousr]_|github_pat_|glpat-|xox[baprs]-|sk_(live|test)_|AIza)[A-Za-z0-9._-]{16,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|"(api[_-]?key|apikey|password|credential|credentials|access[_-]?token|refresh[_-]?token|authorization|bearer[_-]?token|client[_-]?secret|subject[_-]?secret|private[_-]?key|privatekey|secret)([_-]?digest)?"[[:space:]]*:[[:space:]]*"[^"[:space:]]+"|(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{16,}|(AKIA|ASIA)[0-9A-Z]{16}|(gh[pousr]_|github_pat_|glpat-|xox[baprs]-|sk_(live|test)_|AIza)[A-Za-z0-9._-]{16,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
 if grep -R -n -i -I -E -- "${secret_pattern}" "${publishable_roots[@]}"; then
   echo "forbidden secret material found in public conformance fixtures" >&2
   exit 1

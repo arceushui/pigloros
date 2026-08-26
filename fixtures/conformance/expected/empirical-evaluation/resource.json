@@ -1,1 +1,7 @@
-{"claim_layer":"empirical-evaluation","case_id":"empirical-evaluation-resource","family":"resource","result":"resource-limit","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "empirical-evaluation",
+  "case_id": "empirical-evaluation-resource",
+  "family": "resource",
+  "result": "resource-limit",
+  "status": "pending"
+}

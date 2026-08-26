@@ -1,1 +1,7 @@
-{"claim_layer":"empirical-evaluation","case_id":"empirical-evaluation-positive","family":"positive","result":"accepted","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "empirical-evaluation",
+  "case_id": "empirical-evaluation-positive",
+  "family": "positive",
+  "result": "accepted",
+  "status": "pending"
+}

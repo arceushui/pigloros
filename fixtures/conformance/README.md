@@ -23,6 +23,9 @@ Each public input/result pair includes its claim-layer and case identity.
 Materialization binds every family to deterministic-local-v1 or
 deterministic-air-gapped-v1, so every emitted descriptor has exactly one
 ExecutionProfile while the paired bundles retain identical expected bytes.
+The `result` value in a checked-in expected record is descriptive fixture
+metadata only; `status: "pending"` and the CPF1 unavailable outcome prevent it
+from being interpreted as executed conformance evidence.
 
 `SHA256SUMS` and `BLAKE3SUMS` are independent byte inventories for every
 remaining public profile, input, expected result, matrix, inventory, and support

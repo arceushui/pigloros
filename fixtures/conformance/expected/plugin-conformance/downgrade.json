@@ -1,1 +1,7 @@
-{"claim_layer":"plugin-conformance","case_id":"plugin-conformance-downgrade","family":"downgrade","result":"not-authorized","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "plugin-conformance",
+  "case_id": "plugin-conformance-downgrade",
+  "family": "downgrade",
+  "result": "not-authorized",
+  "status": "pending"
+}

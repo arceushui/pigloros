@@ -7,53 +7,13 @@ use pos_conformance::{
     ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
     EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
     FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
-    RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
 use std::ffi::OsString;
-use std::path::{Component, Path, PathBuf};
-
-const CANONICAL_AUTHORITY_ROOT: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/conformance");
-
-const PROFILE_RECORDS: [(&[u8], ClaimLayerV1); 7] = [
-    (
-        include_bytes!("../../../../fixtures/conformance/profiles/artifact-integrity/profile.json"),
-        ClaimLayerV1::ArtifactIntegrity,
-    ),
-    (
-        include_bytes!("../../../../fixtures/conformance/profiles/replay-conformance/profile.json"),
-        ClaimLayerV1::ReplayConformance,
-    ),
-    (
-        include_bytes!(
-            "../../../../fixtures/conformance/profiles/knowledge-non-interference/profile.json"
-        ),
-        ClaimLayerV1::KnowledgeNonInterference,
-    ),
-    (
-        include_bytes!(
-            "../../../../fixtures/conformance/profiles/gateway-client-conformance/profile.json"
-        ),
-        ClaimLayerV1::GatewayClientConformance,
-    ),
-    (
-        include_bytes!("../../../../fixtures/conformance/profiles/plugin-conformance/profile.json"),
-        ClaimLayerV1::PluginConformance,
-    ),
-    (
-        include_bytes!("../../../../fixtures/conformance/profiles/metric-conformance/profile.json"),
-        ClaimLayerV1::MetricConformance,
-    ),
-    (
-        include_bytes!(
-            "../../../../fixtures/conformance/profiles/empirical-evaluation/profile.json"
-        ),
-        ClaimLayerV1::EmpiricalEvaluation,
-    ),
-];
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
 struct FixtureContext {
@@ -73,223 +33,100 @@ struct MaterializationContext<'a> {
     output_root: &'a Path,
     signing_key: &'a SigningKey,
     inventory_bytes: &'a [u8],
-    authority_root: Option<&'a Path>,
 }
 
 type CanonicalFixtureBytes = (&'static [u8], &'static [u8]);
 
-const CANONICAL_FIXTURE_BYTES: [[CanonicalFixtureBytes; 7]; 7] = [
-    [
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/artifact-integrity/positive.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/artifact-integrity/positive.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/artifact-integrity/negative.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/artifact-integrity/negative.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/artifact-integrity/malformed.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/artifact-integrity/malformed.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/artifact-integrity/resource.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/artifact-integrity/resource.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/artifact-integrity/deletion.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/artifact-integrity/deletion.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/artifact-integrity/downgrade.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/artifact-integrity/downgrade.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/artifact-integrity/independent-evaluation.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/artifact-integrity/independent-evaluation.json"),
-        ),
-    ],
-    [
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/replay-conformance/positive.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/replay-conformance/positive.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/replay-conformance/negative.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/replay-conformance/negative.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/replay-conformance/malformed.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/replay-conformance/malformed.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/replay-conformance/resource.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/replay-conformance/resource.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/replay-conformance/deletion.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/replay-conformance/deletion.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/replay-conformance/downgrade.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/replay-conformance/downgrade.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/replay-conformance/independent-evaluation.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/replay-conformance/independent-evaluation.json"),
-        ),
-    ],
-    [
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/knowledge-non-interference/positive.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/knowledge-non-interference/positive.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/knowledge-non-interference/negative.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/knowledge-non-interference/negative.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/knowledge-non-interference/malformed.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/knowledge-non-interference/malformed.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/knowledge-non-interference/resource.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/knowledge-non-interference/resource.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/knowledge-non-interference/deletion.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/knowledge-non-interference/deletion.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/knowledge-non-interference/downgrade.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/knowledge-non-interference/downgrade.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/knowledge-non-interference/independent-evaluation.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/knowledge-non-interference/independent-evaluation.json"),
-        ),
-    ],
-    [
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/gateway-client-conformance/positive.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/gateway-client-conformance/positive.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/gateway-client-conformance/negative.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/gateway-client-conformance/negative.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/gateway-client-conformance/malformed.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/gateway-client-conformance/malformed.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/gateway-client-conformance/resource.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/gateway-client-conformance/resource.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/gateway-client-conformance/deletion.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/gateway-client-conformance/deletion.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/gateway-client-conformance/downgrade.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/gateway-client-conformance/downgrade.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/gateway-client-conformance/independent-evaluation.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/gateway-client-conformance/independent-evaluation.json"),
-        ),
-    ],
-    [
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/plugin-conformance/positive.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/plugin-conformance/positive.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/plugin-conformance/negative.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/plugin-conformance/negative.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/plugin-conformance/malformed.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/plugin-conformance/malformed.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/plugin-conformance/resource.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/plugin-conformance/resource.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/plugin-conformance/deletion.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/plugin-conformance/deletion.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/plugin-conformance/downgrade.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/plugin-conformance/downgrade.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/plugin-conformance/independent-evaluation.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/plugin-conformance/independent-evaluation.json"),
-        ),
-    ],
-    [
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/metric-conformance/positive.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/metric-conformance/positive.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/metric-conformance/negative.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/metric-conformance/negative.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/metric-conformance/malformed.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/metric-conformance/malformed.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/metric-conformance/resource.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/metric-conformance/resource.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/metric-conformance/deletion.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/metric-conformance/deletion.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/metric-conformance/downgrade.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/metric-conformance/downgrade.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/metric-conformance/independent-evaluation.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/metric-conformance/independent-evaluation.json"),
-        ),
-    ],
-    [
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/empirical-evaluation/positive.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/empirical-evaluation/positive.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/empirical-evaluation/negative.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/empirical-evaluation/negative.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/empirical-evaluation/malformed.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/empirical-evaluation/malformed.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/empirical-evaluation/resource.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/empirical-evaluation/resource.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/empirical-evaluation/deletion.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/empirical-evaluation/deletion.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/empirical-evaluation/downgrade.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/empirical-evaluation/downgrade.json"),
-        ),
-        (
-            include_bytes!("../../../../fixtures/conformance/inputs/empirical-evaluation/independent-evaluation.json"),
-            include_bytes!("../../../../fixtures/conformance/expected/empirical-evaluation/independent-evaluation.json"),
-        ),
-    ],
-];
+macro_rules! fixture_sources {
+    ($layer:literal) => {
+        &[
+            (
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/inputs/",
+                    $layer,
+                    "/positive.json"
+                )),
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/expected/",
+                    $layer,
+                    "/positive.json"
+                )),
+            ),
+            (
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/inputs/",
+                    $layer,
+                    "/negative.json"
+                )),
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/expected/",
+                    $layer,
+                    "/negative.json"
+                )),
+            ),
+            (
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/inputs/",
+                    $layer,
+                    "/malformed.json"
+                )),
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/expected/",
+                    $layer,
+                    "/malformed.json"
+                )),
+            ),
+            (
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/inputs/",
+                    $layer,
+                    "/resource.json"
+                )),
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/expected/",
+                    $layer,
+                    "/resource.json"
+                )),
+            ),
+            (
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/inputs/",
+                    $layer,
+                    "/deletion.json"
+                )),
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/expected/",
+                    $layer,
+                    "/deletion.json"
+                )),
+            ),
+            (
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/inputs/",
+                    $layer,
+                    "/downgrade.json"
+                )),
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/expected/",
+                    $layer,
+                    "/downgrade.json"
+                )),
+            ),
+            (
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/inputs/",
+                    $layer,
+                    "/independent-evaluation.json"
+                )),
+                include_bytes!(concat!(
+                    "../../../../fixtures/conformance/expected/",
+                    $layer,
+                    "/independent-evaluation.json"
+                )),
+            ),
+        ]
+    };
+}
 
 struct LayerSpec {
     claim_layer: ClaimLayerV1,
@@ -306,56 +143,70 @@ const LAYER_SPECS: [LayerSpec; 7] = [
         name: "artifact-integrity",
         profile_id: "pigloros.w8.artifact-integrity.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: PROFILE_RECORDS[0].0,
-        fixture_bytes: &CANONICAL_FIXTURE_BYTES[0],
+        profile_record: include_bytes!(
+            "../../../../fixtures/conformance/profiles/artifact-integrity/profile.json"
+        ),
+        fixture_bytes: fixture_sources!("artifact-integrity"),
     },
     LayerSpec {
         claim_layer: ClaimLayerV1::ReplayConformance,
         name: "replay-conformance",
         profile_id: "pigloros.w8.replay-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: PROFILE_RECORDS[1].0,
-        fixture_bytes: &CANONICAL_FIXTURE_BYTES[1],
+        profile_record: include_bytes!(
+            "../../../../fixtures/conformance/profiles/replay-conformance/profile.json"
+        ),
+        fixture_bytes: fixture_sources!("replay-conformance"),
     },
     LayerSpec {
         claim_layer: ClaimLayerV1::KnowledgeNonInterference,
         name: "knowledge-non-interference",
         profile_id: "pigloros.w8.knowledge-non-interference.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: PROFILE_RECORDS[2].0,
-        fixture_bytes: &CANONICAL_FIXTURE_BYTES[2],
+        profile_record: include_bytes!(
+            "../../../../fixtures/conformance/profiles/knowledge-non-interference/profile.json"
+        ),
+        fixture_bytes: fixture_sources!("knowledge-non-interference"),
     },
     LayerSpec {
         claim_layer: ClaimLayerV1::GatewayClientConformance,
         name: "gateway-client-conformance",
         profile_id: "pigloros.w8.gateway-client-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::PublicGatewayProtocol,
-        profile_record: PROFILE_RECORDS[3].0,
-        fixture_bytes: &CANONICAL_FIXTURE_BYTES[3],
+        profile_record: include_bytes!(
+            "../../../../fixtures/conformance/profiles/gateway-client-conformance/profile.json"
+        ),
+        fixture_bytes: fixture_sources!("gateway-client-conformance"),
     },
     LayerSpec {
         claim_layer: ClaimLayerV1::PluginConformance,
         name: "plugin-conformance",
         profile_id: "pigloros.w8.plugin-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::PublicPluginProtocol,
-        profile_record: PROFILE_RECORDS[4].0,
-        fixture_bytes: &CANONICAL_FIXTURE_BYTES[4],
+        profile_record: include_bytes!(
+            "../../../../fixtures/conformance/profiles/plugin-conformance/profile.json"
+        ),
+        fixture_bytes: fixture_sources!("plugin-conformance"),
     },
     LayerSpec {
         claim_layer: ClaimLayerV1::MetricConformance,
         name: "metric-conformance",
         profile_id: "pigloros.w8.metric-conformance.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: PROFILE_RECORDS[5].0,
-        fixture_bytes: &CANONICAL_FIXTURE_BYTES[5],
+        profile_record: include_bytes!(
+            "../../../../fixtures/conformance/profiles/metric-conformance/profile.json"
+        ),
+        fixture_bytes: fixture_sources!("metric-conformance"),
     },
     LayerSpec {
         claim_layer: ClaimLayerV1::EmpiricalEvaluation,
         name: "empirical-evaluation",
         profile_id: "pigloros.w8.empirical-evaluation.1.0.0",
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: PROFILE_RECORDS[6].0,
-        fixture_bytes: &CANONICAL_FIXTURE_BYTES[6],
+        profile_record: include_bytes!(
+            "../../../../fixtures/conformance/profiles/empirical-evaluation/profile.json"
+        ),
+        fixture_bytes: fixture_sources!("empirical-evaluation"),
     },
 ];
 
@@ -374,28 +225,17 @@ fn run(
     mut arguments: impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
 ) -> Result<(), Box<dyn Error>> {
-    run_with_inventory_and_authority(
+    run_with_inventory(
         &mut arguments,
         encoded_signing_key,
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
-        Some(Path::new(CANONICAL_AUTHORITY_ROOT)),
     )
 }
 
-#[cfg(test)]
 fn run_with_inventory(
     arguments: &mut impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
     inventory_bytes: &[u8],
-) -> Result<(), Box<dyn Error>> {
-    run_with_inventory_and_authority(arguments, encoded_signing_key, inventory_bytes, None)
-}
-
-fn run_with_inventory_and_authority(
-    arguments: &mut impl Iterator<Item = OsString>,
-    encoded_signing_key: Result<String, std::env::VarError>,
-    inventory_bytes: &[u8],
-    authority_root: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let output_root = arguments
@@ -414,7 +254,6 @@ fn run_with_inventory_and_authority(
         output_root: &output_root,
         signing_key: &signing_key,
         inventory_bytes,
-        authority_root,
     };
     for spec in &LAYER_SPECS {
         for (lifecycle, lifecycle_name) in &lifecycles {
@@ -457,18 +296,12 @@ fn materialize_profile_with_inventory(
     lifecycle_name: &str,
 ) -> Result<(), Box<dyn Error>> {
     profile_for_claim_layer(layer.claim_layer).and_then(|profile| {
-        materialize_profile_from_profile_with_authority(
-            context,
-            profile,
-            lifecycle,
-            lifecycle_name,
-            layer.name,
-        )
+        materialize_profile_from_profile(context, profile, lifecycle, lifecycle_name, layer.name)
     })
 }
 
 #[cfg(test)]
-fn materialize_profile_from_profile(
+fn materialize_profile_for_test(
     output_root: &Path,
     signing_key: &SigningKey,
     profile: ConformanceProfileV1,
@@ -482,24 +315,20 @@ fn materialize_profile_from_profile(
         inventory_bytes: include_bytes!(
             "../../../../fixtures/conformance/expected-authority/inventory.json"
         ),
-        authority_root: Some(Path::new(CANONICAL_AUTHORITY_ROOT)),
     };
-    materialize_profile_from_profile_with_authority(
-        &context,
-        profile,
-        lifecycle,
-        lifecycle_name,
-        layer_name,
-    )
+    materialize_profile_from_profile(&context, profile, lifecycle, lifecycle_name, layer_name)
 }
 
-fn materialize_profile_from_profile_with_authority(
+fn materialize_profile_from_profile(
     context: &MaterializationContext<'_>,
     mut profile: ConformanceProfileV1,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
     layer_name: &str,
 ) -> Result<(), Box<dyn Error>> {
+    if lifecycle != ProfileLifecycleV1::Draft {
+        return Err("the #190 materializer emits Draft bundles only".into());
+    }
     profile.lifecycle = lifecycle;
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
@@ -514,12 +343,8 @@ fn materialize_profile_from_profile_with_authority(
     )?;
     let mut signed_bundles = Vec::with_capacity(2);
     for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
-        let (members, expected_results) = bundle_inputs_with_authority(
-            &profile,
-            mode,
-            context.inventory_bytes,
-            context.authority_root,
-        )?;
+        let (members, expected_results) =
+            bundle_inputs_from_profile(&profile, mode, context.inventory_bytes)?;
         let bundle = ConformanceBundleV1::materialize(&profile, mode, members, expected_results)
             .and_then(|bundle| bundle.sign(context.signing_key))?;
         signed_bundles.push(bundle);
@@ -766,18 +591,22 @@ fn fixture(
     }
     let (input, expected) =
         canonical_fixture_bytes(context.claim_layer, input_path, expected_path)?;
+    validate_fixture_records(
+        input,
+        expected,
+        case_id,
+        family,
+        claim_layer_name(context.claim_layer),
+    )?;
     let fixture_record_digest = labeled_digest(
         "PiglorOS.CPF1FixtureRecord.v1",
         &serde_json::to_vec(record)?,
     );
-    let (replay_claim, redaction_state) = if family == "deletion" {
-        (
-            ReplayClaimV1::StructuralOnly,
-            RedactionStateV1::StructuralOnly,
-        )
-    } else {
-        (ReplayClaimV1::Exact, RedactionStateV1::None)
-    };
+    let draft_provenance_material = [
+        context.profile_record_digest.as_slice(),
+        fixture_record_digest.as_slice(),
+    ]
+    .concat();
     Ok(FixtureDescriptorV1 {
         case_id: case_id.to_owned(),
         mandatory: true,
@@ -796,10 +625,10 @@ fn fixture(
             bytes: expected.to_vec(),
             digest: *blake3::hash(expected).as_bytes(),
         },
-        expected_verification_outcome: VerificationOutcomeV1::VerifiedExact,
-        expected_verification_error: None,
-        replay_claim,
-        redaction_state,
+        expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
+        expected_verification_error: Some(SafeErrorCodeV1::ProvenanceMissing),
+        replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
+        redaction_state: RedactionStateV1::EvidenceMissing,
         bounds: FixtureBoundsV1 {
             cpu_fuel: 1,
             memory_bytes: 1,
@@ -818,9 +647,18 @@ fn fixture(
             licence_id: "MIT".to_owned(),
             notices_digest: context.notice_digest,
             sbom_digest: context.sbom_digest,
-            source_digest: context.provenance_digest,
-            build_digest: context.provenance_digest,
-            publication_review_digest: context.provenance_digest,
+            source_digest: labeled_digest(
+                "PiglorOS.DraftSourceMetadata.v1",
+                &draft_provenance_material,
+            ),
+            build_digest: labeled_digest(
+                "PiglorOS.DraftBuildMetadata.v1",
+                &draft_provenance_material,
+            ),
+            publication_review_digest: labeled_digest(
+                "PiglorOS.DraftPublicationReviewMetadata.v1",
+                &draft_provenance_material,
+            ),
             limitations_digest: context.limitations_digest,
         },
         compatibility_digest: labeled_digest(
@@ -832,6 +670,35 @@ fn fixture(
             .concat(),
         ),
     })
+}
+
+fn validate_fixture_records(
+    input: &[u8],
+    expected: &[u8],
+    case_id: &str,
+    family: &str,
+    claim_layer: &str,
+) -> Result<(), Box<dyn Error>> {
+    let input_record: JsonValue = serde_json::from_slice(input)?;
+    let expected_record: JsonValue = serde_json::from_slice(expected)?;
+    for record in [&input_record, &expected_record] {
+        if json_text(record, "case_id")? != case_id
+            || json_text(record, "claim_layer")? != claim_layer
+            || json_text(record, "family")? != family
+        {
+            return Err("fixture record identity does not match its profile declaration".into());
+        }
+    }
+    if json_text(&input_record, "subject")?.is_empty()
+        || json_text(&input_record, "assertion")?.is_empty()
+        || json_text(&expected_record, "result")?.is_empty()
+        || json_text(&expected_record, "status")? != "pending"
+        || expected_record.get("verification").is_some()
+        || expected_record.get("source").is_some()
+    {
+        return Err("Draft fixture records contain unsupported evidence claims".into());
+    }
+    Ok(())
 }
 
 fn family_for_path(input_path: &str, expected_path: &str) -> Option<&'static str> {
@@ -954,19 +821,17 @@ fn bundle_inputs(
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
-    bundle_inputs_with_authority(
+    bundle_inputs_from_profile(
         profile,
         mode,
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
-        Some(Path::new(CANONICAL_AUTHORITY_ROOT)),
     )
 }
 
-fn bundle_inputs_with_authority(
+fn bundle_inputs_from_profile(
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
     inventory_bytes: &[u8],
-    authority_root: Option<&Path>,
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
     let execution_mode = match mode {
         BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
@@ -1017,14 +882,13 @@ fn bundle_inputs_with_authority(
         });
         members.push(member);
     }
-    append_supporting_members_with_authority(&mut members, inventory_bytes, authority_root)?;
+    append_supporting_members(&mut members, inventory_bytes)?;
     Ok((members, expected_results))
 }
 
-fn append_supporting_members_with_authority(
+fn append_supporting_members(
     members: &mut Vec<BundleMemberV1>,
     inventory_bytes: &[u8],
-    authority_root: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let support = [
         (
@@ -1082,91 +946,14 @@ fn append_supporting_members_with_authority(
     );
     matrix.role = BundleMemberRoleV1::ExecutionMatrix;
     members.push(matrix);
-    let inventory_json: JsonValue = serde_json::from_slice(inventory_bytes)?;
-    if json_text(&inventory_json, "lifecycle")? == "Candidate" {
-        let authority_root = authority_root
-            .ok_or("Candidate materialization requires the canonical authority root")?;
-        append_authority_artifacts(members, &inventory_json, authority_root)?;
-    }
-    Ok(())
-}
-
-fn append_authority_artifacts(
-    members: &mut Vec<BundleMemberV1>,
-    inventory: &JsonValue,
-    authority_root: &Path,
-) -> Result<(), Box<dyn Error>> {
-    let entries = inventory
-        .get("entries")
-        .and_then(JsonValue::as_array)
-        .ok_or("Candidate authority inventory entries are missing")?;
-    for entry in entries {
-        append_authority_artifact(
-            members,
-            entry,
-            "fixture_bytes_path",
-            "fixture_bytes_digest",
-            BundleMemberRoleV1::AuthorityFixture,
-            authority_root,
-        )?;
-        append_authority_artifact(
-            members,
-            entry,
-            "expected_result_path",
-            "expected_result_digest",
-            BundleMemberRoleV1::AuthorityExpectedResult,
-            authority_root,
-        )?;
-    }
-    Ok(())
-}
-
-fn append_authority_artifact(
-    members: &mut Vec<BundleMemberV1>,
-    entry: &JsonValue,
-    path_field: &str,
-    digest_field: &str,
-    role: BundleMemberRoleV1,
-    authority_root: &Path,
-) -> Result<(), Box<dyn Error>> {
-    let source_path = json_text(entry, path_field)?;
-    let relative_path = safe_authority_relative_path(source_path)?;
-    let bytes = std::fs::read(authority_root.join(relative_path))?;
-    let artifact_fixture_id = serde_json::from_slice::<JsonValue>(&bytes)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("fixture_id")
-                .and_then(JsonValue::as_str)
-                .map(str::to_owned)
-        });
-    if bytes.is_empty()
-        || pos_conformance::decode_hex_digest(json_text(entry, digest_field)?)
-            != Some(*blake3::hash(&bytes).as_bytes())
-        || artifact_fixture_id.as_deref() != entry.get("fixture_id").and_then(JsonValue::as_str)
+    if json_text(
+        &serde_json::from_slice::<JsonValue>(inventory_bytes)?,
+        "lifecycle",
+    )? != "Draft"
     {
-        return Err("Candidate authority artifact does not match inventory".into());
+        return Err("only Draft authority inventories can be materialized here".into());
     }
-    let mut member = BundleMemberV1::new(format!("authority/{source_path}"), bytes, false);
-    member.role = role;
-    members.push(member);
     Ok(())
-}
-
-fn safe_authority_relative_path(path: &str) -> Result<&Path, Box<dyn Error>> {
-    let relative = Path::new(path);
-    if relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        Err("authority inventory path escapes its configured root".into())
-    } else {
-        Ok(relative)
-    }
 }
 
 const fn claim_layer_code(claim_layer: ClaimLayerV1) -> u8 {
@@ -1328,18 +1115,10 @@ mod tests {
         let inventory =
             include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let (local_members, local_expected) = bundle_inputs_with_authority(
-            &profile,
-            BundleModeV1::Local,
-            inventory,
-            Some(Path::new(CANONICAL_AUTHORITY_ROOT)),
-        )?;
-        let (air_gapped_members, air_gapped_expected) = bundle_inputs_with_authority(
-            &profile,
-            BundleModeV1::AirGapped,
-            inventory,
-            Some(Path::new(CANONICAL_AUTHORITY_ROOT)),
-        )?;
+        let (local_members, local_expected) =
+            bundle_inputs_from_profile(&profile, BundleModeV1::Local, inventory)?;
+        let (air_gapped_members, air_gapped_expected) =
+            bundle_inputs_from_profile(&profile, BundleModeV1::AirGapped, inventory)?;
         assert_eq!(local_expected.len(), 7);
         assert_eq!(air_gapped_expected.len(), 7);
         assert!(local_expected.iter().all(|expected| {
@@ -1515,12 +1294,20 @@ mod tests {
             ExecutionModeV1::Local,
         )?;
         assert_eq!(
+            deletion.expected_verification_outcome,
+            VerificationOutcomeV1::UnverifiableArtifactsMissing
+        );
+        assert_eq!(
+            deletion.expected_verification_error,
+            Some(SafeErrorCodeV1::ProvenanceMissing)
+        );
+        assert_eq!(
             deletion.replay_claim,
-            pos_conformance::ReplayClaimV1::StructuralOnly
+            pos_conformance::ReplayClaimV1::UnverifiableArtifactsMissing
         );
         assert_eq!(
             deletion.redaction_state,
-            pos_conformance::RedactionStateV1::StructuralOnly
+            pos_conformance::RedactionStateV1::EvidenceMissing
         );
 
         let positive_record = fixture_records
@@ -1533,10 +1320,21 @@ mod tests {
             context.local_execution_profile_digest,
             ExecutionModeV1::Local,
         )?;
-        assert_eq!(positive.replay_claim, pos_conformance::ReplayClaimV1::Exact);
+        assert_eq!(
+            positive.expected_verification_outcome,
+            VerificationOutcomeV1::UnverifiableArtifactsMissing
+        );
+        assert_eq!(
+            positive.expected_verification_error,
+            Some(SafeErrorCodeV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            positive.replay_claim,
+            pos_conformance::ReplayClaimV1::UnverifiableArtifactsMissing
+        );
         assert_eq!(
             positive.redaction_state,
-            pos_conformance::RedactionStateV1::None
+            pos_conformance::RedactionStateV1::EvidenceMissing
         );
         Ok(())
     }
@@ -1555,6 +1353,44 @@ mod tests {
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
         let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
+        let positive_record = &canonical_record["fixtures"][0];
+        let positive_input_path = json_text(positive_record, "input")?;
+        let positive_expected_path = json_text(positive_record, "expected")?;
+        let (positive_input, positive_expected) = canonical_fixture_bytes(
+            ClaimLayerV1::ArtifactIntegrity,
+            positive_input_path,
+            positive_expected_path,
+        )?;
+        assert!(validate_fixture_records(
+            positive_input,
+            positive_expected,
+            "artifact-integrity-positive",
+            "positive",
+            "artifact-integrity",
+        )
+        .is_ok());
+        let mut invalid_expected: JsonValue = serde_json::from_slice(positive_expected)?;
+        invalid_expected["status"] = JsonValue::String("verified".to_owned());
+        let invalid_expected_bytes = serde_json::to_vec(&invalid_expected)?;
+        assert!(validate_fixture_records(
+            positive_input,
+            &invalid_expected_bytes,
+            "artifact-integrity-positive",
+            "positive",
+            "artifact-integrity",
+        )
+        .is_err());
+        let mut invalid_input: JsonValue = serde_json::from_slice(positive_input)?;
+        invalid_input["case_id"] = JsonValue::String("wrong-case".to_owned());
+        let invalid_input_bytes = serde_json::to_vec(&invalid_input)?;
+        assert!(validate_fixture_records(
+            &invalid_input_bytes,
+            positive_expected,
+            "artifact-integrity-positive",
+            "positive",
+            "artifact-integrity",
+        )
+        .is_err());
         let mut invalid_fixtures = canonical_record;
         invalid_fixtures["fixtures"] = JsonValue::Array(Vec::new());
         assert!(fixtures_from_profile_record(&invalid_fixtures, &context).is_err());
@@ -1675,214 +1511,6 @@ mod tests {
     }
 
     #[test]
-    fn authority_validation_seams() -> Result<(), Box<dyn Error>> {
-        let authority_root = output_root("invalid-authority");
-        let authority_path = authority_root.join("fixtures/INV-001.json");
-        assert!(
-            std::fs::create_dir_all(authority_path.parent().ok_or("authority parent")?).is_ok()
-        );
-        assert!(std::fs::write(&authority_path, br#"{"fixture_id":"INV-001"}"#).is_ok());
-        let authority_bytes = br#"{"fixture_id":"INV-001"}"#;
-        let authority_digest =
-            pos_conformance::hex_digest(blake3::hash(authority_bytes).as_bytes());
-        let invalid_authority_entry = serde_json::json!({
-            "fixture_id": "INV-001",
-            "fixture_bytes_path": "fixtures/INV-001.json",
-            "fixture_bytes_digest": "00".repeat(32)
-        });
-        let mut members = Vec::new();
-        assert!(
-            append_authority_artifacts(&mut members, &serde_json::json!({}), &authority_root)
-                .is_err()
-        );
-        assert!(append_authority_artifacts(
-            &mut members,
-            &serde_json::json!({"entries": [{}]}),
-            &authority_root
-        )
-        .is_err());
-        let missing_expected_result = serde_json::json!({
-            "entries": [{
-                "fixture_id": "INV-001",
-                "fixture_bytes_path": "fixtures/INV-001.json",
-                "fixture_bytes_digest": authority_digest,
-                "expected_result_path": "results/missing.json",
-                "expected_result_digest": "00".repeat(32)
-            }]
-        });
-        assert!(append_authority_artifacts(
-            &mut members,
-            &missing_expected_result,
-            &authority_root
-        )
-        .is_err());
-        assert!(append_authority_artifact(
-            &mut members,
-            &invalid_authority_entry,
-            "fixture_bytes_path",
-            "fixture_bytes_digest",
-            BundleMemberRoleV1::AuthorityFixture,
-            &authority_root
-        )
-        .is_err());
-        assert!(append_authority_artifact(
-            &mut members,
-            &serde_json::json!({}),
-            "fixture_bytes_path",
-            "fixture_bytes_digest",
-            BundleMemberRoleV1::AuthorityFixture,
-            &authority_root
-        )
-        .is_err());
-        assert!(append_authority_artifact(
-            &mut members,
-            &serde_json::json!({
-                "fixture_id": "INV-001",
-                "fixture_bytes_path": "../escape.json",
-                "fixture_bytes_digest": "00".repeat(32)
-            }),
-            "fixture_bytes_path",
-            "fixture_bytes_digest",
-            BundleMemberRoleV1::AuthorityFixture,
-            &authority_root
-        )
-        .is_err());
-        assert!(append_authority_artifact(
-            &mut members,
-            &serde_json::json!({
-                "fixture_id": "INV-001",
-                "fixture_bytes_path": "fixtures/missing.json",
-                "fixture_bytes_digest": "00".repeat(32)
-            }),
-            "fixture_bytes_path",
-            "fixture_bytes_digest",
-            BundleMemberRoleV1::AuthorityFixture,
-            &authority_root
-        )
-        .is_err());
-        assert!(append_authority_artifact(
-            &mut members,
-            &serde_json::json!({
-                "fixture_id": "INV-001",
-                "fixture_bytes_path": "fixtures/INV-001.json"
-            }),
-            "fixture_bytes_path",
-            "fixture_bytes_digest",
-            BundleMemberRoleV1::AuthorityFixture,
-            &authority_root
-        )
-        .is_err());
-        assert!(std::fs::remove_dir_all(authority_root).is_ok());
-        Ok(())
-    }
-
-    #[test]
-    fn candidate_authority_and_nested_file_seams() -> Result<(), Box<dyn Error>> {
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        let candidate = serde_json::json!({"lifecycle":"Candidate", "entries":[{}]});
-        let root = output_root("candidate-error");
-        assert!(bundle_inputs_with_authority(
-            &profile,
-            BundleModeV1::Local,
-            &serde_json::to_vec(&candidate)?,
-            Some(&root),
-        )
-        .is_err());
-        drop(std::fs::remove_dir_all(&root));
-
-        let nested_root = output_root("write-success");
-        write_materialized_file(&nested_root, "nested/file", b"bytes")?;
-        assert_eq!(std::fs::read(nested_root.join("nested/file"))?, b"bytes");
-        assert!(std::fs::remove_dir_all(nested_root).is_ok());
-        assert!(write_materialized_file(Path::new(""), Path::new(""), b"bytes").is_err());
-        assert!(canonical_fixture_input(ClaimLayerV1::ArtifactIntegrity, "unknown").is_err());
-        Ok(())
-    }
-
-    fn candidate_authority_inventory(root: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
-        let mut inventory: JsonValue = serde_json::from_slice(include_bytes!(
-            "../../../../fixtures/conformance/expected-authority/inventory.json"
-        ))?;
-        inventory["lifecycle"] = JsonValue::String("Candidate".to_owned());
-        let entries = inventory
-            .get_mut("entries")
-            .and_then(JsonValue::as_array_mut)
-            .ok_or("candidate inventory entries are missing")?;
-        for entry in entries {
-            let fixture_id = entry
-                .get("fixture_id")
-                .and_then(JsonValue::as_str)
-                .ok_or("candidate fixture id is missing")?
-                .to_owned();
-            let fixture_path = format!("fixtures/{fixture_id}.json");
-            let result_path = format!("results/{fixture_id}.json");
-            let fixture_bytes = serde_json::to_vec(&serde_json::json!({
-                "fixture_id": fixture_id,
-                "kind": "fixture"
-            }))?;
-            let result_bytes = serde_json::to_vec(&serde_json::json!({
-                "fixture_id": fixture_id,
-                "kind": "result"
-            }))?;
-            for (path, bytes, path_field, digest_field) in [
-                (
-                    fixture_path.as_str(),
-                    fixture_bytes.as_slice(),
-                    "fixture_bytes_path",
-                    "fixture_bytes_digest",
-                ),
-                (
-                    result_path.as_str(),
-                    result_bytes.as_slice(),
-                    "expected_result_path",
-                    "expected_result_digest",
-                ),
-            ] {
-                let path = root.join(path);
-                assert!(
-                    std::fs::create_dir_all(path.parent().ok_or("authority parent missing")?)
-                        .is_ok()
-                );
-                assert!(std::fs::write(&path, bytes).is_ok());
-                entry[path_field] =
-                    JsonValue::String(path.strip_prefix(root)?.display().to_string());
-                entry[digest_field] =
-                    JsonValue::String(pos_conformance::hex_digest(blake3::hash(bytes).as_bytes()));
-            }
-            entry["materialization_status"] = JsonValue::String("materialized".to_owned());
-        }
-        serde_json::to_vec(&inventory).map_err(Into::into)
-    }
-
-    #[test]
-    fn materializer_entrypoint_rejects_unbound_candidate_authority() -> Result<(), Box<dyn Error>> {
-        let authority_root = output_root("candidate-entrypoint-authority");
-        let inventory = candidate_authority_inventory(&authority_root)?;
-        let output = output_root("candidate-entrypoint-output");
-        let mut arguments = [
-            OsString::from("materialize"),
-            output.clone().into_os_string(),
-        ]
-        .into_iter();
-        let result = run_with_inventory_and_authority(
-            &mut arguments,
-            Ok(signing_key_hex()),
-            &inventory,
-            Some(&authority_root),
-        );
-        let output_removed = std::fs::remove_dir_all(output);
-        let authority_removed = std::fs::remove_dir_all(authority_root);
-        assert!(
-            result.is_err(),
-            "unbound candidate authority unexpectedly materialized: {:?}",
-            result.as_ref().err()
-        );
-        assert!(output_removed.is_ok());
-        assert!(authority_removed.is_ok());
-        Ok(())
-    }
-
-    #[test]
     fn helper_validation_seams_cover_materialization_errors() -> Result<(), Box<dyn Error>> {
         let candidate = br#"{"lifecycle":"Candidate"}"#;
         assert!(publication_lifecycles_from_bytes(candidate).is_err());
@@ -1901,8 +1529,8 @@ mod tests {
         .into_iter();
         assert!(run_with_inventory(&mut invalid_inventory, Ok(signing_key_hex()), b"{}").is_err());
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        assert!(bundle_inputs_with_authority(&profile, BundleModeV1::Local, b"{", None,).is_err());
-        assert!(bundle_inputs_with_authority(&profile, BundleModeV1::Local, b"{}", None,).is_err());
+        assert!(bundle_inputs_from_profile(&profile, BundleModeV1::Local, b"{").is_err());
+        assert!(bundle_inputs_from_profile(&profile, BundleModeV1::Local, b"{}").is_err());
         let mut invalid_input_profile = profile;
         invalid_input_profile.fixtures[0].case_id = "unknown".to_owned();
         assert!(bundle_inputs(&invalid_input_profile, BundleModeV1::Local).is_err());
@@ -1912,7 +1540,7 @@ mod tests {
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
         assert!(bundle_inputs(&invalid_expected, BundleModeV1::Local).is_err());
         let output = output_root("invalid-expected");
-        assert!(materialize_profile_from_profile(
+        assert!(materialize_profile_for_test(
             &output,
             &SigningKey::from_bytes(&[7; 32]),
             invalid_expected,
@@ -1926,7 +1554,7 @@ mod tests {
         let mut invalid_profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         invalid_profile.fixtures.clear();
         let output = output_root("invalid-profile");
-        assert!(materialize_profile_from_profile(
+        assert!(materialize_profile_for_test(
             &output,
             &SigningKey::from_bytes(&[7; 32]),
             invalid_profile,
@@ -1942,7 +1570,7 @@ mod tests {
             fixture.modes = vec![ExecutionModeV1::AirGapped];
         }
         let output = output_root("unsupported-mode");
-        assert!(materialize_profile_from_profile(
+        assert!(materialize_profile_for_test(
             &output,
             &SigningKey::from_bytes(&[7; 32]),
             unsupported_mode,
@@ -2003,41 +1631,15 @@ mod tests {
     }
 
     #[test]
-    fn canonical_records_bind_fixture_families_and_candidate_authority(
-    ) -> Result<(), Box<dyn Error>> {
+    fn canonical_records_bind_fixture_families() -> Result<(), Box<dyn Error>> {
         assert_canonical_profiles_bind_fixture_families()?;
-        let root = output_root("candidate-authority");
-        let inventory_bytes = candidate_authority_inventory(&root)?;
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        assert!(bundle_inputs_with_authority(
-            &profile,
-            BundleModeV1::Local,
-            &inventory_bytes,
-            None,
-        )
-        .is_err());
-        let (members, _) = bundle_inputs_with_authority(
-            &profile,
-            BundleModeV1::Local,
-            &inventory_bytes,
-            Some(&root),
-        )?;
-        assert_eq!(
-            members
-                .iter()
-                .filter(|member| member.role == BundleMemberRoleV1::AuthorityFixture)
-                .count(),
-            11
-        );
-        assert_eq!(
-            members
-                .iter()
-                .filter(|member| member.role == BundleMemberRoleV1::AuthorityExpectedResult)
-                .count(),
-            11
-        );
-        assert!(safe_authority_relative_path("../escape.json").is_err());
-        assert!(std::fs::remove_dir_all(root).is_ok());
+        let (members, expected) = bundle_inputs(&profile, BundleModeV1::Local)?;
+        assert_eq!(expected.len(), 7);
+        assert!(members.iter().all(|member| !matches!(
+            member.role,
+            BundleMemberRoleV1::AuthorityFixture | BundleMemberRoleV1::AuthorityExpectedResult
+        )));
         Ok(())
     }
 
@@ -2055,7 +1657,7 @@ mod tests {
             pos_conformance::hex_digest(&digest)
         )),)
         .is_ok());
-        assert!(materialize_profile_from_profile(
+        assert!(materialize_profile_for_test(
             &manifest_root,
             &signing_key,
             profile,
@@ -2084,7 +1686,7 @@ mod tests {
             pos_conformance::hex_digest(&digest)
         )),)
         .is_ok());
-        assert!(materialize_profile_from_profile(
+        assert!(materialize_profile_for_test(
             &bundle_root,
             &signing_key,
             profile,

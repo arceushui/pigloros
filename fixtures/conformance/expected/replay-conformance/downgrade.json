@@ -1,1 +1,7 @@
-{"claim_layer":"replay-conformance","case_id":"replay-conformance-downgrade","family":"downgrade","result":"not-authorized","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "replay-conformance",
+  "case_id": "replay-conformance-downgrade",
+  "family": "downgrade",
+  "result": "not-authorized",
+  "status": "pending"
+}

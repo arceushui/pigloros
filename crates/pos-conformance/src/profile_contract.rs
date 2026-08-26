@@ -198,6 +198,11 @@ pub struct CapabilityPolicyV1 {
 }
 
 /// Required licence and supply-chain provenance for a fixture.
+///
+/// Draft-only profiles may use domain-separated metadata bindings for the
+/// source, build, and publication-review fields. Those bindings identify the
+/// records used to construct the draft; they are not attestations that those
+/// activities or any conformance execution have been independently verified.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureProvenanceV1 {
     pub licence_id: String,
@@ -1404,11 +1409,15 @@ fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> 
         return false;
     }
     match &fixture.expected {
-        ExpectedResultV1::CanonicalBytes { digest, .. } => {
-            case.verification_outcome == VerificationOutcomeV1::VerifiedExact
-                && case.expected_digest == Some(*digest)
-                && case.actual_digest == Some(*digest)
-        }
+        ExpectedResultV1::CanonicalBytes { digest, .. } => match case.verification_outcome {
+            VerificationOutcomeV1::VerifiedExact => {
+                case.expected_digest == Some(*digest) && case.actual_digest == Some(*digest)
+            }
+            VerificationOutcomeV1::UnverifiableArtifactsMissing => {
+                case.expected_digest.is_none() && case.actual_digest.is_none()
+            }
+            _ => false,
+        },
         // The preceding identity binding already requires both recorded errors
         // to equal the fixture's typed verification error.  Keeping that
         // authoritative comparison in one place avoids a redundant predicate
@@ -1638,17 +1647,23 @@ fn validate_fixture_verification_outcome(
         fixture.expected_verification_error,
     ) {
         (ExpectedResultV1::CanonicalBytes { .. }, VerificationOutcomeV1::VerifiedExact, None)
+        | (
+            ExpectedResultV1::CanonicalBytes { .. },
+            VerificationOutcomeV1::UnverifiableArtifactsMissing,
+            Some(SafeErrorCodeV1::ProvenanceMissing),
+        )
         | (ExpectedResultV1::AllowedDivergence { .. }, VerificationOutcomeV1::Diverged, None) => {
             Ok(())
         }
         (ExpectedResultV1::TypedFailure(error), outcome, Some(expected_error)) => {
             if *error == expected_error {
                 match outcome {
-                    VerificationOutcomeV1::VerifiedExact | VerificationOutcomeV1::Diverged => {
+                    VerificationOutcomeV1::VerifiedExact
+                    | VerificationOutcomeV1::Diverged
+                    | VerificationOutcomeV1::UnverifiableArtifactsMissing => {
                         Err(ConformanceContractError::ExpectedResultMissing)
                     }
                     VerificationOutcomeV1::InvalidManifest
-                    | VerificationOutcomeV1::UnverifiableArtifactsMissing
                     | VerificationOutcomeV1::IncompatibleProfile
                     | VerificationOutcomeV1::ResourceLimitExceeded => Ok(()),
                 }
@@ -1879,13 +1894,13 @@ fn encode_expected(value: &ExpectedResultV1) -> Value {
     }
 }
 
-/// Encode a typed or classified expected result as canonical public bytes.
+/// Encode a typed or classified expected result as canonical bundle bytes.
 ///
 /// # Errors
 ///
 /// Returns [`ConformanceContractError::InvalidEncoding`] when canonical
 /// encoding fails.
-pub fn expected_result_bytes(
+pub(crate) fn expected_result_bytes(
     value: &ExpectedResultV1,
 ) -> Result<Vec<u8>, ConformanceContractError> {
     canonical::encode(&encode_expected(value))
@@ -5477,6 +5492,23 @@ mod tests {
         let fixture = &profile().fixtures[0];
         let base = case_outcome_record(ExecutionModeV1::Local);
         assert!(case_matches_fixture(&base, fixture));
+
+        let mut pending_fixture = fixture.clone();
+        pending_fixture.expected_verification_outcome =
+            VerificationOutcomeV1::UnverifiableArtifactsMissing;
+        pending_fixture.expected_verification_error = Some(SafeErrorCodeV1::ProvenanceMissing);
+        pending_fixture.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
+        pending_fixture.redaction_state = RedactionStateV1::EvidenceMissing;
+        let mut pending = base.clone();
+        pending.fixture_digest = fixture_digest(&pending_fixture);
+        pending.expected_error = Some(SafeErrorCodeV1::ProvenanceMissing);
+        pending.actual_error = Some(SafeErrorCodeV1::ProvenanceMissing);
+        pending.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing;
+        pending.redaction_state = RedactionStateV1::EvidenceMissing;
+        pending.verification_outcome = VerificationOutcomeV1::UnverifiableArtifactsMissing;
+        pending.expected_digest = None;
+        pending.actual_digest = None;
+        assert!(case_matches_fixture(&pending, &pending_fixture));
 
         let mut changed = base.clone();
         changed.case_id.push('x');

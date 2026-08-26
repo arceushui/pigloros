@@ -1,1 +1,7 @@
-{"claim_layer":"knowledge-non-interference","case_id":"knowledge-non-interference-negative","family":"negative","result":"rejected","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "knowledge-non-interference",
+  "case_id": "knowledge-non-interference-negative",
+  "family": "negative",
+  "result": "rejected",
+  "status": "pending"
+}

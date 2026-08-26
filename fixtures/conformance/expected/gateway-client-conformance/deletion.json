@@ -1,1 +1,7 @@
-{"claim_layer":"gateway-client-conformance","case_id":"gateway-client-conformance-deletion","family":"deletion","result":"destroyed","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-deletion",
+  "family": "deletion",
+  "result": "destroyed",
+  "status": "pending"
+}

@@ -85,15 +85,33 @@ if ((${#archive_files[@]} == 0)); then
 fi
 cargo run -p pos-conformance --bin verify-conformance-bundle --locked -- "${archive_files[@]}"
 
-(cd "${first_output}" && sha256sum --tag "${materialized_files[@]#${first_output}/}" > SHA256SUMS)
-cp "${source_inventory}" "${first_output}/SOURCE-SHA256SUMS"
-{
-  printf 'source_sha256=%s\n' "${source_digest}"
-  printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
-} > "${first_output}/SOURCE-BINDING"
+write_source_binding() {
+  local root=$1
+  cp "${source_inventory}" "${root}/SOURCE-SHA256SUMS"
+  {
+    printf 'source_sha256=%s\n' "${source_digest}"
+    printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
+  } > "${root}/SOURCE-BINDING"
+}
+
+write_output_inventory() {
+  local root=$1
+  (
+    cd "${root}"
+    find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > SHA256SUMS
+    sha256sum --check --strict SHA256SUMS
+  )
+}
+
+for output in "${first_output}" "${second_output}" "${clean_output}"; do
+  write_source_binding "${output}"
+  write_output_inventory "${output}"
+done
+diff -rq "${first_output}" "${second_output}"
+diff -rq "${first_output}" "${clean_output}"
 mv --no-clobber --no-target-directory "${first_output}" "${output_root}"
 if [[ -e "${first_output}" ]]; then
   echo "Draft conformance output appeared during materialization: ${output_root}" >&2
   exit 1
 fi
-echo "materialized ${#materialized_files[@]} signed Draft conformance files under ${output_root}"
+echo "materialized ${#materialized_files[@]} signed Draft conformance files plus integrity records under ${output_root}"

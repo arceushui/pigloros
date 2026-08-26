@@ -1,1 +1,7 @@
-{"claim_layer":"empirical-evaluation","case_id":"empirical-evaluation-negative","family":"negative","result":"rejected","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "empirical-evaluation",
+  "case_id": "empirical-evaluation-negative",
+  "family": "negative",
+  "result": "rejected",
+  "status": "pending"
+}

@@ -25,8 +25,6 @@ pub use bundle_contract::{
     BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
-#[doc(hidden)]
-pub use profile_contract::expected_result_bytes;
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
     EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,

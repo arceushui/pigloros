@@ -1,1 +1,7 @@
-{"claim_layer":"gateway-client-conformance","case_id":"gateway-client-conformance-malformed","family":"malformed","result":"typed-failure","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-malformed",
+  "family": "malformed",
+  "result": "typed-failure",
+  "status": "pending"
+}

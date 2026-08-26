@@ -1,1 +1,7 @@
-{"claim_layer":"gateway-client-conformance","case_id":"gateway-client-conformance-negative","family":"negative","result":"rejected","verification":"VerifiedExact","source":"independent-public-record"}
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-negative",
+  "family": "negative",
+  "result": "rejected",
+  "status": "pending"
+}
