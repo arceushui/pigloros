@@ -1,4 +1,4 @@
-# Retained materialized conformance publications
+# Draft materialized conformance bundles
 
 Each materialization is written below this directory at the SHA-256 address of
 the checked-in `fixtures/conformance/SHA256SUMS` source inventory:
@@ -7,14 +7,11 @@ the checked-in `fixtures/conformance/SHA256SUMS` source inventory:
 fixtures/conformance/published/<source-inventory-sha256>/
 ```
 
-The materializer refuses to overwrite an existing publication directory. A
-publication contains all seven claim layers and the lifecycle permitted by
-the checked-in authority inventory, with paired Local/Air-Gapped manifests
-and signed CFB1 archives plus `SHA256SUMS`, `RETENTION.json`, and
-`IMPACT-ANALYSIS.md`. It also carries the checked-in source inventory as
-`SOURCE-SHA256SUMS` and a `SOURCE-BINDING` record containing that source
-address and revision. The materializer refuses to overwrite an existing
-source-addressed publication.
+The Draft materializer emits all seven claim layers with paired
+Local/Air-Gapped manifests and signed CFB1 archives. These are CI transport
+artifacts only; the materializer refuses to overwrite an existing output
+directory but does not claim that the output is a retained Candidate
+publication. Candidate publication is a later #198 governance operation.
 
 Published archives are signed with `PIGLOROS_CONFORMANCE_SIGNING_KEY`, supplied
 only by the materialization environment. The repository contains no publication
@@ -27,24 +24,12 @@ must retain every source-addressed publication for at least 24 months and the
 latest two Stable major versions, whichever is longer. The source and output
 SHA256SUMS files make that handoff verifiable.
 
-The release owner must copy the complete source-addressed directory, verify
-the source and output SHA256SUMS inventories plus the source BLAKE3SUMS
-inventory after transfer, and record the immutable object store or release URL
-before treating publication as durable. GitHub Actions retention alone is
-never sufficient: the seven-day pull-request artifact and the ninety-day
-trusted artifact are recovery aids only. `RETENTION.json` records the minimum
-retention policy; `IMPACT-ANALYSIS.md` records the replacement obligations for
-corrections.
-
 The bundled SBOM is scoped to this data-only publication. It deliberately
 does not claim to enumerate the CI runner, Rust workspace, or materializer
 toolchain; those are checked independently by repository CI and are not
 shipped inside the CFB1 archive.
 
-Candidate authority records are bundled as typed immutable members only after
-the inventory reaches Candidate with concrete bytes and digests. Every
-executed Candidate coordinate identifies its authority fixture and authority
-result digest, and carries a separately hashed coordinate-specific expected
-result; merely reusing a digest that happens to occur in the archive is not
-sufficient. The materializer's clean-checkout reproducibility
-check protects the publication from same-working-tree-only evidence.
+No authority fixture/result records are bundled while the inventory is Draft.
+The 192-coordinate execution records and Candidate governance artifacts must
+come from their owning workflows (#193 and #198), not from this Draft
+packaging job.

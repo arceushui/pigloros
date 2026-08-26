@@ -19,7 +19,7 @@ source_digest="$(sha256sum "${source_inventory}" | awk '{print $1}')"
 publication_id="${PIGLOROS_CONFORMANCE_PUBLICATION_ID:-${source_digest}}"
 output_root="${1:-fixtures/conformance/published/${publication_id}}"
 if [[ -e "${output_root}" ]]; then
-  echo "refusing to overwrite retained conformance publication: ${output_root}" >&2
+  echo "refusing to overwrite existing Draft conformance output: ${output_root}" >&2
   exit 1
 fi
 publication_parent="$(dirname "${output_root}")"
@@ -34,32 +34,6 @@ PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
 PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
   cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${second_output}"
 
-write_publication_records() {
-  local root="$1"
-  printf '%s\n' \
-    "{\"record_version\":1,\"source_inventory_sha256\":\"${source_digest}\",\"immutable_publication_address\":\"published/${publication_id}\",\"retention_authority\":\"release-or-immutable-object-store\",\"minimum_retention_days\":730,\"stable_major_versions\":2,\"immutable_source_address\":true,\"replacement_required_for_corrections\":true,\"impact_analysis_required_for_corrections\":true}" \
-    > "${root}/RETENTION.json"
-  printf '%s\n' \
-    '# Conformance publication impact record' \
-    '' \
-    "This source-addressed publication is an immutable Candidate evidence set for source ${source_digest}." \
-    'Corrections must publish a new source address, retain this address, and attach' \
-    'a reviewed impact analysis before a replacement can be treated as authoritative.' \
-    > "${root}/IMPACT-ANALYSIS.md"
-  jq -e \
-    --arg source_digest "${source_digest}" \
-    --arg publication_address "published/${publication_id}" \
-    '.record_version == 1 and
-      .source_inventory_sha256 == $source_digest and
-      .immutable_publication_address == $publication_address and
-      .immutable_source_address == true and
-      .replacement_required_for_corrections == true and
-      .impact_analysis_required_for_corrections == true' \
-    "${root}/RETENTION.json" >/dev/null
-}
-
-write_publication_records "${first_output}"
-write_publication_records "${second_output}"
 diff -rq "${first_output}" "${second_output}"
 
 clean_checkout="${temporary_root}/clean-checkout"
@@ -72,7 +46,6 @@ bash "${clean_checkout}/scripts/verify-conformance-fixtures.sh" \
   CARGO_TARGET_DIR="${temporary_root}/clean-target" \
   PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
   cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${clean_output}")
-write_publication_records "${clean_output}"
 diff -rq "${first_output}" "${clean_output}"
 
 mapfile -t materialized_files < <(find "${first_output}" -type f -print | sort)
@@ -87,7 +60,7 @@ mapfile -t archive_files < <(
 )
 authority_lifecycle="$(jq -r '.lifecycle' fixtures/conformance/expected-authority/inventory.json)"
 case "${authority_lifecycle}" in
-  Draft|Candidate) lifecycle_count=1 ;;
+  Draft) lifecycle_count=1 ;;
   *)
     echo "unsupported authority inventory lifecycle: ${authority_lifecycle}" >&2
     exit 1
@@ -96,7 +69,7 @@ esac
 expected_profile_count=$((7 * lifecycle_count))
 expected_manifest_count=$((7 * lifecycle_count * 2))
 expected_archive_count=$((7 * lifecycle_count * 2))
-expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count + 2))
+expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count))
 if ((
   ${#profile_files[@]} != expected_profile_count ||
   ${#manifest_files[@]} != expected_manifest_count ||
@@ -120,7 +93,7 @@ cp "${source_inventory}" "${first_output}/SOURCE-SHA256SUMS"
 } > "${first_output}/SOURCE-BINDING"
 mv --no-clobber --no-target-directory "${first_output}" "${output_root}"
 if [[ -e "${first_output}" ]]; then
-  echo "retained conformance publication appeared during materialization: ${output_root}" >&2
+  echo "Draft conformance output appeared during materialization: ${output_root}" >&2
   exit 1
 fi
-echo "materialized ${#materialized_files[@]} signed conformance files under retained path ${output_root}"
+echo "materialized ${#materialized_files[@]} signed Draft conformance files under ${output_root}"

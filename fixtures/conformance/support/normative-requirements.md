@@ -40,8 +40,9 @@ sizes, BLAKE3 digests, canonical ordering, archive nesting, expansion, and
 total-resource limits are checked before a member is loaded.
 
 The #172 inventory is a separate authority handoff. Its declared SHA-256
-inventory digest is checked against the actual inventory bytes; each concrete
-fixture and expected-result digest is checked with BLAKE3 before Candidate.
+inventory digest is checked against the actual inventory bytes; concrete
+fixture and expected-result bytes are supplied by the owning evidence workflow
+before Candidate.
 The ADR-059 matrix must contain the canonical 12 row IDs, four variants, four
 modes, 192 ordered case identities, and explicit equality declarations. Every
 Candidate coordinate carries an exact JSON expected-result record and its own
@@ -53,6 +54,7 @@ a passing result.
 
 Materialization and verification consume public fixture bytes only. They must
 not call the implementation under test, private Rust modules, a live service,
-or hidden expected output as an oracle. Publication is immutable and addressed
-by its source inventory digest; corrections publish a replacement digest and
-retain the old record and impact information.
+or hidden expected output as an oracle. Draft packaging is immutable per output
+directory and addressed by its source inventory digest. Candidate publication,
+correction, and retention records are supplied by the #198 governance
+workflow.

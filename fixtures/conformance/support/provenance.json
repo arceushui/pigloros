@@ -5,17 +5,17 @@
   "authority_inventory": {
     "digest_algorithm": "SHA-256",
     "path": "expected-authority/inventory.json",
-    "sha256_digest": "9ad1ed560599169407a39281bc4986a77115014f0b226e122a5c8a34165438fe",
-    "status": "Candidate"
+    "sha256_digest": "9411e315c91698c4b5dc9d40a2823f9a784923e48e2d652c17c9f9e4a479bcc1",
+    "status": "Draft"
   },
   "adr_059_execution_matrix": {
     "digest_algorithm": "BLAKE3-256",
-    "blake3_digest": "ae536df3381af8b166b906471d1764b07c8691775c37710cd5d8638aa51a43c1",
-    "executed_case_count": 192,
+    "blake3_digest": "3eee92bb8eaeb5e2bc8f0eff5b33e36532caa278f2b4139bbd50250da236a660",
+    "executed_case_count": 0,
     "path": "matrix/execution-matrix.json",
-    "status": "Candidate"
+    "status": "Draft"
   },
-  "candidate_status": "approved",
-  "deletion_review": "approved",
-  "secret_scan": "clean"
+  "candidate_status": "pending",
+  "deletion_review": "pending",
+  "secret_scan": "pending"
 }

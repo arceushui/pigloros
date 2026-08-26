@@ -22,16 +22,15 @@ authority_path="${fixture_root}/expected-authority/inventory.json"
 
 matrix_lifecycle="$(jq -r '.lifecycle' "${matrix_path}")"
 case "${matrix_lifecycle}" in
-  Draft|Candidate) ;;
+  Draft) ;;
   *)
     echo "invalid ADR-059 matrix lifecycle: ${matrix_lifecycle}" >&2
     exit 1
     ;;
 esac
 
-authority_result_bindings="$(jq -c '[.entries[] | {fixture_id, digest: .expected_result_digest}]' "${authority_path}")"
 jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
-  --argjson authority_result_bindings "${authority_result_bindings}" '
+  '
   . as $root |
   $root.magic == "NIM1" and $root.version == 1 and $root.lifecycle == $matrix_lifecycle and
   $root.row_count == 12 and $root.variant_count == 4 and $root.mode_count == 4 and
@@ -54,25 +53,15 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
   all($root.rows[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variants == ["S", "D", "W", "C"]) and
     (.modes == ["L", "A", "R", "F"]) and .case_count == 16 and
-    .executed_case_count == (if $matrix_lifecycle == "Candidate" then 16 else 0 end)) and
+    .executed_case_count == 0) and
   all($root.cases[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variant | IN("S", "D", "W", "C")) and
     (.mode | IN("L", "A", "R", "F")) and
     .case_id == ("\(.fixture_id)-\(.variant)-\(.mode)") and
-    (if $matrix_lifecycle == "Candidate" then
-      .executed == true and
-      (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
-      (.authority_fixture_id | type == "string" and length > 0) and
-      (.authority_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
-      (.authority_fixture_id as $fixture_id |
-        .authority_result_digest as $digest |
-        ($authority_result_bindings |
-          any(.[]; .fixture_id == $fixture_id and .digest == $digest))) and
-      (.expected_result | type == "string" and length > 0)
-    else
-      .executed == false and .expected_result_digest == null
-    end))
-  and (if $matrix_lifecycle == "Candidate" then .executed_case_count == 192 else true end)
+    .executed == false and .expected_result_digest == null and
+    .authority_fixture_id == null and .authority_result_digest == null and
+    .expected_result == null)
+  and .executed_case_count == 0
   and all($root.rows[]; . as $row | ([$root.cases[] | select(.fixture_id == $row.fixture_id)] | length == 16))
 ' "${matrix_path}" >/dev/null || {
   echo "invalid ADR-059 matrix inventory" >&2
@@ -81,7 +70,7 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
 
 jq -e '
   .magic == "W8H1" and .version == 1 and
-  (.lifecycle == "Draft" or .lifecycle == "Candidate") and
+  .lifecycle == "Draft" and
   .digest_algorithm == "BLAKE3-256" and
   (.entries | length == 11) and
   ([.entries[].fixture_id] == [
@@ -89,21 +78,11 @@ jq -e '
     "INV-003", "RES-001", "LIVE-001", "ERA-001", "SEC-001"
   ]) and
   ([.entries[].fixture_id] | unique | length == 11) and
-  if .lifecycle == "Draft" then
-    all(.entries[];
-      (.fixture_bytes_path == null) and (.expected_result_path == null) and
-      (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
-      .materialization_status == "pending"
-    )
-  else
-    all(.entries[];
-      (.fixture_bytes_path | type == "string") and
-      (.expected_result_path | type == "string") and
-      (.fixture_bytes_digest | type == "string" and test("^[0-9a-f]{64}$")) and
-      (.expected_result_digest | type == "string" and test("^[0-9a-f]{64}$")) and
-      .materialization_status == "materialized"
-    )
-  end
+  all(.entries[];
+    (.fixture_bytes_path == null) and (.expected_result_path == null) and
+    (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
+    .materialization_status == "pending"
+  )
 ' "${authority_path}" >/dev/null || {
   echo "invalid #172 expected-authority inventory lifecycle or entries" >&2
   exit 1
@@ -114,71 +93,8 @@ if [[ "${authority_lifecycle}" != "${matrix_lifecycle}" ]]; then
   echo "authority inventory and ADR-059 matrix lifecycles disagree" >&2
   exit 1
 fi
-if [[ "${authority_lifecycle}" == "Candidate" ]]; then
-  mapfile -t authority_files < <(
-    jq -r '.entries[] | .fixture_bytes_path, .expected_result_path' "${authority_path}"
-  )
-  if (( ${#authority_files[@]} != 22 )); then
-    echo "expected eleven authority fixture/result pairs" >&2
-    exit 1
-  fi
-  for authority_file in "${authority_files[@]}"; do
-    [[ -s "${fixture_root}/${authority_file}" ]] || {
-      echo "missing authority artifact: ${fixture_root}/${authority_file}" >&2
-      exit 1
-    }
-  done
-fi
-
 authority_inventory_sha256="$(sha256sum "${authority_path}" | awk '{print $1}')"
 matrix_blake3_digest="$(b3sum "${matrix_path}" | awk '{print $1}')"
-if [[ "${authority_lifecycle}" == "Candidate" ]]; then
-while IFS=$'\t' read -r fixture_id fixture_path fixture_digest result_path result_digest _expected_outcome; do
-  for value in "${fixture_path}" "${result_path}"; do
-    [[ "${value}" != /* && "${value}" != *".."* ]] || {
-      echo "unsafe authority artifact path for ${fixture_id}: ${value}" >&2
-      exit 1
-    }
-  done
-  actual_fixture_digest="$(b3sum "${fixture_root}/${fixture_path}" | awk '{print $1}')"
-  actual_result_digest="$(b3sum "${fixture_root}/${result_path}" | awk '{print $1}')"
-  [[ "${actual_fixture_digest}" == "${fixture_digest}" ]] || {
-    echo "BLAKE3 mismatch for authority fixture ${fixture_id}" >&2
-    exit 1
-  }
-  [[ "${actual_result_digest}" == "${result_digest}" ]] || {
-    echo "BLAKE3 mismatch for authority result ${fixture_id}" >&2
-    exit 1
-  }
-  jq -e --arg fixture_id "${fixture_id}" \
-    '.fixture_id == $fixture_id' \
-    "${fixture_root}/${result_path}" >/dev/null || {
-    echo "authority result fixture identity disagrees with inventory for ${fixture_id}" >&2
-    exit 1
-  }
-done < <(
-  jq -r '.entries[] | [
-    .fixture_id,
-    .fixture_bytes_path,
-    .fixture_bytes_digest,
-    .expected_result_path,
-    .expected_result_digest,
-    .expected_outcome
-  ] | @tsv' "${authority_path}"
-)
-fi
-
-if [[ "${matrix_lifecycle}" == "Candidate" ]]; then
-  while IFS=$'\t' read -r case_id expected_digest expected_result; do
-    actual_digest="$(printf '%s' "${expected_result}" | b3sum | awk '{print $1}')"
-    [[ "${actual_digest}" == "${expected_digest}" ]] || {
-      echo "Candidate coordinate result digest is incorrect for ${case_id}" >&2
-      exit 1
-    }
-  done < <(
-    jq -r '.cases[] | [.case_id, .expected_result_digest, .expected_result] | @tsv' "${matrix_path}"
-  )
-fi
 
 mapfile -t inputs < <(find "${fixture_root}/inputs" -type f -print | sort)
 mapfile -t expected < <(find "${fixture_root}/expected" -type f -print | sort)
@@ -276,9 +192,9 @@ jq -e \
   --arg authority_lifecycle "${authority_lifecycle}" \
   --arg matrix_lifecycle "${matrix_lifecycle}" \
   --arg matrix_blake3 "${matrix_blake3_digest}" '
-  .candidate_status == (if $authority_lifecycle == "Candidate" then "approved" else "pending" end) and
-  .deletion_review == (if $authority_lifecycle == "Candidate" then "approved" else "pending" end) and
-  .secret_scan == "clean" and
+  .candidate_status == "pending" and
+  .deletion_review == "pending" and
+  .secret_scan == "pending" and
   .authority_inventory.path == "expected-authority/inventory.json" and
   .authority_inventory.digest_algorithm == "SHA-256" and
   .authority_inventory.status == $authority_lifecycle and
@@ -286,9 +202,9 @@ jq -e \
   .adr_059_execution_matrix.digest_algorithm == "BLAKE3-256" and
   .adr_059_execution_matrix.blake3_digest == $matrix_blake3 and
   .adr_059_execution_matrix.status == $matrix_lifecycle and
-  .adr_059_execution_matrix.executed_case_count == (if $matrix_lifecycle == "Candidate" then 192 else 0 end)
+  .adr_059_execution_matrix.executed_case_count == 0
 ' "${fixture_root}/support/provenance.json" >/dev/null || {
-  echo "Candidate publication review evidence is missing or not approved" >&2
+  echo "Draft authority handoff metadata is invalid" >&2
   exit 1
 }
 
@@ -307,7 +223,7 @@ mapfile -t blake3_paths < <(
 )
 mapfile -t expected_blake3_paths < <(
   cd "${fixture_root}" &&
-    find authority-fixtures authority-results expected-authority expected inputs matrix profiles support \
+    find expected-authority expected inputs matrix profiles support \
       -type f -printf '%p\n' | sort
 )
 if ! diff -u \
@@ -332,11 +248,9 @@ publishable_roots=(
   "${fixture_root}/profiles"
   "${fixture_root}/matrix"
   "${fixture_root}/expected-authority"
-  "${fixture_root}/authority-fixtures"
-  "${fixture_root}/authority-results"
   "${fixture_root}/support"
 )
-secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|(private[ _-]?key|secret|credential|password)[[:space:]]*[:=][[:space:]]*[^[:space:]}]+|(AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}'
+secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|"(api[_-]?key|apikey|password|credential|credentials|access[_-]?token|refresh[_-]?token|authorization|bearer[_-]?token|client[_-]?secret|subject[_-]?secret|private[_-]?key|privatekey|secret)"[[:space:]]*:[[:space:]]*"[^"[:space:]]+"|(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{16,}|(AKIA|ASIA)[0-9A-Z]{16}|(gh[pousr]_|github_pat_|glpat-|xox[baprs]-|sk_(live|test)_|AIza)[A-Za-z0-9._-]{16,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
 if grep -R -n -i -I -E -- "${secret_pattern}" "${publishable_roots[@]}"; then
   echo "forbidden secret material found in public conformance fixtures" >&2
   exit 1

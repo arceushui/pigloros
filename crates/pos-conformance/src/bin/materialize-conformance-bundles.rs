@@ -1,15 +1,13 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 use ed25519_dalek::SigningKey;
-#[cfg(test)]
-use pos_conformance::ConformanceBundlePairV1;
 use pos_conformance::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
-    ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1, EvaluatorProtocolV1,
-    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
-    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1, RedactionStateV1,
-    ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
+    EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
+    FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
+    RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -69,6 +67,13 @@ struct FixtureContext {
     sbom_digest: [u8; 32],
     limitations_digest: [u8; 32],
     normative_spec_digest: [u8; 32],
+}
+
+struct MaterializationContext<'a> {
+    output_root: &'a Path,
+    signing_key: &'a SigningKey,
+    inventory_bytes: &'a [u8],
+    authority_root: Option<&'a Path>,
 }
 
 type CanonicalFixtureBytes = (&'static [u8], &'static [u8]);
@@ -286,6 +291,78 @@ const CANONICAL_FIXTURE_BYTES: [[CanonicalFixtureBytes; 7]; 7] = [
     ],
 ];
 
+struct LayerSpec {
+    claim_layer: ClaimLayerV1,
+    name: &'static str,
+    profile_id: &'static str,
+    subject_adapter: SubjectAdapterKindV1,
+    profile_record: &'static [u8],
+    fixture_bytes: &'static [CanonicalFixtureBytes; 7],
+}
+
+const LAYER_SPECS: [LayerSpec; 7] = [
+    LayerSpec {
+        claim_layer: ClaimLayerV1::ArtifactIntegrity,
+        name: "artifact-integrity",
+        profile_id: "pigloros.w8.artifact-integrity.1.0.0",
+        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+        profile_record: PROFILE_RECORDS[0].0,
+        fixture_bytes: &CANONICAL_FIXTURE_BYTES[0],
+    },
+    LayerSpec {
+        claim_layer: ClaimLayerV1::ReplayConformance,
+        name: "replay-conformance",
+        profile_id: "pigloros.w8.replay-conformance.1.0.0",
+        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+        profile_record: PROFILE_RECORDS[1].0,
+        fixture_bytes: &CANONICAL_FIXTURE_BYTES[1],
+    },
+    LayerSpec {
+        claim_layer: ClaimLayerV1::KnowledgeNonInterference,
+        name: "knowledge-non-interference",
+        profile_id: "pigloros.w8.knowledge-non-interference.1.0.0",
+        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+        profile_record: PROFILE_RECORDS[2].0,
+        fixture_bytes: &CANONICAL_FIXTURE_BYTES[2],
+    },
+    LayerSpec {
+        claim_layer: ClaimLayerV1::GatewayClientConformance,
+        name: "gateway-client-conformance",
+        profile_id: "pigloros.w8.gateway-client-conformance.1.0.0",
+        subject_adapter: SubjectAdapterKindV1::PublicGatewayProtocol,
+        profile_record: PROFILE_RECORDS[3].0,
+        fixture_bytes: &CANONICAL_FIXTURE_BYTES[3],
+    },
+    LayerSpec {
+        claim_layer: ClaimLayerV1::PluginConformance,
+        name: "plugin-conformance",
+        profile_id: "pigloros.w8.plugin-conformance.1.0.0",
+        subject_adapter: SubjectAdapterKindV1::PublicPluginProtocol,
+        profile_record: PROFILE_RECORDS[4].0,
+        fixture_bytes: &CANONICAL_FIXTURE_BYTES[4],
+    },
+    LayerSpec {
+        claim_layer: ClaimLayerV1::MetricConformance,
+        name: "metric-conformance",
+        profile_id: "pigloros.w8.metric-conformance.1.0.0",
+        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+        profile_record: PROFILE_RECORDS[5].0,
+        fixture_bytes: &CANONICAL_FIXTURE_BYTES[5],
+    },
+    LayerSpec {
+        claim_layer: ClaimLayerV1::EmpiricalEvaluation,
+        name: "empirical-evaluation",
+        profile_id: "pigloros.w8.empirical-evaluation.1.0.0",
+        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+        profile_record: PROFILE_RECORDS[6].0,
+        fixture_bytes: &CANONICAL_FIXTURE_BYTES[6],
+    },
+];
+
+fn layer_spec(claim_layer: ClaimLayerV1) -> &'static LayerSpec {
+    &LAYER_SPECS[usize::from(claim_layer_code(claim_layer))]
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     run(
         std::env::args_os(),
@@ -333,33 +410,15 @@ fn run_with_inventory_and_authority(
     }
     let signing_key = signing_key_from_encoded(encoded_signing_key)?;
     let lifecycles = publication_lifecycles_from_bytes(inventory_bytes)?;
-    let layers = [
-        (ClaimLayerV1::ArtifactIntegrity, "artifact-integrity"),
-        (ClaimLayerV1::ReplayConformance, "replay-conformance"),
-        (
-            ClaimLayerV1::KnowledgeNonInterference,
-            "knowledge-non-interference",
-        ),
-        (
-            ClaimLayerV1::GatewayClientConformance,
-            "gateway-client-conformance",
-        ),
-        (ClaimLayerV1::PluginConformance, "plugin-conformance"),
-        (ClaimLayerV1::MetricConformance, "metric-conformance"),
-        (ClaimLayerV1::EmpiricalEvaluation, "empirical-evaluation"),
-    ];
-    for (claim_layer, layer_name) in layers {
+    let context = MaterializationContext {
+        output_root: &output_root,
+        signing_key: &signing_key,
+        inventory_bytes,
+        authority_root,
+    };
+    for spec in &LAYER_SPECS {
         for (lifecycle, lifecycle_name) in &lifecycles {
-            materialize_profile_with_inventory(
-                &output_root,
-                &signing_key,
-                claim_layer,
-                layer_name,
-                *lifecycle,
-                lifecycle_name,
-                inventory_bytes,
-                authority_root,
-            )?;
+            materialize_profile_with_inventory(&context, spec, *lifecycle, lifecycle_name)?;
         }
     }
     Ok(())
@@ -384,31 +443,26 @@ fn publication_lifecycles_from_bytes(
         .ok_or("authority inventory lifecycle is missing")?
     {
         "Draft" => Ok(vec![(ProfileLifecycleV1::Draft, "draft")]),
-        "Candidate" => Ok(vec![(ProfileLifecycleV1::Candidate, "candidate")]),
+        "Candidate" => {
+            Err("Candidate materialization is owned by the #198 governance workflow".into())
+        }
         _ => Err("unsupported authority inventory lifecycle".into()),
     }
 }
 
 fn materialize_profile_with_inventory(
-    output_root: &Path,
-    signing_key: &SigningKey,
-    claim_layer: ClaimLayerV1,
-    layer_name: &str,
+    context: &MaterializationContext<'_>,
+    layer: &LayerSpec,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
-    inventory_bytes: &[u8],
-    authority_root: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
-    profile_for_claim_layer(claim_layer).and_then(|profile| {
+    profile_for_claim_layer(layer.claim_layer).and_then(|profile| {
         materialize_profile_from_profile_with_authority(
-            output_root,
-            signing_key,
+            context,
             profile,
             lifecycle,
             lifecycle_name,
-            layer_name,
-            inventory_bytes,
-            authority_root,
+            layer.name,
         )
     })
 }
@@ -422,59 +476,66 @@ fn materialize_profile_from_profile(
     lifecycle_name: &str,
     layer_name: &str,
 ) -> Result<(), Box<dyn Error>> {
-    materialize_profile_from_profile_with_authority(
+    let context = MaterializationContext {
         output_root,
         signing_key,
+        inventory_bytes: include_bytes!(
+            "../../../../fixtures/conformance/expected-authority/inventory.json"
+        ),
+        authority_root: Some(Path::new(CANONICAL_AUTHORITY_ROOT)),
+    };
+    materialize_profile_from_profile_with_authority(
+        &context,
         profile,
         lifecycle,
         lifecycle_name,
         layer_name,
-        include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
-        Some(Path::new(CANONICAL_AUTHORITY_ROOT)),
     )
 }
 
 fn materialize_profile_from_profile_with_authority(
-    output_root: &Path,
-    signing_key: &SigningKey,
+    context: &MaterializationContext<'_>,
     mut profile: ConformanceProfileV1,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
     layer_name: &str,
-    inventory_bytes: &[u8],
-    authority_root: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     profile.lifecycle = lifecycle;
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
     let prefix = format!("{layer_name}/{lifecycle_name}");
     write_materialized_file(
-        output_root,
+        context.output_root,
         format!(
             "{prefix}/CPF1-{}.cbor",
             pos_conformance::hex_digest(&profile.profile_digest)
         ),
         &profile_bytes,
     )?;
-    for (mode, mode_name) in [
-        (BundleModeV1::Local, "local"),
-        (BundleModeV1::AirGapped, "air-gapped"),
-    ] {
-        let (members, expected_results) =
-            bundle_inputs_with_authority(&profile, mode, inventory_bytes, authority_root)?;
-        let (bundle, bundle_digest) =
-            ConformanceBundleV1::materialize(&profile, mode, members, expected_results)
-                .and_then(|bundle| bundle.sign(signing_key))
-                .and_then(|bundle| {
-                    bundle
-                        .bundle_digest()
-                        .map(|bundle_digest| (bundle, bundle_digest))
-                })?;
+    let mut signed_bundles = Vec::with_capacity(2);
+    for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
+        let (members, expected_results) = bundle_inputs_with_authority(
+            &profile,
+            mode,
+            context.inventory_bytes,
+            context.authority_root,
+        )?;
+        let bundle = ConformanceBundleV1::materialize(&profile, mode, members, expected_results)
+            .and_then(|bundle| bundle.sign(context.signing_key))?;
+        signed_bundles.push(bundle);
+    }
+    let pair = ConformanceBundlePairV1 {
+        local: signed_bundles.remove(0),
+        air_gapped: signed_bundles.remove(0),
+    };
+    pair.validate()?;
+    for (mode_name, bundle) in [("local", &pair.local), ("air-gapped", &pair.air_gapped)] {
+        let bundle_digest = bundle.bundle_digest()?;
         let manifest_bytes = bundle.manifest_bytes()?;
         let bundle_bytes = bundle.to_canonical_cbor()?;
         verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
         write_materialized_file(
-            output_root,
+            context.output_root,
             format!(
                 "{prefix}/manifest-{mode_name}-{}.cbor",
                 pos_conformance::hex_digest(&bundle_digest)
@@ -482,7 +543,7 @@ fn materialize_profile_from_profile_with_authority(
             &manifest_bytes,
         )?;
         write_materialized_file(
-            output_root,
+            context.output_root,
             format!(
                 "{prefix}/bundle-{mode_name}-{}.cfb1",
                 pos_conformance::hex_digest(&bundle_digest)
@@ -494,7 +555,7 @@ fn materialize_profile_from_profile_with_authority(
 }
 
 fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
-    PROFILE_RECORDS[usize::from(claim_layer_code(claim_layer))].0
+    layer_spec(claim_layer).profile_record
 }
 
 fn validated_profile_record(
@@ -678,40 +739,16 @@ fn profile_from_record(
     Ok(profile)
 }
 
-const fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
-    match claim_layer {
-        ClaimLayerV1::ArtifactIntegrity => "pigloros.w8.artifact-integrity.1.0.0",
-        ClaimLayerV1::ReplayConformance => "pigloros.w8.replay-conformance.1.0.0",
-        ClaimLayerV1::KnowledgeNonInterference => "pigloros.w8.knowledge-non-interference.1.0.0",
-        ClaimLayerV1::GatewayClientConformance => "pigloros.w8.gateway-client-conformance.1.0.0",
-        ClaimLayerV1::PluginConformance => "pigloros.w8.plugin-conformance.1.0.0",
-        ClaimLayerV1::MetricConformance => "pigloros.w8.metric-conformance.1.0.0",
-        ClaimLayerV1::EmpiricalEvaluation => "pigloros.w8.empirical-evaluation.1.0.0",
-    }
+fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
+    layer_spec(claim_layer).profile_id
 }
 
-const fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
-    match claim_layer {
-        ClaimLayerV1::ArtifactIntegrity => "artifact-integrity",
-        ClaimLayerV1::ReplayConformance => "replay-conformance",
-        ClaimLayerV1::KnowledgeNonInterference => "knowledge-non-interference",
-        ClaimLayerV1::GatewayClientConformance => "gateway-client-conformance",
-        ClaimLayerV1::PluginConformance => "plugin-conformance",
-        ClaimLayerV1::MetricConformance => "metric-conformance",
-        ClaimLayerV1::EmpiricalEvaluation => "empirical-evaluation",
-    }
+fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
+    layer_spec(claim_layer).name
 }
 
-const fn subject_adapter(claim_layer: ClaimLayerV1) -> SubjectAdapterKindV1 {
-    match claim_layer {
-        ClaimLayerV1::GatewayClientConformance => SubjectAdapterKindV1::PublicGatewayProtocol,
-        ClaimLayerV1::PluginConformance => SubjectAdapterKindV1::PublicPluginProtocol,
-        ClaimLayerV1::ArtifactIntegrity
-        | ClaimLayerV1::ReplayConformance
-        | ClaimLayerV1::KnowledgeNonInterference
-        | ClaimLayerV1::MetricConformance
-        | ClaimLayerV1::EmpiricalEvaluation => SubjectAdapterKindV1::ExportedArtifact,
-    }
+fn subject_adapter(claim_layer: ClaimLayerV1) -> SubjectAdapterKindV1 {
+    layer_spec(claim_layer).subject_adapter
 }
 
 fn fixture(
@@ -848,7 +885,7 @@ fn canonical_fixture_bytes(
     .iter()
     .position(|candidate| *candidate == family)
     .ok_or("canonical fixture family is unknown")?;
-    Ok(CANONICAL_FIXTURE_BYTES[usize::from(claim_layer_code(claim_layer))][family_index])
+    Ok(layer_spec(claim_layer).fixture_bytes[family_index])
 }
 
 fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {
@@ -1272,8 +1309,8 @@ mod tests {
             output.clone().into_os_string(),
         ];
         assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_ok());
-        assert!(output.join("artifact-integrity/candidate").is_dir());
-        assert!(output.join("empirical-evaluation/candidate").is_dir());
+        assert!(output.join("artifact-integrity/draft").is_dir());
+        assert!(output.join("empirical-evaluation/draft").is_dir());
         assert!(std::fs::remove_dir_all(output).is_ok());
     }
 
@@ -1848,10 +1885,11 @@ mod tests {
     #[test]
     fn helper_validation_seams_cover_materialization_errors() -> Result<(), Box<dyn Error>> {
         let candidate = br#"{"lifecycle":"Candidate"}"#;
-        let lifecycles = publication_lifecycles_from_bytes(candidate);
+        assert!(publication_lifecycles_from_bytes(candidate).is_err());
+        let draft = br#"{"lifecycle":"Draft"}"#;
         assert_eq!(
-            lifecycles.as_ref().ok(),
-            Some(&vec![(ProfileLifecycleV1::Candidate, "candidate")])
+            publication_lifecycles_from_bytes(draft).as_ref().ok(),
+            Some(&vec![(ProfileLifecycleV1::Draft, "draft")])
         );
         assert!(publication_lifecycles_from_bytes(b"{}").is_err());
         assert!(publication_lifecycles_from_bytes(br#"{"lifecycle":"Retired"}"#).is_err());
@@ -1928,7 +1966,8 @@ mod tests {
     }
 
     fn assert_canonical_profiles_bind_fixture_families() -> Result<(), Box<dyn Error>> {
-        for (_, claim_layer) in PROFILE_RECORDS {
+        for spec in &LAYER_SPECS {
+            let claim_layer = spec.claim_layer;
             let profile = test_profile(claim_layer)?;
             assert_eq!(profile.fixtures.len(), 14);
             assert_eq!(

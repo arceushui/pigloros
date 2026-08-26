@@ -101,7 +101,9 @@ pub enum BundleContractErrorV1 {
     /// A public fixture contains a private-key or secret marker.
     #[error("conformance bundle contains forbidden subject secret material")]
     SecretMaterialDetected,
-    /// Only Draft and Candidate bundles may be materialized by this ticket.
+    /// Only Draft and Candidate bundles are valid for this contract. The #190
+    /// materializer emits Draft bundles; Candidate publication is governed by
+    /// the separate evidence workflow.
     #[error("conformance bundle lifecycle is not Draft or Candidate")]
     LifecycleInvalid,
     /// The member manifest is not canonical.
@@ -1380,6 +1382,13 @@ fn independent_verify_profile(
     );
     if embedded_profile_digest != recomputed_profile_digest {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    let validated_profile = ConformanceProfileV1::from_canonical_cbor(profile_bytes)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    if validated_profile.profile_digest != embedded_profile_digest
+        || validated_profile.lifecycle.wire_code() != lifecycle
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
     }
     Ok(())
 }
@@ -2984,23 +2993,140 @@ fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
 }
 
 fn contains_secret_marker(bytes: &[u8]) -> bool {
+    let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
     [
         b"private key".as_slice(),
         b"begin secret".as_slice(),
         b"private_key".as_slice(),
         b"subject_secret".as_slice(),
-        b"\"privatekey\"".as_slice(),
-        b"\"subjectsecret\"".as_slice(),
-        b"\"password\"".as_slice(),
-        b"\"credential\"".as_slice(),
-        b"\"access_token\"".as_slice(),
-        b"\"client_secret\"".as_slice(),
+        b"privatekey".as_slice(),
+        b"subjectsecret".as_slice(),
     ]
     .iter()
     .any(|marker| {
-        bytes
+        lowercase
             .windows(marker.len())
-            .any(|window| window.eq_ignore_ascii_case(marker))
+            .any(|window| window == *marker)
+    }) || json_contains_secret_value(bytes)
+        || standalone_secret_string(bytes)
+        || contains_prefixed_secret(&lowercase, b"bearer ", 16)
+        || contains_prefixed_secret(&lowercase, b"basic ", 16)
+        || contains_prefixed_secret(&lowercase, b"ghp_", 20)
+        || contains_prefixed_secret(&lowercase, b"github_pat_", 20)
+        || contains_prefixed_secret(&lowercase, b"glpat-", 20)
+        || contains_prefixed_secret(&lowercase, b"xoxb-", 20)
+        || contains_prefixed_secret(&lowercase, b"xoxp-", 20)
+        || contains_prefixed_secret(&lowercase, b"sk_live_", 16)
+        || contains_prefixed_secret(&lowercase, b"sk_test_", 16)
+        || contains_prefixed_secret(&lowercase, b"aiza", 30)
+        || contains_aws_access_key(&lowercase)
+        || contains_jwt(&lowercase)
+}
+
+fn json_contains_secret_value(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<JsonValue>(bytes) else {
+        return false;
+    };
+    json_value_contains_secret(&value)
+}
+
+fn standalone_secret_string(bytes: &[u8]) -> bool {
+    matches!(
+        serde_json::from_slice::<JsonValue>(bytes),
+        Ok(JsonValue::String(value)) if is_sensitive_json_key(&value)
+    )
+}
+
+fn json_value_contains_secret(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Object(fields) => fields.iter().any(|(key, value)| {
+            (is_sensitive_json_key(key) && !is_empty_or_digest(value, key))
+                || json_value_contains_secret(value)
+        }),
+        JsonValue::Array(values) => values.iter().any(json_value_contains_secret),
+        _ => false,
+    }
+}
+
+fn is_sensitive_json_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('-', "_");
+    let key_without_digest = normalized.strip_suffix("_digest").unwrap_or(&normalized);
+    matches!(
+        key_without_digest,
+        "api_key"
+            | "apikey"
+            | "password"
+            | "credential"
+            | "credentials"
+            | "access_token"
+            | "refresh_token"
+            | "authorization"
+            | "bearer_token"
+            | "client_secret"
+            | "subject_secret"
+            | "private_key"
+            | "privatekey"
+            | "secret"
+            | "token"
+    )
+}
+
+fn is_empty_or_digest(value: &JsonValue, key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('-', "_");
+    match value {
+        JsonValue::Null => true,
+        JsonValue::String(text) => {
+            text.is_empty()
+                || (normalized.ends_with("_digest")
+                    && text.len() == 64
+                    && text.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        }
+        _ => false,
+    }
+}
+
+fn contains_prefixed_secret(bytes: &[u8], prefix: &[u8], minimum_length: usize) -> bool {
+    bytes
+        .windows(prefix.len())
+        .enumerate()
+        .any(|(index, window)| {
+            window == prefix && token_length(bytes, index + prefix.len()) >= minimum_length
+        })
+}
+
+fn token_length(bytes: &[u8], start: usize) -> usize {
+    bytes
+        .get(start..)
+        .unwrap_or_default()
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte))
+        .count()
+}
+
+fn contains_aws_access_key(bytes: &[u8]) -> bool {
+    bytes.windows(4).enumerate().any(|(index, window)| {
+        (window == b"akia" || window == b"asia") && token_length(bytes, index + 4) >= 16
+    })
+}
+
+fn contains_jwt(bytes: &[u8]) -> bool {
+    bytes.windows(3).enumerate().any(|(index, window)| {
+        if window != b"eyj" {
+            return false;
+        }
+        let first = token_length(bytes, index);
+        let Some(dot_one) = bytes.get(index + first) else {
+            return false;
+        };
+        if *dot_one != b'.' || first < 10 {
+            return false;
+        }
+        let second_start = index + first + 1;
+        let second = token_length(bytes, second_start);
+        let third_start = second_start + second + 1;
+        second >= 10
+            && bytes.get(second_start + second) == Some(&b'.')
+            && token_length(bytes, third_start) >= 10
     })
 }
 
@@ -4217,6 +4343,14 @@ mod tests {
         assert!(validate_member_path("nested/result").is_ok());
         assert!(validate_member_path("space result").is_ok());
         assert!(contains_secret_marker(b"PUBLIC PRIVATE_KEY material"));
+        assert!(contains_secret_marker(br#"{"password":"not-public"}"#));
+        assert!(contains_secret_marker(br#"Bearer abcdefghijklmnop"#));
+        assert!(!contains_secret_marker(
+            br#"{"secret_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#
+        ));
+        assert!(!contains_secret_marker(
+            br#"{"subject_secret":null,"public":"expected result"}"#
+        ));
         assert!(!contains_secret_marker(b"public expected result"));
     }
 
