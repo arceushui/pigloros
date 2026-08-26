@@ -1643,7 +1643,11 @@ mod tests {
         let empirical_candidate = output.join("empirical-evaluation/candidate").is_dir();
         let output_removed = std::fs::remove_dir_all(output);
         let authority_removed = std::fs::remove_dir_all(authority_root);
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "candidate materialization failed: {:?}",
+            result.as_ref().err()
+        );
         assert!(artifact_candidate);
         assert!(empirical_candidate);
         assert!(output_removed.is_ok());
