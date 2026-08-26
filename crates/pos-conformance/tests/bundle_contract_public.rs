@@ -1019,6 +1019,19 @@ fn assert_archive_decoder_rejected(
     Ok(())
 }
 
+fn assert_post_signed_archive_decoder_rejected(
+    bundle: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+    mutate: impl FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let archive = post_signed_archive_variant(bundle, signing_key, mutate)?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&archive),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+    );
+    Ok(())
+}
+
 fn assert_json_member_rejected(
     bundle: &ConformanceBundleV1,
     path: &str,
@@ -1554,23 +1567,23 @@ fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
             archive_expected(value)?[5] = Value::Bytes(vec![0]);
             Ok(())
         }),
-        Box::new(|value| {
-            top_fields(value)?[4] = Value::Bytes(vec![0]);
-            Ok(())
-        }),
-        Box::new(|value| {
-            top_fields(value)?[5] = Value::Bytes(vec![0]);
-            Ok(())
-        }),
     ];
-    for (index, mutate) in mutations.into_iter().enumerate() {
-        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
-        assert_eq!(
-            ConformanceBundleV1::from_canonical_cbor(&archive),
-            Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid),
-            "member/expected archive mutation {index} was accepted",
-        );
+    for mutate in mutations {
+        assert_archive_decoder_rejected(
+            &bundle,
+            &signing_key,
+            mutate,
+            pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid,
+        )?;
     }
+    assert_post_signed_archive_decoder_rejected(&bundle, &signing_key, |value| {
+        top_fields(value)?[4] = Value::Bytes(vec![0]);
+        Ok(())
+    })?;
+    assert_post_signed_archive_decoder_rejected(&bundle, &signing_key, |value| {
+        top_fields(value)?[5] = Value::Bytes(vec![0]);
+        Ok(())
+    })?;
     Ok(())
 }
 
