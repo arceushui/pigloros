@@ -49,26 +49,20 @@ impl SigningKeyMaterial {
 
     /// Return the material fingerprint used by the registry contract.
     ///
-    /// # Errors
-    /// Returns [`KeyRegistryErrorV1::Destroyed`] after the material has been
-    /// destroyed.
-    pub fn material_digest(&self) -> Result<Hash, KeyRegistryErrorV1> {
-        self.signing_key
-            .as_ref()
-            .map(|_| self.material_digest)
-            .ok_or(KeyRegistryErrorV1::Destroyed)
+    /// The fingerprint is retained after destruction so an exact replay can
+    /// be checked without retaining or restoring private material.
+    #[must_use]
+    pub const fn material_digest(&self) -> Hash {
+        self.material_digest
     }
 
     /// Return the public verification key corresponding to the private key.
     ///
-    /// # Errors
-    /// Returns [`KeyRegistryErrorV1::Destroyed`] after the material has been
-    /// destroyed.
-    pub fn public_verification_key(&self) -> Result<pos_core::PublicKey, KeyRegistryErrorV1> {
-        self.signing_key
-            .as_ref()
-            .map(|_| self.public_verification_key)
-            .ok_or(KeyRegistryErrorV1::Destroyed)
+    /// The public key is retained after destruction for historical signature
+    /// verification.
+    #[must_use]
+    pub const fn public_verification_key(&self) -> pos_core::PublicKey {
+        self.public_verification_key
     }
 
     fn as_key(&self) -> Result<&SigningKey, KeyRegistryErrorV1> {
@@ -112,14 +106,11 @@ impl EncryptionKeyMaterial {
 
     /// Return the material fingerprint used by the registry contract.
     ///
-    /// # Errors
-    /// Returns [`KeyRegistryErrorV1::Destroyed`] after the material has been
-    /// destroyed.
-    pub fn material_digest(&self) -> Result<Hash, KeyRegistryErrorV1> {
-        self.private_material
-            .as_ref()
-            .map(|_| self.material_digest)
-            .ok_or(KeyRegistryErrorV1::Destroyed)
+    /// The fingerprint is retained after destruction so an exact replay can
+    /// be checked without retaining or restoring private material.
+    #[must_use]
+    pub const fn material_digest(&self) -> Hash {
+        self.material_digest
     }
 
     fn destroy(&mut self) {
@@ -259,11 +250,11 @@ pub fn sign_for_registered_role<R: KeyRegistrySigningPortV1>(
     if !identity.role.is_signing() {
         return Err(KeyRegistryErrorV1::SigningRoleRequired);
     }
-    let material_digest = signing_key.material_digest()?;
-    let public_verification_key = signing_key.public_verification_key()?;
-    let signing_key = signing_key.as_key()?;
+    let signing_key_ref = signing_key.as_key()?;
+    let material_digest = signing_key.material_digest;
+    let public_verification_key = signing_key.public_verification_key;
     registry.with_signing_authorization(identity, material_digest, public_verification_key, || {
-        sign_for_role_unchecked(signing_key, identity.role, identity.epoch, payload)
+        sign_for_role_unchecked(signing_key_ref, identity.role, identity.epoch, payload)
     })
 }
 
@@ -293,7 +284,10 @@ where
     if !identity.role.is_encryption() {
         return Err(KeyRegistryErrorV1::EncryptionRoleRequired);
     }
-    let digest = private_material.material_digest()?;
+    if private_material.private_material.is_none() {
+        return Err(KeyRegistryErrorV1::Destroyed);
+    }
+    let digest = private_material.material_digest;
     registry.with_encryption_authorization(identity, digest, operation)
 }
 
@@ -365,7 +359,7 @@ mod tests {
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
             identity,
-            signing_key.material_digest()?,
+            signing_key.material_digest(),
             Some(public_key_from_verifying_key(&verifying_key)),
         ))?;
         let signature = sign_for_registered_role(&mut registry, &signing_key, identity, &value)?;
@@ -449,7 +443,7 @@ mod tests {
         let (signing_key, verifying_key) = generate_keypair();
         let mut signing_key = SigningKeyMaterial::new(signing_key);
         let identity = KeyIdentityV1::new(KeyRoleV1::SubjectAttributionSigning, 1);
-        let material_digest = signing_key.material_digest()?;
+        let material_digest = signing_key.material_digest();
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
             identity,
@@ -492,7 +486,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut material = EncryptionKeyMaterial::new([11u8; 32]);
         let identity = KeyIdentityV1::new(KeyRoleV1::SubjectDataEncryption, 1);
-        let material_digest = material.material_digest()?;
+        let material_digest = material.material_digest();
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(identity, material_digest, None))?;
 

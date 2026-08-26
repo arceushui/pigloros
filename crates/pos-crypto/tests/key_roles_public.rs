@@ -97,7 +97,7 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
     let mut registry = KeyRegistryStateV1::new();
     registry.register_key(KeyRegistrationV1::new(
         encryption_identity,
-        encryption_material.material_digest()?,
+        encryption_material.material_digest(),
         None,
     ))?;
     assert_eq!(
@@ -129,7 +129,7 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
         Err(pos_core::KeyRegistryErrorV1::EncryptionRoleRequired)
     );
 
-    let material_digest = encryption_material.material_digest()?;
+    let material_digest = encryption_material.material_digest();
     assert_eq!(
         destroy_registered_encryption_key::<&str, _>(
             &mut encryption_material,
@@ -164,6 +164,7 @@ fn public_role_bound_encryption_covers_destruction_edges() -> Result<(), Box<dyn
         registry.destroy_key(request)
     })?;
     assert!(encryption_material.is_destroyed());
+    assert_eq!(encryption_material.material_digest(), material_digest);
     assert_eq!(
         with_registered_encryption_authorization(
             &mut registry,
@@ -191,7 +192,7 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
     let (signing_key, verifying_key) = pos_crypto::signing::generate_keypair();
     let mut material = SigningKeyMaterial::new(signing_key);
     let identity = KeyIdentityV1::new(KeyRoleV1::TimelineIntegritySigning, 1);
-    let digest = material.material_digest()?;
+    let digest = material.material_digest();
     let wrong_request = pos_core::KeyDestructionRequestV1::new(
         identity,
         pos_core::Hash::from_bytes([35; 32]),
@@ -225,6 +226,11 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
         registry.destroy_key(request)
     })?;
     assert!(material.is_destroyed());
+    assert_eq!(material.material_digest(), digest);
+    assert_eq!(
+        material.public_verification_key(),
+        public_key_from_verifying_key(&verifying_key)
+    );
     let tombstone = registry
         .tombstone(identity)
         .ok_or("destroyed signing key must retain its tombstone")?;

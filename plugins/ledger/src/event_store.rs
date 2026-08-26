@@ -75,15 +75,11 @@ impl EventLedgerStore {
             .map_err(|_| LedgerError::Store("ledger signing registry is unavailable".to_owned()))?;
         let mut candidate_registry = persisted_registry.unwrap_or_else(|| registry.clone());
         let signing_key = SigningKeyMaterial::new(signing_key);
-        let public_verification_key = signing_key.public_verification_key().map_err(|error| {
-            LedgerError::Store(format!("ledger signing material unavailable: {error}"))
-        })?;
+        let public_verification_key = signing_key.public_verification_key();
         candidate_registry
             .with_signing_authorization(
                 signing_identity,
-                signing_key.material_digest().map_err(|error| {
-                    LedgerError::Store(format!("ledger signing material unavailable: {error}"))
-                })?,
+                signing_key.material_digest(),
                 public_verification_key,
                 || (),
             )
@@ -974,7 +970,7 @@ mod tests {
         assert_eq!(ledger.entries()[0].prediction.prediction_id, id);
         let events = store.store.read(store.timeline_id, SeqRange::all())?;
         let signature = events[0].signature.as_ref().ok_or("missing signature")?;
-        let public_key = store.signing_key.public_verification_key()?;
+        let public_key = store.signing_key.public_verification_key();
         let verifying_key = pos_crypto::signing::verifying_key_from_public_key(&public_key)?;
         verify_for_role(
             &verifying_key,
