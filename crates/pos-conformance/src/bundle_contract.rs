@@ -2034,14 +2034,16 @@ fn bundle_pair_payloads(
                     .expected_results
                     .iter()
                     .find(|expected| expected.member_path == member.path)
-                    .map(|expected| {
-                        format!(
-                            "expected-result/{}/{}",
-                            expected.case_id,
-                            claim_layer_code(expected.claim_layer)
-                        )
-                    })
-                    .unwrap_or_else(|| member.path.clone())
+                    .map_or_else(
+                        || member.path.clone(),
+                        |expected| {
+                            format!(
+                                "expected-result/{}/{}",
+                                expected.case_id,
+                                claim_layer_code(expected.claim_layer)
+                            )
+                        },
+                    )
             } else {
                 member.path.clone()
             };
@@ -2678,7 +2680,7 @@ fn is_sensitive_digest_key(key: &str) -> bool {
         .is_some_and(is_sensitive_json_key)
 }
 
-fn is_empty_sensitive_value(value: &JsonValue) -> bool {
+const fn is_empty_sensitive_value(value: &JsonValue) -> bool {
     match value {
         JsonValue::Null => true,
         JsonValue::String(text) => text.is_empty(),

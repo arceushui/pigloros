@@ -1672,12 +1672,8 @@ fn validate_fixture_verification_outcome(
     ) {
         (ExpectedResultV1::CanonicalBytes { .. }, VerificationOutcomeV1::VerifiedExact, None)
         | (
-            ExpectedResultV1::CanonicalBytes { .. },
-            VerificationOutcomeV1::UnverifiableArtifactsMissing,
-            Some(SafeErrorCodeV1::ProvenanceMissing),
-        )
-        | (
-            ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ProvenanceMissing),
+            ExpectedResultV1::CanonicalBytes { .. }
+            | ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ProvenanceMissing),
             VerificationOutcomeV1::UnverifiableArtifactsMissing,
             Some(SafeErrorCodeV1::ProvenanceMissing),
         )

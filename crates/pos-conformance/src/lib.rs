@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 mod bundle_contract;
-mod profile_contract;
+pub(crate) mod profile_contract;
 
 pub use bundle_contract::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,

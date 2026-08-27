@@ -743,7 +743,7 @@ fn validate_fixture_records(
         }
     }
     let declared_input_digest =
-        crate::decode_hex_digest(json_text(&expected_record, "input_blake3_digest")?)
+        pos_conformance::decode_hex_digest(json_text(&expected_record, "input_blake3_digest")?)
             .ok_or("expected fixture input digest is invalid")?;
     if declared_input_digest != *blake3::hash(input).as_bytes() {
         return Err("expected fixture input digest does not match its input bytes".into());
