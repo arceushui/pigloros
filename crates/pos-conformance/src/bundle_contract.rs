@@ -6326,6 +6326,7 @@ mod instrumented_public_entrypoints {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut profile = tests::profile();
         profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
+        profile.profile_digest = profile.digest();
         let profile_value = profile_value(&profile)?;
         let valid_matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
         let entries = AUTHORITY_FIXTURE_IDS
