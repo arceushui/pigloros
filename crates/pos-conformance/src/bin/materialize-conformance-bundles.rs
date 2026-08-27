@@ -1631,6 +1631,12 @@ mod tests {
         assert!(verify_public_archive(&bundle_bytes, &wrong_digest, &manifest).is_err());
         assert!(verify_public_archive(&bundle_bytes, &bundle_digest, b"invalid").is_err());
         assert!(verify_public_archive(b"invalid", &bundle_digest, &manifest).is_err());
+        let mut invalid_signature = ConformanceBundleV1::from_canonical_cbor(&bundle_bytes)?;
+        invalid_signature.signature = pos_core::Signature::from_bytes([0; 64]);
+        let invalid_signature_bytes = invalid_signature.to_canonical_cbor()?;
+        assert!(
+            verify_public_archive(&invalid_signature_bytes, &bundle_digest, &manifest).is_err()
+        );
         Ok(())
     }
 
@@ -1726,6 +1732,14 @@ mod tests {
         std::os::unix::fs::symlink(output.join("real"), output.join("link"))?;
         assert!(write_materialized_file(&output, "link/file", b"bytes").is_err());
         std::fs::remove_dir_all(output)?;
+
+        let root_parent = output_root("symlink-root");
+        let root_target = root_parent.join("target");
+        let root_link = root_parent.join("link");
+        std::fs::create_dir_all(&root_target)?;
+        std::os::unix::fs::symlink(&root_target, &root_link)?;
+        assert!(write_materialized_file(&root_link, "file", b"bytes").is_err());
+        std::fs::remove_dir_all(root_parent)?;
         Ok(())
     }
 
