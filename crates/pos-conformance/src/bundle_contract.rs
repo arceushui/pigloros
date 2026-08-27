@@ -1876,7 +1876,7 @@ const fn validate_member_size(member_size: u64) -> Result<(), BundleContractErro
     }
 }
 
-const fn accumulate_member_bytes(
+fn accumulate_member_bytes(
     total_bytes: u64,
     member_size: u64,
 ) -> Result<u64, BundleContractErrorV1> {
