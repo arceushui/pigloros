@@ -1834,4 +1834,154 @@ mod tests {
         assert!(std::fs::remove_dir_all(bundle_root).is_ok());
         Ok(())
     }
+
+    #[test]
+    fn materializer_rejects_each_public_fixture_boundary() -> Result<(), Box<dyn Error>> {
+        materializer_rejects_non_draft_lifecycle()?;
+        materializer_rejects_matrix_binding_changes()?;
+        materializer_rejects_invalid_fixture_records()?;
+        materializer_recognizes_every_fixture_family();
+        Ok(())
+    }
+
+    fn materializer_rejects_non_draft_lifecycle() -> Result<(), Box<dyn Error>> {
+        let draft = br#"{"lifecycle":"Draft"}"#;
+        let candidate = br#"{"lifecycle":"Candidate"}"#;
+        let mut candidate_arguments = [
+            OsString::from("materialize"),
+            OsString::from("candidate-inventory"),
+        ]
+        .into_iter();
+        assert!(
+            run_with_inventory(&mut candidate_arguments, Ok(signing_key_hex()), candidate,)
+                .is_err()
+        );
+
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        let lifecycle_root = output_root("candidate-lifecycle");
+        assert!(materialize_profile_for_test(
+            &lifecycle_root,
+            &SigningKey::from_bytes(&[7; 32]),
+            profile,
+            ProfileLifecycleV1::Candidate,
+            "candidate",
+            "artifact-integrity",
+        )
+        .is_err());
+        let mut members = Vec::new();
+        assert!(append_supporting_members(&mut members, candidate).is_err());
+        assert!(append_supporting_members(&mut members, draft).is_ok());
+        Ok(())
+    }
+
+    fn materializer_rejects_matrix_binding_changes() -> Result<(), Box<dyn Error>> {
+        let knowledge_bytes = profile_record_bytes(ClaimLayerV1::KnowledgeNonInterference);
+        let knowledge: JsonValue = serde_json::from_slice(knowledge_bytes)?;
+        assert!(validate_profile_record_bindings(
+            ClaimLayerV1::KnowledgeNonInterference,
+            &knowledge,
+        )
+        .is_ok());
+        for field in [
+            "adr_059_execution_matrix",
+            "adr_059_execution_matrix_status",
+            "adr_059_execution_matrix_blake3_digest",
+        ] {
+            let mut changed = knowledge.clone();
+            changed[field] = JsonValue::String("invalid".to_owned());
+            assert!(validate_profile_record_bindings(
+                ClaimLayerV1::KnowledgeNonInterference,
+                &changed,
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    fn materializer_rejects_invalid_fixture_records() -> Result<(), Box<dyn Error>> {
+        let artifact_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
+        let artifact: JsonValue = serde_json::from_slice(artifact_bytes)?;
+        let fixture_record = &artifact["fixtures"][0];
+        let input_path = json_text(fixture_record, "input")?;
+        let expected_path = json_text(fixture_record, "expected")?;
+        let (input, expected) =
+            canonical_fixture_bytes(ClaimLayerV1::ArtifactIntegrity, input_path, expected_path)?;
+        for (changed_input, changed_expected) in [
+            (b"{".as_slice(), expected),
+            (input, b"{".as_slice()),
+            (input, br#"{"case_id":"wrong"}"#.as_slice()),
+        ] {
+            assert!(validate_fixture_records(
+                changed_input,
+                changed_expected,
+                "artifact-integrity-positive",
+                "positive",
+                "artifact-integrity",
+            )
+            .is_err());
+        }
+        assert!(canonical_fixture_bytes(
+            ClaimLayerV1::ArtifactIntegrity,
+            "inputs/replay-conformance/positive.json",
+            "expected/replay-conformance/positive.json",
+        )
+        .is_err());
+        Ok(())
+    }
+
+    fn materializer_recognizes_every_fixture_family() {
+        for (input_path, expected_path, expected_family) in [
+            (
+                "inputs/artifact-integrity/positive.json",
+                "expected/artifact-integrity/positive.json",
+                Some("positive"),
+            ),
+            (
+                "inputs/artifact-integrity/negative.json",
+                "expected/artifact-integrity/negative.json",
+                Some("negative"),
+            ),
+            (
+                "inputs/artifact-integrity/malformed.json",
+                "expected/artifact-integrity/malformed.json",
+                Some("malformed"),
+            ),
+            (
+                "inputs/artifact-integrity/resource.json",
+                "expected/artifact-integrity/resource.json",
+                Some("resource"),
+            ),
+            (
+                "inputs/artifact-integrity/deletion.json",
+                "expected/artifact-integrity/deletion.json",
+                Some("deletion"),
+            ),
+            (
+                "inputs/artifact-integrity/downgrade.json",
+                "expected/artifact-integrity/downgrade.json",
+                Some("downgrade"),
+            ),
+            (
+                "inputs/artifact-integrity/independent-evaluation.json",
+                "expected/artifact-integrity/independent-evaluation.json",
+                Some("independent-evaluation"),
+            ),
+        ] {
+            assert_eq!(family_for_path(input_path, expected_path), expected_family);
+        }
+        assert_eq!(
+            family_for_path(
+                "inputs/artifact-integrity/positive.json",
+                "expected/artifact-integrity/negative.json",
+            ),
+            None,
+        );
+        assert_eq!(
+            family_for_path(
+                "wrong/artifact-integrity/positive.json",
+                "expected/artifact-integrity/positive.json",
+            ),
+            None,
+        );
+    }
 }
