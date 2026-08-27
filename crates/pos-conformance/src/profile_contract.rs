@@ -2728,7 +2728,6 @@ mod tests {
     // lifecycle transitions, and hard-cap entrypoints. Closed enum mapping
     // tests below only enumerate the representation used by those seams.
     use super::*;
-    use crate::strict_codec::StrictCborError;
     use ed25519_dalek::Signer;
 
     const MAX_FIXTURE_COUNT: u32 = 65_536;
@@ -3206,7 +3205,7 @@ mod tests {
         profile: &ConformanceProfileV1,
         path: &[usize],
         replacement: Value,
-    ) -> Result<Vec<u8>, StrictCborError> {
+    ) -> Result<Vec<u8>, ConformanceContractError> {
         let mut encoded = encode_profile(profile, true);
         replace_profile_path(&mut encoded, path, replacement);
         encode_value(&encoded)
@@ -3216,7 +3215,7 @@ mod tests {
     fn malformed_request_bytes(
         path: &[usize],
         replacement: Value,
-    ) -> Result<Vec<u8>, StrictCborError> {
+    ) -> Result<Vec<u8>, ConformanceContractError> {
         let mut encoded = encode_request(&request(), true);
         replace_profile_path(&mut encoded, path, replacement);
         encode_value(&encoded)
