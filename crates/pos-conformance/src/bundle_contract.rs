@@ -7320,7 +7320,7 @@ mod instrumented_public_entrypoints {
             BundleModeV1::Local.code(),
         )
         .is_err());
-        let malformed_fixture = profile_with_fixture_field(&profile_value, 8, Value::Null)?;
+        let malformed_fixture = profile_with_fixture_field(&profile_value, 7, Value::Null)?;
         assert!(independent_verify_fixture_inputs(
             &records,
             &malformed_fixture,
