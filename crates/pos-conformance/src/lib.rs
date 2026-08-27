@@ -17,7 +17,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 mod bundle_contract;
-pub(crate) mod profile_contract;
+mod profile_contract;
+
+pub(crate) fn requires_execution_matrix_binding(profile_id: &str) -> bool {
+    const EXECUTION_MATRIX_BINDING_MARKER: &str = "#matrix=";
+    const KNOWLEDGE_PROFILE_ID: &str = "pigloros.w8.knowledge-non-interference.1.0.0";
+
+    profile_id
+        .split_once(EXECUTION_MATRIX_BINDING_MARKER)
+        .map_or(profile_id, |(base, _)| base)
+        == KNOWLEDGE_PROFILE_ID
+}
 
 pub use bundle_contract::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,

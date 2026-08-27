@@ -984,7 +984,7 @@ fn validate_profile(
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
-    if requires_execution_matrix_binding(&profile.profile_id)
+    if crate::requires_execution_matrix_binding(&profile.profile_id)
         || profile.profile_id.contains(EXECUTION_MATRIX_BINDING_MARKER)
     {
         matrix_binding_parts(&profile.profile_id)?;
@@ -1795,13 +1795,6 @@ fn matrix_binding_parts(
     } else {
         Err(ConformanceContractError::FieldOutOfBounds)
     }
-}
-
-pub(crate) fn requires_execution_matrix_binding(profile_id: &str) -> bool {
-    profile_id
-        .split_once(EXECUTION_MATRIX_BINDING_MARKER)
-        .map_or(profile_id, |(base, _)| base)
-        == KNOWLEDGE_PROFILE_ID
 }
 
 fn strictly_ordered<T: Ord>(values: &[T]) -> bool {

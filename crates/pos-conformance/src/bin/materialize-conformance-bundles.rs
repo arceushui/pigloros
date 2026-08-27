@@ -17,6 +17,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
+const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
+
 #[derive(Clone, Copy)]
 struct FixtureContext {
     claim_layer: ClaimLayerV1,
@@ -1005,7 +1007,7 @@ fn append_supporting_members(
         members.push(BundleMemberV1::supporting(path, bytes.to_vec(), role));
     }
     let mut inventory = BundleMemberV1::new(
-        "authority/expected-authority-inventory.json",
+        AUTHORITY_INVENTORY_MEMBER_PATH,
         inventory_bytes.to_vec(),
         false,
     );
