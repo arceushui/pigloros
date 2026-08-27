@@ -187,6 +187,12 @@ pub enum BundleContractErrorV1 {
     /// The public archive encoding is malformed or not canonical.
     #[error("conformance bundle archive encoding is invalid")]
     ArchiveEncodingInvalid,
+    /// A release filename is not the canonical CFB1 archive address.
+    #[error("conformance bundle release filename is invalid")]
+    ReleaseFilenameInvalid,
+    /// The supplied archive bytes do not match their expected CFB1 address.
+    #[error("conformance bundle archive digest does not match its bytes")]
+    ArchiveDigestMismatch,
 }
 
 /// The two execution modes materialized by #190.
@@ -483,19 +489,44 @@ impl ConformanceBundleV1 {
         })
     }
 
-    /// Return the content address of the canonical manifest.
+    /// Return the domain-separated content address of the canonical manifest.
     ///
     /// # Errors
     ///
     /// Returns [`BundleContractErrorV1::EncodingFailed`] if canonical encoding
     /// fails.
-    pub fn bundle_digest(&self) -> Result<[u8; 32], BundleContractErrorV1> {
+    pub fn manifest_digest(&self) -> Result<[u8; 32], BundleContractErrorV1> {
         self.manifest_bytes().map(|bytes| {
             let mut input = Vec::with_capacity(32 + bytes.len());
             input.extend_from_slice(b"PiglorOS.ConformanceBundle.v1\0");
             input.extend_from_slice(&bytes);
             *blake3::hash(&input).as_bytes()
         })
+    }
+
+    /// Return the content address of the exact canonical signed CFB1 bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when this bundle cannot be encoded as a valid
+    /// canonical signed archive.
+    pub fn archive_digest(&self) -> Result<[u8; 32], BundleContractErrorV1> {
+        self.to_canonical_cbor()
+            .map(|bytes| *blake3::hash(&bytes).as_bytes())
+    }
+
+    /// Return the only public CFB1 release filename for this signed archive.
+    ///
+    /// The lowercase hexadecimal digest identifies the exact signed bytes,
+    /// including the embedded verification key and signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when this bundle cannot be encoded as a valid
+    /// canonical signed archive.
+    pub fn release_filename(&self) -> Result<String, BundleContractErrorV1> {
+        self.archive_digest()
+            .map(|digest| format!("{}.cfb1", crate::hex_digest(&digest)))
     }
 
     fn validate_unsigned(&self) -> Result<(), BundleContractErrorV1> {
@@ -703,8 +734,7 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps = independent_archive_caps(profile_bytes)?;
     validate_independent_preflight_caps(&caps, &preflight, bytes.len())?;
-    let profile_contract = ConformanceProfileV2::from_canonical_cbor(profile_bytes)
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    independent_verify_cpf2(&profile)?;
     let archive: (Value, Value, Value, Vec<Value>, Value, Value) =
         ciborium::from_reader(Cursor::new(bytes))
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
@@ -737,7 +767,44 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     independent_verify_fixture_inputs(&member_records, &profile, bundle_mode)?;
     independent_verify_supporting_members(&member_records, &profile)?;
     independent_verify_authority_members(&member_records, &profile)?;
-    independent_verify_profile_contract(&profile_contract, lifecycle, &manifest[3])
+    independent_verify_profile_contract(&profile, lifecycle, &manifest[3])
+}
+
+/// Independently verify an archive after binding it to its sole canonical
+/// release filename.
+///
+/// Legacy manifest-addressed names are not accepted: a CFB1 release filename
+/// is exactly 64 lowercase hexadecimal BLAKE3 digits followed by `.cfb1`.
+/// The exact archive bytes are checked against that address before semantic
+/// archive validation begins.
+///
+/// # Errors
+///
+/// Returns a closed error when the filename is noncanonical, the archive bytes
+/// do not match it, or independent archive verification fails.
+pub fn verify_archive_release_filename(
+    bytes: &[u8],
+    filename: &str,
+) -> Result<(), BundleContractErrorV1> {
+    let expected_digest = release_filename_digest(filename)?;
+    if expected_digest != *blake3::hash(bytes).as_bytes() {
+        return Err(BundleContractErrorV1::ArchiveDigestMismatch);
+    }
+    verify_archive_independently(bytes)
+}
+
+fn release_filename_digest(filename: &str) -> Result<[u8; 32], BundleContractErrorV1> {
+    let Some(encoded) = filename.strip_suffix(".cfb1") else {
+        return Err(BundleContractErrorV1::ReleaseFilenameInvalid);
+    };
+    if encoded.len() != 64
+        || !encoded.bytes().all(|byte| {
+            byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(BundleContractErrorV1::ReleaseFilenameInvalid);
+    }
+    crate::decode_hex_digest(encoded).ok_or(BundleContractErrorV1::ReleaseFilenameInvalid)
 }
 
 fn independent_verify_signature(
@@ -1216,17 +1283,683 @@ fn independent_expected_member_path(
 }
 
 fn independent_verify_profile_contract(
-    profile: &ConformanceProfileV2,
+    profile: &Value,
     lifecycle: u64,
     manifest_profile_digest: &Value,
 ) -> Result<(), BundleContractErrorV1> {
-    if lifecycle != profile.lifecycle.wire_code() {
+    let fields = independent_profile_array(profile, 18)?;
+    if lifecycle != independent_profile_u64(&fields[4])? {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    if profile.profile_digest != independent_digest::<32>(manifest_profile_digest)? {
+    if independent_profile_digest(&fields[17])?
+        != independent_digest::<32>(manifest_profile_digest)?
+    {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     Ok(())
+}
+
+struct IndependentCpf2Caps {
+    max_cases: u64,
+    max_bundle_members: u64,
+    max_member_path_bytes: u64,
+    max_member_bytes: u64,
+    max_total_bundle_bytes: u64,
+    max_structural_nesting: u64,
+    max_coordinate_bytes: u64,
+}
+
+fn independent_verify_cpf2(profile: &Value) -> Result<(), BundleContractErrorV1> {
+    let fields = independent_profile_array(profile, 18)?;
+    independent_verify_cpf2_header(fields)?;
+    let execution_profiles = independent_profile_digests(&fields[7])?;
+    let public_schemas = independent_profile_digests(&fields[8])?;
+    let caps = independent_verify_cpf2_protocol(&fields[11])?;
+    independent_verify_cpf2_root(fields, &execution_profiles, &public_schemas)?;
+    independent_verify_cpf2_requirements(&fields[12])?;
+    independent_verify_cpf2_allowed_divergences(&fields[10], caps.max_coordinate_bytes)?;
+    independent_verify_cpf2_fixtures(
+        &fields[9],
+        &fields[10],
+        &execution_profiles,
+        &public_schemas,
+        &caps,
+    )?;
+    independent_verify_cpf2_selected_caps(profile, &fields[9], &fields[10], &caps)?;
+    independent_verify_cpf2_digest(profile, fields)
+}
+
+fn independent_verify_cpf2_header(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    if independent_profile_text(&fields[0], 4)? != "CPF2"
+        || independent_profile_u64(&fields[1])? != 2
+        || independent_profile_u64(&fields[4])? != 0
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    Ok(())
+}
+
+fn independent_verify_cpf2_root(
+    fields: &[Value],
+    execution_profiles: &[[u8; 32]],
+    public_schemas: &[[u8; 32]],
+) -> Result<(), BundleContractErrorV1> {
+    if !independent_semantic_version(independent_profile_text(&fields[3], 256)?)
+        || independent_profile_text(&fields[2], 256)?.contains("#matrix=")
+        || [5_usize, 6, 13, 14, 15]
+            .iter()
+            .any(|index| independent_profile_digest(&fields[*index]) == Ok([0; 32]))
+        || execution_profiles.is_empty()
+        || execution_profiles.len() > 64
+        || execution_profiles.iter().any(|digest| *digest == [0; 32])
+        || public_schemas.iter().any(|digest| *digest == [0; 32])
+        || !independent_strictly_ordered(execution_profiles)
+        || !independent_strictly_ordered(public_schemas)
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    match &fields[16] {
+        Value::Null => Ok(()),
+        value if independent_profile_digest(value)? != [0; 32] => Ok(()),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
+}
+
+fn independent_verify_cpf2_protocol(
+    value: &Value,
+) -> Result<IndependentCpf2Caps, BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 5)?;
+    if [1_usize, 2, 3]
+        .iter()
+        .any(|index| independent_profile_digest(&fields[*index]) == Ok([0; 32]))
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    independent_profile_text(&fields[0], 128)?;
+    independent_verify_cpf2_hard_caps(&fields[4])
+}
+
+fn independent_verify_cpf2_hard_caps(
+    value: &Value,
+) -> Result<IndependentCpf2Caps, BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 10)?;
+    let values = fields
+        .iter()
+        .map(independent_profile_u64)
+        .collect::<Result<Vec<_>, _>>()?;
+    if values[0] == 0
+        || values[0] > MAX_PROFILE_BYTES
+        || values[1] == 0
+        || values[1] > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX)
+        || values[2] == 0
+        || values[2] > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX)
+        || values[3] == 0
+        || values[3] > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX)
+        || values[4] == 0
+        || values[4] > MAX_MEMBER_BYTES
+        || values[5] == 0
+        || values[5] > MAX_TOTAL_BUNDLE_BYTES
+        || values[6] == 0
+        || values[6] > 100
+        || values[7] == 0
+        || values[7] > u64::from(MAX_STRUCTURAL_NESTING)
+        || values[8] == 0
+        || values[8] > 128
+        || values[9] > 1024 * 1024
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    Ok(IndependentCpf2Caps {
+        max_cases: values[1],
+        max_bundle_members: values[2],
+        max_member_path_bytes: values[3],
+        max_member_bytes: values[4],
+        max_total_bundle_bytes: values[5],
+        max_structural_nesting: values[7],
+        max_coordinate_bytes: values[8],
+    })
+}
+
+fn independent_verify_cpf2_requirements(value: &Value) -> Result<(), BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 5)?;
+    if fields[..3]
+        .iter()
+        .any(|field| !matches!(field, Value::Bool(_)))
+        || independent_profile_digest(&fields[3])? == [0; 32]
+        || independent_profile_digest(&fields[4])? == [0; 32]
+    {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn independent_verify_cpf2_allowed_divergences(
+    value: &Value,
+    max_coordinate_bytes: u64,
+) -> Result<(), BundleContractErrorV1> {
+    let values = independent_profile_array_bounded(value)?;
+    let records = values
+        .iter()
+        .map(|value| {
+            let fields = independent_profile_array(value, 2)?;
+            let classification = independent_profile_divergence(&fields[0])?;
+            let coordinate = independent_profile_bytes(&fields[1])?;
+            if coordinate.is_empty()
+                || u64::try_from(coordinate.len()).unwrap_or(u64::MAX) > max_coordinate_bytes
+            {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
+            Ok((classification, coordinate.to_vec()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if independent_strictly_ordered(&records) {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_verify_cpf2_fixtures(
+    value: &Value,
+    allowed_divergences: &Value,
+    execution_profiles: &[[u8; 32]],
+    public_schemas: &[[u8; 32]],
+    caps: &IndependentCpf2Caps,
+) -> Result<(), BundleContractErrorV1> {
+    let fixtures = independent_profile_array_bounded(value)?;
+    let allowed = independent_profile_allowed_divergences(allowed_divergences)?;
+    let mut previous = None;
+    for fixture in fixtures {
+        let key = independent_verify_cpf2_fixture(
+            fixture,
+            &allowed,
+            execution_profiles,
+            public_schemas,
+            caps,
+        )?;
+        if previous.as_ref().is_some_and(|prior| prior >= &key) {
+            return Err(BundleContractErrorV1::ProfileInvalid);
+        }
+        previous = Some(key);
+    }
+    Ok(())
+}
+
+fn independent_verify_cpf2_fixture(
+    value: &Value,
+    allowed: &[(u64, Vec<u8>)],
+    execution_profiles: &[[u8; 32]],
+    public_schemas: &[[u8; 32]],
+    caps: &IndependentCpf2Caps,
+) -> Result<(String, u64, [u8; 32]), BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 17)?;
+    let case_id = independent_profile_text(&fields[0], 128)?.to_owned();
+    if !matches!(&fields[1], Value::Bool(_)) {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let claim_layer = independent_profile_claim_layer(&fields[2])?;
+    let execution_profile = independent_profile_digest(&fields[3])?;
+    let public_schema = independent_profile_digest(&fields[4])?;
+    if public_schema == [0; 32]
+        || !execution_profiles.contains(&execution_profile)
+        || !public_schemas.contains(&public_schema)
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let modes = independent_profile_modes(&fields[5])?;
+    independent_profile_adapter(&fields[6])?;
+    independent_verify_cpf2_fixture_inputs(&fields[7], caps)?;
+    independent_verify_cpf2_expected(&fields[8], allowed, caps.max_coordinate_bytes)?;
+    independent_verify_cpf2_fixture_outcome(&fields[8], &fields[9], &fields[10])?;
+    independent_verify_cpf2_fixture_claim(&fields[11], &fields[12])?;
+    independent_verify_cpf2_bounds(&fields[13])?;
+    independent_verify_cpf2_expected_bounds(&fields[8], &fields[13], caps)?;
+    independent_verify_cpf2_capabilities(&fields[14])?;
+    independent_verify_cpf2_provenance(&fields[15])?;
+    if independent_profile_digest(&fields[16])? == [0; 32]
+        || (modes.contains(&1) && independent_profile_bool(&fields[14], 0)?)
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    Ok((case_id, claim_layer, execution_profile))
+}
+
+fn independent_verify_cpf2_fixture_inputs(
+    value: &Value,
+    caps: &IndependentCpf2Caps,
+) -> Result<(), BundleContractErrorV1> {
+    let inputs = independent_profile_array_bounded(value)?;
+    let mut previous = None;
+    let mut total = 0_u64;
+    for input in inputs {
+        let fields = independent_profile_array(input, 4)?;
+        let member_id = independent_profile_ascii(&fields[0], 256)?.to_owned();
+        let size = independent_profile_u64(&fields[1])?;
+        if size == 0
+            || size > MAX_MEMBER_BYTES
+            || size > caps.max_member_bytes
+            || u64::try_from(member_id.len()).unwrap_or(u64::MAX) > caps.max_member_path_bytes
+            || independent_profile_digest(&fields[2])? == [0; 32]
+            || independent_profile_digest(&fields[3])? == [0; 32]
+            || previous
+                .as_ref()
+                .is_some_and(|prior: &String| prior >= &member_id)
+        {
+            return Err(BundleContractErrorV1::ProfileInvalid);
+        }
+        previous = Some(member_id);
+        total = total.saturating_add(size);
+    }
+    if total > caps.max_total_bundle_bytes {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn independent_verify_cpf2_expected(
+    value: &Value,
+    allowed: &[(u64, Vec<u8>)],
+    max_coordinate_bytes: u64,
+) -> Result<(), BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 5)?;
+    match independent_profile_u64(&fields[0])? {
+        0 => {
+            let bytes = independent_profile_bytes(&fields[1])?;
+            if bytes.is_empty()
+                || *blake3::hash(bytes).as_bytes() != independent_profile_digest(&fields[2])?
+            {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            } else {
+                Ok(())
+            }
+        }
+        1 => independent_profile_safe_error(&fields[3]).map(|_| ()),
+        2 => {
+            let divergence = independent_profile_array(&fields[4], 2)?;
+            let classification = independent_profile_divergence(&divergence[0])?;
+            let coordinate = independent_profile_bytes(&divergence[1])?;
+            if u64::try_from(coordinate.len()).unwrap_or(u64::MAX) > max_coordinate_bytes
+                || !allowed
+                    .iter()
+                    .any(|value| value.0 == classification && value.1.as_slice() == coordinate)
+            {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
+}
+
+fn independent_verify_cpf2_fixture_outcome(
+    expected: &Value,
+    outcome: &Value,
+    error: &Value,
+) -> Result<(), BundleContractErrorV1> {
+    let expected_fields = independent_profile_array(expected, 5)?;
+    let expected_kind = independent_profile_u64(&expected_fields[0])?;
+    let outcome = independent_profile_outcome(outcome)?;
+    let error = independent_profile_optional_safe_error(error)?;
+    let valid = match expected_kind {
+        0 => (outcome == 0 && error.is_none()) || (outcome == 3 && error == Some(12)),
+        1 => match (outcome, error) {
+            (2 | 4 | 5, Some(error)) => {
+                error == independent_profile_safe_error(&expected_fields[3])?
+            }
+            (3, Some(12)) => independent_profile_safe_error(&expected_fields[3])? == 12,
+            _ => false,
+        },
+        2 => outcome == 1 && error.is_none(),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_verify_cpf2_fixture_claim(
+    replay_claim: &Value,
+    redaction: &Value,
+) -> Result<(), BundleContractErrorV1> {
+    let claim = independent_profile_replay_claim(replay_claim)?;
+    let redaction = independent_profile_redaction(redaction)?;
+    if claim == 4 || matches!((claim, redaction), (0, 0) | (1, 1) | (2, 2) | (3, 3)) {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_verify_cpf2_expected_bounds(
+    expected: &Value,
+    bounds: &Value,
+    caps: &IndependentCpf2Caps,
+) -> Result<(), BundleContractErrorV1> {
+    let expected = independent_profile_array(expected, 5)?;
+    if independent_profile_u64(&expected[0])? != 0 {
+        return Ok(());
+    }
+    let bytes = independent_profile_bytes(&expected[1])?;
+    let bounds = independent_profile_array(bounds, 8)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > independent_profile_u64(&bounds[3])?
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes
+    {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn independent_verify_cpf2_bounds(value: &Value) -> Result<(), BundleContractErrorV1> {
+    if independent_profile_array(value, 8)?
+        .iter()
+        .map(independent_profile_u64)
+        .collect::<Result<Vec<_>, _>>()?
+        .contains(&0)
+    {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn independent_verify_cpf2_capabilities(value: &Value) -> Result<(), BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 2)?;
+    if !matches!(&fields[0], Value::Bool(_)) {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let ids = independent_profile_array_bounded(&fields[1])?
+        .iter()
+        .map(|value| independent_profile_text(value, 128).map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    if independent_strictly_ordered(&ids) {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_verify_cpf2_provenance(value: &Value) -> Result<(), BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 7)?;
+    independent_profile_text(&fields[0], 128)?;
+    if fields[1..]
+        .iter()
+        .any(|field| independent_profile_digest(field) == Ok([0; 32]))
+    {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn independent_verify_cpf2_selected_caps(
+    profile: &Value,
+    fixtures: &Value,
+    divergences: &Value,
+    caps: &IndependentCpf2Caps,
+) -> Result<(), BundleContractErrorV1> {
+    if u64::try_from(value_depth(profile)).unwrap_or(u64::MAX) > caps.max_structural_nesting {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let fixtures = independent_profile_array_bounded(fixtures)?;
+    if u64::try_from(fixtures.len()).unwrap_or(u64::MAX) > caps.max_cases {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let member_count = fixtures.iter().try_fold(0_u64, |count, fixture| {
+        let fields = independent_profile_array(fixture, 17)?;
+        let inputs = independent_profile_array_bounded(&fields[7])?;
+        Ok::<_, BundleContractErrorV1>(
+            count.saturating_add(u64::try_from(inputs.len()).unwrap_or(u64::MAX)),
+        )
+    })?;
+    if member_count > caps.max_bundle_members {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    independent_verify_cpf2_allowed_divergences(divergences, caps.max_coordinate_bytes)
+}
+
+fn independent_verify_cpf2_digest(
+    profile: &Value,
+    fields: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    let expected = independent_profile_digest(&fields[17])?;
+    let stable_evidence = independent_cpf2_digest(
+        b"PiglorOS.ConformanceProfileStableEvidence.v2",
+        &Value::Array(Vec::new()),
+    )?;
+    let mut identity = fields.to_vec();
+    identity[17] = Value::Null;
+    let actual = independent_cpf2_digest(
+        b"PiglorOS.ConformanceProfile.v2",
+        &Value::Array(vec![
+            Value::Array(identity),
+            Value::Bytes(stable_evidence.to_vec()),
+        ]),
+    )?;
+    if expected == actual && matches!(profile, Value::Array(_)) {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_allowed_divergences(
+    value: &Value,
+) -> Result<Vec<(u64, Vec<u8>)>, BundleContractErrorV1> {
+    independent_profile_array_bounded(value)?
+        .iter()
+        .map(|value| {
+            let fields = independent_profile_array(value, 2)?;
+            Ok((
+                independent_profile_divergence(&fields[0])?,
+                independent_profile_bytes(&fields[1])?.to_vec(),
+            ))
+        })
+        .collect()
+}
+
+fn independent_profile_array(
+    value: &Value,
+    length: usize,
+) -> Result<&[Value], BundleContractErrorV1> {
+    independent_array(value, length).map_err(|_| BundleContractErrorV1::ProfileInvalid)
+}
+
+fn independent_profile_array_bounded(value: &Value) -> Result<&[Value], BundleContractErrorV1> {
+    independent_array_bounded(value).map_err(|_| BundleContractErrorV1::ProfileInvalid)
+}
+
+fn independent_profile_text(value: &Value, maximum: usize) -> Result<&str, BundleContractErrorV1> {
+    let text = archive_text(value).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    if text.is_empty() || text.len() > maximum {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(text)
+    }
+}
+
+fn independent_profile_ascii(value: &Value, maximum: usize) -> Result<&str, BundleContractErrorV1> {
+    let text = independent_profile_text(value, maximum)?;
+    if text.is_ascii() {
+        Ok(text)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_bytes(value: &Value) -> Result<&[u8], BundleContractErrorV1> {
+    archive_bytes(value).map_err(|_| BundleContractErrorV1::ProfileInvalid)
+}
+
+fn independent_profile_u64(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    archive_u64(value).map_err(|_| BundleContractErrorV1::ProfileInvalid)
+}
+
+fn independent_profile_digest(value: &Value) -> Result<[u8; 32], BundleContractErrorV1> {
+    independent_digest(value).map_err(|_| BundleContractErrorV1::ProfileInvalid)
+}
+
+fn independent_profile_bool(value: &Value, index: usize) -> Result<bool, BundleContractErrorV1> {
+    let fields = independent_profile_array(value, 2)?;
+    match fields.get(index) {
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
+}
+
+fn independent_profile_claim_layer(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    let code = independent_profile_u64(value)?;
+    if code <= 6 {
+        Ok(code)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_modes(value: &Value) -> Result<Vec<u64>, BundleContractErrorV1> {
+    let modes = independent_profile_array_bounded(value)?
+        .iter()
+        .map(independent_profile_u64)
+        .collect::<Result<Vec<_>, _>>()?;
+    if modes.is_empty()
+        || modes.iter().any(|mode| *mode > 3)
+        || !independent_strictly_ordered(&modes)
+    {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(modes)
+    }
+}
+
+fn independent_profile_adapter(value: &Value) -> Result<(), BundleContractErrorV1> {
+    if independent_profile_u64(value)? <= 2 {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_divergence(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    let code = independent_profile_u64(value)?;
+    if code <= 8 {
+        Ok(code)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_safe_error(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    let code = independent_profile_u64(value)?;
+    if code <= 13 {
+        Ok(code)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_optional_safe_error(
+    value: &Value,
+) -> Result<Option<u64>, BundleContractErrorV1> {
+    if matches!(value, Value::Null) {
+        Ok(None)
+    } else {
+        independent_profile_safe_error(value).map(Some)
+    }
+}
+
+fn independent_profile_outcome(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    let code = independent_profile_u64(value)?;
+    if code <= 5 {
+        Ok(code)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_replay_claim(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    let code = independent_profile_u64(value)?;
+    if code <= 4 {
+        Ok(code)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_redaction(value: &Value) -> Result<u64, BundleContractErrorV1> {
+    let code = independent_profile_u64(value)?;
+    if code <= 3 {
+        Ok(code)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
+}
+
+fn independent_profile_digests(value: &Value) -> Result<Vec<[u8; 32]>, BundleContractErrorV1> {
+    independent_profile_array_bounded(value)?
+        .iter()
+        .map(independent_profile_digest)
+        .collect()
+}
+
+fn independent_strictly_ordered<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn independent_semantic_version(value: &str) -> bool {
+    let (core_and_prerelease, build) = match value.split_once('+') {
+        Some((core, build)) if !build.is_empty() => (core, build),
+        Some(_) => return false,
+        None => (value, ""),
+    };
+    let (core, prerelease) = match core_and_prerelease.split_once('-') {
+        Some((core, prerelease)) if !prerelease.is_empty() => (core, prerelease),
+        Some(_) => return false,
+        None => (core_and_prerelease, ""),
+    };
+    let core_parts = core.split('.').collect::<Vec<_>>();
+    core_parts.len() == 3
+        && core_parts
+            .iter()
+            .all(|part| independent_numeric_identifier(part))
+        && independent_semver_identifiers(prerelease, true)
+        && independent_semver_identifiers(build, false)
+}
+
+fn independent_numeric_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 10
+        && (value == "0" || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn independent_semver_identifiers(value: &str, forbid_numeric_leading_zero: bool) -> bool {
+    value.is_empty()
+        || value.split('.').all(|identifier| {
+            !identifier.is_empty()
+                && identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && (!forbid_numeric_leading_zero
+                    || !identifier.bytes().all(|byte| byte.is_ascii_digit())
+                    || independent_numeric_identifier(identifier))
+        })
+}
+
+fn independent_cpf2_digest(
+    domain: &[u8],
+    value: &Value,
+) -> Result<[u8; 32], BundleContractErrorV1> {
+    let bytes = encode_archive_value(value)?;
+    let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
+    source.extend_from_slice(domain);
+    source.push(0);
+    source.extend_from_slice(&bytes);
+    Ok(*blake3::hash(&source).as_bytes())
 }
 
 fn independent_array(value: &Value, length: usize) -> Result<&[Value], BundleContractErrorV1> {
@@ -4094,7 +4827,7 @@ mod tests {
         let mut digest_input = b"PiglorOS.ConformanceBundle.v1\0".to_vec();
         digest_input.extend_from_slice(&manifest_bytes);
         assert_eq!(
-            bundle.bundle_digest()?,
+            bundle.manifest_digest()?,
             *blake3::hash(&digest_input).as_bytes()
         );
         assert_eq!(bundle.manifest.profile_digest, profile.profile_digest);
@@ -5640,7 +6373,7 @@ mod instrumented_public_entrypoints {
         let archive = bundle.to_canonical_cbor()?;
         assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
         assert_eq!(verify_archive_independently(&archive), Ok(()));
-        assert!(bundle.bundle_digest()?.iter().any(|byte| *byte != 0));
+        assert!(bundle.manifest_digest()?.iter().any(|byte| *byte != 0));
 
         let mut invalid_magic = bundle.clone();
         invalid_magic.manifest.magic = "invalid".to_owned();
@@ -7889,8 +8622,7 @@ mod instrumented_public_entrypoints {
     #[test]
     fn independent_authority_metadata_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let profile_value = profile_value(&tests::profile())?;
-        let profile = profile_value.clone();
+        let profile = profile_value(&tests::profile())?;
         let inventory = br#"{"lifecycle":"Draft","magic":"W8H1","version":1,"digest_algorithm":"BLAKE3-256","entries":[]}"#;
         let matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
         let missing_inventory_lifecycle =
@@ -7959,6 +8691,29 @@ mod instrumented_public_entrypoints {
             )
             .is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn draft_authority_records_reject_undeclared_evidence_fields(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut inventory: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/expected-authority/inventory.json"
+        ))?;
+        inventory["candidate_evidence"] = JsonValue::Null;
+        assert_eq!(
+            validate_authority_inventory(&inventory),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut matrix: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
+        ))?;
+        matrix["candidate_evidence"] = JsonValue::Null;
+        assert_eq!(
+            validate_execution_matrix(&matrix),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
         Ok(())
     }
 

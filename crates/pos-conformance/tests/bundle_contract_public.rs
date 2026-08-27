@@ -733,14 +733,69 @@ fn public_draft_archive_round_trip_and_independent_verification(
     let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
     let manifest = bundle.manifest_bytes()?;
     assert_eq!(manifest, bundle.manifest_bytes()?);
-    assert!(bundle.bundle_digest()?.iter().any(|byte| *byte != 0));
+    let manifest_digest = bundle.manifest_digest()?;
+    let mut manifest_source = b"PiglorOS.ConformanceBundle.v1\0".to_vec();
+    manifest_source.extend_from_slice(&manifest);
+    assert_eq!(manifest_digest, *blake3::hash(&manifest_source).as_bytes());
 
     let archive = bundle.to_canonical_cbor()?;
+    let archive_digest = bundle.archive_digest()?;
+    assert_eq!(archive_digest, *blake3::hash(&archive).as_bytes());
+    let filename = bundle.release_filename()?;
+    assert_eq!(
+        filename,
+        format!("{}.cfb1", pos_conformance::hex_digest(&archive_digest))
+    );
     assert_eq!(
         pos_conformance::verify_archive_independently(&archive),
         Ok(())
     );
+    assert_eq!(
+        pos_conformance::verify_archive_release_filename(&archive, &filename),
+        Ok(())
+    );
+    for invalid_filename in [
+        format!("{}.CFB1", pos_conformance::hex_digest(&archive_digest)),
+        format!(
+            "{}.cfb1",
+            pos_conformance::hex_digest(&archive_digest).to_uppercase()
+        ),
+        format!(
+            "bundle-local-{}.cfb1",
+            pos_conformance::hex_digest(&manifest_digest)
+        ),
+    ] {
+        assert_eq!(
+            pos_conformance::verify_archive_release_filename(&archive, &invalid_filename),
+            Err(pos_conformance::BundleContractErrorV1::ReleaseFilenameInvalid)
+        );
+    }
+    let mut changed_archive = archive.clone();
+    changed_archive[0] ^= 1;
+    assert_eq!(
+        pos_conformance::verify_archive_release_filename(&changed_archive, &filename),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveDigestMismatch)
+    );
+    let re_signed = fixtures::draft_bundle()?.sign(&SigningKey::from_bytes(&[7; 32]))?;
+    assert_eq!(re_signed.manifest_digest()?, manifest_digest);
+    assert_ne!(re_signed.archive_digest()?, archive_digest);
+    assert_ne!(re_signed.release_filename()?, filename);
     assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_a_cpf2_semantic_invariant(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let invalid_profile = signed_archive_variant(&bundle, &signing_key, |value| {
+        mutate_profile(value, |fields| fields[3] = Value::Text("1".to_owned()))
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&invalid_profile),
+        Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+    );
     Ok(())
 }
 

@@ -25,9 +25,10 @@ pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
 
 pub use bundle_contract::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
-    BundleContractErrorV1, BundleExpectedResultV1, BundleManifestV1, BundleMemberDescriptorV1,
-    BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ConformanceBundlePairV1, ConformanceBundleV1,
-    CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+    verify_archive_release_filename, BundleContractErrorV1, BundleExpectedResultV1,
+    BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
+    ConformanceBundlePairV1, ConformanceBundleV1, CONFORMANCE_BUNDLE_MAGIC_V1,
+    MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV2,
