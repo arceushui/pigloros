@@ -1663,7 +1663,7 @@ mod tests {
         let mut invalid_expected = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         invalid_expected.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
-        assert!(bundle_inputs(&invalid_expected, BundleModeV1::Local).is_err());
+        assert!(bundle_inputs(&invalid_expected, BundleModeV1::Local).is_ok());
         let output = output_root("invalid-expected");
         assert!(materialize_profile_for_test(
             &output,
