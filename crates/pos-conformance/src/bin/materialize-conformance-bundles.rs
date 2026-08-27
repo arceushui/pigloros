@@ -1679,9 +1679,9 @@ mod tests {
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
         let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
         assert!(fixtures_from_profile_record(&canonical_record, &context).is_ok());
-        let fixture = &canonical_record["fixtures"][0];
+        let fixture_record = &canonical_record["fixtures"][0];
         assert!(fixture(
-            fixture,
+            fixture_record,
             &context,
             context.local_execution_profile_digest,
             ExecutionModeV1::Local,
