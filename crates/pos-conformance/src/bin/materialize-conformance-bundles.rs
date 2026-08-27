@@ -253,18 +253,6 @@ fn run(
     mut arguments: impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
 ) -> Result<(), Box<dyn Error>> {
-    run_with_inventory(
-        &mut arguments,
-        encoded_signing_key,
-        include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json"),
-    )
-}
-
-fn run_with_inventory(
-    arguments: &mut impl Iterator<Item = OsString>,
-    encoded_signing_key: Result<String, std::env::VarError>,
-    inventory_bytes: &[u8],
-) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let output_root = arguments
         .next()
@@ -277,6 +265,8 @@ fn run_with_inventory(
         return Err("materialization output directory already exists".into());
     }
     let signing_key = signing_key_from_encoded(encoded_signing_key)?;
+    let inventory_bytes =
+        include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
     let lifecycles = publication_lifecycles_from_bytes(inventory_bytes)?;
     std::fs::create_dir(&output_root)?;
     let context = MaterializationContext {
@@ -305,17 +295,14 @@ fn publication_lifecycles_from_bytes(
     bytes: &[u8],
 ) -> Result<Vec<(ProfileLifecycleV1, &'static str)>, Box<dyn Error>> {
     let inventory: JsonValue = serde_json::from_slice(bytes)?;
-    match inventory
+    let lifecycle = inventory
         .get("lifecycle")
         .and_then(JsonValue::as_str)
-        .ok_or("authority inventory lifecycle is missing")?
-    {
-        "Draft" => Ok(vec![(ProfileLifecycleV1::Draft, "draft")]),
-        "Candidate" => {
-            Err("Candidate materialization is owned by the #198 governance workflow".into())
-        }
-        _ => Err("unsupported authority inventory lifecycle".into()),
+        .ok_or("authority inventory lifecycle is missing")?;
+    if lifecycle != "Draft" {
+        return Err("only Draft authority inventories can be materialized here".into());
     }
+    Ok(vec![(ProfileLifecycleV1::Draft, "draft")])
 }
 
 fn materialize_profile_with_inventory(
@@ -810,10 +797,11 @@ fn canonical_fixture_bytes(
     expected_path: &str,
 ) -> Result<CanonicalFixtureBytes, Box<dyn Error>> {
     let fixture_root = layer_spec(claim_layer).fixture_root;
-    if !input_path.starts_with(&format!("inputs/{fixture_root}/"))
-        || !expected_path.starts_with(&format!("expected/{fixture_root}/"))
-    {
-        return Err("canonical fixture paths are bound to the wrong claim layer".into());
+    if !input_path.starts_with(&format!("inputs/{fixture_root}/")) {
+        return Err("canonical fixture input path is bound to the wrong claim layer".into());
+    }
+    if !expected_path.starts_with(&format!("expected/{fixture_root}/")) {
+        return Err("canonical fixture expected path is bound to the wrong claim layer".into());
     }
     let family =
         family_for_path(input_path, expected_path).ok_or("canonical fixture paths are unknown")?;
@@ -1684,12 +1672,6 @@ mod tests {
         assert!(publication_lifecycles_from_bytes(b"{}").is_err());
         assert!(publication_lifecycles_from_bytes(br#"{"lifecycle":"Retired"}"#).is_err());
         assert!(publication_lifecycles_from_bytes(b"{").is_err());
-        let mut invalid_inventory = [
-            OsString::from("materialize"),
-            OsString::from("invalid-inventory"),
-        ]
-        .into_iter();
-        assert!(run_with_inventory(&mut invalid_inventory, Ok(signing_key_hex()), b"{}").is_err());
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         assert!(bundle_inputs_from_profile(&profile, BundleModeV1::Local, b"{").is_err());
         assert!(bundle_inputs_from_profile(&profile, BundleModeV1::Local, b"{}").is_err());
@@ -1860,16 +1842,6 @@ mod tests {
     fn materializer_rejects_non_draft_lifecycle() -> Result<(), Box<dyn Error>> {
         let draft = br#"{"lifecycle":"Draft"}"#;
         let candidate = br#"{"lifecycle":"Candidate"}"#;
-        let mut candidate_arguments = [
-            OsString::from("materialize"),
-            OsString::from("candidate-inventory"),
-        ]
-        .into_iter();
-        assert!(
-            run_with_inventory(&mut candidate_arguments, Ok(signing_key_hex()), candidate,)
-                .is_err()
-        );
-
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let lifecycle_root = output_root("candidate-lifecycle");
         assert!(materialize_profile_for_test(
@@ -1936,6 +1908,18 @@ mod tests {
         assert!(canonical_fixture_bytes(
             ClaimLayerV1::ArtifactIntegrity,
             "inputs/replay-conformance/positive.json",
+            "expected/replay-conformance/positive.json",
+        )
+        .is_err());
+        assert!(canonical_fixture_bytes(
+            ClaimLayerV1::ArtifactIntegrity,
+            "inputs/replay-conformance/positive.json",
+            "expected/artifact-integrity/positive.json",
+        )
+        .is_err());
+        assert!(canonical_fixture_bytes(
+            ClaimLayerV1::ArtifactIntegrity,
+            "inputs/artifact-integrity/positive.json",
             "expected/replay-conformance/positive.json",
         )
         .is_err());

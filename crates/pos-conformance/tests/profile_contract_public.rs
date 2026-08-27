@@ -123,7 +123,7 @@ pub mod fixtures {
         ])
     }
 
-    fn fixture() -> Value {
+    fn encoded_fixture_descriptor_value() -> Value {
         Value::Array(vec![
             text("ART-001"),
             Value::Bool(true),
@@ -219,14 +219,17 @@ pub mod fixtures {
     }
 
     #[must_use]
-    pub fn encode(value: &Value) -> Vec<u8> {
+    pub fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes).unwrap_or_default();
-        bytes
+        ciborium::into_writer(value, &mut bytes)?;
+        Ok(bytes)
     }
 
     #[must_use]
-    pub fn profile(lifecycle: u64, with_stable_evidence: bool) -> Vec<u8> {
+    pub fn profile(
+        lifecycle: u64,
+        with_stable_evidence: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut fields = vec![
             text("CPF1"),
             uint(1),
@@ -236,7 +239,7 @@ pub mod fixtures {
             bytes(12),
             Value::Array(vec![bytes(1)]),
             Value::Array(vec![bytes(2)]),
-            Value::Array(vec![fixture()]),
+            Value::Array(vec![encoded_fixture_descriptor_value()]),
             Value::Array(vec![Value::Array(vec![uint(0), bytes(99)])]),
             protocol(),
             requirements(),
@@ -255,7 +258,7 @@ pub mod fixtures {
     }
 
     #[must_use]
-    pub fn request() -> Vec<u8> {
+    pub fn request() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         encode(&Value::Array(vec![
             text("EVR1"),
             uint(1),
@@ -335,7 +338,9 @@ fn report_with_cases(count: usize) -> ConformanceReportV1 {
         provenance_digest: [17; 32],
         report_digest: [0; 32],
     };
-    report.report_digest = report.digest().unwrap_or([0; 32]);
+    report.report_digest = report
+        .digest()
+        .expect("constructed public report fixture must be encodable");
     report
 }
 
@@ -471,7 +476,8 @@ fn request_for_caps(caps: &EvaluatorHardCapsV1) -> EvaluatorRequestV1 {
 }
 
 #[test]
-fn public_report_validation_and_encoding_cover_empty_and_large_boundaries() {
+fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
+) -> Result<(), Box<dyn std::error::Error>> {
     let empty = report_with_cases(0);
     assert_eq!(
         empty.validate(),
@@ -479,25 +485,20 @@ fn public_report_validation_and_encoding_cover_empty_and_large_boundaries() {
     );
 
     let ordinary = report_with_cases(128);
-    let ordinary_bytes = ordinary.to_canonical_cbor();
-    assert!(ordinary_bytes.is_ok());
-    assert!(ordinary_bytes
-        .as_ref()
-        .is_ok_and(|bytes| bytes.len() > 17_408));
+    let ordinary_bytes = ordinary.to_canonical_cbor()?;
+    assert!(ordinary_bytes.len() > 17_408);
     assert_eq!(
-        ConformanceReportV1::from_canonical_cbor(&ordinary_bytes.unwrap_or_default()),
+        ConformanceReportV1::from_canonical_cbor(&ordinary_bytes),
         Ok(ordinary)
     );
 
     let large = report_with_cases(7_000);
-    let large_bytes = large.to_canonical_cbor();
-    assert!(large_bytes.is_ok());
-    assert!(large_bytes
-        .as_ref()
-        .is_ok_and(|bytes| bytes.len() > 1_048_592));
+    let large_bytes = large.to_canonical_cbor()?;
+    assert!(large_bytes.len() > 1_048_592);
 
     let exact_case_cap = report_with_cases(65_536);
     assert_eq!(exact_case_cap.validate(), Ok(()));
+    Ok(())
 }
 
 #[test]
@@ -530,7 +531,8 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
 }
 
 #[test]
-fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
+fn public_profile_matrix_binding_is_content_addressed_and_fail_closed(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut bound = profile_without_matrix_binding();
     let unbound_digest = bound.digest();
     let matrix_digest = *blake3::hash(b"adr-059-execution-matrix").as_bytes();
@@ -558,9 +560,9 @@ fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
         .starts_with("pigloros.w8.knowledge-non-interference.1.0.0#matrix="));
     assert_eq!(bound.execution_matrix_digest(), Ok(matrix_digest));
     assert_ne!(bound.profile_digest, unbound_digest);
-    let encoded = bound.to_canonical_cbor();
+    let encoded = bound.to_canonical_cbor()?;
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&encoded.unwrap_or_default()),
+        ConformanceProfileV1::from_canonical_cbor(&encoded),
         Ok(bound.clone())
     );
 
@@ -596,6 +598,7 @@ fn public_profile_matrix_binding_is_content_addressed_and_fail_closed() {
         mismatched.validate(),
         Err(ConformanceContractError::FixtureDigestMismatch)
     );
+    Ok(())
 }
 
 #[test]
@@ -863,19 +866,21 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
 }
 
 #[test]
-fn exported_decoders_reject_terminal_digest_after_nested_decode() {
+fn exported_decoders_reject_terminal_digest_after_nested_decode(
+) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(0, false)),
+        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(0, false)?),
         Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(2, true)),
+        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(2, true)?),
         Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
-        EvaluatorRequestV1::from_canonical_cbor(&fixtures::request()),
+        EvaluatorRequestV1::from_canonical_cbor(&fixtures::request()?),
         Err(ConformanceContractError::InvalidEncoding)
     );
+    Ok(())
 }
 
 #[test]
@@ -919,38 +924,38 @@ fn public_replay_claim_erasure_seam_only_preserves_or_weakens() {
     );
 }
 
-fn profile_with_field(index: usize, replacement: Value) -> Vec<u8> {
-    let Ok(mut value) = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
-    else {
-        return fixtures::encode(&Value::Null);
-    };
+fn profile_with_field(
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)?))?;
     let Value::Array(fields) = &mut value else {
-        return fixtures::encode(&Value::Null);
+        return Err("public profile fixture is not an array".into());
     };
     fields[index] = replacement;
     fixtures::encode(&value)
 }
 
-fn profile_with_fixture_field(index: usize, replacement: Value) -> Vec<u8> {
-    let Ok(mut value) = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)))
-    else {
-        return fixtures::encode(&Value::Null);
-    };
+fn profile_with_fixture_field(
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)?))?;
     let Value::Array(fields) = &mut value else {
-        return fixtures::encode(&Value::Null);
+        return Err("public profile fixture is not an array".into());
     };
     let Value::Array(fixtures) = &mut fields[8] else {
-        return fixtures::encode(&Value::Null);
+        return Err("public profile fixture list is not an array".into());
     };
     let Value::Array(fixture) = &mut fixtures[0] else {
-        return fixtures::encode(&Value::Null);
+        return Err("public fixture descriptor is not an array".into());
     };
     fixture[index] = replacement;
     fixtures::encode(&value)
 }
 
 #[test]
-fn public_profile_decoders_cover_nested_failure_shapes() {
+fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let uint = |value: u64| Value::Integer(value.into());
     let bytes = |seed: u8| Value::Bytes(vec![seed; 32]);
     let expected_canonical = |first: Value, second: Value, digest: Value| {
@@ -967,14 +972,14 @@ fn public_profile_decoders_cover_nested_failure_shapes() {
     };
 
     let malformed_profiles = [
-        profile_with_field(9, Value::Array(vec![Value::Null])),
-        profile_with_fixture_field(5, Value::Array(vec![uint(99)])),
-        profile_with_fixture_field(8, Value::Array(vec![Value::Null; 5])),
-        profile_with_fixture_field(8, expected_canonical(uint(0), Value::Null, bytes(5))),
-        profile_with_fixture_field(8, expected_canonical(uint(0), bytes(5), Value::Null)),
-        profile_with_fixture_field(8, expected_divergence(Value::Null, Value::Bytes(vec![1]))),
-        profile_with_fixture_field(8, expected_divergence(uint(0), Value::Null)),
-        profile_with_field(16, Value::Null),
+        profile_with_field(9, Value::Array(vec![Value::Null]))?,
+        profile_with_fixture_field(5, Value::Array(vec![uint(99)]))?,
+        profile_with_fixture_field(8, Value::Array(vec![Value::Null; 5]))?,
+        profile_with_fixture_field(8, expected_canonical(uint(0), Value::Null, bytes(5)))?,
+        profile_with_fixture_field(8, expected_canonical(uint(0), bytes(5), Value::Null))?,
+        profile_with_fixture_field(8, expected_divergence(Value::Null, Value::Bytes(vec![1])))?,
+        profile_with_fixture_field(8, expected_divergence(uint(0), Value::Null))?,
+        profile_with_field(16, Value::Null)?,
     ];
 
     for bytes in malformed_profiles {
@@ -983,6 +988,7 @@ fn public_profile_decoders_cover_nested_failure_shapes() {
             Err(ConformanceContractError::InvalidEncoding)
         );
     }
+    Ok(())
 }
 
 #[test]
