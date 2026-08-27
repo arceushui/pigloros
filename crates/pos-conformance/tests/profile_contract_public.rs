@@ -584,15 +584,15 @@ fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record(
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut fields = fixtures::profile(0, false)?;
-    let mut value: Value = ciborium::from_reader(fields.as_slice())?;
-    let Value::Array(fields) = &mut value else {
+    let profile_bytes = fixtures::profile(0, false)?;
+    let mut value: Value = ciborium::from_reader(profile_bytes.as_slice())?;
+    let Value::Array(profile_fields) = &mut value else {
         return Err("profile fixture must be an array".into());
     };
-    fields.remove(6);
-    fields[0] = Value::Text("CPF1".to_owned());
-    fields[1] = Value::Integer(1_u64.into());
-    fields = fixtures::encode(&value)?;
+    profile_fields.remove(6);
+    profile_fields[0] = Value::Text("CPF1".to_owned());
+    profile_fields[1] = Value::Integer(1_u64.into());
+    let fields = fixtures::encode(&value)?;
     assert_eq!(
         ConformanceProfileV2::from_canonical_cbor(&fields),
         Err(ConformanceContractError::UnsupportedVersion)
