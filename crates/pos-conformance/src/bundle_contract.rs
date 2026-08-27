@@ -2433,6 +2433,13 @@ fn matrix_cases_are_open(cases: &[JsonValue]) -> bool {
             && case
                 .get("expected_result_digest")
                 .is_some_and(JsonValue::is_null)
+            && [
+                "authority_fixture_id",
+                "authority_result_digest",
+                "expected_result",
+            ]
+            .iter()
+            .all(|field| case.get(*field).is_none_or(JsonValue::is_null))
     })
 }
 
@@ -7196,6 +7203,15 @@ mod instrumented_public_entrypoints {
         let mut bound_case = cases.clone();
         bound_case[0]["expected_result_digest"] = JsonValue::String("bound".to_owned());
         assert!(!matrix_cases_are_open(&bound_case));
+        for field in [
+            "authority_fixture_id",
+            "authority_result_digest",
+            "expected_result",
+        ] {
+            let mut claimed_case = cases.clone();
+            claimed_case[0][field] = JsonValue::String("claimed".to_owned());
+            assert!(!matrix_cases_are_open(&claimed_case));
+        }
 
         let mut no_provenance = bundle.members.clone();
         no_provenance.retain(|member| member.role != BundleMemberRoleV1::Provenance);

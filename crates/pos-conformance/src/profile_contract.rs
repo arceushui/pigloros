@@ -3209,17 +3209,20 @@ mod tests {
         profile: &ConformanceProfileV1,
         path: &[usize],
         replacement: Value,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, StrictCborError> {
         let mut encoded = encode_profile(profile, true);
         replace_profile_path(&mut encoded, path, replacement);
-        encode_value(&encoded).unwrap_or_default()
+        encode_value(&encoded)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn malformed_request_bytes(path: &[usize], replacement: Value) -> Vec<u8> {
+    fn malformed_request_bytes(
+        path: &[usize],
+        replacement: Value,
+    ) -> Result<Vec<u8>, StrictCborError> {
         let mut encoded = encode_request(&request(), true);
         replace_profile_path(&mut encoded, path, replacement);
-        encode_value(&encoded).unwrap_or_default()
+        encode_value(&encoded)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -4312,7 +4315,8 @@ mod tests {
     }
 
     #[test]
-    fn public_profile_decoder_reaches_top_level_invalid_field_seams() {
+    fn public_profile_decoder_reaches_top_level_invalid_field_seams(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let value = profile();
         for index in 0..17 {
             // `previous_profile_digest` is an optional field; CBOR null is
@@ -4322,7 +4326,7 @@ mod tests {
             } else {
                 Value::Null
             };
-            let bytes = malformed_profile_bytes(&value, &[index], replacement);
+            let bytes = malformed_profile_bytes(&value, &[index], replacement)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..17 {
@@ -4331,35 +4335,35 @@ mod tests {
             } else {
                 Value::Null
             };
-            let bytes = malformed_profile_bytes(&value, &[8, 0, index], replacement);
+            let bytes = malformed_profile_bytes(&value, &[8, 0, index], replacement)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..4 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 7, 0, index], Value::Null);
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 7, 0, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..8 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 13, index], Value::Null);
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 13, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..2 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 14, index], Value::Null);
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 14, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..7 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 15, index], Value::Null);
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 15, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..5 {
-            let bytes = malformed_profile_bytes(&value, &[10, index], Value::Null);
+            let bytes = malformed_profile_bytes(&value, &[10, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..10 {
-            let bytes = malformed_profile_bytes(&value, &[10, 4, index], Value::Null);
+            let bytes = malformed_profile_bytes(&value, &[10, 4, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..5 {
-            let bytes = malformed_profile_bytes(&value, &[11, index], Value::Null);
+            let bytes = malformed_profile_bytes(&value, &[11, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         for expected in [
@@ -4385,9 +4389,10 @@ mod tests {
                 Value::Null,
             ]),
         ] {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 8], expected);
+            let bytes = malformed_profile_bytes(&value, &[8, 0, 8], expected)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
+        Ok(())
     }
 
     #[test]
@@ -4452,17 +4457,18 @@ mod tests {
     }
 
     #[test]
-    fn public_request_decoder_reaches_nested_invalid_field_seams() {
+    fn public_request_decoder_reaches_nested_invalid_field_seams(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for index in 0..14 {
-            let bytes = malformed_request_bytes(&[index], Value::Null);
+            let bytes = malformed_request_bytes(&[index], Value::Null)?;
             assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..6 {
-            let bytes = malformed_request_bytes(&[7, index], Value::Null);
+            let bytes = malformed_request_bytes(&[7, index], Value::Null)?;
             assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..3 {
-            let bytes = malformed_request_bytes(&[10, index], Value::Null);
+            let bytes = malformed_request_bytes(&[10, index], Value::Null)?;
             assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
         }
 
@@ -4470,6 +4476,7 @@ mod tests {
         invalid_caps.evaluator_protocol.hard_caps.max_cases = 0;
         invalid_caps.profile_digest = invalid_caps.digest();
         assert!(invalid_caps.validate().is_err());
+        Ok(())
     }
 
     #[test]
