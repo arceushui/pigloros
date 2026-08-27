@@ -5569,16 +5569,31 @@ mod instrumented_public_entrypoints {
         }
         assert!(verify_archive_independently(&raw_archive(&[0x60], &exact_members)).is_err());
 
-        let malformed_member = raw_archive(&[0x60], &[0x81, 0x00]);
-        assert_eq!(
-            ConformanceBundleV1::from_canonical_cbor(&malformed_member),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
-        assert_eq!(
-            verify_archive_independently(&malformed_member),
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        );
+        public_archive_rejects_malformed_member_container()?;
+        public_archive_rejects_missing_profile(archive)?;
+        Ok(())
+    }
 
+    fn public_archive_rejects_malformed_member_container() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut malformed = vec![0x86, 0x60, 0x01, 0x80, 0x81, 0x00, 0x58, 0x20];
+        malformed.extend_from_slice(&[0; 32]);
+        malformed.extend_from_slice(&[0x58, 0x40]);
+        malformed.extend_from_slice(&[0; 64]);
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&malformed),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&malformed),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        Ok(())
+    }
+
+    fn public_archive_rejects_missing_profile(
+        archive: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut missing_profile: ciborium::value::Value =
             ciborium::from_reader(std::io::Cursor::new(archive))?;
         let ciborium::value::Value::Array(fields) = &mut missing_profile else {
