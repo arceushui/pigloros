@@ -2355,7 +2355,7 @@ fn reject_malformed_inventory_records(
     ];
     for (index, mutate) in inventory_cases.into_iter().enumerate() {
         assert_json_member_rejected(
-            &bundle,
+            bundle,
             "authority/expected-authority-inventory.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
