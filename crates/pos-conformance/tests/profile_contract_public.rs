@@ -218,14 +218,24 @@ pub mod fixtures {
         ])
     }
 
-    #[must_use]
+    /// Serializes a fixture value as canonical CBOR bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when CBOR serialization fails.
+    #[must_use = "encoded fixture bytes must be used by the contract exercise"]
     pub fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut bytes = Vec::new();
         ciborium::into_writer(value, &mut bytes)?;
         Ok(bytes)
     }
 
-    #[must_use]
+    /// Builds a complete CPF1 profile fixture for rejection-path exercises.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when encoding the fixture as CBOR fails.
+    #[must_use = "profile fixture bytes must be used by the contract exercise"]
     pub fn profile(
         lifecycle: u64,
         with_stable_evidence: bool,
@@ -257,7 +267,12 @@ pub mod fixtures {
         encode(&Value::Array(fields))
     }
 
-    #[must_use]
+    /// Builds a complete EVR1 verification-request fixture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when encoding the fixture as CBOR fails.
+    #[must_use = "request fixture bytes must be used by the contract exercise"]
     pub fn request() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         encode(&Value::Array(vec![
             text("EVR1"),
