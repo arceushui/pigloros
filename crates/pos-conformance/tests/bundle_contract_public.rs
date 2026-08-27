@@ -2327,6 +2327,14 @@ fn public_independent_verifier_rejects_each_zero_archive_cap(
 fn public_draft_authority_records_reject_each_malformed_shape(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bundle = signed_draft_bundle()?;
+    reject_malformed_inventory_records(&bundle)?;
+    reject_malformed_provenance_records(&bundle)?;
+    reject_malformed_matrix_records(&bundle)
+}
+
+fn reject_malformed_inventory_records(
+    bundle: &ConformanceBundleV1,
+) -> Result<(), Box<dyn std::error::Error>> {
     let inventory_cases: Vec<JsonMutation> = vec![
         Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
@@ -2355,7 +2363,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         )?;
     }
     assert_json_member_rejected(
-        &bundle,
+        bundle,
         "authority/expected-authority-inventory.json",
         |value| {
             let _ = value["entries"].as_array_mut().map(Vec::pop);
@@ -2364,7 +2372,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         "inventory entries length",
     )?;
     assert_json_member_rejected(
-        &bundle,
+        bundle,
         "authority/expected-authority-inventory.json",
         |value| value["entries"] = JsonValue::Null,
         pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
@@ -2385,7 +2393,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         ),
     ] {
         assert_json_member_rejected(
-            &bundle,
+            bundle,
             "authority/expected-authority-inventory.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
@@ -2393,30 +2401,37 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         )?;
     }
 
-    for (index, mutate) in [
-        Box::new(|value: &mut JsonValue| {
-            value["authority_inventory"]["sha256_digest"] = JsonValue::Null;
-        }) as Box<dyn FnOnce(&mut JsonValue)>,
-        Box::new(|value: &mut JsonValue| {
+    Ok(())
+}
+
+fn reject_malformed_provenance_records(
+    bundle: &ConformanceBundleV1,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let provenance_cases: Vec<JsonMutation> = vec![
+        Box::new(|value| value["authority_inventory"]["sha256_digest"] = JsonValue::Null),
+        Box::new(|value| {
             value["authority_inventory"]["sha256_digest"] =
                 JsonValue::String("not-a-digest".to_owned());
         }),
-        Box::new(|value: &mut JsonValue| {
+        Box::new(|value| {
             value["authority_inventory"]["sha256_digest"] = JsonValue::String("00".repeat(32));
         }),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    for (index, mutate) in provenance_cases.into_iter().enumerate() {
         assert_json_member_rejected(
-            &bundle,
+            bundle,
             "support/provenance.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
             &format!("provenance inventory digest case {index}"),
         )?;
     }
+    Ok(())
+}
 
+fn reject_malformed_matrix_records(
+    bundle: &ConformanceBundleV1,
+) -> Result<(), Box<dyn std::error::Error>> {
     let matrix_cases: Vec<JsonMutation> = vec![
         Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
@@ -2437,7 +2452,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
     ];
     for (index, mutate) in matrix_cases.into_iter().enumerate() {
         assert_json_member_rejected(
-            &bundle,
+            bundle,
             "authority/execution-matrix.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
@@ -2471,7 +2486,7 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         ),
     ] {
         assert_json_member_rejected(
-            &bundle,
+            bundle,
             "authority/execution-matrix.json",
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
