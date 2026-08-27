@@ -1631,16 +1631,11 @@ mod tests {
         assert!(verify_public_archive(&bundle_bytes, &wrong_digest, &manifest).is_err());
         assert!(verify_public_archive(&bundle_bytes, &bundle_digest, b"invalid").is_err());
         assert!(verify_public_archive(b"invalid", &bundle_digest, &manifest).is_err());
-        let (members, expected_results) = bundle_inputs(&profile, BundleModeV1::Local)?;
-        let mut invalid_signature = ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            members,
-            expected_results,
-        )?
-        .sign(&signing_key)?;
-        invalid_signature.signature = pos_core::Signature::from_bytes([0; 64]);
-        let invalid_signature_bytes = invalid_signature.to_canonical_cbor()?;
+        let mut invalid_signature_bytes = bundle_bytes.clone();
+        let signature_byte = invalid_signature_bytes
+            .last_mut()
+            .ok_or("canonical bundle must contain a signature")?;
+        *signature_byte ^= 1;
         assert!(
             verify_public_archive(&invalid_signature_bytes, &bundle_digest, &manifest).is_err()
         );
