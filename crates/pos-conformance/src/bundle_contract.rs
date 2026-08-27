@@ -3861,7 +3861,7 @@ mod tests {
             &embedded_digest_archive,
             BundleContractErrorV1::ProfileInvalid,
         )?;
-        let mut recomputed_digest_mismatch = embedded_digest_archive;
+        let mut recomputed_digest_mismatch = valid.clone();
         if let Value::Array(fields) = &mut recomputed_digest_mismatch {
             let Value::Array(manifest) = &mut fields[2] else {
                 return Err("manifest must be an array".into());
