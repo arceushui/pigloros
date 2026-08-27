@@ -1248,7 +1248,7 @@ fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
 
 fn encode_archive_value<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).unwrap_or_default();
+    let _ = ciborium::into_writer(value, &mut bytes);
     bytes
 }
 
