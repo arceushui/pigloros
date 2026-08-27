@@ -598,17 +598,17 @@ impl ConformanceBundleV1 {
         if canonical_bytes.as_slice() != bytes {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
-        let Value::Array(fields) = &value else {
-            unreachable!("archive preflight validated the archive array");
-        };
+        let fields = value
+            .as_array()
+            .expect("archive preflight validated the archive array");
         if archive_text(&fields[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&fields[1])? != 1
         {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
         let manifest = decode_manifest(&fields[2])?;
-        let Value::Array(members) = &fields[3] else {
-            unreachable!("archive preflight validated the members array");
-        };
+        let members = fields[3]
+            .as_array()
+            .expect("archive preflight validated the members array");
         let members = members
             .iter()
             .map(decode_member)
@@ -661,9 +661,9 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     if encode_archive_value(&value)?.as_slice() != bytes {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
-    let Value::Array(archive) = &value else {
-        unreachable!("archive preflight validated the archive array");
-    };
+    let archive = value
+        .as_array()
+        .expect("archive preflight validated the archive array");
     if archive_text(&archive[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&archive[1])? != 1 {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
@@ -675,9 +675,9 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
     independent_verify_signature(&archive[2], &archive[4], &archive[5])?;
-    let Value::Array(members) = &archive[3] else {
-        unreachable!("archive preflight validated the members array");
-    };
+    let members = archive[3]
+        .as_array()
+        .expect("archive preflight validated the members array");
     let descriptors = independent_array_bounded(&manifest[4])?;
     if members.len() != descriptors.len() {
         return Err(BundleContractErrorV1::UndeclaredMember);
