@@ -1631,7 +1631,7 @@ mod tests {
         assert!(verify_public_archive(&bundle_bytes, &wrong_digest, &manifest).is_err());
         assert!(verify_public_archive(&bundle_bytes, &bundle_digest, b"invalid").is_err());
         assert!(verify_public_archive(b"invalid", &bundle_digest, &manifest).is_err());
-        let mut invalid_signature_bytes = bundle_bytes.clone();
+        let mut invalid_signature_bytes = bundle_bytes;
         let signature_byte = invalid_signature_bytes
             .last_mut()
             .ok_or("canonical bundle must contain a signature")?;
