@@ -5821,6 +5821,7 @@ mod tests {
         constrained.fixtures[0]
             .modes
             .extend([ExecutionModeV1::Replay, ExecutionModeV1::Fork]);
+        constrained.fixtures.truncate(1);
         constrained
             .evaluator_protocol
             .hard_caps

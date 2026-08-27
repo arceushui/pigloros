@@ -3701,7 +3701,7 @@ mod tests {
             }
         }
         resign_archive(&mut candidate)?;
-        assert_independent_error(&candidate, BundleContractErrorV1::MemberDigestMismatch)
+        assert_independent_error(&candidate, BundleContractErrorV1::LifecycleInvalid)
     }
 
     fn expected_member_index(bundle: &ConformanceBundleV1) -> Option<usize> {
