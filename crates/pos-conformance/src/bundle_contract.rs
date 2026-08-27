@@ -3859,7 +3859,7 @@ mod tests {
         resign_archive(&mut embedded_digest_archive)?;
         assert_independent_error(
             &embedded_digest_archive,
-            BundleContractErrorV1::MemberDigestMismatch,
+            BundleContractErrorV1::ProfileInvalid,
         )?;
         let mut recomputed_digest_mismatch = embedded_digest_archive;
         if let Value::Array(fields) = &mut recomputed_digest_mismatch {
