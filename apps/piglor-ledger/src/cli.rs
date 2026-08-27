@@ -88,8 +88,8 @@ fn ledger_signing_registry(
     let owner_id = ledger_owner_id();
     let identity = persisted_registry
         .and_then(|registry| registry.active_key(&owner_id, KeyRoleV1::TimelineIntegritySigning))
-        .map_or(
-            KeyIdentityV1::from_parts(owner_id, KeyRoleV1::TimelineIntegritySigning, 1),
+        .map_or_else(
+            || KeyIdentityV1::from_parts(owner_id, KeyRoleV1::TimelineIntegritySigning, 1),
             |record| record.identity,
         );
     let mut registry = persisted_registry.cloned().unwrap_or_default();
