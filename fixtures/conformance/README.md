@@ -1,7 +1,7 @@
 # Public conformance fixture sources
 
 These files are the public, deterministic inputs and expected-result records
-for the seven CPF1 claim layers. Each directory under `profiles/` is a
+for the seven CPF2 claim layers. Each directory under `profiles/` is a
 separate public profile manifest and binds exactly one claim layer to all seven
 required fixture families: positive, negative, malformed, resource, deletion,
 downgrade, and independent evaluation. The 49 records are layer-specific;
@@ -9,7 +9,7 @@ there is no shared generic fixture record. They contain no implementation-
 private state, credentials, or signing material.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
-caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
+caller, recomputes each BLAKE3 content address, binds the CPF2 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be
 materialized separately with the same expected-result records; the Air-Gapped
 profile capability policy remains network-deny.
@@ -26,12 +26,12 @@ ExecutionProfile while the paired bundles retain identical expected bytes.
 Each expected record also carries the BLAKE3-256 digest of its exact input
 bytes; the independent generator and hosted verifier recompute this binding.
 The `result` value in a checked-in expected record is descriptive fixture
-metadata only; `status: "pending"` and the CPF1 unavailable outcome prevent it
+metadata only; `status: "pending"` and the CPF2 unavailable outcome prevent it
 from being interpreted as executed conformance evidence.
 Each expected record also declares the exact Draft-unavailable typed result
 (`ProvenanceMissing`) that the materializer encodes into the bundle, so the
 packaged result cannot silently diverge from the public record.
-Draft CPF1 bundles encode the exact checked-in expected-result record bytes;
+Draft CPF2 bundles encode the exact checked-in expected-result record bytes;
 the record's `status: "pending"` and `ProvenanceMissing` declaration keep those
 bytes explicitly unavailable rather than executed evidence.
 
@@ -48,7 +48,7 @@ their dependency/advisory checks remain CI responsibilities (`cargo-deny`,
 `cargo-audit`, and the pinned toolchain). The checked-in `SHA256SUMS` file is
 the byte-integrity authority for this scoped support record.
 
-The canonical architecture decisions for the CPF1 and authority workflow are
+The canonical architecture decisions for the CPF2 and authority workflow are
 ADR-058 through ADR-062 on the [Redmine project wiki](https://redmine.piglor.com/projects/pigloros/wiki).
 
 Repository settings must require the `ci-gate` check for protected branches;
@@ -78,7 +78,7 @@ retention are owned by the #198 governance workflow after #193 supplies the
 execution evidence.
 
 The Draft materializer binds every layer-specific input/result pair to its
-CPF1 profile, validates the authority handoff and matrix as open slots, checks
+CPF2 profile, validates the authority handoff and matrix as open slots, checks
 the Local/Air-Gapped pair before writing either archive, and independently
 performs a structural cross-check of the resulting public archives. It does
 not execute the matrix or claim that descriptive metadata is conformance

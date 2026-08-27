@@ -1,14 +1,18 @@
-# CPF1 public conformance requirements
+# CPF2 public conformance requirements
 
 ## Authority and lifecycle
 
-CPF1 is the immutable, content-addressed oracle contract for one claim layer.
+CPF2 is the immutable, content-addressed oracle contract for one claim layer.
 It contains no aggregate certification flag and no implementation-private
 state. `Draft` records may contain open authority handoff slots; `Candidate`
 records must contain a non-empty expected result for every mandatory fixture.
 Only the closed lifecycle transitions Draft → Candidate → Stable → Retired
 are permitted. A Stable record additionally requires two independently
 developed implementation reports and an external trusted-root policy.
+
+Every CPF2 record carries a nonzero BLAKE3 digest of the exact canonical
+`authority/execution-matrix.json` member. The digest binds the matrix into
+every claim-layer profile without claiming that any matrix case executed.
 
 ## Required profile inventory
 

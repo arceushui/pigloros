@@ -4,7 +4,7 @@ use ed25519_dalek::SigningKey;
 use pos_conformance::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
-    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
+    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV2, EvaluatorHardCapsV1,
     EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
     FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1, VerificationOutcomeV1,
@@ -320,7 +320,7 @@ fn materialize_profile_with_inventory(
 fn materialize_profile_for_test(
     output_root: &Path,
     signing_key: &SigningKey,
-    profile: ConformanceProfileV1,
+    profile: ConformanceProfileV2,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
     layer_name: &str,
@@ -337,7 +337,7 @@ fn materialize_profile_for_test(
 
 fn materialize_profile_from_profile(
     context: &MaterializationContext<'_>,
-    mut profile: ConformanceProfileV1,
+    mut profile: ConformanceProfileV2,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
     layer_name: &str,
@@ -351,7 +351,7 @@ fn materialize_profile_from_profile(
     let prefix = format!("{layer_name}/{lifecycle_name}");
     let mut outputs = vec![(
         format!(
-            "{prefix}/CPF1-{}.cbor",
+            "{prefix}/CPF2-{}.cbor",
             pos_conformance::hex_digest(&profile.profile_digest)
         ),
         profile_bytes,
@@ -461,29 +461,15 @@ fn validate_profile_record_bindings(
     {
         return Err("knowledge profile matrix binding is invalid".into());
     }
-    if claim_layer != ClaimLayerV1::KnowledgeNonInterference
-        && [
-            "adr_059_execution_matrix",
-            "adr_059_execution_matrix_blake3_digest",
-            "adr_059_execution_matrix_status",
-            "matrix",
-            "matrix_size_bytes",
-            "matrix_blake3_digest",
-        ]
-        .iter()
-        .any(|field| profile_record.get(*field).is_some())
-    {
-        return Err("execution matrix binding is only valid for the knowledge profile".into());
-    }
     Ok(())
 }
 
 fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> FixtureContext {
     let profile_record_digest =
-        labeled_digest("PiglorOS.CPF1ProfileRecord.v1", profile_record_bytes);
+        labeled_digest("PiglorOS.CPF2ProfileRecord.v2", profile_record_bytes);
     let normative =
         include_bytes!("../../../../fixtures/conformance/support/normative-requirements.md");
-    let schema = include_bytes!("../../../../fixtures/conformance/support/schema-cpf1-v1.cddl");
+    let schema = include_bytes!("../../../../fixtures/conformance/support/schema-cpf2-v2.cddl");
     let notice = include_bytes!("../../../../fixtures/conformance/support/NOTICE");
     let sbom = include_bytes!("../../../../fixtures/conformance/support/sbom.json");
     let provenance = include_bytes!("../../../../fixtures/conformance/support/provenance.json");
@@ -553,7 +539,7 @@ fn fixtures_from_profile_record(
 
 fn profile_for_claim_layer(
     claim_layer: ClaimLayerV1,
-) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+) -> Result<ConformanceProfileV2, Box<dyn Error>> {
     validated_profile_record(claim_layer).and_then(|(profile_record_bytes, profile_record)| {
         profile_from_record(claim_layer, profile_record_bytes, &profile_record)
     })
@@ -563,7 +549,7 @@ fn profile_from_record(
     claim_layer: ClaimLayerV1,
     profile_record_bytes: &[u8],
     profile_record: &JsonValue,
-) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+) -> Result<ConformanceProfileV2, Box<dyn Error>> {
     let context = fixture_context(profile_record_bytes, claim_layer);
     let fixtures = fixtures_from_profile_record(profile_record, &context)?;
     let mut execution_profile_digests = vec![
@@ -571,11 +557,16 @@ fn profile_from_record(
         context.air_gapped_execution_profile_digest,
     ];
     execution_profile_digests.sort_unstable();
-    let mut profile = ConformanceProfileV1 {
+    let execution_matrix_digest = *blake3::hash(include_bytes!(
+        "../../../../fixtures/conformance/matrix/execution-matrix.json"
+    ))
+    .as_bytes();
+    let mut profile = ConformanceProfileV2 {
         profile_id: profile_id(claim_layer).to_owned(),
         semantic_version: "1.0.0".to_owned(),
         lifecycle: ProfileLifecycleV1::Draft,
         normative_spec_digest: context.normative_spec_digest,
+        execution_matrix_digest,
         execution_profile_digests,
         public_schema_digests: vec![context.schema_digest],
         fixtures,
@@ -601,16 +592,7 @@ fn profile_from_record(
         stable_evidence: Vec::new(),
         profile_digest: [0; 32],
     };
-    if claim_layer == ClaimLayerV1::KnowledgeNonInterference {
-        profile.bind_execution_matrix_digest(
-            *blake3::hash(include_bytes!(
-                "../../../../fixtures/conformance/matrix/execution-matrix.json"
-            ))
-            .as_bytes(),
-        )?;
-    } else {
-        profile.profile_digest = profile.digest();
-    }
+    profile.profile_digest = profile.digest();
     Ok(profile)
 }
 
@@ -649,7 +631,7 @@ fn fixture_descriptor_from_record(
         claim_layer_name(context.claim_layer),
     )?;
     let fixture_record_digest = labeled_digest(
-        "PiglorOS.CPF1FixtureRecord.v1",
+        "PiglorOS.CPF2FixtureRecord.v2",
         &serde_json::to_vec(record)?,
     );
     let draft_provenance_material = [
@@ -890,7 +872,7 @@ fn evaluator_protocol(profile_record_digest: [u8; 32]) -> EvaluatorProtocolV1 {
 
 #[cfg(test)]
 fn bundle_inputs(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     mode: BundleModeV1,
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
     bundle_inputs_from_profile(
@@ -901,7 +883,7 @@ fn bundle_inputs(
 }
 
 fn bundle_inputs_from_profile(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     mode: BundleModeV1,
     inventory_bytes: &[u8],
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
@@ -971,8 +953,8 @@ fn append_supporting_members(
             BundleMemberRoleV1::NormativeSpecification,
         ),
         (
-            "support/schema-cpf1-v1.cddl",
-            include_bytes!("../../../../fixtures/conformance/support/schema-cpf1-v1.cddl")
+            "support/schema-cpf2-v2.cddl",
+            include_bytes!("../../../../fixtures/conformance/support/schema-cpf2-v2.cddl")
                 .as_slice(),
             BundleMemberRoleV1::Schema,
         ),
@@ -1134,7 +1116,7 @@ mod tests {
         ))
     }
 
-    fn local_bundle_digest(profile: &ConformanceProfileV1, signing_key: &SigningKey) -> [u8; 32] {
+    fn local_bundle_digest(profile: &ConformanceProfileV2, signing_key: &SigningKey) -> [u8; 32] {
         let digest = bundle_inputs(profile, BundleModeV1::Local)
             .ok()
             .and_then(|(members, expected_results)| {
@@ -1153,7 +1135,7 @@ mod tests {
     }
 
     fn local_bundle_artifacts(
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         signing_key: &SigningKey,
     ) -> Result<LocalBundleArtifacts, Box<dyn Error>> {
         let (members, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
@@ -1172,7 +1154,7 @@ mod tests {
 
     type LocalBundleArtifacts = (Vec<u8>, [u8; 32], Vec<u8>);
 
-    fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+    fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV2, Box<dyn Error>> {
         profile_for_claim_layer(claim_layer)
     }
 

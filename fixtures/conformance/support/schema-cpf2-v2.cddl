@@ -1,12 +1,13 @@
-# CPF1 public conformance schema (canonical CBOR array)
+# CPF2 public conformance schema (canonical CBOR array)
 
-cpf1 = [
-  magic: "CPF1",
-  version: 1,
+cpf2 = [
+  magic: "CPF2",
+  version: 2,
   profile-id: tstr,
   semantic-version: tstr,
   lifecycle: 0..3,
   normative-spec-digest: digest,
+  execution-matrix-digest: digest,
   execution-profile-digests: [* digest],
   public-schema-digests: [* digest],
   fixtures: [* fixture],

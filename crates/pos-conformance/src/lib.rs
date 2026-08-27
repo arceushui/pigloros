@@ -1106,7 +1106,7 @@ pub struct IndependenceEvidenceV1 {
 
 /// One CNR1 public conformance case.
 ///
-/// The wire representation is the exact fourteen-field ADR-062 record. CPF1
+/// The wire representation is the exact fourteen-field ADR-062 record. CPF2
 /// carries the richer [`ProfileCaseOutcomeV1`] record separately because
 /// verification outcome and divergence classification are profile semantics,
 /// not part of the stable CNR1 report shape.
@@ -1129,7 +1129,7 @@ pub struct CaseOutcomeV1 {
     pub provenance_digest: [u8; 32],
 }
 
-/// CPF1-only case evidence with profile verification semantics.
+/// CPF2-only case evidence with profile verification semantics.
 ///
 /// This is intentionally a separately named record from [`CaseOutcomeV1`].
 /// Adding these fields to CNR1 would silently change its exact fourteen-field
@@ -6636,7 +6636,7 @@ pub fn hex_digest(bytes: &[u8; 32]) -> String {
 
 /// Decode a fixed-width hexadecimal 256-bit digest.
 ///
-/// Digest fields in the CPF1 and CFB1 wire representations use exactly 64
+/// Digest fields in the CPF2 and CFB1 wire representations use exactly 64
 /// hexadecimal characters. Both ASCII letter cases are accepted.
 #[must_use]
 pub fn decode_hex_digest(value: &str) -> Option<[u8; 32]> {
@@ -7514,7 +7514,7 @@ pub mod tests {
         let mut mixed_profile_report = report;
         mixed_profile_report.cases[0].execution_profile_digest = [99; 32];
         mixed_profile_report.report_digest = mixed_profile_report.digest().unwrap_or([0; 32]);
-        // CNR1 permits a per-case execution-profile matrix; CPF1 performs
+        // CNR1 permits a per-case execution-profile matrix; CPF2 performs
         // the authoritative fixture/profile membership check.
         assert_eq!(mixed_profile_report.validate(), Ok(()));
 

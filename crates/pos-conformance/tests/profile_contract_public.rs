@@ -3,7 +3,7 @@
 use ciborium::value::Value;
 use pos_conformance::{
     CapabilityPolicyV1, CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, ConformanceContractError,
-    ConformanceProfileV1, ConformanceReportV1, ErasureDispositionV1, EvaluatorHardCapsV1,
+    ConformanceProfileV2, ConformanceReportV1, ErasureDispositionV1, EvaluatorHardCapsV1,
     EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1, ExecutionModeV1,
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, ImplementationIdentityV1, IndependenceEvidenceV1,
@@ -241,12 +241,13 @@ pub mod fixtures {
         with_stable_evidence: bool,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut fields = vec![
-            text("CPF1"),
-            uint(1),
-            text("pigloros.w8.knowledge-non-interference.1.0.0#matrix=0101010101010101010101010101010101010101010101010101010101010101"),
+            text("CPF2"),
+            uint(2),
+            text("pigloros.w8.knowledge-non-interference.1.0.0"),
             text("1.0.0"),
             uint(lifecycle),
             bytes(12),
+            bytes(20),
             Value::Array(vec![bytes(1)]),
             Value::Array(vec![bytes(2)]),
             Value::Array(vec![encoded_fixture_descriptor_value()]),
@@ -259,7 +260,7 @@ pub mod fixtures {
             Value::Null,
         ];
         if with_stable_evidence {
-            // Stable evidence is a sidecar, not an undocumented CPF1 field.
+            // Stable evidence is a sidecar, not an undocumented CPF2 field.
             // Keep this optional fixture as an explicit extra-field rejection.
             fields.push(Value::Array(vec![stable_evidence()]));
         }
@@ -357,7 +358,7 @@ fn report_with_cases(count: usize) -> Result<ConformanceReportV1, pos_conformanc
     Ok(report)
 }
 
-fn profile_without_matrix_binding() -> ConformanceProfileV1 {
+fn profile() -> ConformanceProfileV2 {
     let expected = b"expected".to_vec();
     let fixture = FixtureDescriptorV1 {
         case_id: "ART-001".to_owned(),
@@ -406,11 +407,12 @@ fn profile_without_matrix_binding() -> ConformanceProfileV1 {
         },
         compatibility_digest: [11; 32],
     };
-    let mut profile = ConformanceProfileV1 {
+    let mut profile = ConformanceProfileV2 {
         profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
         semantic_version: "1.0.0".to_owned(),
         lifecycle: pos_conformance::ProfileLifecycleV1::Draft,
         normative_spec_digest: [12; 32],
+        execution_matrix_digest: [21; 32],
         execution_profile_digests: vec![[1; 32]],
         public_schema_digests: vec![[2; 32]],
         fixtures: vec![fixture],
@@ -451,10 +453,8 @@ fn profile_without_matrix_binding() -> ConformanceProfileV1 {
     profile
 }
 
-fn profile_for_digest() -> ConformanceProfileV1 {
-    let mut profile = profile_without_matrix_binding();
-    assert_eq!(profile.bind_execution_matrix_digest([1; 32]), Ok(()));
-    profile
+fn profile_for_digest() -> ConformanceProfileV2 {
+    profile()
 }
 
 fn request_for_caps(caps: &EvaluatorHardCapsV1) -> EvaluatorRequestV1 {
@@ -544,146 +544,56 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
 }
 
 #[test]
-fn public_profile_matrix_binding_is_content_addressed_and_fail_closed(
+fn public_profile_matrix_binding_is_explicit_and_fail_closed(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut bound = profile_without_matrix_binding();
-    let unbound_digest = bound.digest();
-    let matrix_digest = *blake3::hash(b"adr-059-execution-matrix").as_bytes();
+    let profile = profile();
+    assert_eq!(profile.validate(), Ok(()));
+    assert_eq!(profile.execution_matrix_digest, [21; 32]);
+    let encoded = profile.to_canonical_cbor()?;
+    assert_eq!(
+        ConformanceProfileV2::from_canonical_cbor(&encoded),
+        Ok(profile.clone())
+    );
 
+    let mut missing = profile.clone();
+    missing.execution_matrix_digest = [0; 32];
+    missing.profile_digest = missing.digest();
     assert_eq!(
-        bound.execution_matrix_digest(),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-    assert_eq!(
-        bound.validate(),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-    assert_eq!(
-        bound.bind_execution_matrix_digest([0; 32]),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-    assert_eq!(
-        bound.execution_matrix_digest(),
+        missing.validate(),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    assert_eq!(bound.bind_execution_matrix_digest(matrix_digest), Ok(()));
-    assert!(bound
-        .profile_id
-        .starts_with("pigloros.w8.knowledge-non-interference.1.0.0#matrix="));
-    assert_eq!(bound.execution_matrix_digest(), Ok(matrix_digest));
-    assert_ne!(bound.profile_digest, unbound_digest);
-    let encoded = bound.to_canonical_cbor()?;
+    let mut substituted = profile.clone();
+    substituted.execution_matrix_digest = [7; 32];
+    substituted.profile_digest = profile.profile_digest;
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&encoded),
-        Ok(bound.clone())
-    );
-
-    let mut different_matrix = profile_without_matrix_binding();
-    assert_eq!(
-        different_matrix.bind_execution_matrix_digest([7; 32]),
-        Ok(())
-    );
-    assert_ne!(bound.profile_digest, different_matrix.profile_digest);
-
-    for profile_id in [
-        "pigloros.w8.artifact-integrity.1.0.0",
-        "pigloros.w8.replay-conformance.1.0.0",
-        "pigloros.w8.gateway-client-conformance.1.0.0",
-        "pigloros.w8.plugin-conformance.1.0.0",
-        "pigloros.w8.metric-conformance.1.0.0",
-        "pigloros.w8.empirical-evaluation.1.0.0",
-    ] {
-        let mut non_knowledge = profile_without_matrix_binding();
-        non_knowledge.profile_id = profile_id.to_owned();
-        non_knowledge.profile_digest = non_knowledge.digest();
-        assert_eq!(
-            non_knowledge.bind_execution_matrix_digest([1; 32]),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-        assert_eq!(non_knowledge.validate(), Ok(()));
-    }
-
-    let mut mismatched = bound.clone();
-    assert_eq!(mismatched.bind_execution_matrix_digest([8; 32]), Ok(()));
-    mismatched.profile_digest = bound.profile_digest;
-    assert_eq!(
-        mismatched.validate(),
+        substituted.validate(),
         Err(ConformanceContractError::FixtureDigestMismatch)
     );
     Ok(())
 }
 
 #[test]
-fn public_profile_matrix_binding_rejects_malformed_suffixes() {
-    let mut malformed = profile_without_matrix_binding();
-    malformed.profile_id.push_str("#matrix=not-a-digest");
-    malformed.profile_digest = malformed.digest();
+fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record() {
+    let mut legacy_suffix = profile();
+    legacy_suffix.profile_id.push_str("#matrix=0101");
+    legacy_suffix.profile_digest = legacy_suffix.digest();
     assert_eq!(
-        malformed.execution_matrix_digest(),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-    assert_eq!(
-        malformed.validate(),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-}
-
-#[test]
-fn public_profile_matrix_binding_rejects_invalid_hex_zero_and_overlong_ids() {
-    let mut invalid_hex = profile_without_matrix_binding();
-    invalid_hex.profile_id.push_str("#matrix=");
-    invalid_hex.profile_id.push_str(&"g".repeat(64));
-    invalid_hex.profile_digest = invalid_hex.digest();
-    assert_eq!(
-        invalid_hex.execution_matrix_digest(),
+        legacy_suffix.validate(),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut uppercase = profile_without_matrix_binding();
-    uppercase.profile_id = format!(
-        "pigloros.w8.knowledge-non-interference.1.0.0#matrix={}",
-        "AB".repeat(32)
-    );
-    assert_eq!(uppercase.execution_matrix_digest(), Ok([0xab; 32]));
-
-    let mut duplicate_marker = profile_without_matrix_binding();
-    duplicate_marker.profile_id.push_str("#matrix=");
-    duplicate_marker.profile_id.push_str(&"0".repeat(32));
-    duplicate_marker.profile_id.push_str("#matrix=");
+    let mut fields = fixtures::profile(0, false).unwrap_or_default();
+    let mut value: Value = ciborium::from_reader(fields.as_slice()).unwrap_or(Value::Null);
+    if let Value::Array(fields) = &mut value {
+        fields.remove(6);
+        fields[0] = Value::Text("CPF1".to_owned());
+        fields[1] = Value::Integer(1_u64.into());
+    }
+    fields = fixtures::encode(&value).unwrap_or_default();
     assert_eq!(
-        duplicate_marker.execution_matrix_digest(),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-
-    let mut empty_base = profile_without_matrix_binding();
-    empty_base.profile_id = "#matrix=".to_owned();
-    assert_eq!(
-        empty_base.execution_matrix_digest(),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-
-    let mut zero = profile_without_matrix_binding();
-    zero.profile_id.push_str("#matrix=");
-    zero.profile_id.push_str(&"0".repeat(64));
-    zero.profile_digest = zero.digest();
-    assert_eq!(
-        zero.execution_matrix_digest(),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-
-    let mut overlong = profile_without_matrix_binding();
-    overlong.profile_id = "p".repeat(256);
-    assert_eq!(
-        overlong.bind_execution_matrix_digest([1; 32]),
-        Err(ConformanceContractError::FieldOutOfBounds)
-    );
-
-    let mut malformed_rebind = profile_without_matrix_binding();
-    malformed_rebind.profile_id.push_str("#matrix=short");
-    assert_eq!(
-        malformed_rebind.bind_execution_matrix_digest([1; 32]),
-        Err(ConformanceContractError::FieldOutOfBounds)
+        ConformanceProfileV2::from_canonical_cbor(&fields),
+        Err(ConformanceContractError::UnsupportedVersion)
     );
 }
 
@@ -695,7 +605,7 @@ fn public_stable_evidence_decoder_rejects_oversized_profile_before_policy_use() 
         trust_policy_snapshot_digest: [0; 32],
     };
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+        ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
             &oversized,
             Vec::new(),
             &policy,
@@ -884,11 +794,11 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
 fn exported_decoders_reject_terminal_digest_after_nested_decode(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(0, false)?),
+        ConformanceProfileV2::from_canonical_cbor(&fixtures::profile(0, false)?),
         Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&fixtures::profile(2, true)?),
+        ConformanceProfileV2::from_canonical_cbor(&fixtures::profile(2, true)?),
         Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
@@ -959,7 +869,7 @@ fn profile_with_fixture_field(
     let Value::Array(fields) = &mut value else {
         return Err("public profile fixture is not an array".into());
     };
-    let Value::Array(fixtures) = &mut fields[8] else {
+    let Value::Array(fixtures) = &mut fields[9] else {
         return Err("public profile fixture list is not an array".into());
     };
     let Value::Array(fixture) = &mut fixtures[0] else {
@@ -999,7 +909,7 @@ fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn s
 
     for bytes in malformed_profiles {
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            ConformanceProfileV2::from_canonical_cbor(&bytes),
             Err(ConformanceContractError::InvalidEncoding)
         );
     }
