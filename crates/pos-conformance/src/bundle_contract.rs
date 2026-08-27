@@ -7479,7 +7479,7 @@ mod instrumented_public_entrypoints {
         role: BundleMemberRoleV1,
         update: impl FnOnce(&mut JsonValue),
     ) -> Result<Vec<BundleMemberV1>, Box<dyn std::error::Error>> {
-        let mut members = bundle.members;
+        let mut members = bundle.members.clone();
         mutate_authority_member_json(&mut members, role, update)?;
         Ok(members)
     }
@@ -7835,7 +7835,7 @@ mod instrumented_public_entrypoints {
         let mut profile = tests::profile();
         profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
         let bundle = signed_draft_bundle()?;
-        let mut members = bundle.members.clone();
+        let mut members = bundle.members;
         mutate_authority_member_json(&mut members, BundleMemberRoleV1::ExecutionMatrix, |value| {
             value["lifecycle"] = JsonValue::Null;
         })?;
