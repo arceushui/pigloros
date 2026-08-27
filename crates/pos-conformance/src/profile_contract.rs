@@ -5821,7 +5821,6 @@ mod tests {
         constrained.fixtures[0]
             .modes
             .extend([ExecutionModeV1::Replay, ExecutionModeV1::Fork]);
-        constrained.fixtures.truncate(1);
         constrained
             .evaluator_protocol
             .hard_caps
@@ -5848,12 +5847,10 @@ mod tests {
             case.fixture_digest = fixture_digest(&constrained.fixtures[0]);
         }
         refresh_stable_report_for_profile(&mut second, &constrained);
-        assert!(constrained
-            .transition_to(
-                ProfileLifecycleV1::Stable,
-                vec![at_limit.clone(), second.clone()]
-            )
-            .is_ok());
+        assert_eq!(
+            validate_stable_implementation(&at_limit, &constrained, None),
+            Ok(())
+        );
 
         constrained.evaluator_protocol.hard_caps.max_cases = 0;
         assert_eq!(
