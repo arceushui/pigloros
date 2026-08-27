@@ -4284,6 +4284,7 @@ dependencies = [
  "libc",
  "pos-core",
  "pos-crypto",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",

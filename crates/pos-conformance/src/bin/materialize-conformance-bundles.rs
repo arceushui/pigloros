@@ -9,6 +9,10 @@ use pos_conformance::{
     FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
+#[cfg(target_os = "linux")]
+use rustix::fs::{self, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
+#[cfg(target_os = "linux")]
+use rustix::io::Errno;
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
@@ -20,7 +24,7 @@ use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "linux")]
@@ -1111,21 +1115,6 @@ fn verify_public_archive(
 }
 
 #[cfg(target_os = "linux")]
-const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-#[cfg(target_os = "linux")]
-const RESOLVE_BENEATH: u64 = 0x08;
-#[cfg(target_os = "linux")]
-const RENAME_NOREPLACE: u32 = 1;
-
-#[cfg(target_os = "linux")]
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
-
-#[cfg(target_os = "linux")]
 struct AtomicPublication {
     parent: OwnedFd,
     staging: OwnedFd,
@@ -1157,13 +1146,13 @@ impl AtomicPublication {
             directory = open_or_create_directory(&directory, name)?;
         }
         let fd = open_at2(
-            directory.as_raw_fd(),
+            &directory,
             file_name,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0o600,
-            RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
         )?;
-        let mut file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
+        let mut file: File = fd.into();
         file.write_all(bytes)
             .map_err(|_| MaterializationError::DurabilitySyncFailed)?;
         file.sync_all()
@@ -1200,13 +1189,13 @@ impl AtomicPublication {
             directory = open_directory(&directory, name)?;
         }
         let fd = open_at2(
-            directory.as_raw_fd(),
+            &directory,
             file_name,
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0,
-            RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
         )?;
-        let mut file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
+        let mut file: File = fd.into();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(|_| MaterializationError::ArchiveDigestMismatch)?;
@@ -1214,27 +1203,14 @@ impl AtomicPublication {
     }
 
     fn publish(self) -> Result<(), MaterializationError> {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                self.parent.as_raw_fd(),
-                self.staging_name.as_ptr(),
-                self.parent.as_raw_fd(),
-                self.destination_name.as_ptr(),
-                RENAME_NOREPLACE,
-            )
-        };
-        if result == -1 {
-            let error = std::io::Error::last_os_error();
-            return match error.raw_os_error() {
-                Some(libc::EEXIST) => Err(MaterializationError::DestinationExists),
-                Some(libc::ENOSYS | libc::EINVAL) => {
-                    Err(MaterializationError::AtomicPublicationUnsupported)
-                }
-                Some(libc::ELOOP) => Err(MaterializationError::SymlinkDetected),
-                _ => Err(MaterializationError::UntrustedOutputDirectory),
-            };
-        }
+        fs::renameat_with(
+            &self.parent,
+            self.staging_name.as_c_str(),
+            &self.parent,
+            self.destination_name.as_c_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(map_publish_error)?;
         sync_fd(&self.parent)
     }
 }
@@ -1280,11 +1256,11 @@ fn open_trusted_parent(parent: &Path) -> Result<OwnedFd, MaterializationError> {
     let parent = CString::new(parent.as_os_str().as_bytes())
         .map_err(|_| MaterializationError::UntrustedOutputDirectory)?;
     open_at2(
-        libc::AT_FDCWD,
+        CWD,
         &parent,
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        0,
-        RESOLVE_NO_SYMLINKS,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS,
     )
 }
 
@@ -1292,15 +1268,14 @@ fn open_trusted_parent(parent: &Path) -> Result<OwnedFd, MaterializationError> {
 fn create_private_staging(parent: &OwnedFd) -> Result<(CString, OwnedFd), MaterializationError> {
     for _ in 0..16 {
         let name = random_staging_name()?;
-        let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
-        if result == 0 {
-            let staging = open_directory(parent, &name)?;
-            return Ok((name, staging));
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::EEXIST) => continue,
-            Some(libc::ELOOP) => return Err(MaterializationError::SymlinkDetected),
-            _ => return Err(MaterializationError::UntrustedOutputDirectory),
+        match fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
+            Ok(()) => {
+                let staging = open_directory(parent, &name)?;
+                return Ok((name, staging));
+            }
+            Err(Errno::EXIST) => continue,
+            Err(Errno::LOOP) => return Err(MaterializationError::SymlinkDetected),
+            Err(_) => return Err(MaterializationError::UntrustedOutputDirectory),
         }
     }
     Err(MaterializationError::UntrustedOutputDirectory)
@@ -1309,25 +1284,9 @@ fn create_private_staging(parent: &OwnedFd) -> Result<(CString, OwnedFd), Materi
 #[cfg(target_os = "linux")]
 fn random_staging_name() -> Result<CString, MaterializationError> {
     let mut random = [0_u8; 16];
-    let mut offset = 0;
-    while offset < random.len() {
-        let result = unsafe {
-            libc::getrandom(
-                random[offset..].as_mut_ptr().cast(),
-                random.len() - offset,
-                0,
-            )
-        };
-        if result > 0 {
-            offset += usize::try_from(result)
-                .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
-            continue;
-        }
-        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-            continue;
-        }
-        return Err(MaterializationError::AtomicPublicationUnsupported);
-    }
+    File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
     let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     CString::new(format!(".pigloros-conformance-staging-{suffix}"))
         .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
@@ -1356,13 +1315,10 @@ fn open_or_create_directory(
     parent: &OwnedFd,
     name: &CString,
 ) -> Result<OwnedFd, MaterializationError> {
-    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
-    if result == -1 {
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::EEXIST) => {}
-            Some(libc::ELOOP) => return Err(MaterializationError::SymlinkDetected),
-            _ => return Err(MaterializationError::UntrustedOutputDirectory),
-        }
+    match fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(Errno::LOOP) => return Err(MaterializationError::SymlinkDetected),
+        Err(_) => return Err(MaterializationError::UntrustedOutputDirectory),
     }
     sync_fd(parent)?;
     open_directory(parent, name)
@@ -1371,66 +1327,52 @@ fn open_or_create_directory(
 #[cfg(target_os = "linux")]
 fn open_directory(parent: &OwnedFd, name: &CString) -> Result<OwnedFd, MaterializationError> {
     open_at2(
-        parent.as_raw_fd(),
+        parent,
         name,
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        0,
-        RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
     )
 }
 
 #[cfg(target_os = "linux")]
 fn duplicate_fd(fd: &OwnedFd) -> Result<OwnedFd, MaterializationError> {
-    let duplicate = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicate == -1 {
-        return Err(MaterializationError::UntrustedOutputDirectory);
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    rustix::io::dup(fd).map_err(|_| MaterializationError::UntrustedOutputDirectory)
 }
 
 #[cfg(target_os = "linux")]
 fn sync_fd(fd: &OwnedFd) -> Result<(), MaterializationError> {
-    if unsafe { libc::fsync(fd.as_raw_fd()) } == -1 {
-        return Err(MaterializationError::DurabilitySyncFailed);
-    }
-    Ok(())
+    fs::fsync(fd).map_err(|_| MaterializationError::DurabilitySyncFailed)
 }
 
 #[cfg(target_os = "linux")]
-fn open_at2(
-    directory_fd: libc::c_int,
+fn open_at2<Fd: std::os::fd::AsFd>(
+    directory_fd: Fd,
     path: &CString,
-    flags: libc::c_int,
-    mode: libc::mode_t,
-    resolve: u64,
+    flags: OFlags,
+    mode: Mode,
+    resolve: ResolveFlags,
 ) -> Result<OwnedFd, MaterializationError> {
-    let how = OpenHow {
-        flags: u64::try_from(flags)
-            .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?,
-        mode: u64::from(mode),
-        resolve,
-    };
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            directory_fd,
-            path.as_ptr(),
-            &how,
-            std::mem::size_of::<OpenHow>(),
-        )
-    };
-    if fd == -1 {
-        return match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::ELOOP) => Err(MaterializationError::SymlinkDetected),
-            Some(libc::ENOSYS | libc::EINVAL) => {
-                Err(MaterializationError::AtomicPublicationUnsupported)
-            }
-            _ => Err(MaterializationError::UntrustedOutputDirectory),
-        };
+    fs::openat2(directory_fd, path.as_c_str(), flags, mode, resolve).map_err(map_open_error)
+}
+
+#[cfg(target_os = "linux")]
+const fn map_open_error(error: Errno) -> MaterializationError {
+    match error {
+        Errno::LOOP => MaterializationError::SymlinkDetected,
+        Errno::NOSYS | Errno::INVAL => MaterializationError::AtomicPublicationUnsupported,
+        _ => MaterializationError::UntrustedOutputDirectory,
     }
-    let fd = libc::c_int::try_from(fd)
-        .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(target_os = "linux")]
+const fn map_publish_error(error: Errno) -> MaterializationError {
+    match error {
+        Errno::EXIST => MaterializationError::DestinationExists,
+        Errno::LOOP => MaterializationError::SymlinkDetected,
+        Errno::NOSYS | Errno::INVAL => MaterializationError::AtomicPublicationUnsupported,
+        _ => MaterializationError::UntrustedOutputDirectory,
+    }
 }
 
 #[cfg(test)]
