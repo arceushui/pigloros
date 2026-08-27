@@ -2,7 +2,7 @@
 
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
-    expected_result_member_path, fixture_input_member_path, verify_archive_independently,
+    expected_result_member_path, fixture_input_member_path, verify_archive_release_filename,
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
     ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV2, EvaluatorHardCapsV1,
     EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
@@ -12,12 +12,24 @@ use pos_conformance::{
 use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
 use std::ffi::OsString;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
+use std::path::Component;
+use std::path::{Path, PathBuf};
+use thiserror::Error as ThisError;
 
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
+const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
 
 #[derive(Clone, Copy)]
 struct FixtureContext {
@@ -34,9 +46,36 @@ struct FixtureContext {
 }
 
 struct MaterializationContext<'a> {
-    output_root: &'a Path,
     signing_key: &'a SigningKey,
     inventory_bytes: &'a [u8],
+}
+
+struct MaterializedFile {
+    relative_path: String,
+    bytes: Vec<u8>,
+    archive: Option<ArchiveExpectation>,
+}
+
+struct ArchiveExpectation {
+    digest: [u8; 32],
+    manifest: Vec<u8>,
+    release_filename: String,
+}
+
+#[derive(Debug, ThisError)]
+enum MaterializationError {
+    #[error("destination already exists")]
+    DestinationExists,
+    #[error("untrusted output directory")]
+    UntrustedOutputDirectory,
+    #[error("symbolic link detected in output path")]
+    SymlinkDetected,
+    #[error("atomic publication is unsupported")]
+    AtomicPublicationUnsupported,
+    #[error("durability synchronization failed")]
+    DurabilitySyncFailed,
+    #[error("staged archive digest mismatch")]
+    ArchiveDigestMismatch,
 }
 
 type CanonicalFixtureBytes = (&'static [u8], &'static [u8]);
@@ -261,25 +300,27 @@ fn run(
     if arguments.next().is_some() {
         return Err("materialization accepts exactly one output directory".into());
     }
-    if output_root.exists() {
-        return Err("materialization output directory already exists".into());
-    }
     let signing_key = signing_key_from_encoded(encoded_signing_key)?;
     let inventory_bytes =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
     let lifecycles = publication_lifecycles_from_bytes(inventory_bytes)?;
-    std::fs::create_dir(&output_root)?;
     let context = MaterializationContext {
-        output_root: &output_root,
         signing_key: &signing_key,
         inventory_bytes,
     };
+    let mut outputs = Vec::new();
     for spec in &LAYER_SPECS {
         for (lifecycle, lifecycle_name) in &lifecycles {
-            materialize_profile_with_inventory(&context, spec, *lifecycle, lifecycle_name)?;
+            outputs.extend(materialize_profile_with_inventory(
+                &context,
+                spec,
+                *lifecycle,
+                lifecycle_name,
+            )?);
         }
     }
-    Ok(())
+    outputs.push(materialization_metadata(&lifecycles)?);
+    publish_materialized_tree(&output_root, &outputs).map_err(|error| error.into())
 }
 
 fn signing_key_from_encoded(
@@ -310,29 +351,10 @@ fn materialize_profile_with_inventory(
     layer: &LayerSpec,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
     profile_for_claim_layer(layer.claim_layer).and_then(|profile| {
         materialize_profile_from_profile(context, profile, lifecycle, lifecycle_name, layer.name)
     })
-}
-
-#[cfg(test)]
-fn materialize_profile_for_test(
-    output_root: &Path,
-    signing_key: &SigningKey,
-    profile: ConformanceProfileV2,
-    lifecycle: ProfileLifecycleV1,
-    lifecycle_name: &str,
-    layer_name: &str,
-) -> Result<(), Box<dyn Error>> {
-    let context = MaterializationContext {
-        output_root,
-        signing_key,
-        inventory_bytes: include_bytes!(
-            "../../../../fixtures/conformance/expected-authority/inventory.json"
-        ),
-    };
-    materialize_profile_from_profile(&context, profile, lifecycle, lifecycle_name, layer_name)
 }
 
 fn materialize_profile_from_profile(
@@ -341,7 +363,7 @@ fn materialize_profile_from_profile(
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
     layer_name: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
     if lifecycle != ProfileLifecycleV1::Draft {
         return Err("the #190 materializer emits Draft bundles only".into());
     }
@@ -349,13 +371,14 @@ fn materialize_profile_from_profile(
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
     let prefix = format!("{layer_name}/{lifecycle_name}");
-    let mut outputs = vec![(
-        format!(
+    let mut outputs = vec![MaterializedFile {
+        relative_path: format!(
             "{prefix}/CPF2-{}.cbor",
             pos_conformance::hex_digest(&profile.profile_digest)
         ),
-        profile_bytes,
-    )];
+        bytes: profile_bytes,
+        archive: None,
+    }];
     let mut signed_bundles = Vec::with_capacity(2);
     for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
         let mode_name = match mode {
@@ -378,29 +401,53 @@ fn materialize_profile_from_profile(
     };
     pair.validate()?;
     for (mode_name, bundle) in [("local", &pair.local), ("air-gapped", &pair.air_gapped)] {
-        let bundle_digest = bundle.bundle_digest()?;
+        let manifest_digest = bundle.manifest_digest()?;
+        let archive_digest = bundle.archive_digest()?;
+        let release_filename = bundle.release_filename()?;
         let manifest_bytes = bundle.manifest_bytes()?;
         let bundle_bytes = bundle.to_canonical_cbor()?;
-        verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
-        outputs.push((
-            format!(
+        verify_public_archive(
+            &bundle_bytes,
+            &archive_digest,
+            &manifest_bytes,
+            &release_filename,
+        )?;
+        outputs.push(MaterializedFile {
+            relative_path: format!(
                 "{prefix}/manifest-{mode_name}-{}.cbor",
-                pos_conformance::hex_digest(&bundle_digest)
+                pos_conformance::hex_digest(&manifest_digest)
             ),
-            manifest_bytes,
-        ));
-        outputs.push((
-            format!(
-                "{prefix}/bundle-{mode_name}-{}.cfb1",
-                pos_conformance::hex_digest(&bundle_digest)
-            ),
-            bundle_bytes,
-        ));
+            bytes: manifest_bytes.clone(),
+            archive: None,
+        });
+        outputs.push(MaterializedFile {
+            relative_path: format!("{prefix}/{release_filename}"),
+            bytes: bundle_bytes,
+            archive: Some(ArchiveExpectation {
+                digest: archive_digest,
+                manifest: manifest_bytes,
+                release_filename,
+            }),
+        });
     }
-    for (relative_path, bytes) in outputs {
-        write_materialized_file(context.output_root, relative_path, &bytes)?;
-    }
-    Ok(())
+    Ok(outputs)
+}
+
+fn materialization_metadata(
+    lifecycles: &[(ProfileLifecycleV1, &'static str)],
+) -> Result<MaterializedFile, Box<dyn Error>> {
+    let lifecycle_names: Vec<&str> = lifecycles.iter().map(|(_, name)| *name).collect();
+    let layer_names: Vec<&str> = LAYER_SPECS.iter().map(|layer| layer.name).collect();
+    Ok(MaterializedFile {
+        relative_path: MATERIALIZATION_METADATA_PATH.to_owned(),
+        bytes: serde_json::to_vec(&serde_json::json!({
+            "format": 1,
+            "lifecycles": lifecycle_names,
+            "layers": layer_names,
+            "modes": ["local", "air-gapped"],
+        }))?,
+        archive: None,
+    })
 }
 
 const fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
@@ -1024,11 +1071,12 @@ fn canonical_fixture_input(
 }
 
 fn verify_public_archive(
-    bundle_bytes: &[u8],
-    expected_digest: &[u8; 32],
+    archive_bytes: &[u8],
+    expected_archive_digest: &[u8; 32],
     expected_manifest: &[u8],
+    release_filename: &str,
 ) -> Result<(), Box<dyn Error>> {
-    ConformanceBundleV1::from_canonical_cbor(bundle_bytes)
+    ConformanceBundleV1::from_canonical_cbor(archive_bytes)
         .map_err(|error| Box::new(error) as Box<dyn Error>)
         .and_then(|decoded| {
             decoded
@@ -1040,18 +1088,21 @@ fn verify_public_archive(
                         .map_err(|error| Box::new(error) as Box<dyn Error>)
                         .and_then(|manifest_bytes| {
                             decoded
-                                .bundle_digest()
+                                .archive_digest()
                                 .map_err(|error| Box::new(error) as Box<dyn Error>)
-                                .and_then(|bundle_digest| {
-                                    if canonical_bytes != bundle_bytes
+                                .and_then(|archive_digest| {
+                                    if canonical_bytes != archive_bytes
                                         || manifest_bytes != expected_manifest
-                                        || bundle_digest != *expected_digest
+                                        || archive_digest != *expected_archive_digest
                                     {
                                         Err("public archive verification did not reproduce canonical bytes"
                                             .into())
                                     } else {
-                                        verify_archive_independently(bundle_bytes)
-                                            .map_err(|error| Box::new(error) as Box<dyn Error>)
+                                        verify_archive_release_filename(
+                                            archive_bytes,
+                                            release_filename,
+                                        )
+                                        .map_err(|error| Box::new(error) as Box<dyn Error>)
                                     }
                                 })
                         })
@@ -1059,48 +1110,327 @@ fn verify_public_archive(
         })
 }
 
-fn write_materialized_file(
-    root: &Path,
-    relative: impl AsRef<Path>,
-    bytes: &[u8],
-) -> Result<(), Box<dyn Error>> {
-    let relative = relative.as_ref();
-    let root_metadata = std::fs::symlink_metadata(root)?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err("materialized output root must be a directory".into());
+#[cfg(target_os = "linux")]
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+#[cfg(target_os = "linux")]
+const RESOLVE_BENEATH: u64 = 0x08;
+#[cfg(target_os = "linux")]
+const RENAME_NOREPLACE: u32 = 1;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+#[cfg(target_os = "linux")]
+struct AtomicPublication {
+    parent: OwnedFd,
+    staging: OwnedFd,
+    staging_name: CString,
+    destination_name: CString,
+}
+
+#[cfg(target_os = "linux")]
+impl AtomicPublication {
+    fn prepare(destination: &Path) -> Result<Self, MaterializationError> {
+        let (parent_path, destination_name) = output_parent_and_name(destination)?;
+        let parent = open_trusted_parent(parent_path)?;
+        let (staging_name, staging) = create_private_staging(&parent)?;
+        Ok(Self {
+            parent,
+            staging,
+            staging_name,
+            destination_name,
+        })
     }
-    let mut components = relative.components().peekable();
-    let mut parent = root.to_owned();
-    let file_name = loop {
-        let component = components
-            .next()
-            .ok_or("materialized file path must not be empty")?;
-        let Component::Normal(name) = component else {
-            return Err("materialized file path must be relative and normalized".into());
+
+    fn write_file(&self, relative_path: &str, bytes: &[u8]) -> Result<(), MaterializationError> {
+        let components = relative_components(Path::new(relative_path))?;
+        let (file_name, directories) = components
+            .split_last()
+            .ok_or(MaterializationError::UntrustedOutputDirectory)?;
+        let mut directory = duplicate_fd(&self.staging)?;
+        for name in directories {
+            directory = open_or_create_directory(&directory, name)?;
+        }
+        let fd = open_at2(
+            directory.as_raw_fd(),
+            file_name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+            RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+        )?;
+        let mut file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
+        file.write_all(bytes)
+            .map_err(|_| MaterializationError::DurabilitySyncFailed)?;
+        file.sync_all()
+            .map_err(|_| MaterializationError::DurabilitySyncFailed)?;
+        sync_fd(&directory)
+    }
+
+    fn verify_and_sync(&self, files: &[MaterializedFile]) -> Result<(), MaterializationError> {
+        for file in files {
+            let bytes = self.read_file(&file.relative_path)?;
+            if bytes != file.bytes {
+                return Err(MaterializationError::ArchiveDigestMismatch);
+            }
+            if let Some(archive) = &file.archive {
+                verify_public_archive(
+                    &bytes,
+                    &archive.digest,
+                    &archive.manifest,
+                    &archive.release_filename,
+                )
+                .map_err(|_| MaterializationError::ArchiveDigestMismatch)?;
+            }
+        }
+        sync_fd(&self.staging)
+    }
+
+    fn read_file(&self, relative_path: &str) -> Result<Vec<u8>, MaterializationError> {
+        let components = relative_components(Path::new(relative_path))?;
+        let (file_name, directories) = components
+            .split_last()
+            .ok_or(MaterializationError::UntrustedOutputDirectory)?;
+        let mut directory = duplicate_fd(&self.staging)?;
+        for name in directories {
+            directory = open_directory(&directory, name)?;
+        }
+        let fd = open_at2(
+            directory.as_raw_fd(),
+            file_name,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+            RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+        )?;
+        let mut file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|_| MaterializationError::ArchiveDigestMismatch)?;
+        Ok(bytes)
+    }
+
+    fn publish(self) -> Result<(), MaterializationError> {
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                self.parent.as_raw_fd(),
+                self.staging_name.as_ptr(),
+                self.parent.as_raw_fd(),
+                self.destination_name.as_ptr(),
+                RENAME_NOREPLACE,
+            )
         };
-        if components.peek().is_none() {
-            break name;
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::EEXIST) => Err(MaterializationError::DestinationExists),
+                Some(libc::ENOSYS | libc::EINVAL) => {
+                    Err(MaterializationError::AtomicPublicationUnsupported)
+                }
+                Some(libc::ELOOP) => Err(MaterializationError::SymlinkDetected),
+                _ => Err(MaterializationError::UntrustedOutputDirectory),
+            };
         }
-        parent.push(name);
-        match std::fs::symlink_metadata(&parent) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err("materialized output directory must not contain symlinks".into());
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err("materialized output path component is not a directory".into());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&parent)?;
-            }
-            Err(error) => return Err(error.into()),
+        sync_fd(&self.parent)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn publish_materialized_tree(
+    destination: &Path,
+    files: &[MaterializedFile],
+) -> Result<(), MaterializationError> {
+    let publication = AtomicPublication::prepare(destination)?;
+    for file in files {
+        publication.write_file(&file.relative_path, &file.bytes)?;
+    }
+    publication.verify_and_sync(files)?;
+    publication.publish()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_materialized_tree(
+    _destination: &Path,
+    _files: &[MaterializedFile],
+) -> Result<(), MaterializationError> {
+    Err(MaterializationError::AtomicPublicationUnsupported)
+}
+
+#[cfg(target_os = "linux")]
+fn output_parent_and_name(destination: &Path) -> Result<(&Path, CString), MaterializationError> {
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = destination
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or(MaterializationError::UntrustedOutputDirectory)?;
+    CString::new(file_name.as_bytes())
+        .map_err(|_| MaterializationError::UntrustedOutputDirectory)
+        .map(|name| (parent, name))
+}
+
+#[cfg(target_os = "linux")]
+fn open_trusted_parent(parent: &Path) -> Result<OwnedFd, MaterializationError> {
+    let parent = CString::new(parent.as_os_str().as_bytes())
+        .map_err(|_| MaterializationError::UntrustedOutputDirectory)?;
+    open_at2(
+        libc::AT_FDCWD,
+        &parent,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+        RESOLVE_NO_SYMLINKS,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn create_private_staging(parent: &OwnedFd) -> Result<(CString, OwnedFd), MaterializationError> {
+    for _ in 0..16 {
+        let name = random_staging_name()?;
+        let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+        if result == 0 {
+            let staging = open_directory(parent, &name)?;
+            return Ok((name, staging));
         }
-    };
-    let path = parent.join(file_name);
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EEXIST) => continue,
+            Some(libc::ELOOP) => return Err(MaterializationError::SymlinkDetected),
+            _ => return Err(MaterializationError::UntrustedOutputDirectory),
+        }
+    }
+    Err(MaterializationError::UntrustedOutputDirectory)
+}
+
+#[cfg(target_os = "linux")]
+fn random_staging_name() -> Result<CString, MaterializationError> {
+    let mut random = [0_u8; 16];
+    let mut offset = 0;
+    while offset < random.len() {
+        let result = unsafe {
+            libc::getrandom(
+                random[offset..].as_mut_ptr().cast(),
+                random.len() - offset,
+                0,
+            )
+        };
+        if result > 0 {
+            offset += usize::try_from(result)
+                .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
+            continue;
+        }
+        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(MaterializationError::AtomicPublicationUnsupported);
+    }
+    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    CString::new(format!(".pigloros-conformance-staging-{suffix}"))
+        .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
+}
+
+#[cfg(target_os = "linux")]
+fn relative_components(path: &Path) -> Result<Vec<CString>, MaterializationError> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            return Err(MaterializationError::UntrustedOutputDirectory);
+        };
+        components.push(
+            CString::new(name.as_bytes())
+                .map_err(|_| MaterializationError::UntrustedOutputDirectory)?,
+        );
+    }
+    if components.is_empty() {
+        return Err(MaterializationError::UntrustedOutputDirectory);
+    }
+    Ok(components)
+}
+
+#[cfg(target_os = "linux")]
+fn open_or_create_directory(
+    parent: &OwnedFd,
+    name: &CString,
+) -> Result<OwnedFd, MaterializationError> {
+    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
+    if result == -1 {
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EEXIST) => {}
+            Some(libc::ELOOP) => return Err(MaterializationError::SymlinkDetected),
+            _ => return Err(MaterializationError::UntrustedOutputDirectory),
+        }
+    }
+    sync_fd(parent)?;
+    open_directory(parent, name)
+}
+
+#[cfg(target_os = "linux")]
+fn open_directory(parent: &OwnedFd, name: &CString) -> Result<OwnedFd, MaterializationError> {
+    open_at2(
+        parent.as_raw_fd(),
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+        RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn duplicate_fd(fd: &OwnedFd) -> Result<OwnedFd, MaterializationError> {
+    let duplicate = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate == -1 {
+        return Err(MaterializationError::UntrustedOutputDirectory);
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+}
+
+#[cfg(target_os = "linux")]
+fn sync_fd(fd: &OwnedFd) -> Result<(), MaterializationError> {
+    if unsafe { libc::fsync(fd.as_raw_fd()) } == -1 {
+        return Err(MaterializationError::DurabilitySyncFailed);
+    }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_at2(
+    directory_fd: libc::c_int,
+    path: &CString,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+    resolve: u64,
+) -> Result<OwnedFd, MaterializationError> {
+    let how = OpenHow {
+        flags: u64::try_from(flags)
+            .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?,
+        mode: u64::from(mode),
+        resolve,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            directory_fd,
+            path.as_ptr(),
+            &how,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd == -1 {
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ELOOP) => Err(MaterializationError::SymlinkDetected),
+            Some(libc::ENOSYS | libc::EINVAL) => {
+                Err(MaterializationError::AtomicPublicationUnsupported)
+            }
+            _ => Err(MaterializationError::UntrustedOutputDirectory),
+        };
+    }
+    let fd = libc::c_int::try_from(fd)
+        .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 #[cfg(test)]
@@ -1108,31 +1438,6 @@ fn write_materialized_file(
 mod tests {
     use super::*;
     use pos_conformance::{ExecutionModeV1, SafeErrorCodeV1};
-
-    fn output_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "pigloros-conformance-{name}-{}",
-            std::process::id()
-        ))
-    }
-
-    fn local_bundle_digest(profile: &ConformanceProfileV2, signing_key: &SigningKey) -> [u8; 32] {
-        let digest = bundle_inputs(profile, BundleModeV1::Local)
-            .ok()
-            .and_then(|(members, expected_results)| {
-                ConformanceBundleV1::materialize(
-                    profile,
-                    BundleModeV1::Local,
-                    members,
-                    expected_results,
-                )
-                .ok()
-            })
-            .and_then(|bundle| bundle.sign(signing_key).ok())
-            .and_then(|bundle| bundle.bundle_digest().ok());
-        assert!(digest.is_some(), "fixture bundle digest setup must succeed");
-        digest.unwrap_or_default()
-    }
 
     fn local_bundle_artifacts(
         profile: &ConformanceProfileV2,
@@ -1146,13 +1451,13 @@ mod tests {
             expected_results,
         )?
         .sign(signing_key)?;
-        let digest = bundle.bundle_digest()?;
+        let digest = bundle.archive_digest()?;
         let manifest = bundle.manifest_bytes()?;
         let bytes = bundle.to_canonical_cbor()?;
-        Ok((bytes, digest, manifest))
+        Ok((bytes, digest, manifest, bundle.release_filename()?))
     }
 
-    type LocalBundleArtifacts = (Vec<u8>, [u8; 32], Vec<u8>);
+    type LocalBundleArtifacts = (Vec<u8>, [u8; 32], Vec<u8>, String);
 
     fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV2, Box<dyn Error>> {
         profile_for_claim_layer(claim_layer)
@@ -1620,21 +1925,37 @@ mod tests {
     fn archive_validation_seams() -> Result<(), Box<dyn Error>> {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let (bundle_bytes, bundle_digest, manifest) =
+        let (archive_bytes, archive_digest, manifest, release_filename) =
             local_bundle_artifacts(&profile, &signing_key)?;
-        let mut wrong_digest = bundle_digest;
+        let mut wrong_digest = archive_digest;
         wrong_digest[0] ^= 1;
-        assert!(verify_public_archive(&bundle_bytes, &wrong_digest, &manifest).is_err());
-        assert!(verify_public_archive(&bundle_bytes, &bundle_digest, b"invalid").is_err());
-        assert!(verify_public_archive(b"invalid", &bundle_digest, &manifest).is_err());
-        let mut invalid_signature_bytes = bundle_bytes;
+        assert!(
+            verify_public_archive(&archive_bytes, &wrong_digest, &manifest, &release_filename)
+                .is_err()
+        );
+        assert!(verify_public_archive(
+            &archive_bytes,
+            &archive_digest,
+            b"invalid",
+            &release_filename
+        )
+        .is_err());
+        assert!(
+            verify_public_archive(b"invalid", &archive_digest, &manifest, &release_filename)
+                .is_err()
+        );
+        let mut invalid_signature_bytes = archive_bytes;
         let signature_byte = invalid_signature_bytes
             .last_mut()
             .ok_or("canonical bundle must contain a signature")?;
         *signature_byte ^= 1;
-        assert!(
-            verify_public_archive(&invalid_signature_bytes, &bundle_digest, &manifest).is_err()
-        );
+        assert!(verify_public_archive(
+            &invalid_signature_bytes,
+            &archive_digest,
+            &manifest,
+            &release_filename,
+        )
+        .is_err());
         Ok(())
     }
 
@@ -1662,148 +1983,16 @@ mod tests {
         invalid_expected.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::InvalidEncoding);
         assert!(bundle_inputs(&invalid_expected, BundleModeV1::Local).is_ok());
-        let output = output_root("invalid-expected");
-        assert!(materialize_profile_for_test(
-            &output,
-            &SigningKey::from_bytes(&[7; 32]),
-            invalid_expected,
-            ProfileLifecycleV1::Draft,
-            "draft",
-            "artifact-integrity",
-        )
-        .is_err());
-        drop(std::fs::remove_dir_all(output));
 
         let mut invalid_profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         invalid_profile.fixtures.clear();
-        let output = output_root("invalid-profile");
-        assert!(materialize_profile_for_test(
-            &output,
-            &SigningKey::from_bytes(&[7; 32]),
-            invalid_profile,
-            ProfileLifecycleV1::Draft,
-            "draft",
-            "artifact-integrity",
-        )
-        .is_err());
-        drop(std::fs::remove_dir_all(output));
+        assert!(bundle_inputs(&invalid_profile, BundleModeV1::Local).is_err());
 
         let mut unsupported_mode = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         for fixture in &mut unsupported_mode.fixtures {
             fixture.modes = vec![ExecutionModeV1::AirGapped];
         }
-        let output = output_root("unsupported-mode");
-        assert!(materialize_profile_for_test(
-            &output,
-            &SigningKey::from_bytes(&[7; 32]),
-            unsupported_mode,
-            ProfileLifecycleV1::Draft,
-            "draft",
-            "artifact-integrity",
-        )
-        .is_err());
-        drop(std::fs::remove_dir_all(output));
-
-        let output = output_root("write-error");
-        assert!(std::fs::create_dir_all(output.join("directory")).is_ok());
-        assert!(write_materialized_file(&output, "directory", b"bytes").is_err());
-        assert!(std::fs::remove_dir_all(output).is_ok());
-
-        let blocker = output_root("create-dir-error");
-        assert!(std::fs::write(&blocker, b"not a directory").is_ok());
-        assert!(write_materialized_file(&blocker, "nested/file", b"bytes").is_err());
-        assert!(std::fs::remove_file(blocker).is_ok());
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn materialized_output_rejects_symlinked_parent_directories() -> Result<(), Box<dyn Error>> {
-        let output = output_root("symlink-parent");
-        std::fs::create_dir_all(output.join("real"))?;
-        std::os::unix::fs::symlink(output.join("real"), output.join("link"))?;
-        assert!(write_materialized_file(&output, "link/file", b"bytes").is_err());
-        std::fs::remove_dir_all(output)?;
-
-        let root_parent = output_root("symlink-root");
-        let root_target = root_parent.join("target");
-        let root_link = root_parent.join("link");
-        std::fs::create_dir_all(&root_target)?;
-        std::os::unix::fs::symlink(&root_target, &root_link)?;
-        assert!(write_materialized_file(&root_link, "file", b"bytes").is_err());
-        std::fs::remove_dir_all(root_parent)?;
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn materialized_output_propagates_parent_metadata_errors() -> Result<(), Box<dyn Error>> {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = output_root("metadata-error");
-        let protected = root.join("protected");
-        std::fs::create_dir_all(&protected)?;
-        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o000))?;
-        let result = write_materialized_file(&root, "protected/nested/file", b"bytes");
-        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::remove_dir_all(root)?;
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn materializer_manifest_and_bundle_write_errors_are_explicit() -> Result<(), Box<dyn Error>> {
-        let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        let digest = local_bundle_digest(&profile, &signing_key);
-        let prefix = "artifact-integrity/draft";
-
-        let manifest_root = output_root("manifest-error");
-        assert!(std::fs::create_dir_all(manifest_root.join(prefix)).is_ok());
-        assert!(std::fs::create_dir_all(manifest_root.join(format!(
-            "{prefix}/manifest-local-{}.cbor",
-            pos_conformance::hex_digest(&digest)
-        )),)
-        .is_ok());
-        assert!(materialize_profile_for_test(
-            &manifest_root,
-            &signing_key,
-            profile,
-            ProfileLifecycleV1::Draft,
-            "draft",
-            "artifact-integrity",
-        )
-        .is_err());
-        assert!(std::fs::remove_dir_all(manifest_root).is_ok());
-
-        let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        let digest = local_bundle_digest(&profile, &signing_key);
-        let bundle_root = output_root("bundle-error");
-        assert!(std::fs::create_dir_all(bundle_root.join(prefix)).is_ok());
-        assert!(std::fs::write(
-            bundle_root.join(format!(
-                "{prefix}/manifest-local-{}.cbor",
-                pos_conformance::hex_digest(&digest)
-            )),
-            b"existing",
-        )
-        .is_ok());
-        assert!(std::fs::create_dir_all(bundle_root.join(format!(
-            "{prefix}/bundle-local-{}.cfb1",
-            pos_conformance::hex_digest(&digest)
-        )),)
-        .is_ok());
-        assert!(materialize_profile_for_test(
-            &bundle_root,
-            &signing_key,
-            profile,
-            ProfileLifecycleV1::Draft,
-            "draft",
-            "artifact-integrity",
-        )
-        .is_err());
-        assert!(std::fs::remove_dir_all(bundle_root).is_ok());
+        assert!(bundle_inputs(&unsupported_mode, BundleModeV1::Local).is_err());
         Ok(())
     }
 
@@ -1813,24 +2002,13 @@ mod tests {
         materializer_rejects_matrix_binding_changes()?;
         materializer_rejects_invalid_fixture_records()?;
         materializer_recognizes_every_fixture_family();
-        materialized_output_paths_are_fail_closed()?;
         Ok(())
     }
 
     fn materializer_rejects_non_draft_lifecycle() -> Result<(), Box<dyn Error>> {
         let draft = br#"{"lifecycle":"Draft"}"#;
         let candidate = br#"{"lifecycle":"Candidate"}"#;
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        let lifecycle_root = output_root("candidate-lifecycle");
-        assert!(materialize_profile_for_test(
-            &lifecycle_root,
-            &SigningKey::from_bytes(&[7; 32]),
-            profile,
-            ProfileLifecycleV1::Candidate,
-            "candidate",
-            "artifact-integrity",
-        )
-        .is_err());
+        assert!(publication_lifecycles_from_bytes(candidate).is_err());
         let mut members = Vec::new();
         assert!(append_supporting_members(&mut members, candidate).is_err());
         assert!(append_supporting_members(&mut members, draft).is_ok());
@@ -1972,24 +2150,5 @@ mod tests {
         ] {
             assert_eq!(family_for_path(input_path, expected_path), None);
         }
-    }
-
-    fn materialized_output_paths_are_fail_closed() -> Result<(), Box<dyn Error>> {
-        let missing_root = output_root("missing-root");
-        assert!(write_materialized_file(&missing_root, "file", b"bytes").is_err());
-
-        let root = output_root("path-boundaries");
-        std::fs::create_dir(&root)?;
-        assert!(write_materialized_file(&root, "", b"bytes").is_err());
-        assert!(write_materialized_file(&root, ".", b"bytes").is_err());
-        assert!(write_materialized_file(&root, "../escape", b"bytes").is_err());
-
-        std::fs::write(root.join("file-parent"), b"blocker")?;
-        assert!(write_materialized_file(&root, "file-parent/child", b"bytes").is_err());
-        assert!(write_materialized_file(&root, "created/nested/file", b"bytes").is_ok());
-        assert_eq!(std::fs::read(root.join("created/nested/file"))?, b"bytes");
-        assert!(write_materialized_file(&root, "created/nested/file", b"bytes").is_err());
-        std::fs::remove_dir_all(root)?;
-        Ok(())
     }
 }

@@ -19,15 +19,6 @@ use std::process::Command;
 
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/execution-matrix.json";
-const MATERIALIZED_LAYERS: [&str; 7] = [
-    "artifact-integrity",
-    "replay-conformance",
-    "knowledge-non-interference",
-    "gateway-client-conformance",
-    "plugin-conformance",
-    "metric-conformance",
-    "empirical-evaluation",
-];
 
 type ArchiveMutation = Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>;
 type JsonMutation = Box<dyn FnOnce(&mut JsonValue)>;
@@ -526,11 +517,22 @@ fn archive_paths(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>
     Ok(archives)
 }
 
-fn contains_archive_kind(archives: &[PathBuf], kind: &str) -> bool {
-    archives.iter().any(|path| {
-        path.file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with(kind))
-    })
+fn materialized_layers(root: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let metadata: JsonValue =
+        serde_json::from_slice(&fs::read(root.join("MATERIALIZATION-METADATA.json"))?)?;
+    let layers = metadata
+        .get("layers")
+        .and_then(JsonValue::as_array)
+        .ok_or("materialization metadata layers are missing")?;
+    layers
+        .iter()
+        .map(|layer| {
+            layer
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "materialization metadata layer is invalid".into())
+        })
+        .collect()
 }
 
 struct TemporaryOutput(PathBuf);
@@ -566,13 +568,25 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
 
     let archives = archive_paths(&output_root)?;
     assert_eq!(archives.len(), 14);
-    for layer in MATERIALIZED_LAYERS {
+    for layer in materialized_layers(&output_root)? {
         let layer_archives = archive_paths(&output_root.join(layer).join("draft"))?;
         assert_eq!(layer_archives.len(), 2);
-        assert!(contains_archive_kind(&layer_archives, "bundle-local-"));
-        assert!(contains_archive_kind(&layer_archives, "bundle-air-gapped-"));
+        assert!(layer_archives.iter().all(|archive| {
+            archive.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                let bytes = name.as_bytes();
+                bytes.len() == 69
+                    && bytes[64..] == b".cfb1"[..]
+                    && bytes[..64].iter().copied().all(|byte| {
+                        byte.is_ascii_digit()
+                            || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+                    })
+            })
+        }));
+        let mut modes = Vec::new();
         for archive_path in layer_archives {
             let bundle = ConformanceBundleV1::from_canonical_cbor(&fs::read(archive_path)?)?;
+            modes.push(bundle.manifest.mode);
             let profile_bytes = bundle
                 .members
                 .iter()
@@ -628,6 +642,11 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
                 .as_bytes()
             );
         }
+        modes.sort_by_key(|mode| match mode {
+            BundleModeV1::Local => 0,
+            BundleModeV1::AirGapped => 1,
+        });
+        assert_eq!(modes, vec![BundleModeV1::Local, BundleModeV1::AirGapped]);
     }
     let verifier_binary = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
         .ok_or("verifier binary path is unavailable")?;
@@ -664,11 +683,13 @@ fn public_materializer_rejects_invalid_invocations() -> Result<(), Box<dyn std::
         .args([&missing_key_output, &invalid_key_output])
         .status()?
         .success());
-    assert!(!Command::new(&materializer_binary)
+    let existing_output_result = Command::new(&materializer_binary)
         .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
         .arg(&existing_output)
-        .status()?
-        .success());
+        .output()?;
+    assert!(!existing_output_result.status.success());
+    assert!(String::from_utf8_lossy(&existing_output_result.stderr)
+        .contains("destination already exists"));
     assert!(!Command::new(&materializer_binary)
         .arg(&missing_key_output)
         .status()?
@@ -688,6 +709,36 @@ fn public_materializer_rejects_invalid_invocations() -> Result<(), Box<dyn std::
     fs::remove_file(blocked_root)?;
     assert!(!missing_key_output.exists());
     assert!(!invalid_key_output.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn public_materializer_rejects_a_symlinked_parent() -> Result<(), Box<dyn std::error::Error>> {
+    let unique = format!(
+        "pigloros-conformance-symlink-parent-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    let trusted_parent = root.join("trusted-parent");
+    let linked_parent = root.join("linked-parent");
+    fs::create_dir_all(&trusted_parent)?;
+    std::os::unix::fs::symlink(&trusted_parent, &linked_parent)?;
+    let materializer_binary = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    let output = Command::new(materializer_binary)
+        .env(
+            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
+            "0707070707070707070707070707070707070707070707070707070707070707",
+        )
+        .arg(linked_parent.join("publication"))
+        .output()?;
+    fs::remove_dir_all(root)?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symbolic link detected"));
     Ok(())
 }
 

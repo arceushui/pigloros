@@ -17,10 +17,6 @@ source_inventory="fixtures/conformance/SHA256SUMS"
 source_digest="$(sha256sum "${source_inventory}" | awk '{print $1}')"
 publication_id="${PIGLOROS_CONFORMANCE_PUBLICATION_ID:-${source_digest}}"
 output_root="${1:-fixtures/conformance/published/${publication_id}}"
-if [[ -e "${output_root}" ]]; then
-  echo "refusing to overwrite existing Draft conformance output: ${output_root}" >&2
-  exit 1
-fi
 publication_parent="$(dirname "${output_root}")"
 mkdir -p "${publication_parent}"
 temporary_root="$(mktemp -d "${publication_parent}/.pigloros-conformance.XXXXXX")"
@@ -53,20 +49,22 @@ mapfile -t manifest_files < <(
   find "${first_output}" -type f -name 'manifest-*.cbor' -print | sort
 )
 mapfile -t archive_files < <(
-  find "${first_output}" -type f -name 'bundle-*.cfb1' -print | sort
+  find "${first_output}" -type f -name '*.cfb1' -print | sort
 )
-authority_lifecycle="$(jq -r '.lifecycle' fixtures/conformance/expected-authority/inventory.json)"
-case "${authority_lifecycle}" in
-  Draft) lifecycle_count=1 ;;
-  *)
-    echo "unsupported authority inventory lifecycle: ${authority_lifecycle}" >&2
-    exit 1
-    ;;
-esac
-expected_profile_count=$((7 * lifecycle_count))
-expected_manifest_count=$((7 * lifecycle_count * 2))
-expected_archive_count=$((7 * lifecycle_count * 2))
-expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count))
+metadata_file="${first_output}/MATERIALIZATION-METADATA.json"
+jq -e '
+  .format == 1 and
+  (.lifecycles | type == "array" and length > 0) and
+  (.layers | type == "array" and length > 0) and
+  (.modes | type == "array" and length > 0)
+' "${metadata_file}" >/dev/null
+layer_count="$(jq -r '.layers | length' "${metadata_file}")"
+lifecycle_count="$(jq -r '.lifecycles | length' "${metadata_file}")"
+mode_count="$(jq -r '.modes | length' "${metadata_file}")"
+expected_profile_count=$((layer_count * lifecycle_count))
+expected_manifest_count=$((expected_profile_count * mode_count))
+expected_archive_count=$((expected_profile_count * mode_count))
+expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count + 1))
 if ((
   ${#profile_files[@]} != expected_profile_count ||
   ${#manifest_files[@]} != expected_manifest_count ||
@@ -82,33 +80,9 @@ if ((${#archive_files[@]} == 0)); then
 fi
 cargo run -p pos-conformance --bin verify-conformance-bundle --locked -- "${archive_files[@]}"
 
-write_source_binding() {
-  local root=$1
-  cp "${source_inventory}" "${root}/SOURCE-SHA256SUMS"
-  {
-    printf 'source_sha256=%s\n' "${source_digest}"
-    printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
-  } > "${root}/SOURCE-BINDING"
-}
-
-write_output_inventory() {
-  local root=$1
-  (
-    cd "${root}"
-    find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > SHA256SUMS
-    sha256sum --check --strict SHA256SUMS
-  )
-}
-
-for output in "${first_output}" "${second_output}" "${clean_output}"; do
-  write_source_binding "${output}"
-  write_output_inventory "${output}"
-done
 diff -rq "${first_output}" "${second_output}"
 diff -rq "${first_output}" "${clean_output}"
-mv --no-clobber --no-target-directory "${first_output}" "${output_root}"
-if [[ -e "${first_output}" ]]; then
-  echo "Draft conformance output appeared during materialization: ${output_root}" >&2
-  exit 1
-fi
-echo "materialized ${#materialized_files[@]} signed Draft conformance files plus integrity records under ${output_root}"
+PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
+  cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${output_root}"
+diff -rq "${first_output}" "${output_root}"
+echo "atomically materialized ${#materialized_files[@]} signed Draft conformance files under ${output_root}"
