@@ -7559,7 +7559,7 @@ mod instrumented_public_entrypoints {
         let bad_matrix_digest =
             authority_members_with_json(bundle, BundleMemberRoleV1::Provenance, |value| {
                 value["adr_059_execution_matrix"]["blake3_digest"] =
-                    JsonValue::String("00".repeat(32))
+                    JsonValue::String("00".repeat(32));
             })?;
         assert_eq!(
             validate_authority_members(profile, &bad_matrix_digest),
@@ -7579,7 +7579,7 @@ mod instrumented_public_entrypoints {
         }
         let bad_binding =
             authority_members_with_json(bundle, BundleMemberRoleV1::Provenance, |value| {
-                value["authority_inventory"]["path"] = JsonValue::String("wrong".to_owned())
+                value["authority_inventory"]["path"] = JsonValue::String("wrong".to_owned());
             })?;
         assert_eq!(
             validate_authority_members(profile, &bad_binding),
@@ -7588,7 +7588,7 @@ mod instrumented_public_entrypoints {
 
         let mut bad_matrix =
             authority_members_with_json(bundle, BundleMemberRoleV1::ExecutionMatrix, |value| {
-                value["magic"] = JsonValue::String("NIM0".to_owned())
+                value["magic"] = JsonValue::String("NIM0".to_owned());
             })?;
         let matrix_bytes = bad_matrix
             .iter()
