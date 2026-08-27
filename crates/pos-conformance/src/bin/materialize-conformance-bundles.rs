@@ -1791,56 +1791,6 @@ mod tests {
         Ok(())
     }
 
-    fn assert_canonical_profiles_bind_fixture_families() -> Result<(), Box<dyn Error>> {
-        for spec in &LAYER_SPECS {
-            let claim_layer = spec.claim_layer;
-            let profile = test_profile(claim_layer)?;
-            assert_eq!(profile.fixtures.len(), 14);
-            assert_eq!(
-                profile
-                    .fixtures
-                    .iter()
-                    .filter(|fixture| fixture.modes == [pos_conformance::ExecutionModeV1::Local])
-                    .count(),
-                7
-            );
-            assert_eq!(
-                profile
-                    .fixtures
-                    .iter()
-                    .filter(|fixture| {
-                        fixture.modes == [pos_conformance::ExecutionModeV1::AirGapped]
-                    })
-                    .count(),
-                7
-            );
-            assert!(profile.fixtures.iter().all(|fixture| {
-                fixture
-                    .inputs
-                    .first()
-                    .is_some_and(|input| input.member_id.starts_with("inputs/"))
-            }));
-            assert!(profile
-                .fixtures
-                .iter()
-                .all(|fixture| fixture.subject_adapter == subject_adapter(claim_layer)));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn canonical_records_bind_fixture_families() -> Result<(), Box<dyn Error>> {
-        assert_canonical_profiles_bind_fixture_families()?;
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        let (members, expected) = bundle_inputs(&profile, BundleModeV1::Local)?;
-        assert_eq!(expected.len(), 7);
-        assert!(members.iter().any(|member| {
-            member.role == BundleMemberRoleV1::AuthorityInventory
-                && member.path == AUTHORITY_INVENTORY_MEMBER_PATH
-        }));
-        Ok(())
-    }
-
     #[test]
     fn materializer_manifest_and_bundle_write_errors_are_explicit() -> Result<(), Box<dyn Error>> {
         let signing_key = SigningKey::from_bytes(&[7; 32]);

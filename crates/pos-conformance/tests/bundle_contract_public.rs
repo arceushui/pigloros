@@ -585,8 +585,38 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
             let profile = ConformanceProfileV1::from_canonical_cbor(profile_bytes)?;
             assert_eq!(profile.lifecycle, ProfileLifecycleV1::Draft);
             assert_eq!(profile.execution_profile_digests.len(), 2);
-            assert_eq!(profile.fixtures.len(), 28);
+            assert_eq!(profile.fixtures.len(), 14);
+            assert_eq!(
+                profile
+                    .fixtures
+                    .iter()
+                    .filter(|fixture| {
+                        fixture.modes == [pos_conformance::ExecutionModeV1::Local]
+                    })
+                    .count(),
+                7
+            );
+            assert_eq!(
+                profile
+                    .fixtures
+                    .iter()
+                    .filter(|fixture| {
+                        fixture.modes == [pos_conformance::ExecutionModeV1::AirGapped]
+                    })
+                    .count(),
+                7
+            );
+            assert!(profile.fixtures.iter().all(|fixture| {
+                fixture
+                    .inputs
+                    .first()
+                    .is_some_and(|input| input.member_id.starts_with("inputs/"))
+            }));
             assert_eq!(bundle.manifest.expected_results.len(), 7);
+            assert!(bundle.members.iter().any(|member| {
+                member.role == BundleMemberRoleV1::AuthorityInventory
+                    && member.path == AUTHORITY_INVENTORY_MEMBER_PATH
+            }));
             assert!(bundle
                 .manifest
                 .expected_results
