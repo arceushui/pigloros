@@ -354,8 +354,7 @@ pub mod fixtures {
         profile
     }
 
-    fn draft_authority_members(
-    ) -> Result<(Vec<BundleMemberV1>, Vec<u8>), Box<dyn std::error::Error>> {
+    fn draft_authority_members() -> (Vec<BundleMemberV1>, Vec<u8>) {
         let inventory_bytes =
             include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json")
                 .to_vec();
@@ -375,7 +374,7 @@ pub mod fixtures {
                 BundleMemberRoleV1::ExecutionMatrix,
             ),
         ];
-        Ok((members, provenance_bytes))
+        (members, provenance_bytes)
     }
 
     fn draft_members(
@@ -463,7 +462,7 @@ pub mod fixtures {
     /// Returns an error if the checked-in fixture data cannot be transformed
     /// into the Draft authority shape.
     pub fn draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
-        let (authority_members, provenance_bytes) = draft_authority_members()?;
+        let (authority_members, provenance_bytes) = draft_authority_members();
         let mut profile = profile(digest(&provenance_bytes));
         profile.lifecycle = ProfileLifecycleV1::Draft;
         bind_profile_to_matrix(&mut profile, &authority_members)?;

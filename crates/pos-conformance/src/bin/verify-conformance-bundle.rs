@@ -8,6 +8,8 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+const INITIAL_READ_CAPACITY: u64 = 64 * 1024;
+
 fn main() -> Result<(), Box<dyn Error>> {
     run(env::args_os())
 }
@@ -78,9 +80,8 @@ fn read_bounded(
         )
         .into());
     }
-    const INITIAL_READ_CAPACITY: u64 = 64 * 1024;
-    let initial_capacity = usize::try_from(declared_len.min(INITIAL_READ_CAPACITY))
-        .unwrap_or(INITIAL_READ_CAPACITY as usize);
+    let initial_capacity =
+        usize::try_from(declared_len.min(INITIAL_READ_CAPACITY)).unwrap_or(usize::MAX);
     let mut bytes = Vec::with_capacity(initial_capacity);
     reader
         .take(limit.saturating_add(1))

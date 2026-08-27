@@ -2821,7 +2821,6 @@ mod tests {
         VerificationOutcomeV1,
     };
     use pos_crypto::canonical;
-    use std::collections::BTreeSet;
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
@@ -5255,24 +5254,6 @@ mod tests {
             return Err(std::io::Error::other("expected array"));
         };
         fields[index] = replacement;
-        Ok(Value::Array(fields))
-    }
-
-    fn replace_nested_array_field(
-        value: &Value,
-        path: &[usize],
-        replacement: Value,
-    ) -> Result<Value, std::io::Error> {
-        let Some((&index, remaining)) = path.split_first() else {
-            return Ok(replacement);
-        };
-        let Value::Array(mut fields) = value.clone() else {
-            return Err(std::io::Error::other("expected array"));
-        };
-        let field = fields
-            .get(index)
-            .ok_or_else(|| std::io::Error::other("array index out of bounds"))?;
-        fields[index] = replace_nested_array_field(field, remaining, replacement)?;
         Ok(Value::Array(fields))
     }
 

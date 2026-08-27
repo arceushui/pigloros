@@ -371,10 +371,21 @@ fn materialize_profile_from_profile(
     )];
     let mut signed_bundles = Vec::with_capacity(2);
     for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
+        let mode_name = match mode {
+            BundleModeV1::Local => "local",
+            BundleModeV1::AirGapped => "air-gapped",
+        };
         let (members, expected_results) =
-            bundle_inputs_from_profile(&profile, mode, context.inventory_bytes)?;
+            bundle_inputs_from_profile(&profile, mode, context.inventory_bytes).map_err(
+                |error| {
+                    format!("failed to assemble {layer_name}/{mode_name} bundle inputs: {error:?}")
+                },
+            )?;
         let bundle = ConformanceBundleV1::materialize(&profile, mode, members, expected_results)
-            .and_then(|bundle| bundle.sign(context.signing_key))?;
+            .and_then(|bundle| bundle.sign(context.signing_key))
+            .map_err(|error| {
+                format!("failed to materialize {layer_name}/{mode_name} bundle: {error:?}")
+            })?;
         signed_bundles.push(bundle);
     }
     let pair = ConformanceBundlePairV1 {
@@ -386,7 +397,9 @@ fn materialize_profile_from_profile(
         let bundle_digest = bundle.bundle_digest()?;
         let manifest_bytes = bundle.manifest_bytes()?;
         let bundle_bytes = bundle.to_canonical_cbor()?;
-        verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes)?;
+        verify_public_archive(&bundle_bytes, &bundle_digest, &manifest_bytes).map_err(|error| {
+            format!("failed to verify {layer_name}/{mode_name} bundle: {error:?}")
+        })?;
         outputs.push((
             format!(
                 "{prefix}/manifest-{mode_name}-{}.cbor",
