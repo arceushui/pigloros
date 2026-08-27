@@ -1193,57 +1193,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_binds_one_execution_profile_per_mode_and_preserves_pair_parity(
-    ) -> Result<(), Box<dyn Error>> {
-        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
-        assert!(profile.execution_matrix_digest().is_err());
-        let knowledge_profile = test_profile(ClaimLayerV1::KnowledgeNonInterference)?;
-        assert_eq!(
-            knowledge_profile.execution_matrix_digest()?,
-            *blake3::hash(include_bytes!(
-                "../../../../fixtures/conformance/matrix/execution-matrix.json"
-            ))
-            .as_bytes()
-        );
-        let inventory =
-            include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
-        let signing_key = SigningKey::from_bytes(&[7; 32]);
-        let (local_members, local_expected) =
-            bundle_inputs_from_profile(&profile, BundleModeV1::Local, inventory)?;
-        let (air_gapped_members, air_gapped_expected) =
-            bundle_inputs_from_profile(&profile, BundleModeV1::AirGapped, inventory)?;
-        assert_eq!(local_expected.len(), 7);
-        assert_eq!(air_gapped_expected.len(), 7);
-        assert!(local_expected.iter().all(|expected| {
-            expected.execution_profile_digest
-                == labeled_digest("PiglorOS.ExecutionProfile.v1", b"deterministic-local-v1")
-        }));
-        assert!(air_gapped_expected.iter().all(|expected| {
-            expected.execution_profile_digest
-                == labeled_digest(
-                    "PiglorOS.ExecutionProfile.v1",
-                    b"deterministic-air-gapped-v1",
-                )
-        }));
-        let local = ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::Local,
-            local_members,
-            local_expected,
-        )?
-        .sign(&signing_key)?;
-        let air_gapped = ConformanceBundleV1::materialize(
-            &profile,
-            BundleModeV1::AirGapped,
-            air_gapped_members,
-            air_gapped_expected,
-        )?
-        .sign(&signing_key)?;
-        ConformanceBundlePairV1 { local, air_gapped }.validate()?;
-        Ok(())
-    }
-
-    #[test]
     fn helper_validation_seams_cover_alternate_records() -> Result<(), Box<dyn Error>> {
         helper_validation_seams_cover_codecs();
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);

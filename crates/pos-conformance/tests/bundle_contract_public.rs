@@ -573,6 +573,37 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
         assert_eq!(layer_archives.len(), 2);
         assert!(contains_archive_kind(&layer_archives, "bundle-local-"));
         assert!(contains_archive_kind(&layer_archives, "bundle-air-gapped-"));
+        for archive_path in layer_archives {
+            let bundle = ConformanceBundleV1::from_canonical_cbor(&fs::read(archive_path)?)?;
+            let profile_bytes = bundle
+                .members
+                .iter()
+                .find(|member| member.role == BundleMemberRoleV1::Profile)
+                .ok_or("materialized bundle profile is missing")?
+                .bytes
+                .as_slice();
+            let profile = ConformanceProfileV1::from_canonical_cbor(profile_bytes)?;
+            assert_eq!(profile.lifecycle, ProfileLifecycleV1::Draft);
+            assert_eq!(profile.execution_profile_digests.len(), 2);
+            assert_eq!(profile.fixtures.len(), 28);
+            assert_eq!(bundle.manifest.expected_results.len(), 7);
+            assert!(bundle
+                .manifest
+                .expected_results
+                .iter()
+                .all(|expected| expected.mode == bundle.manifest.mode));
+            if layer == "knowledge-non-interference" {
+                assert_eq!(
+                    profile.execution_matrix_digest()?,
+                    *blake3::hash(include_bytes!(
+                        "../../../fixtures/conformance/matrix/execution-matrix.json"
+                    ))
+                    .as_bytes()
+                );
+            } else {
+                assert!(profile.execution_matrix_digest().is_err());
+            }
+        }
     }
     let verifier_binary = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
         .ok_or("verifier binary path is unavailable")?;
