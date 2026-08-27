@@ -1288,14 +1288,14 @@ impl SqliteStore {
                     if chain.is_empty() {
                         leaf_head = head;
                     }
-                    chain.push((current, None));
+                    chain.push((current, Seq::ZERO));
                     break;
                 }
                 Some(DecodedForkChainRow::Fork { parent, fork, head }) => {
                     if chain.is_empty() {
                         leaf_head = head;
                     }
-                    chain.push((current, Some(fork)));
+                    chain.push((current, fork));
                     current = parent;
                 }
             }
@@ -1306,23 +1306,19 @@ impl SqliteStore {
 
     fn logical_segment_length(
         &self,
-        chain: &[(TimelineId, Option<Seq>)],
+        chain: &[(TimelineId, Seq)],
         index: usize,
         timeline: TimelineId,
     ) -> Result<u64, CoreError> {
-        let prefix = chain[index].1.map_or(0, Seq::as_u64);
+        let prefix = chain[index].1.as_u64();
         let local_head = self.get_head_seq(timeline)?.as_u64();
-        let length =
-            chain
-                .get(index + 1)
-                .and_then(|(_, fork)| *fork)
-                .map_or(Ok(local_head), |fork| {
-                    fork.as_u64().checked_sub(prefix).ok_or_else(|| {
-                        CoreError::Storage(format!(
-                            "Fork point precedes inherited history for timeline {timeline}"
-                        ))
-                    })
-                })?;
+        let length = chain.get(index + 1).map_or(Ok(local_head), |(_, fork)| {
+            fork.as_u64().checked_sub(prefix).ok_or_else(|| {
+                CoreError::Storage(format!(
+                    "Fork point precedes inherited history for timeline {timeline}"
+                ))
+            })
+        })?;
         if length > local_head {
             return Err(CoreError::Storage(format!(
                 "Fork point exceeds parent logical Event head for timeline {timeline}"
@@ -1438,7 +1434,9 @@ struct ForkChainRow {
     head_seq: i64,
 }
 
-type ForkChain = Vec<(TimelineId, Option<Seq>)>;
+/// A stitched Timeline ancestry entry. The root's prefix is always zero;
+/// non-root entries carry their validated fork sequence.
+type ForkChain = Vec<(TimelineId, Seq)>;
 type ForkChainWithLeafHead = (ForkChain, u64);
 
 #[derive(Debug)]
@@ -1771,10 +1769,7 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&tx, timeline)?;
-        let logical_prefix = chain
-            .last()
-            .and_then(|(_, fork)| *fork)
-            .map_or(0, Seq::as_u64);
+        let logical_prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
         let owner = if gateway_consent {
             Some(crate::ensure_gateway_consent_drafts(
                 drafts,
@@ -3231,7 +3226,7 @@ impl EventStore for SqliteStore {
         let Some(index) = chain.iter().position(|(id, _)| *id == owner) else {
             return Ok(None);
         };
-        let prefix = chain[index].1.map_or(0, Seq::as_u64);
+        let prefix = chain[index].1.as_u64();
         let local_limit = self.logical_segment_length(&chain, index, owner)?;
         let local_seq = u64::try_from(local_seq).map_err(|_| {
             CoreError::Storage(format!("timeline {owner} has a negative Event sequence"))
@@ -3399,9 +3394,9 @@ impl EventStore for SqliteStore {
                 let mut all: Vec<Event> = Vec::new();
 
                 for (i, &(tid, _)) in chain.iter().enumerate() {
-                    let logical_prefix = chain[i].1.map_or(0, Seq::as_u64);
+                    let logical_prefix = chain[i].1.as_u64();
                     if i + 1 < chain.len() {
-                        let logical_fork = chain[i + 1].1.unwrap_or(Seq::ZERO);
+                        let logical_fork = chain[i + 1].1;
                         let fork_point_error = CoreError::Storage(format!(
                             "Fork point precedes inherited history for timeline {tid}"
                         ));

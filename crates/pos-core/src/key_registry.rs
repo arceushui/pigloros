@@ -116,15 +116,11 @@ impl OwnerIdV1 {
     /// Panics when `value` is empty or longer than 128 UTF-8 bytes. Source
     /// controlled literals should use a valid owner identifier.
     #[must_use]
-    pub const fn from_static(value: &'static str) -> Self {
+    pub fn from_static(value: &'static str) -> Self {
         let bytes = value.as_bytes();
         assert!(!bytes.is_empty() && bytes.len() <= 128);
         let mut storage = [0; 128];
-        let mut index = 0;
-        while index < bytes.len() {
-            storage[index] = bytes[index];
-            index += 1;
-        }
+        storage[..bytes.len()].copy_from_slice(bytes);
         Self {
             bytes: storage,
             length: bytes.len(),
@@ -1126,7 +1122,23 @@ fn destruction_digest(request: &KeyDestructionRequestV1) -> Hash {
 mod tests {
     use super::*;
 
-    const TEST_OWNER: OwnerIdV1 = OwnerIdV1::from_static("test-owner");
+    const TEST_OWNER: OwnerIdV1 = OwnerIdV1 {
+        bytes: {
+            let mut bytes = [0; 128];
+            bytes[0] = b't';
+            bytes[1] = b'e';
+            bytes[2] = b's';
+            bytes[3] = b't';
+            bytes[4] = b'-';
+            bytes[5] = b'o';
+            bytes[6] = b'w';
+            bytes[7] = b'n';
+            bytes[8] = b'e';
+            bytes[9] = b'r';
+            bytes
+        },
+        length: 10,
+    };
     const DATA: KeyIdentityV1 =
         KeyIdentityV1::from_parts(TEST_OWNER, KeyRoleV1::SubjectDataEncryption, 1);
     const ATTRIBUTION: KeyIdentityV1 =

@@ -9,6 +9,14 @@ use pos_core::{
 };
 use std::cell::Cell;
 
+#[test]
+fn source_controlled_owner_identifier_preserves_literal_bytes() {
+    assert_eq!(
+        OwnerIdV1::from_static("mutation-owner").as_str(),
+        "mutation-owner"
+    );
+}
+
 struct RegistryStore {
     registry: Option<KeyRegistryStateV1>,
     timeline: Option<Timeline>,

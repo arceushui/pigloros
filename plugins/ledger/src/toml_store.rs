@@ -61,15 +61,14 @@ impl TomlLedgerStore {
                 path: path.display().to_string(),
                 reason: e.to_string(),
             })?;
-            // Directory entries always have a filename. If an exotic path
-            // ever reaches this point without a stem, the empty stem is
-            // rejected by the caller's prediction/resolution identity check.
             let stem = path
                 .file_stem()
-                .map(ToOwned::to_owned)
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| LedgerError::Toml {
+                    path: path.display().to_string(),
+                    reason: "TOML filename stem must be valid UTF-8".to_owned(),
+                })?
+                .to_owned();
             items.push((stem, value));
         }
         Ok(items)
@@ -148,6 +147,8 @@ impl LedgerStore for TomlLedgerStore {
 mod tests {
     use super::*;
     use crate::contract;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -239,6 +240,23 @@ mod tests {
         let err = store.load("2026-07-25").err().ok_or("expected error")?;
         assert!(matches!(err, LedgerError::InvalidPrediction(_)));
         assert!(err.to_string().contains("stem"));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn non_utf8_filename_stem_is_rejected_at_read_boundary(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, tmp) = make_store()?;
+        store.register(contract::sample_new_prediction("2026-08-01"))?;
+        let dir = tmp.path().join("predictions");
+        let file = std::fs::read_dir(&dir)?
+            .next()
+            .ok_or("missing prediction file")??;
+        let invalid_stem = OsString::from_vec(vec![0xff, b'.', b't', b'o', b'm', b'l']);
+        std::fs::rename(file.path(), dir.join(invalid_stem))?;
+        let error = store.load("2026-07-25").err().ok_or("expected error")?;
+        assert!(matches!(error, LedgerError::Toml { .. }));
         Ok(())
     }
 

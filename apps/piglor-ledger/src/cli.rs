@@ -24,7 +24,9 @@ use pos_store::StoreConfig;
 use crate::hex::hex_decode;
 use crate::{hex_encode, render_html, render_json, render_redirect, CliError};
 
-const LEDGER_OWNER_ID: OwnerIdV1 = OwnerIdV1::from_static("piglor-ledger");
+fn ledger_owner_id() -> OwnerIdV1 {
+    OwnerIdV1::from_static("piglor-ledger")
+}
 
 /// Parsed `--source toml:DIR|store:DB` value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,12 +85,11 @@ fn ledger_signing_registry(
 ) -> Result<(KeyRegistryStateV1, KeyIdentityV1), CliError> {
     let material_digest = key_material_digest(signing_key.as_bytes());
     let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
+    let owner_id = ledger_owner_id();
     let identity = persisted_registry
-        .and_then(|registry| {
-            registry.active_key(&LEDGER_OWNER_ID, KeyRoleV1::TimelineIntegritySigning)
-        })
+        .and_then(|registry| registry.active_key(&owner_id, KeyRoleV1::TimelineIntegritySigning))
         .map_or(
-            KeyIdentityV1::from_parts(LEDGER_OWNER_ID, KeyRoleV1::TimelineIntegritySigning, 1),
+            KeyIdentityV1::from_parts(owner_id, KeyRoleV1::TimelineIntegritySigning, 1),
             |record| record.identity,
         );
     let mut registry = persisted_registry.cloned().unwrap_or_default();

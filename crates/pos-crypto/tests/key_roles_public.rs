@@ -256,6 +256,9 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
         digest,
         Some(public_key_from_verifying_key(&verifying_key)),
     ))?;
+    let historical_payload = CanonicalBytes::from_static(b"historical signature");
+    let historical_signature =
+        sign_for_registered_role(&mut registry, &material, identity, &historical_payload)?;
     destroy_registered_signing_key(&mut material, request, &mut registry)?;
     assert!(material.is_destroyed());
     assert_eq!(material.material_digest(), digest);
@@ -263,6 +266,12 @@ fn public_signing_material_destruction_is_commit_gated() -> Result<(), Box<dyn s
         material.public_verification_key(),
         public_key_from_verifying_key(&verifying_key)
     );
+    verify_for_role(
+        &verifying_key,
+        identity,
+        &historical_payload,
+        &historical_signature,
+    )?;
     let tombstone = registry
         .tombstone(identity)
         .ok_or("destroyed signing key must retain its tombstone")?;
