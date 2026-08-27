@@ -2309,9 +2309,15 @@ fn encode_case(value: &CaseOutcomeV1) -> Value {
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map(|()| bytes)
-        .map_err(|_| ConformanceContractError::InvalidEncoding)
+    encode_value_to_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn encode_value_to_writer<W: std::io::Write>(
+    value: &Value,
+    writer: W,
+) -> Result<(), ConformanceContractError> {
+    ciborium::into_writer(value, writer).map_err(|_| ConformanceContractError::InvalidEncoding)
 }
 
 fn encode_bounded(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
@@ -2731,6 +2737,26 @@ mod tests {
     const MAX_FIXTURE_COUNT: u32 = 65_536;
     const MAX_MEMBER_PATH_BYTES: u16 = 256;
     const MAX_COORDINATE_COUNT_BYTES: u16 = 128;
+
+    #[test]
+    fn canonical_encoding_maps_write_failures() {
+        struct FailingWriter;
+
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("write failure"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        assert_eq!(
+            encode_value_to_writer(&Value::Null, FailingWriter),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+    }
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]

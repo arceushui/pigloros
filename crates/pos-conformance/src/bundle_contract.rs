@@ -517,8 +517,7 @@ impl ConformanceBundleV1 {
             {
                 return Err(BundleContractErrorV1::MemberDigestMismatch);
             }
-            validate_member_size(member.bytes.len() as u64)?;
-            total_bytes = total_bytes.saturating_add(descriptor.size_bytes);
+            total_bytes = accumulate_member_bytes(total_bytes, member.bytes.len() as u64)?;
             if contains_secret_marker(&member.bytes) {
                 return Err(BundleContractErrorV1::SecretMaterialDetected);
             }
@@ -1252,9 +1251,15 @@ fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
 
 fn encode_archive_value<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, BundleContractErrorV1> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map(|()| bytes)
-        .map_err(|_| BundleContractErrorV1::EncodingFailed)
+    encode_archive_value_to_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn encode_archive_value_to_writer<T: serde::Serialize, W: std::io::Write>(
+    value: &T,
+    writer: W,
+) -> Result<(), BundleContractErrorV1> {
+    ciborium::into_writer(value, writer).map_err(|_| BundleContractErrorV1::EncodingFailed)
 }
 
 fn validate_archive_length(length: usize) -> Result<(), BundleContractErrorV1> {
@@ -1869,6 +1874,14 @@ const fn validate_member_size(member_size: u64) -> Result<(), BundleContractErro
     } else {
         Ok(())
     }
+}
+
+const fn accumulate_member_bytes(
+    total_bytes: u64,
+    member_size: u64,
+) -> Result<u64, BundleContractErrorV1> {
+    validate_member_size(member_size)?;
+    Ok(total_bytes.saturating_add(member_size))
 }
 
 /// Derive the deterministic archive path for one CPF1 fixture-input member.
@@ -3817,6 +3830,34 @@ mod tests {
                 usize::try_from(MAX_TOTAL_BUNDLE_BYTES + 1).unwrap_or(usize::MAX)
             ),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            accumulate_member_bytes(0, MAX_MEMBER_BYTES + 1),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+        assert_eq!(
+            accumulate_member_bytes(MAX_TOTAL_BUNDLE_BYTES, 1),
+            Ok(MAX_TOTAL_BUNDLE_BYTES + 1)
+        );
+    }
+
+    #[test]
+    fn canonical_archive_encoding_maps_write_failures() {
+        struct FailingWriter;
+
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("write failure"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        assert_eq!(
+            encode_archive_value_to_writer(&Value::Null, FailingWriter),
+            Err(BundleContractErrorV1::EncodingFailed)
         );
     }
 
