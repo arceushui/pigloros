@@ -14,26 +14,45 @@ fi
 echo "pre-commit: trunk rust-test-policy (staged files)"
 trunk check --filter rust-test-policy --index --no-fix --no-progress
 
-changed_files=$(git diff --cached --name-only --diff-filter=ACDMRT)
+changed_files=$(git diff --cached --name-only --diff-filter=ACMRT)
 changed_cargo_manifests=$(printf '%s\n' "$changed_files" | awk '
     $0 == "Cargo.toml" || $0 ~ /\/Cargo\.toml$/
 ')
-while IFS= read -r manifest; do
-    [ -n "$manifest" ] || continue
-    if [ "$manifest" = "fuzz/Cargo.toml" ]; then
-        echo "pre-commit: cargo generate-lockfile --manifest-path $manifest"
-        cargo generate-lockfile --manifest-path "$manifest"
-        git add fuzz/Cargo.lock
-    else
-        echo "pre-commit: cargo generate-lockfile"
-        cargo generate-lockfile
-        git add Cargo.lock
-    fi
-done <<< "$changed_cargo_manifests"
+if [ -n "$changed_cargo_manifests" ]; then
+    staged_tree=$(mktemp -d)
+    trap 'rm -rf "$staged_tree"' EXIT
+    git checkout-index --prefix="$staged_tree/" -a
 
-# Include a generated lockfile in the metadata gate below when the command
-# above added it to the index.
-changed_files=$(git diff --cached --name-only --diff-filter=ACDMRT)
+    check_staged_lockfile() {
+        local manifest=$1
+        local lockfile=$2
+        echo "pre-commit: verify staged $lockfile from $manifest"
+        cargo generate-lockfile --manifest-path "$staged_tree/$manifest"
+        if ! cmp -s <(git show ":$lockfile") "$staged_tree/$lockfile"; then
+            echo "pre-commit: $lockfile is stale for the staged manifests; generate and stage it before committing" >&2
+            exit 1
+        fi
+    }
+
+    workspace_manifest_changed=false
+    fuzz_manifest_changed=false
+    while IFS= read -r manifest; do
+        [ -n "$manifest" ] || continue
+        if [ "$manifest" = "fuzz/Cargo.toml" ]; then
+            fuzz_manifest_changed=true
+        else
+            workspace_manifest_changed=true
+        fi
+    done <<< "$changed_cargo_manifests"
+    if [ "$workspace_manifest_changed" = true ]; then
+        check_staged_lockfile "Cargo.toml" "Cargo.lock"
+    fi
+    if [ "$fuzz_manifest_changed" = true ]; then
+        check_staged_lockfile "fuzz/Cargo.toml" "fuzz/Cargo.lock"
+    fi
+fi
+
+changed_files=$(git diff --cached --name-only --diff-filter=ACMRT)
 changed_rust_files=$(printf '%s\n' "$changed_files" | awk '$0 ~ /\.rs$/')
 changed_cargo_files=$(printf '%s\n' "$changed_files" | awk '
     $0 == "Cargo.toml" || $0 == "Cargo.lock" || $0 == "rust-toolchain.toml" ||
@@ -67,8 +86,22 @@ package_name() {
 
 while IFS= read -r file; do
     case "$file" in
+        Cargo.toml|Cargo.lock|rust-toolchain.toml)
+            needs_workspace=true
+            ;;
         fuzz/Cargo.toml|fuzz/Cargo.lock)
             isolated_manifests["fuzz/Cargo.toml"]="fuzz/Cargo.toml"
+            ;;
+        */Cargo.toml)
+            package=$(package_name "$file")
+            if [ -n "$package" ]; then
+                packages["$package"]="$file"
+            else
+                needs_workspace=true
+            fi
+            ;;
+        */Cargo.lock)
+            needs_workspace=true
             ;;
     esac
 done <<< "$changed_cargo_files"

@@ -3,6 +3,7 @@ use pos_core::{
     crypto::Hash,
     event::{CanonicalBytes, Event, Kind, SchemaVersion},
     ids::{EntityId, EventId, TimelineId},
+    store::validate_event_signature,
     timeline::{Timeline, TimelineMeta, TimelineMode},
     TimelineExport,
 };
@@ -134,6 +135,7 @@ fn validate_export(export: &TimelineExport) -> Result<(), ClientError> {
             || event.schema_version != SchemaVersion::V1
             || event.signature.is_some()
             || event.payload_hash != payload_hash(event.payload.as_slice())
+            || validate_event_signature(event).is_err()
         {
             return Err(ClientError::Invalid("event fields".to_owned()));
         }
@@ -163,6 +165,7 @@ mod tests {
         event::{Kind, SchemaVersion},
         ids::{CorrelationId, EntityId, EventId, TimelineId},
         timeline::TimelineMode,
+        KeyIdentityV1, KeyRoleV1,
     };
     use pos_plugin_society::{decode_signal, SocietyDimension, EVENT_TYPE_SIGNAL};
     use serde::Serialize;
@@ -250,6 +253,22 @@ mod tests {
         );
         assert_eq!(export.timeline.head, Seq::from_u64(2));
 
+        Ok(())
+    }
+
+    #[test]
+    fn fixture_rejects_signature_identity_without_a_signature(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut export = decoded_fixture()?;
+        export.events[0].signature_identity = Some(KeyIdentityV1::new(
+            "fixture-owner",
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
+        let error = decode_fixture(&encode(&export)?)
+            .err()
+            .ok_or("fixture was accepted")?;
+        assert!(error.to_string().contains("event fields"));
         Ok(())
     }
 

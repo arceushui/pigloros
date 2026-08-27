@@ -674,10 +674,8 @@ impl KeyRegistryStateV1 {
                 (None, Some(_)) => {
                     return Err(KeyRegistryErrorV1::InvalidState);
                 }
-                (Some(previous_digest), None) => {
-                    if !next.tombstones.get(identity).is_some_and(|tombstone| {
-                        tombstone.destroyed_material_digest == previous_digest
-                    }) {
+                (Some(_), None) => {
+                    if !self.pending_destructions.contains_key(identity) {
                         return Err(KeyRegistryErrorV1::InvalidState);
                     }
                 }
@@ -895,6 +893,9 @@ impl KeyRegistryStateV1 {
         &mut self,
         request: KeyDestructionRequestV1,
     ) -> Result<KeyDestructionBeginOutcomeV1, KeyRegistryErrorV1> {
+        if request.identity.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
         self.validate()?;
         if let Some(tombstone) = self.tombstones.get(&request.identity).copied() {
             if tombstone.destroyed_material_digest != request.expected_material_digest {
@@ -942,6 +943,9 @@ impl KeyRegistryStateV1 {
         request: KeyDestructionRequestV1,
         receipt: Hash,
     ) -> Result<KeyDestructionOutcomeV1, KeyRegistryErrorV1> {
+        if request.identity.epoch == 0 {
+            return Err(KeyRegistryErrorV1::InvalidEpoch);
+        }
         self.validate()?;
         if let Some(tombstone) = self.tombstones.get(&request.identity).copied() {
             if tombstone.destroyed_material_digest != request.expected_material_digest {
@@ -964,12 +968,11 @@ impl KeyRegistryStateV1 {
         if receipt != deletion_receipt(&request) {
             return Err(KeyRegistryErrorV1::DeletionReceiptMismatch);
         }
-        // `validate` proves that every pending request has a record, so this
-        // lookup has no recoverable failure at the completion boundary.
-        let _record = self
-            .records
-            .get_mut(&request.identity)
-            .map(|record| record.private_material_digest = None);
+        // `validate` proves that every pending request has a record.
+        let Some(record) = self.records.get_mut(&request.identity) else {
+            return Err(KeyRegistryErrorV1::InvalidState);
+        };
+        record.private_material_digest = None;
         let destruction_digest = destruction_digest(&request);
         let identity = request.identity;
         let tombstone = KeyTombstoneV1 {
@@ -1154,6 +1157,49 @@ mod tests {
     ) -> Result<KeyDestructionOutcomeV1, KeyRegistryErrorV1> {
         registry.begin_key_destruction(request)?;
         registry.complete_key_destruction(request, deletion_receipt(&request))
+    }
+
+    fn assert_pending_transition_binds_every_tombstone_field(
+        pending: &KeyRegistryStateV1,
+        request: KeyDestructionRequestV1,
+    ) -> Result<(), KeyRegistryErrorV1> {
+        let mut completed = pending.clone();
+        completed.complete_key_destruction(request, deletion_receipt(&request))?;
+        assert_eq!(pending.validate_replacement(&completed), Ok(()));
+
+        let mut wrong_material = completed.clone();
+        wrong_material
+            .tombstones
+            .get_mut(&request.identity)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .destroyed_material_digest = digest(70);
+        assert_eq!(
+            pending.validate_replacement(&wrong_material),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut wrong_destruction = completed.clone();
+        wrong_destruction
+            .tombstones
+            .get_mut(&request.identity)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .destruction_digest = digest(71);
+        assert_eq!(
+            pending.validate_replacement(&wrong_destruction),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut wrong_receipt = completed;
+        wrong_receipt
+            .tombstones
+            .get_mut(&request.identity)
+            .ok_or(KeyRegistryErrorV1::NotFound)?
+            .deletion_receipt = digest(72);
+        assert_eq!(
+            pending.validate_replacement(&wrong_receipt),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        Ok(())
     }
 
     fn signing_registration(identity: KeyIdentityV1, material: u8) -> KeyRegistrationV1 {
@@ -1629,27 +1675,56 @@ mod tests {
             Err(KeyRegistryErrorV1::InvalidState)
         );
 
-        let mut wrong_tombstone = pending.clone();
-        wrong_tombstone.pending_destructions.remove(&ATTRIBUTION);
-        wrong_tombstone
+        assert_pending_transition_binds_every_tombstone_field(&pending, request)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn destruction_rejects_zero_epoch_and_direct_tombstoning() -> Result<(), KeyRegistryErrorV1> {
+        let zero_epoch_request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("test-owner", KeyRoleV1::SubjectAttributionSigning, 0),
+            digest(59),
+            digest(60),
+        );
+        let mut zero_epoch_registry = KeyRegistryStateV1::new();
+        assert_eq!(
+            zero_epoch_registry.begin_key_destruction(zero_epoch_request),
+            Err(KeyRegistryErrorV1::InvalidEpoch)
+        );
+        assert_eq!(
+            zero_epoch_registry.complete_key_destruction(
+                zero_epoch_request,
+                deletion_receipt(&zero_epoch_request),
+            ),
+            Err(KeyRegistryErrorV1::InvalidEpoch)
+        );
+
+        let mut live = KeyRegistryStateV1::new();
+        live.register_key(signing_registration(ATTRIBUTION, 72))?;
+        let direct_request = KeyDestructionRequestV1::new(ATTRIBUTION, digest(72), digest(73));
+        let mut direct_tombstone = live.clone();
+        direct_tombstone
             .records
             .get_mut(&ATTRIBUTION)
             .ok_or(KeyRegistryErrorV1::NotFound)?
             .private_material_digest = None;
-        wrong_tombstone.tombstones.insert(
+        direct_tombstone
+            .active
+            .remove(&(ATTRIBUTION.owner_id, ATTRIBUTION.role));
+        direct_tombstone.tombstones.insert(
             ATTRIBUTION,
             KeyTombstoneV1 {
                 identity: ATTRIBUTION,
-                destroyed_material_digest: digest(60),
-                destruction_digest: digest(71),
-                deletion_receipt: deletion_receipt(&request),
+                destroyed_material_digest: digest(72),
+                destruction_digest: destruction_digest(&direct_request),
+                deletion_receipt: deletion_receipt(&direct_request),
             },
         );
         assert_eq!(
-            pending.validate_replacement(&wrong_tombstone),
+            live.validate_replacement(&direct_tombstone),
             Err(KeyRegistryErrorV1::InvalidState)
         );
-
         Ok(())
     }
 
@@ -2290,12 +2365,22 @@ mod tests {
             Err(KeyRegistryErrorV1::InvalidState)
         );
 
-        let mut destroyed = previous.clone();
-        destroy(
-            &mut destroyed,
-            KeyDestructionRequestV1::new(ATTRIBUTION, digest(50), digest(53)),
-        )?;
-        assert_eq!(previous.validate_replacement(&destroyed), Ok(()));
+        let request = KeyDestructionRequestV1::new(ATTRIBUTION, digest(50), digest(53));
+        let mut pending = previous.clone();
+        assert_eq!(
+            pending.begin_key_destruction(request)?,
+            KeyDestructionBeginOutcomeV1::Started
+        );
+        let mut destroyed = pending.clone();
+        assert!(matches!(
+            destroyed.complete_key_destruction(request, deletion_receipt(&request))?,
+            KeyDestructionOutcomeV1::Destroyed(_)
+        ));
+        assert_eq!(
+            previous.validate_replacement(&destroyed),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        assert_eq!(pending.validate_replacement(&destroyed), Ok(()));
 
         let mut restored = destroyed.clone();
         restored
