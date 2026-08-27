@@ -574,7 +574,8 @@ fn public_profile_matrix_binding_is_explicit_and_fail_closed(
 }
 
 #[test]
-fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record() {
+fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut legacy_suffix = profile();
     legacy_suffix.profile_id.push_str("#matrix=0101");
     legacy_suffix.profile_digest = legacy_suffix.digest();
@@ -583,18 +584,20 @@ fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record() {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut fields = fixtures::profile(0, false).unwrap_or_default();
-    let mut value: Value = ciborium::from_reader(fields.as_slice()).unwrap_or(Value::Null);
-    if let Value::Array(fields) = &mut value {
-        fields.remove(6);
-        fields[0] = Value::Text("CPF1".to_owned());
-        fields[1] = Value::Integer(1_u64.into());
-    }
-    fields = fixtures::encode(&value).unwrap_or_default();
+    let mut fields = fixtures::profile(0, false)?;
+    let mut value: Value = ciborium::from_reader(fields.as_slice())?;
+    let Value::Array(fields) = &mut value else {
+        return Err("profile fixture must be an array".into());
+    };
+    fields.remove(6);
+    fields[0] = Value::Text("CPF1".to_owned());
+    fields[1] = Value::Integer(1_u64.into());
+    fields = fixtures::encode(&value)?;
     assert_eq!(
         ConformanceProfileV2::from_canonical_cbor(&fields),
         Err(ConformanceContractError::UnsupportedVersion)
     );
+    Ok(())
 }
 
 #[test]

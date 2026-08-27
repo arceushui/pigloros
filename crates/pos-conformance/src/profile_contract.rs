@@ -3309,7 +3309,10 @@ mod tests {
         assert_eq!(fields.len(), 18);
         assert_eq!(fields[0], text(CONFORMANCE_PROFILE_MAGIC_V2));
         assert_eq!(fields[1], uint(2));
-        assert_eq!(fields[6], digest(&value.execution_matrix_digest));
+        assert_eq!(
+            fields[6],
+            Value::Bytes(value.execution_matrix_digest.to_vec())
+        );
         let bytes = value.to_canonical_cbor().unwrap_or_default();
         assert_eq!(ConformanceProfileV2::from_canonical_cbor(&bytes), Ok(value));
     }
