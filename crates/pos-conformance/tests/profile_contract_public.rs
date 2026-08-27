@@ -230,13 +230,13 @@ pub mod fixtures {
         Ok(bytes)
     }
 
-    /// Builds a complete CPF1 profile fixture for rejection-path exercises.
+    /// Builds a complete CPF2 profile fixture for rejection-path exercises.
     ///
     /// # Errors
     ///
     /// Returns an error when encoding the fixture as CBOR fails.
     #[must_use = "profile fixture bytes must be used by the contract exercise"]
-    pub fn profile(
+    pub fn cpf2_profile_rejection_fixture(
         lifecycle: u64,
         with_stable_evidence: bool,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -358,7 +358,7 @@ fn report_with_cases(count: usize) -> Result<ConformanceReportV1, pos_conformanc
     Ok(report)
 }
 
-fn profile() -> ConformanceProfileV2 {
+fn knowledge_non_interference_profile() -> ConformanceProfileV2 {
     let expected = b"expected".to_vec();
     let fixture = FixtureDescriptorV1 {
         case_id: "ART-001".to_owned(),
@@ -454,7 +454,7 @@ fn profile() -> ConformanceProfileV2 {
 }
 
 fn profile_for_digest() -> ConformanceProfileV2 {
-    profile()
+    knowledge_non_interference_profile()
 }
 
 fn request_for_caps(caps: &EvaluatorHardCapsV1) -> EvaluatorRequestV1 {
@@ -546,10 +546,18 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
 #[test]
 fn public_profile_matrix_binding_is_explicit_and_fail_closed(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let profile = profile();
+    let profile = knowledge_non_interference_profile();
     assert_eq!(profile.validate(), Ok(()));
     assert_eq!(profile.execution_matrix_digest, [21; 32]);
     let encoded = profile.to_canonical_cbor()?;
+    let Value::Array(fields) = ciborium::from_reader(encoded.as_slice())? else {
+        return Err("CPF2 profile encoding must be an array".into());
+    };
+    assert_eq!(fields.len(), 18);
+    assert_eq!(fields[0], Value::Text("CPF2".to_owned()));
+    assert_eq!(fields[1], Value::Integer(2_u64.into()));
+    assert_eq!(fields[2], Value::Text(profile.profile_id.clone()));
+    assert_eq!(fields[6], Value::Bytes([21; 32].to_vec()));
     assert_eq!(
         ConformanceProfileV2::from_canonical_cbor(&encoded),
         Ok(profile.clone())
@@ -576,7 +584,7 @@ fn public_profile_matrix_binding_is_explicit_and_fail_closed(
 #[test]
 fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut legacy_suffix = profile();
+    let mut legacy_suffix = knowledge_non_interference_profile();
     legacy_suffix.profile_id.push_str("#matrix=0101");
     legacy_suffix.profile_digest = legacy_suffix.digest();
     assert_eq!(
@@ -584,7 +592,7 @@ fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record(
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let profile_bytes = fixtures::profile(0, false)?;
+    let profile_bytes = fixtures::cpf2_profile_rejection_fixture(0, false)?;
     let mut value: Value = ciborium::from_reader(profile_bytes.as_slice())?;
     let Value::Array(profile_fields) = &mut value else {
         return Err("profile fixture must be an array".into());
@@ -797,11 +805,15 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
 fn exported_decoders_reject_terminal_digest_after_nested_decode(
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
-        ConformanceProfileV2::from_canonical_cbor(&fixtures::profile(0, false)?),
+        ConformanceProfileV2::from_canonical_cbor(&fixtures::cpf2_profile_rejection_fixture(
+            0, false
+        )?,),
         Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
-        ConformanceProfileV2::from_canonical_cbor(&fixtures::profile(2, true)?),
+        ConformanceProfileV2::from_canonical_cbor(&fixtures::cpf2_profile_rejection_fixture(
+            2, true
+        )?,),
         Err(ConformanceContractError::InvalidEncoding)
     );
     assert_eq!(
@@ -856,7 +868,9 @@ fn profile_with_field(
     index: usize,
     replacement: Value,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)?))?;
+    let mut value = ciborium::from_reader(std::io::Cursor::new(
+        fixtures::cpf2_profile_rejection_fixture(0, false)?,
+    ))?;
     let Value::Array(fields) = &mut value else {
         return Err("public profile fixture is not an array".into());
     };
@@ -868,7 +882,9 @@ fn profile_with_fixture_field(
     index: usize,
     replacement: Value,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut value = ciborium::from_reader(std::io::Cursor::new(fixtures::profile(0, false)?))?;
+    let mut value = ciborium::from_reader(std::io::Cursor::new(
+        fixtures::cpf2_profile_rejection_fixture(0, false)?,
+    ))?;
     let Value::Array(fields) = &mut value else {
         return Err("public profile fixture is not an array".into());
     };
