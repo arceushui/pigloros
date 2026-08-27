@@ -7011,6 +7011,47 @@ mod instrumented_public_entrypoints {
         Ok(())
     }
 
+    #[test]
+    fn independent_archive_cap_predicates_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        for (index, replacement) in [
+            (0, 0),
+            (0, MAX_PROFILE_BYTES + 1),
+            (1, 0),
+            (1, u64::try_from(MAX_MEMBERS)? + 1),
+            (2, 0),
+            (2, u64::try_from(MAX_MEMBERS)? + 1),
+            (3, 0),
+            (3, u64::try_from(MAX_MEMBER_PATH_BYTES)? + 1),
+            (4, 0),
+            (4, MAX_MEMBER_BYTES + 1),
+            (5, 0),
+            (5, MAX_TOTAL_BUNDLE_BYTES + 1),
+            (6, 0),
+            (6, u64::from(u32::MAX) + 1),
+            (7, 0),
+            (7, u64::from(MAX_STRUCTURAL_NESTING) + 1),
+        ] {
+            let mut encoded_profile = profile_value(&profile)?;
+            let Value::Array(fields) = &mut encoded_profile else {
+                return Err("profile must encode as an array".into());
+            };
+            let Value::Array(protocol) = &mut fields[10] else {
+                return Err("profile protocol must encode as an array".into());
+            };
+            let Value::Array(caps) = &mut protocol[4] else {
+                return Err("profile hard caps must encode as an array".into());
+            };
+            caps[index] = Value::Integer(replacement.into());
+            let encoded_profile = encode_archive_value(&encoded_profile)?;
+            assert_eq!(
+                independent_archive_caps(&encoded_profile),
+                Err(BundleContractErrorV1::MemberOutOfBounds)
+            );
+        }
+        Ok(())
+    }
+
     fn exercise_archive_preflight_regions() {
         assert!(archive_preflight::scan(&[0x98]).is_err());
         assert!(archive_preflight::scan(&[0x86]).is_err());
