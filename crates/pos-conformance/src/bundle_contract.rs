@@ -3616,7 +3616,13 @@ mod tests {
         let mut mismatched_member = valid.clone();
         if let Value::Array(fields) = &mut mismatched_member {
             if let Value::Array(members) = &mut fields[3] {
-                if let Value::Array(member) = &mut members[0] {
+                let member = members
+                    .iter_mut()
+                    .find(|member| {
+                        matches!(member, Value::Array(fields) if !matches!(fields.first(), Some(Value::Text(path)) if path == PROFILE_MEMBER_PATH))
+                    })
+                    .ok_or("missing non-profile member")?;
+                if let Value::Array(member) = member {
                     if let Value::Bytes(bytes) = &mut member[1] {
                         bytes.push(0);
                     }
@@ -3804,10 +3810,7 @@ mod tests {
         fixture[0] = Value::Text("case-rebound".to_owned());
         replace_profile_bytes(&mut mismatched_path, &encode_archive_value(&profile_value)?)?;
         resign_archive(&mut mismatched_path)?;
-        assert_independent_error(
-            &mismatched_path,
-            BundleContractErrorV1::ProfileInvalid,
-        )?;
+        assert_independent_error(&mismatched_path, BundleContractErrorV1::ProfileInvalid)?;
 
         Ok(())
     }
