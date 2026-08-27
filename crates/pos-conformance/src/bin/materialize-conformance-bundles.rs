@@ -952,7 +952,10 @@ fn bundle_inputs_from_profile(
                 false,
             ));
         }
-        let bytes = fixture.expected.to_canonical_bytes()?;
+        let bytes = match &fixture.expected {
+            ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.clone(),
+            typed_or_divergent => typed_or_divergent.to_canonical_bytes()?,
+        };
         let path = expected_result_member_path(
             &fixture.case_id,
             fixture.claim_layer,
