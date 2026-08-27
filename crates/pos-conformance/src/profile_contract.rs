@@ -378,7 +378,7 @@ impl TrustedRootPolicyV1 {
         if self.trusted_root_public_keys.is_empty()
             || self.trusted_root_public_keys.len() > 64
             || self.trusted_root_public_keys.iter().any(zero_digest)
-            || !strictly_ordered(&self.trusted_root_public_keys)
+            || !crate::strictly_ordered(&self.trusted_root_public_keys)
             || self.trust_policy_snapshot_digest != self.digest()
         {
             Err(ConformanceContractError::IndependenceEvidenceMissing)
@@ -976,8 +976,8 @@ fn validate_profile(
     {
         return Err(ConformanceContractError::FieldOutOfBounds);
     }
-    if !strictly_ordered(&profile.execution_profile_digests)
-        || !strictly_ordered(&profile.public_schema_digests)
+    if !crate::strictly_ordered(&profile.execution_profile_digests)
+        || !crate::strictly_ordered(&profile.public_schema_digests)
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
@@ -1121,7 +1121,7 @@ fn validate_fixture(
             ConformanceContractError::FieldOutOfBounds
         });
     }
-    if !strictly_ordered(&fixture.modes)
+    if !crate::strictly_ordered(&fixture.modes)
         || fixture
             .inputs
             .windows(2)
@@ -1792,10 +1792,6 @@ fn matrix_binding_parts(
     } else {
         Err(ConformanceContractError::FieldOutOfBounds)
     }
-}
-
-fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
-    values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn fixture_key(value: &FixtureDescriptorV1) -> (&str, ClaimLayerV1, [u8; 32]) {

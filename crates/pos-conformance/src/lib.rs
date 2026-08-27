@@ -29,6 +29,10 @@ pub(crate) fn requires_execution_matrix_binding(profile_id: &str) -> bool {
         == KNOWLEDGE_PROFILE_ID
 }
 
+pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
 pub use bundle_contract::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
     BundleContractErrorV1, BundleExpectedResultV1, BundleManifestV1, BundleMemberDescriptorV1,

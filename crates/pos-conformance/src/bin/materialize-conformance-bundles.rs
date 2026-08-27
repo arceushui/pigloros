@@ -542,7 +542,7 @@ fn fixtures_from_profile_record(
         if json_text(fixture_record, "claim_layer")? != claim_layer_name(context.claim_layer) {
             return Err("canonical profile fixture is bound to the wrong claim layer".into());
         }
-        let local = fixture(
+        let local = fixture_descriptor_from_record(
             fixture_record,
             context,
             context.local_execution_profile_digest,
@@ -639,7 +639,7 @@ const fn subject_adapter(claim_layer: ClaimLayerV1) -> SubjectAdapterKindV1 {
     layer_spec(claim_layer).subject_adapter
 }
 
-fn fixture(
+fn fixture_descriptor_from_record(
     record: &JsonValue,
     context: &FixtureContext,
     execution_profile_digest: [u8; 32],
@@ -1396,7 +1396,7 @@ mod tests {
             .iter()
             .find(|record| record.get("family").and_then(JsonValue::as_str) == Some("deletion"))
             .ok_or("canonical deletion fixture is missing")?;
-        let deletion = fixture(
+        let deletion = fixture_descriptor_from_record(
             deletion_record,
             context,
             context.local_execution_profile_digest,
@@ -1423,7 +1423,7 @@ mod tests {
             .iter()
             .find(|record| record.get("family").and_then(JsonValue::as_str) == Some("positive"))
             .ok_or("canonical positive fixture is missing")?;
-        let positive = fixture(
+        let positive = fixture_descriptor_from_record(
             positive_record,
             context,
             context.local_execution_profile_digest,
@@ -1528,7 +1528,7 @@ mod tests {
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
         invalid_collection["fixtures"] = JsonValue::Array(vec![invalid_fixture.clone(); 7]);
         assert!(fixtures_from_profile_record(&invalid_collection, &context).is_err());
-        assert!(fixture(
+        assert!(fixture_descriptor_from_record(
             &invalid_fixture,
             &context,
             context.local_execution_profile_digest,
@@ -1545,7 +1545,7 @@ mod tests {
                 "input": "inputs/artifact-integrity/positive.json"
             }),
         ] {
-            assert!(fixture(
+            assert!(fixture_descriptor_from_record(
                 &invalid_fixture,
                 &context,
                 context.local_execution_profile_digest,
@@ -1675,7 +1675,7 @@ mod tests {
         let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
         assert!(fixtures_from_profile_record(&canonical_record, &context).is_ok());
         let fixture_record = &canonical_record["fixtures"][0];
-        assert!(fixture(
+        assert!(fixture_descriptor_from_record(
             fixture_record,
             &context,
             context.local_execution_profile_digest,

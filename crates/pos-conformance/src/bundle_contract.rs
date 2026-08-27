@@ -467,7 +467,7 @@ impl ConformanceBundleV1 {
         }
         validate_fixture_inputs_for_mode(&profile, Some(self.manifest.mode), &self.members)?;
         if self.manifest.members.len() != self.members.len()
-            || !strictly_ordered(&self.manifest.members)
+            || !crate::strictly_ordered(&self.manifest.members)
             || !members_strictly_ordered(&self.members)
         {
             return Err(BundleContractErrorV1::NonCanonicalOrder);
@@ -2046,7 +2046,7 @@ fn validate_expected_results(
     manifest: &BundleManifestV1,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
-    if !strictly_ordered(&manifest.expected_results) {
+    if !crate::strictly_ordered(&manifest.expected_results) {
         return Err(BundleContractErrorV1::NonCanonicalOrder);
     }
     for expected in &manifest.expected_results {
@@ -2723,10 +2723,6 @@ fn contains_jwt(bytes: &[u8]) -> bool {
             && bytes.get(second_start + second) == Some(&b'.')
             && token_length(bytes, third_start) >= 10
     })
-}
-
-fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
-    values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn members_strictly_ordered(values: &[BundleMemberV1]) -> bool {
@@ -4639,11 +4635,11 @@ mod tests {
 
     #[test]
     fn ordering_predicates_reject_descending_and_duplicate_values() {
-        assert!(strictly_ordered(&[1_u8, 2, 3]));
-        assert!(!strictly_ordered(&[2_u8, 1]));
-        assert!(!strictly_ordered(&[1_u8, 1]));
-        assert!(strictly_ordered::<u8>(&[]));
-        assert!(strictly_ordered(&[1_u8]));
+        assert!(crate::strictly_ordered(&[1_u8, 2, 3]));
+        assert!(!crate::strictly_ordered(&[2_u8, 1]));
+        assert!(!crate::strictly_ordered(&[1_u8, 1]));
+        assert!(crate::strictly_ordered::<u8>(&[]));
+        assert!(crate::strictly_ordered(&[1_u8]));
 
         let ordered = vec![
             BundleMemberV1::new("a", vec![1], false),
