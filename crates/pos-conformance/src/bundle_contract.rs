@@ -668,7 +668,7 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     if members.len() != descriptors.len() {
         return Err(BundleContractErrorV1::UndeclaredMember);
     }
-    let (member_records, _) = independent_member_records(members, descriptors)?;
+    let (member_records, _) = independent_member_records(&members, descriptors)?;
     let expected_results = independent_array_bounded(&manifest[5])?;
     independent_verify_expected_results(expected_results, &member_records, &profile, bundle_mode)?;
     independent_verify_fixture_inputs(&member_records, &profile, bundle_mode)?;
