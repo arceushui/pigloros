@@ -591,32 +591,27 @@ impl ConformanceBundleV1 {
         )
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
         validate_preflight_archive_caps(&preflight_profile, &preflight, bytes.len())?;
-        let value = ciborium::from_reader(Cursor::new(bytes))
-            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-        let canonical_bytes = encode_archive_value(&value)
+        let archive: (Value, Value, Value, Vec<Value>, Value, Value) =
+            ciborium::from_reader(Cursor::new(bytes))
+                .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let canonical_bytes = encode_archive_value(&archive)
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
         if canonical_bytes.as_slice() != bytes {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
-        let fields = value
-            .as_array()
-            .expect("archive preflight validated the archive array");
-        if archive_text(&fields[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&fields[1])? != 1
-        {
+        let (magic, version, manifest_value, members, signer_value, signature_value) = archive;
+        if archive_text(&magic)? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&version)? != 1 {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
-        let manifest = decode_manifest(&fields[2])?;
-        let members = fields[3]
-            .as_array()
-            .expect("archive preflight validated the members array");
+        let manifest = decode_manifest(&manifest_value)?;
         let members = members
             .iter()
             .map(decode_member)
             .collect::<Result<Vec<_>, _>>()?;
-        let signer_public_key = archive_digest::<32>(&fields[4])
+        let signer_public_key = archive_digest::<32>(&signer_value)
             .map(PublicKey::from_bytes)
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-        let signature = archive_digest::<64>(&fields[5])
+        let signature = archive_digest::<64>(&signature_value)
             .map(Signature::from_bytes)
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
         let bundle = Self {
@@ -625,11 +620,6 @@ impl ConformanceBundleV1 {
             signer_public_key,
             signature,
         };
-        preflight_profile
-            .evaluator_protocol
-            .hard_caps
-            .validate_compression_expansion(bytes.len() as u64, bytes.len() as u64)
-            .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
         bundle.validate().map(|()| bundle)
     }
 }
@@ -656,28 +646,24 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps = independent_archive_caps(profile_bytes)?;
     validate_independent_preflight_caps(&caps, &preflight, bytes.len())?;
-    let value: Value = ciborium::from_reader(Cursor::new(bytes))
-        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-    if encode_archive_value(&value)?.as_slice() != bytes {
+    let archive: (Value, Value, Value, Vec<Value>, Value, Value) =
+        ciborium::from_reader(Cursor::new(bytes))
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+    if encode_archive_value(&archive)?.as_slice() != bytes {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
-    let archive = value
-        .as_array()
-        .expect("archive preflight validated the archive array");
-    if archive_text(&archive[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&archive[1])? != 1 {
+    let (magic, version, manifest_value, members, public_key, signature) = archive;
+    if archive_text(&magic)? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&version)? != 1 {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
-    let manifest = independent_array(&archive[2], 6)?;
+    let manifest = independent_array(&manifest_value, 6)?;
     let lifecycle = archive_u64(&manifest[1])?;
     let bundle_mode = archive_u64(&manifest[2])?;
     decode_bundle_mode(bundle_mode)?;
     if lifecycle != 0 {
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
-    independent_verify_signature(&archive[2], &archive[4], &archive[5])?;
-    let members = archive[3]
-        .as_array()
-        .expect("archive preflight validated the members array");
+    independent_verify_signature(&manifest_value, &public_key, &signature)?;
     let descriptors = independent_array_bounded(&manifest[4])?;
     if members.len() != descriptors.len() {
         return Err(BundleContractErrorV1::UndeclaredMember);
@@ -1264,7 +1250,7 @@ fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
     ])
 }
 
-fn encode_archive_value(value: &Value) -> Result<Vec<u8>, BundleContractErrorV1> {
+fn encode_archive_value<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, BundleContractErrorV1> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)
         .map(|()| bytes)
