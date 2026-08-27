@@ -3682,7 +3682,7 @@ mod tests {
 
         let mut invalid_fixture = profile_value.clone();
         if let Value::Array(fields) = &mut invalid_fixture {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             fixtures[0] = Value::Null;
@@ -3701,7 +3701,7 @@ mod tests {
 
         let mut invalid_modes = profile_value;
         if let Value::Array(fields) = &mut invalid_modes {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             let Value::Array(mut fixture) = fixtures[0].clone() else {
@@ -3747,7 +3747,7 @@ mod tests {
         let Value::Array(profile_fields) = &mut profile_value else {
             return Err("profile must be an array".into());
         };
-        let Value::Array(fixtures) = &mut profile_fields[8] else {
+        let Value::Array(fixtures) = &mut profile_fields[9] else {
             return Err("fixtures must be an array".into());
         };
         let Value::Array(fixture) = &mut fixtures[0] else {
@@ -3793,7 +3793,7 @@ mod tests {
         )?;
         let mut embedded_digest_mismatch = profile_value;
         if let Value::Array(fields) = &mut embedded_digest_mismatch {
-            fields[16] = Value::Bytes(vec![9; 32]);
+            fields[17] = Value::Bytes(vec![9; 32]);
         }
         let mut embedded_digest_archive = valid.clone();
         replace_profile_bytes(
@@ -6248,7 +6248,7 @@ mod instrumented_public_entrypoints {
 
         let mut malformed_fixture_profile = profile_value.clone();
         if let Value::Array(fields) = &mut malformed_fixture_profile {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             fixtures[0] = Value::Null;
@@ -6263,7 +6263,7 @@ mod instrumented_public_entrypoints {
 
         let mut non_boolean_mandatory = profile_value.clone();
         if let Value::Array(fields) = &mut non_boolean_mandatory {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             let Value::Array(fixture) = &mut fixtures[0] else {
@@ -6339,7 +6339,7 @@ mod instrumented_public_entrypoints {
         let records = independent_records(&value)?;
         let mut duplicate_input_profile = profile_value.clone();
         if let Value::Array(fields) = &mut duplicate_input_profile {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             let Value::Array(fixture) = &mut fixtures[0] else {
@@ -6368,7 +6368,7 @@ mod instrumented_public_entrypoints {
 
         let mut no_declared_inputs = profile_value;
         if let Value::Array(fields) = &mut no_declared_inputs {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             for fixture in fixtures {
@@ -6398,7 +6398,7 @@ mod instrumented_public_entrypoints {
         ] {
             let mut malformed_support_profile = profile_value.clone();
             if let Value::Array(fields) = &mut malformed_support_profile {
-                let Value::Array(fixtures) = &mut fields[8] else {
+                let Value::Array(fixtures) = &mut fields[9] else {
                     return Err("fixtures must be an array".into());
                 };
                 let Value::Array(fixture) = &mut fixtures[0] else {
@@ -6410,13 +6410,13 @@ mod instrumented_public_entrypoints {
                     fixture[15] = fixture_replacement;
                 }
             }
-            let fields = independent_array(&malformed_support_profile, 17)?;
-            let fixtures = independent_array_bounded(&fields[8])?;
+            let fields = independent_array(&malformed_support_profile, 18)?;
+            let fixtures = independent_array_bounded(&fields[9])?;
             assert!(independent_support_digests(fields, fixtures, role).is_err());
         }
         let mut malformed_provenance = profile_value.clone();
         if let Value::Array(fields) = &mut malformed_provenance {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             let Value::Array(fixture) = &mut fixtures[0] else {
@@ -6424,13 +6424,13 @@ mod instrumented_public_entrypoints {
             };
             fixture[15] = Value::Array(vec![Value::Null; 7]);
         }
-        let fields = independent_array(&malformed_provenance, 17)?;
-        let fixtures = independent_array_bounded(&fields[8])?;
+        let fields = independent_array(&malformed_provenance, 18)?;
+        let fixtures = independent_array_bounded(&fields[9])?;
         assert!(
             independent_support_digests(fields, fixtures, BundleMemberRoleV1::Provenance).is_err()
         );
-        let profile_fields = independent_array(&profile_value, 17)?;
-        let profile_fixtures = independent_array_bounded(&profile_fields[8])?;
+        let profile_fields = independent_array(&profile_value, 18)?;
+        let profile_fixtures = independent_array_bounded(&profile_fields[9])?;
         assert!(independent_support_digests(
             profile_fields,
             profile_fixtures,
@@ -6438,8 +6438,8 @@ mod instrumented_public_entrypoints {
         )
         .is_ok());
 
-        let profile_fields = independent_array(&profile_value, 17)?;
-        let profile_fixtures = independent_array_bounded(&profile_fields[8])?;
+        let profile_fields = independent_array(&profile_value, 18)?;
+        let profile_fixtures = independent_array_bounded(&profile_fields[9])?;
         assert!(!independent_support_digests(
             profile_fields,
             profile_fixtures,
@@ -6449,7 +6449,7 @@ mod instrumented_public_entrypoints {
 
         let mut malformed_limitations = profile_value.clone();
         if let Value::Array(fields) = &mut malformed_limitations {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             let Value::Array(fixture) = &mut fixtures[0] else {
@@ -6460,8 +6460,8 @@ mod instrumented_public_entrypoints {
             };
             provenance[6] = Value::Null;
         }
-        let fields = independent_array(&malformed_limitations, 17)?;
-        let fixtures = independent_array_bounded(&fields[8])?;
+        let fields = independent_array(&malformed_limitations, 18)?;
+        let fixtures = independent_array_bounded(&fields[9])?;
         assert!(
             independent_support_digests(fields, fixtures, BundleMemberRoleV1::Limitations).is_err()
         );
@@ -6527,12 +6527,8 @@ mod instrumented_public_entrypoints {
     #[test]
     fn independent_authority_json_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let profile = tests::profile();
-        let profile_value = profile_value(&profile)?;
-        let mut no_matrix_binding = profile_value;
-        if let Value::Array(fields) = &mut no_matrix_binding {
-            fields[2] = Value::Text("pigloros.w8.artifact-integrity.1.0.0".to_owned());
-        }
+        let profile_value = profile_value(&tests::profile())?;
+        let no_matrix_digest = profile_without_matrix_digest(&profile_value)?;
         let bad_metadata_inventory =
             br#"{"lifecycle":"Draft","magic":"BAD","version":1,"digest_algorithm":"BLAKE3-256"}"#;
         let valid_metadata_matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
@@ -6540,7 +6536,7 @@ mod instrumented_public_entrypoints {
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(bad_metadata_inventory, valid_metadata_matrix, provenance,),
-                &no_matrix_binding,
+                &no_matrix_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
@@ -6556,7 +6552,7 @@ mod instrumented_public_entrypoints {
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(&wrong_entries_bytes, valid_metadata_matrix, provenance,),
-                &no_matrix_binding,
+                &no_matrix_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
@@ -6587,24 +6583,8 @@ mod instrumented_public_entrypoints {
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(&pending_inventory_bytes, valid_metadata_matrix, provenance,),
-                &no_matrix_binding,
+                &no_matrix_digest,
             ),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-
-        assert_eq!(
-            independent_matrix_digest("pigloros.w8.knowledge-non-interference.1.0.0"),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-        assert_eq!(
-            independent_matrix_digest("pigloros.w8.knowledge-non-interference.1.0.0#matrix=bad"),
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-        assert_eq!(
-            independent_matrix_digest(&format!(
-                "pigloros.w8.knowledge-non-interference.1.0.0#matrix={}",
-                "0".repeat(64)
-            )),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
@@ -6968,7 +6948,7 @@ mod instrumented_public_entrypoints {
         .is_err());
         let mut malformed_fixtures = profile_value.clone();
         if let Value::Array(fields) = &mut malformed_fixtures {
-            fields[8] = Value::Array(vec![Value::Null]);
+            fields[9] = Value::Array(vec![Value::Null]);
         }
         assert!(independent_verify_expected_results(
             &[],
@@ -6979,7 +6959,7 @@ mod instrumented_public_entrypoints {
         .is_err());
         let mut malformed_modes = profile_value.clone();
         if let Value::Array(fields) = &mut malformed_modes {
-            let Value::Array(fixtures) = &mut fields[8] else {
+            let Value::Array(fixtures) = &mut fields[9] else {
                 return Err("fixtures must be an array".into());
             };
             let Value::Array(fixture) = &mut fixtures[0] else {
@@ -6997,7 +6977,7 @@ mod instrumented_public_entrypoints {
         for field in [0, 2, 3] {
             let mut malformed_identity = profile_value.clone();
             if let Value::Array(fields) = &mut malformed_identity {
-                let Value::Array(fixtures) = &mut fields[8] else {
+                let Value::Array(fixtures) = &mut fields[9] else {
                     return Err("fixtures must be an array".into());
                 };
                 let Value::Array(fixture) = &mut fixtures[0] else {
@@ -7048,7 +7028,7 @@ mod instrumented_public_entrypoints {
         for field in [0, 2, 3, 7] {
             let mut malformed_inputs = profile_value.clone();
             if let Value::Array(fields) = &mut malformed_inputs {
-                let Value::Array(fixtures) = &mut fields[8] else {
+                let Value::Array(fixtures) = &mut fields[9] else {
                     return Err("fixtures must be an array".into());
                 };
                 let Value::Array(fixture) = &mut fixtures[0] else {
@@ -7066,7 +7046,7 @@ mod instrumented_public_entrypoints {
         for field in [0, 1, 2] {
             let mut malformed_input = profile_value.clone();
             if let Value::Array(fields) = &mut malformed_input {
-                let Value::Array(fixtures) = &mut fields[8] else {
+                let Value::Array(fixtures) = &mut fields[9] else {
                     return Err("fixtures must be an array".into());
                 };
                 let Value::Array(fixture) = &mut fixtures[0] else {
@@ -7095,7 +7075,7 @@ mod instrumented_public_entrypoints {
         .is_err());
         let mut missing_fixture_array = profile_value.clone();
         if let Value::Array(fields) = &mut missing_fixture_array {
-            fields[8] = Value::Null;
+            fields[9] = Value::Null;
         }
         assert!(independent_verify_fixture_inputs(
             records,
@@ -7113,7 +7093,7 @@ mod instrumented_public_entrypoints {
         assert!(independent_verify_supporting_members(&[], &Value::Null).is_err());
         let mut missing_support_fixtures = profile_value.clone();
         if let Value::Array(fields) = &mut missing_support_fixtures {
-            fields[8] = Value::Null;
+            fields[9] = Value::Null;
         }
         assert!(independent_verify_supporting_members(records, &missing_support_fixtures).is_err());
         for role in [
@@ -7125,8 +7105,8 @@ mod instrumented_public_entrypoints {
             BundleMemberRoleV1::Provenance,
             BundleMemberRoleV1::Limitations,
         ] {
-            let fields = independent_array(profile_value, 17)?;
-            let fixtures = independent_array_bounded(&fields[8])?;
+            let fields = independent_array(profile_value, 18)?;
+            let fixtures = independent_array_bounded(&fields[9])?;
             assert!(!independent_support_digests(fields, fixtures, role)?.is_empty());
         }
         let mut malformed_support_profile = profile_value.clone();
@@ -7145,7 +7125,7 @@ mod instrumented_public_entrypoints {
         ] {
             let mut malformed_provenance = profile_value.clone();
             if let Value::Array(fields) = &mut malformed_provenance {
-                let Value::Array(fixtures) = &mut fields[8] else {
+                let Value::Array(fixtures) = &mut fields[9] else {
                     return Err("fixtures must be an array".into());
                 };
                 let Value::Array(fixture) = &mut fixtures[0] else {
@@ -7153,8 +7133,8 @@ mod instrumented_public_entrypoints {
                 };
                 fixture[15] = Value::Null;
             }
-            let fields = independent_array(&malformed_provenance, 17)?;
-            let fixtures = independent_array_bounded(&fields[8])?;
+            let fields = independent_array(&malformed_provenance, 18)?;
+            let fixtures = independent_array_bounded(&fields[9])?;
             assert!(independent_support_digests(fields, fixtures, role).is_err());
         }
         Ok(())
@@ -7199,7 +7179,7 @@ mod instrumented_public_entrypoints {
             let Value::Array(fields) = &mut encoded_profile else {
                 return Err("profile must encode as an array".into());
             };
-            let Value::Array(protocol) = &mut fields[10] else {
+            let Value::Array(protocol) = &mut fields[11] else {
                 return Err("profile protocol must encode as an array".into());
             };
             let Value::Array(caps) = &mut protocol[4] else {
@@ -7471,11 +7451,6 @@ mod instrumented_public_entrypoints {
         missing_predicates["equality_predicates"] = JsonValue::Null;
         assert!(validate_execution_matrix(&missing_predicates).is_err());
         assert!(json_string_array(&rows[0], "missing").is_err());
-        assert!(independent_matrix_digest(&format!(
-            "pigloros.w8.knowledge-non-interference.1.0.0#matrix={}",
-            "z".repeat(64)
-        ))
-        .is_err());
         Ok(())
     }
 
@@ -7502,11 +7477,8 @@ mod instrumented_public_entrypoints {
         let payloads = bundle_pair_payloads(&tied_payloads);
         assert!(payloads.windows(2).any(|pair| pair[0] == pair[1]));
         assert!(!records.is_empty());
-        let mut no_matrix_binding = profile_value.clone();
-        if let Value::Array(fields) = &mut no_matrix_binding {
-            fields[2] = Value::Null;
-        }
-        assert!(independent_verify_authority_members(records, &no_matrix_binding).is_err());
+        let no_matrix_digest = profile_without_matrix_digest(profile_value)?;
+        assert!(independent_verify_authority_members(records, &no_matrix_digest).is_err());
         Ok(())
     }
 
@@ -7532,7 +7504,7 @@ mod instrumented_public_entrypoints {
         let Value::Array(fields) = &mut profile else {
             return Err("profile must be an array".into());
         };
-        let Value::Array(fixtures) = &mut fields[8] else {
+        let Value::Array(fixtures) = &mut fields[9] else {
             return Err("fixtures must be an array".into());
         };
         let Value::Array(fixture) = &mut fixtures[0] else {
@@ -7551,7 +7523,7 @@ mod instrumented_public_entrypoints {
         let Value::Array(fields) = &mut profile else {
             return Err("profile must be an array".into());
         };
-        let Value::Array(fixtures) = &mut fields[8] else {
+        let Value::Array(fixtures) = &mut fields[9] else {
             return Err("fixtures must be an array".into());
         };
         let Value::Array(fixture) = &mut fixtures[0] else {
@@ -7774,8 +7746,8 @@ mod instrumented_public_entrypoints {
         profile_value: &Value,
         role: BundleMemberRoleV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let fields = independent_array(profile_value, 17)?;
-        let fixtures = independent_array_bounded(&fields[8])?;
+        let fields = independent_array(profile_value, 18)?;
+        let fixtures = independent_array_bounded(&fields[9])?;
         assert!(independent_support_digests(fields, fixtures, role).is_err());
         Ok(())
     }
@@ -7789,11 +7761,11 @@ mod instrumented_public_entrypoints {
             BundleMemberRoleV1::NormativeSpecification,
         )?;
         assert_support_digest_error(
-            &profile_with_field(&profile_value, 7, Value::Null)?,
+            &profile_with_field(&profile_value, 8, Value::Null)?,
             BundleMemberRoleV1::Schema,
         )?;
         assert_support_digest_error(
-            &profile_with_field(&profile_value, 7, Value::Array(vec![Value::Null]))?,
+            &profile_with_field(&profile_value, 8, Value::Array(vec![Value::Null]))?,
             BundleMemberRoleV1::Schema,
         )?;
         assert_support_digest_error(
@@ -7817,7 +7789,7 @@ mod instrumented_public_entrypoints {
             )?;
         }
         assert_support_digest_error(
-            &profile_with_field(&profile_value, 14, Value::Null)?,
+            &profile_with_field(&profile_value, 15, Value::Null)?,
             BundleMemberRoleV1::Provenance,
         )?;
         assert_support_digest_error(
@@ -7833,7 +7805,7 @@ mod instrumented_public_entrypoints {
             BundleMemberRoleV1::Provenance,
         )?;
         assert_support_digest_error(
-            &profile_with_field(&profile_value, 13, Value::Null)?,
+            &profile_with_field(&profile_value, 14, Value::Null)?,
             BundleMemberRoleV1::Limitations,
         )?;
         assert_support_digest_error(
@@ -7843,14 +7815,10 @@ mod instrumented_public_entrypoints {
         Ok(())
     }
 
-    fn profile_without_matrix_binding(
+    fn profile_without_matrix_digest(
         profile_value: &Value,
     ) -> Result<Value, Box<dyn std::error::Error>> {
-        profile_with_field(
-            profile_value,
-            2,
-            Value::Text("pigloros.w8.artifact-integrity.1.0.0".to_owned()),
-        )
+        profile_with_field(profile_value, 6, Value::Null)
     }
 
     fn mutate_authority_member_json(
@@ -7882,20 +7850,20 @@ mod instrumented_public_entrypoints {
     fn independent_authority_parse_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile_value = profile_value(&tests::profile())?;
-        let profile_without_binding = profile_without_matrix_binding(&profile_value)?;
+        let profile_without_digest = profile_without_matrix_digest(&profile_value)?;
         let inventory = br#"{"lifecycle":"Draft","magic":"W8H1","version":1,"digest_algorithm":"BLAKE3-256","entries":[]}"#;
         let matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(b"[", matrix, b"{}"),
-                &profile_without_binding,
+                &profile_without_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(inventory, b"[", b"{}"),
-                &profile_without_binding,
+                &profile_without_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
@@ -7907,15 +7875,11 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
 
-        let invalid_matrix_binding = profile_with_field(
-            &profile_value,
-            2,
-            Value::Text("pigloros.w8.knowledge-non-interference.1.0.0#matrix=bad".to_owned()),
-        )?;
+        let zero_matrix_digest = profile_with_field(&profile_value, 6, Value::Bytes(vec![0; 32]))?;
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(inventory, matrix, b"{}"),
-                &invalid_matrix_binding,
+                &zero_matrix_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
@@ -7926,7 +7890,7 @@ mod instrumented_public_entrypoints {
     fn independent_authority_metadata_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile_value = profile_value(&tests::profile())?;
-        let profile = profile_without_matrix_binding(&profile_value)?;
+        let profile = profile_value.clone();
         let inventory = br#"{"lifecycle":"Draft","magic":"W8H1","version":1,"digest_algorithm":"BLAKE3-256","entries":[]}"#;
         let matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
         let missing_inventory_lifecycle =
@@ -8203,7 +8167,7 @@ mod instrumented_public_entrypoints {
     fn malformed_fixture_containers_reach_independent_error_boundaries(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile_value = profile_value(&tests::profile())?;
-        let malformed = profile_with_field(&profile_value, 8, Value::Array(vec![Value::Null]))?;
+        let malformed = profile_with_field(&profile_value, 9, Value::Array(vec![Value::Null]))?;
         assert!(
             independent_verify_fixture_inputs(&[], &malformed, BundleModeV1::Local.code(),)
                 .is_err()
@@ -8224,7 +8188,7 @@ mod instrumented_public_entrypoints {
     fn independent_authority_valid_metadata_is_verified() -> Result<(), Box<dyn std::error::Error>>
     {
         let bundle = signed_draft_bundle()?;
-        let profile = profile_without_matrix_binding(&profile_value(&tests::profile())?)?;
+        let profile = profile_value(&tests::profile())?;
         let inventory = bundle
             .members
             .iter()
@@ -8254,7 +8218,6 @@ mod instrumented_public_entrypoints {
     fn authority_matrix_lifecycle_shape_is_checked_after_digest_binding(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut profile = tests::profile();
-        profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
         let bundle = signed_draft_bundle()?;
         let mut members = bundle.members;
         mutate_authority_member_json(&mut members, BundleMemberRoleV1::ExecutionMatrix, |value| {
@@ -8266,6 +8229,8 @@ mod instrumented_public_entrypoints {
             .ok_or("missing matrix")?
             .bytes
             .clone();
+        profile.execution_matrix_digest = *blake3::hash(&matrix_bytes).as_bytes();
+        profile.profile_digest = profile.digest();
         mutate_authority_member_json(&mut members, BundleMemberRoleV1::Provenance, |value| {
             value["adr_059_execution_matrix"]["blake3_digest"] =
                 JsonValue::String(blake3::hash(&matrix_bytes).to_hex().to_string());
