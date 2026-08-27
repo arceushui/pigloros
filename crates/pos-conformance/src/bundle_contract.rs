@@ -3806,7 +3806,7 @@ mod tests {
         resign_archive(&mut mismatched_path)?;
         assert_independent_error(
             &mismatched_path,
-            BundleContractErrorV1::ExpectedResultMismatch,
+            BundleContractErrorV1::ProfileInvalid,
         )?;
 
         Ok(())
