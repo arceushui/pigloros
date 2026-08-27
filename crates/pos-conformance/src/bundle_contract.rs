@@ -1668,23 +1668,52 @@ fn independent_archive_caps(
     let max_total_bundle_bytes = &values[5];
     let max_compression_expansion = &values[6];
     let max_structural_nesting = &values[7];
-    if *max_profile_bytes == 0
-        || *max_profile_bytes > MAX_PROFILE_BYTES
-        || *max_cases == 0
-        || *max_cases > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX)
-        || *max_bundle_members == 0
-        || *max_bundle_members > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX)
-        || *max_member_path_bytes == 0
-        || *max_member_path_bytes > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX)
-        || *max_member_bytes == 0
-        || *max_member_bytes > MAX_MEMBER_BYTES
-        || *max_total_bundle_bytes == 0
-        || *max_total_bundle_bytes > MAX_TOTAL_BUNDLE_BYTES
-        || *max_compression_expansion == 0
-        || *max_compression_expansion > u64::from(u32::MAX)
-        || *max_structural_nesting == 0
-        || *max_structural_nesting > u64::from(MAX_STRUCTURAL_NESTING)
-    {
+    if *max_profile_bytes == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_profile_bytes > MAX_PROFILE_BYTES {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_cases == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_cases > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX) {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_bundle_members == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_bundle_members > u64::try_from(MAX_MEMBERS).unwrap_or(u64::MAX) {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_member_path_bytes == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_member_path_bytes > u64::try_from(MAX_MEMBER_PATH_BYTES).unwrap_or(u64::MAX) {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_member_bytes == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_member_bytes > MAX_MEMBER_BYTES {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_total_bundle_bytes == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_total_bundle_bytes > MAX_TOTAL_BUNDLE_BYTES {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_compression_expansion == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_compression_expansion > u64::from(u32::MAX) {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_structural_nesting == 0 {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if *max_structural_nesting > u64::from(MAX_STRUCTURAL_NESTING) {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
     Ok(IndependentArchiveCaps {
@@ -1703,16 +1732,29 @@ fn validate_independent_preflight_caps(
     encoded_len: usize,
 ) -> Result<(), BundleContractErrorV1> {
     let encoded_len = u64::try_from(encoded_len).unwrap_or(u64::MAX);
-    if encoded_len > caps.total_bundle_bytes
-        || u64::try_from(preflight.profile_bytes.map_or(0, <[u8]>::len)).unwrap_or(u64::MAX)
-            > caps.profile_bytes
-        || u64::try_from(preflight.maximum_depth).unwrap_or(u64::MAX) > caps.structural_nesting
-        || u64::try_from(preflight.member_count).unwrap_or(u64::MAX) > caps.bundle_members
-        || u64::try_from(preflight.largest_member_path_bytes).unwrap_or(u64::MAX)
-            > caps.member_path_bytes
-        || preflight.largest_member_bytes > caps.member_bytes
-        || preflight.total_member_bytes > caps.total_bundle_bytes
+    if encoded_len > caps.total_bundle_bytes {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if u64::try_from(preflight.profile_bytes.map_or(0, <[u8]>::len)).unwrap_or(u64::MAX)
+        > caps.profile_bytes
     {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if u64::try_from(preflight.maximum_depth).unwrap_or(u64::MAX) > caps.structural_nesting {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if u64::try_from(preflight.member_count).unwrap_or(u64::MAX) > caps.bundle_members {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if u64::try_from(preflight.largest_member_path_bytes).unwrap_or(u64::MAX)
+        > caps.member_path_bytes
+    {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if preflight.largest_member_bytes > caps.member_bytes {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if preflight.total_member_bytes > caps.total_bundle_bytes {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
     Ok(())
@@ -1731,9 +1773,10 @@ fn validate_archive_caps(
     let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps = &profile.evaluator_protocol.hard_caps;
-    if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.max_total_bundle_bytes
-        || value_depth(value) > usize::from(caps.max_structural_nesting)
-    {
+    if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.max_total_bundle_bytes {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if value_depth(value) > usize::from(caps.max_structural_nesting) {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
     caps.validate_compression_expansion(
@@ -2666,9 +2709,10 @@ fn validate_selected_bundle_caps(
         .iter()
         .find(|member| member.role == BundleMemberRoleV1::Profile)
         .ok_or(BundleContractErrorV1::MemberMissing)?;
-    if u64::try_from(profile_member.bytes.len()).unwrap_or(u64::MAX) > caps.max_profile_bytes
-        || value_depth(&manifest_value(&bundle.manifest)) > usize::from(caps.max_structural_nesting)
-    {
+    if u64::try_from(profile_member.bytes.len()).unwrap_or(u64::MAX) > caps.max_profile_bytes {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    if value_depth(&manifest_value(&bundle.manifest)) > usize::from(caps.max_structural_nesting) {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
     caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))
@@ -2678,9 +2722,10 @@ fn validate_selected_bundle_caps(
     }
     let mut total_bytes = 0_u64;
     for member in &bundle.members {
-        if member.path.len() > usize::from(caps.max_member_path_bytes)
-            || u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes
-        {
+        if member.path.len() > usize::from(caps.max_member_path_bytes) {
+            return Err(BundleContractErrorV1::MemberOutOfBounds);
+        }
+        if u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes {
             return Err(BundleContractErrorV1::MemberOutOfBounds);
         }
         total_bytes =
@@ -2712,7 +2757,7 @@ fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
 
 fn contains_secret_marker(bytes: &[u8]) -> bool {
     let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
-    [
+    if [
         b"private key".as_slice(),
         b"private_key".as_slice(),
         b"begin secret".as_slice(),
@@ -2722,20 +2767,49 @@ fn contains_secret_marker(bytes: &[u8]) -> bool {
         lowercase
             .windows(marker.len())
             .any(|window| window == *marker)
-    }) || json_contains_secret_value(bytes)
-        || standalone_secret_string(bytes)
-        || contains_prefixed_secret(&lowercase, b"bearer ", 16)
-        || contains_prefixed_secret(&lowercase, b"basic ", 16)
-        || contains_prefixed_secret(&lowercase, b"ghp_", 20)
-        || contains_prefixed_secret(&lowercase, b"github_pat_", 20)
-        || contains_prefixed_secret(&lowercase, b"glpat-", 20)
-        || contains_prefixed_secret(&lowercase, b"xoxb-", 20)
-        || contains_prefixed_secret(&lowercase, b"xoxp-", 20)
-        || contains_prefixed_secret(&lowercase, b"sk_live_", 16)
-        || contains_prefixed_secret(&lowercase, b"sk_test_", 16)
-        || contains_prefixed_secret(&lowercase, b"aiza", 30)
-        || contains_aws_access_key(&lowercase)
-        || contains_jwt(&lowercase)
+    }) {
+        return true;
+    }
+    if json_contains_secret_value(bytes) {
+        return true;
+    }
+    if standalone_secret_string(bytes) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"bearer ", 16) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"basic ", 16) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"ghp_", 20) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"github_pat_", 20) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"glpat-", 20) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"xoxb-", 20) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"xoxp-", 20) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"sk_live_", 16) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"sk_test_", 16) {
+        return true;
+    }
+    if contains_prefixed_secret(&lowercase, b"aiza", 30) {
+        return true;
+    }
+    if contains_aws_access_key(&lowercase) {
+        return true;
+    }
+    contains_jwt(&lowercase)
 }
 
 fn json_contains_secret_value(bytes: &[u8]) -> bool {
