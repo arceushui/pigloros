@@ -1631,7 +1631,14 @@ mod tests {
         assert!(verify_public_archive(&bundle_bytes, &wrong_digest, &manifest).is_err());
         assert!(verify_public_archive(&bundle_bytes, &bundle_digest, b"invalid").is_err());
         assert!(verify_public_archive(b"invalid", &bundle_digest, &manifest).is_err());
-        let mut invalid_signature = ConformanceBundleV1::from_canonical_cbor(&bundle_bytes)?;
+        let (members, expected_results) = bundle_inputs(&profile, BundleModeV1::Local)?;
+        let mut invalid_signature = ConformanceBundleV1::materialize(
+            &profile,
+            BundleModeV1::Local,
+            members,
+            expected_results,
+        )?
+        .sign(&signing_key)?;
         invalid_signature.signature = pos_core::Signature::from_bytes([0; 64]);
         let invalid_signature_bytes = invalid_signature.to_canonical_cbor()?;
         assert!(
