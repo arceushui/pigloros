@@ -626,9 +626,6 @@ impl ConformanceProfileV1 {
             "{EXECUTION_MATRIX_BINDING_MARKER}{}",
             crate::hex_digest(&binding.digest)
         );
-        if base_profile_id.len() + suffix.len() > MAX_STRING_BYTES {
-            return Err(ConformanceContractError::FieldOutOfBounds);
-        }
         let mut bound = self.clone();
         bound.profile_id = format!("{base_profile_id}{suffix}");
         bound.profile_digest = bound.digest();
@@ -2353,9 +2350,7 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
             27 => 8,
             _ => return Err(ConformanceContractError::InvalidEncoding),
         };
-        let end = index
-            .checked_add(width)
-            .ok_or(ConformanceContractError::FieldOutOfBounds)?;
+        let end = index.saturating_add(width);
         let value = bytes
             .get(*index..end)
             .ok_or(ConformanceContractError::InvalidEncoding)?;
@@ -5924,6 +5919,10 @@ mod tests {
         invalid_key_evidence.attestation.trust_root_digest = digest_bytes(
             b"PiglorOS.ConformanceTrustRoot.v1",
             &Value::Bytes(vec![0xff; 32]),
+        );
+        assert_eq!(
+            validate_stable_attestation(&invalid_key_evidence, &requirements, None),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
         assert_eq!(
             candidate().transition_to(
