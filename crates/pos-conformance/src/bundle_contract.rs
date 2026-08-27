@@ -3766,7 +3766,7 @@ mod tests {
         assert!(validate_member_path("space result").is_ok());
         assert!(contains_secret_marker(b"PUBLIC PRIVATE_KEY material"));
         assert!(contains_secret_marker(br#"{"password":"not-public"}"#));
-        assert!(contains_secret_marker(br#"Bearer abcdefghijklmnop"#));
+        assert!(contains_secret_marker(br"Bearer abcdefghijklmnop"));
         assert!(contains_secret_marker(
             br#"{"secret_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#
         ));

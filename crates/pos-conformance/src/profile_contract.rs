@@ -4498,10 +4498,10 @@ mod tests {
             Some(SafeErrorCodeV1::ProvenanceMissing);
         draft_unavailable.profile_digest = draft_unavailable.digest();
         assert_eq!(draft_unavailable.validate(), Ok(()));
-        assert!(!draft_unavailable.fixtures[0]
+        assert!(draft_unavailable.fixtures[0]
             .expected
             .to_canonical_bytes()
-            .is_err());
+            .is_ok());
     }
 
     #[test]
