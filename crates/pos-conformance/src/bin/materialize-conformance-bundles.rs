@@ -1127,10 +1127,6 @@ mod tests {
     use super::*;
     use pos_conformance::{ExecutionModeV1, SafeErrorCodeV1};
 
-    fn signing_key_hex() -> String {
-        "07".repeat(32)
-    }
-
     fn output_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "pigloros-conformance-{name}-{}",
