@@ -3649,7 +3649,7 @@ mod tests {
         resign_archive(&mut duplicate_expected)?;
         assert_independent_error(
             &duplicate_expected,
-            BundleContractErrorV1::ExpectedResultMismatch,
+            BundleContractErrorV1::NonCanonicalOrder,
         )?;
         let mut missing_expected_member = valid.clone();
         if let Value::Array(fields) = &mut missing_expected_member {
