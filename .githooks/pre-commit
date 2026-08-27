@@ -6,6 +6,14 @@ set -euo pipefail
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 
+if ! command -v trunk >/dev/null 2>&1; then
+    echo "pre-commit: Trunk is required for rust-test-policy; install it before committing" >&2
+    exit 1
+fi
+
+echo "pre-commit: trunk rust-test-policy (staged files)"
+trunk check --filter rust-test-policy --index --no-fix --no-progress
+
 changed_files=$(git diff --cached --name-only --diff-filter=ACDMRT)
 changed_cargo_manifests=$(printf '%s\n' "$changed_files" | awk '
     $0 == "Cargo.toml" || $0 ~ /\/Cargo\.toml$/

@@ -62,7 +62,8 @@ the final filename itself is protected atomically with create-new semantics.
 Requires the pinned toolchain in `rust-toolchain.toml` (Rust **1.97.1**).
 
 ```bash
-# One-time per clone — enable git hooks (fmt + clippy on commit):
+# One-time per clone — enable the versioned pre-commit hook
+# (fmt, rust-test-policy, lockfile generation, and targeted Clippy):
 git config core.hooksPath .githooks
 ```
 
@@ -165,22 +166,24 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy (also mir
 | Gate | Tool | What it bans / enforces |
 |---|---|---|
 | `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
-| Local git hooks | Trunk **`trunk-check-pre-commit`** + **`trunk-check-pre-push`** | Blocks commit/push if `rust-test-policy` fails (`trunk git-hooks sync`) |
+| Local git hook | Versioned `.githooks/pre-commit` + Trunk **`rust-test-policy`** | Blocks a commit if the staged Rust policy fails |
 | Runtime `#[ignore]` | `cargo test -- --include-ignored` + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report `0 ignored` |
 | Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
 
 #### Git hooks (local)
 
-Trunk manages hooks via `core.hooksPath` (not files under `.git/hooks/`):
+Git does not activate repository hooks automatically on clone. Enable the
+versioned pre-commit hook once:
 
 ```bash
-trunk git-hooks sync   # once per clone / after enabling actions
+git config core.hooksPath .githooks
 ```
 
-Enabled actions (see `.trunk/trunk.yaml`):
+The hook fails closed if Trunk is unavailable, then runs `rust-test-policy` on
+the staged files before its Cargo checks:
 
-- **pre-commit:** repository hook runs `cargo fmt`, regenerates and stages `Cargo.lock` when a manifest changes, then runs targeted Clippy; Trunk also runs `trunk-fmt-pre-commit` + `trunk-check-pre-commit` (including `rust-test-policy`)
-- **pre-push:** `trunk-check-pre-push`
+- **pre-commit:** `cargo fmt`, Trunk `rust-test-policy`, `Cargo.lock`
+  regeneration/staging after manifest changes, and targeted Clippy.
 
 `#[cfg_attr(coverage_nightly, coverage(off))]` is applied **only** to `#[test]` functions
 and code inside `#[cfg(test)]` modules. CI requires **at least 99% lines and 99% regions**.
