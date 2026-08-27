@@ -598,13 +598,18 @@ impl ConformanceBundleV1 {
         if canonical_bytes.as_slice() != bytes {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
-        let fields = archive_array_exact(&value, 6)?;
+        let Value::Array(fields) = &value else {
+            unreachable!("archive preflight validated the archive array");
+        };
         if archive_text(&fields[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&fields[1])? != 1
         {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
         let manifest = decode_manifest(&fields[2])?;
-        let members = archive_array_bounded(&fields[3], MAX_MEMBERS)?
+        let Value::Array(members) = &fields[3] else {
+            unreachable!("archive preflight validated the members array");
+        };
+        let members = members
             .iter()
             .map(decode_member)
             .collect::<Result<Vec<_>, _>>()?;
@@ -620,7 +625,6 @@ impl ConformanceBundleV1 {
             signer_public_key,
             signature,
         };
-        validate_archive_caps(&bundle, &value, bytes.len())?;
         preflight_profile
             .evaluator_protocol
             .hard_caps
@@ -657,7 +661,9 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     if encode_archive_value(&value)?.as_slice() != bytes {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
-    let archive = independent_array(&value, 6)?;
+    let Value::Array(archive) = &value else {
+        unreachable!("archive preflight validated the archive array");
+    };
     if archive_text(&archive[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 || archive_u64(&archive[1])? != 1 {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
@@ -669,18 +675,19 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
     independent_verify_signature(&archive[2], &archive[4], &archive[5])?;
-    let members = independent_array_bounded(&archive[3])?;
+    let Value::Array(members) = &archive[3] else {
+        unreachable!("archive preflight validated the members array");
+    };
     let descriptors = independent_array_bounded(&manifest[4])?;
     if members.len() != descriptors.len() {
         return Err(BundleContractErrorV1::UndeclaredMember);
     }
-    let (member_records, profile_bytes) = independent_member_records(members, descriptors)?;
+    let (member_records, _) = independent_member_records(members, descriptors)?;
     let expected_results = independent_array_bounded(&manifest[5])?;
     independent_verify_expected_results(expected_results, &member_records, &profile, bundle_mode)?;
     independent_verify_fixture_inputs(&member_records, &profile, bundle_mode)?;
     independent_verify_supporting_members(&member_records, &profile)?;
     independent_verify_authority_members(&member_records, &profile)?;
-    let profile_bytes = profile_bytes.ok_or(BundleContractErrorV1::MemberMissing)?;
     independent_verify_profile(profile_bytes, lifecycle, &manifest[3])
 }
 
@@ -5539,6 +5546,19 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
         public_archive_rejects_unknown_member_role(archive)?;
+
+        let mut invalid_magic: ciborium::value::Value =
+            ciborium::from_reader(std::io::Cursor::new(archive))?;
+        let ciborium::value::Value::Array(fields) = &mut invalid_magic else {
+            return Err("encoded bundle is not an array".into());
+        };
+        fields[0] = ciborium::value::Value::Null;
+        let mut invalid_magic_bytes = Vec::new();
+        ciborium::into_writer(&invalid_magic, &mut invalid_magic_bytes)?;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&invalid_magic_bytes),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
 
         let mut nested = vec![0x81; 34];
         nested.push(0xf6);
