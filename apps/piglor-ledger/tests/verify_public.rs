@@ -85,8 +85,11 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
     )?;
 
     let anchor = trust_anchor(identity, &"aa".repeat(32));
-    let report = verify_source(&Source::Store(database_path), Some(&anchor), None)?;
-    assert!(report
+    let error = match verify_source(&Source::Store(database_path), Some(&anchor), None) {
+        Ok(report) => return Err(format!("malformed identity produced a report: {report}").into()),
+        Err(error) => error,
+    };
+    assert!(error
         .to_string()
         .contains("signed event must carry a TimelineIntegritySigning owner/role/epoch identity"));
     Ok(())
