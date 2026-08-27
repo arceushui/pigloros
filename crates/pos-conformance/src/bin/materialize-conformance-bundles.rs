@@ -1656,7 +1656,8 @@ mod tests {
         assert!(bundle_inputs_from_profile(&profile, BundleModeV1::Local, b"{").is_err());
         assert!(bundle_inputs_from_profile(&profile, BundleModeV1::Local, b"{}").is_err());
         let mut invalid_input_profile = profile;
-        invalid_input_profile.fixtures[0].case_id = "unknown".to_owned();
+        invalid_input_profile.fixtures[0].inputs[0].member_id =
+            "inputs/artifact-integrity/unknown.json".to_owned();
         assert!(bundle_inputs(&invalid_input_profile, BundleModeV1::Local).is_err());
 
         let mut invalid_expected = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
