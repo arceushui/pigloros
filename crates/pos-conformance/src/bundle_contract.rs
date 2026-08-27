@@ -6,7 +6,7 @@
 //! validates them against CPF1, and verifies the bundle signature.
 
 use ciborium::value::Value;
-use ed25519_dalek::Verifier;
+use ed25519_dalek::{Signer, Verifier};
 use pos_core::{CanonicalBytes, PublicKey, Signature};
 use pos_crypto::signing;
 use serde_json::Value as JsonValue;
@@ -397,7 +397,7 @@ impl ConformanceBundleV1 {
             self.manifest_bytes().and_then(|bytes| {
                 self.signer_public_key =
                     PublicKey::from_bytes(signing_key.verifying_key().to_bytes());
-                self.signature = signing::sign(signing_key, &CanonicalBytes::from_vec(bytes));
+                self.signature = Signature::from_bytes(signing_key.sign(&bytes).to_bytes());
                 self.validate()
                     .map(|()| self)
                     .map_err(|_| BundleContractErrorV1::SignatureInvalid)
