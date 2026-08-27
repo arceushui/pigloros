@@ -14,8 +14,12 @@ fi
 echo "pre-commit: trunk rust-test-policy (staged files)"
 trunk check --filter rust-test-policy --index --no-fix --no-progress
 
-changed_files=$(git diff --cached --name-only --diff-filter=ACMRT)
+changed_files=$(git diff --cached --name-only --diff-filter=ACMRTD)
+deleted_files=$(git diff --cached --name-only --diff-filter=D)
 changed_cargo_manifests=$(printf '%s\n' "$changed_files" | awk '
+    $0 == "Cargo.toml" || $0 ~ /\/Cargo\.toml$/
+')
+deleted_cargo_manifests=$(printf '%s\n' "$deleted_files" | awk '
     $0 == "Cargo.toml" || $0 ~ /\/Cargo\.toml$/
 ')
 if [ -n "$changed_cargo_manifests" ]; then
@@ -39,7 +43,15 @@ if [ -n "$changed_cargo_manifests" ]; then
     while IFS= read -r manifest; do
         [ -n "$manifest" ] || continue
         if [ "$manifest" = "fuzz/Cargo.toml" ]; then
-            fuzz_manifest_changed=true
+            if git cat-file -e ":$manifest" 2>/dev/null; then
+                fuzz_manifest_changed=true
+            elif git cat-file -e :fuzz/Cargo.lock 2>/dev/null; then
+                echo "pre-commit: deleting fuzz/Cargo.toml requires deleting fuzz/Cargo.lock" >&2
+                exit 1
+            fi
+        elif [ "$manifest" = "Cargo.toml" ] && ! git cat-file -e :Cargo.toml 2>/dev/null; then
+            echo "pre-commit: deleting the workspace Cargo.toml is not supported" >&2
+            exit 1
         else
             workspace_manifest_changed=true
         fi
@@ -68,6 +80,9 @@ echo "pre-commit: cargo clippy (changed packages)"
 declare -A packages=()
 declare -A isolated_manifests=()
 needs_workspace=false
+if [ -n "$deleted_cargo_manifests" ]; then
+    needs_workspace=true
+fi
 if [ -z "$changed_rust_files" ]; then
     needs_workspace=true
 fi
