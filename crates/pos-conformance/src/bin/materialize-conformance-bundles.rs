@@ -421,7 +421,7 @@ fn materialize_profile_from_profile(
     Ok(())
 }
 
-fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
+const fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
     layer_spec(claim_layer).profile_record
 }
 
@@ -632,15 +632,15 @@ fn profile_from_record(
     Ok(profile)
 }
 
-fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
+const fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
     layer_spec(claim_layer).profile_id
 }
 
-fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
+const fn claim_layer_name(claim_layer: ClaimLayerV1) -> &'static str {
     layer_spec(claim_layer).name
 }
 
-fn subject_adapter(claim_layer: ClaimLayerV1) -> SubjectAdapterKindV1 {
+const fn subject_adapter(claim_layer: ClaimLayerV1) -> SubjectAdapterKindV1 {
     layer_spec(claim_layer).subject_adapter
 }
 
