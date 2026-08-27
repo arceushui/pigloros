@@ -6176,7 +6176,8 @@ mod instrumented_public_entrypoints {
             independent_support_digests(fields, fixtures, BundleMemberRoleV1::Limitations).is_err()
         );
 
-        let mut bad_support_records = independent_records(&bundle_value(&bundle))?;
+        let bundle_value = bundle_value(&bundle);
+        let mut bad_support_records = independent_records(&bundle_value)?;
         let schema = bad_support_records
             .iter_mut()
             .find(|member| member.role == BundleMemberRoleV1::Schema)
@@ -6607,22 +6608,34 @@ mod instrumented_public_entrypoints {
         let bundle = signed_draft_bundle()?;
         let archive = bundle.to_canonical_cbor()?;
         let mut value: Value = ciborium::from_reader(Cursor::new(&archive))?;
-        let Value::Array(fields) = &mut value else {
-            return Err("archive must be an array".into());
-        };
-        fields[0] = Value::Text("wrong".to_owned());
+        {
+            let Value::Array(fields) = &mut value else {
+                return Err("archive must be an array".into());
+            };
+            fields[0] = Value::Text("wrong".to_owned());
+        }
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&value)?),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
-        fields[0] = Value::Text(CONFORMANCE_BUNDLE_MAGIC_V1.to_owned());
-        fields[1] = Value::Integer(2_u64.into());
+        {
+            let Value::Array(fields) = &mut value else {
+                return Err("archive must be an array".into());
+            };
+            fields[0] = Value::Text(CONFORMANCE_BUNDLE_MAGIC_V1.to_owned());
+            fields[1] = Value::Integer(2_u64.into());
+        }
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&value)?),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
-        fields[1] = Value::Integer(1_u64.into());
-        fields[2] = Value::Null;
+        {
+            let Value::Array(fields) = &mut value else {
+                return Err("archive must be an array".into());
+            };
+            fields[1] = Value::Integer(1_u64.into());
+            fields[2] = Value::Null;
+        }
         assert_eq!(
             ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&value)?),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
