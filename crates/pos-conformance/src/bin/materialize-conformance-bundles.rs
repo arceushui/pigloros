@@ -1674,6 +1674,40 @@ mod tests {
     }
 
     #[test]
+    fn profile_and_fixture_construction_paths_are_exercised() -> Result<(), Box<dyn Error>> {
+        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
+        let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
+        let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
+        assert!(fixtures_from_profile_record(&canonical_record, &context).is_ok());
+        let fixture = &canonical_record["fixtures"][0];
+        assert!(fixture(
+            fixture,
+            &context,
+            context.local_execution_profile_digest,
+            ExecutionModeV1::Local,
+        )
+        .is_ok());
+
+        let mut wrong_layer = canonical_record.clone();
+        wrong_layer["fixtures"][0]["claim_layer"] = JsonValue::String("wrong".to_owned());
+        assert!(fixtures_from_profile_record(&wrong_layer, &context).is_err());
+        let mut unknown_fixture = canonical_record;
+        unknown_fixture["fixtures"][0]["input"] =
+            JsonValue::String("inputs/artifact-integrity/unknown.json".to_owned());
+        assert!(fixtures_from_profile_record(&unknown_fixture, &context).is_err());
+
+        let knowledge_bytes = profile_record_bytes(ClaimLayerV1::KnowledgeNonInterference);
+        let knowledge_record: JsonValue = serde_json::from_slice(knowledge_bytes)?;
+        assert!(profile_from_record(
+            ClaimLayerV1::KnowledgeNonInterference,
+            knowledge_bytes,
+            &knowledge_record,
+        )
+        .is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn canonical_record_required_fields_reject_missing_values() -> Result<(), Box<dyn Error>> {
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;

@@ -7527,7 +7527,7 @@ mod instrumented_public_entrypoints {
                 &[descriptor(
                     "member",
                     0,
-                    digest.clone(),
+                    digest,
                     BundleMemberRoleV1::Profile.code()
                 )],
             ),
