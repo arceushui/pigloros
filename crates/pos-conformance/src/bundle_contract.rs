@@ -6884,7 +6884,7 @@ mod instrumented_public_entrypoints {
         Ok(())
     }
 
-    fn exercise_archive_preflight_regions() -> Result<(), Box<dyn std::error::Error>> {
+    fn exercise_archive_preflight_regions() {
         assert!(archive_preflight::scan(&[0x98]).is_err());
         assert!(archive_preflight::scan(&[0x86]).is_err());
         assert!(archive_preflight::scan(&[0x86, 0x18]).is_err());
@@ -6953,7 +6953,6 @@ mod instrumented_public_entrypoints {
             }
             assert!(decode_manifest(&invalid_manifest).is_err());
         }
-        Ok(())
     }
 
     fn exercise_archive_profile_regions(
@@ -7174,7 +7173,7 @@ mod instrumented_public_entrypoints {
         let bundle = signed_draft_bundle()?;
         let encoded_bundle = bundle_value(&bundle);
         let records = independent_records(&encoded_bundle)?;
-        exercise_archive_preflight_regions()?;
+        exercise_archive_preflight_regions();
         exercise_archive_profile_regions(&bundle)?;
 
         let inventory = bundle
