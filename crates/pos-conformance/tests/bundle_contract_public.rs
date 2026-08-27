@@ -146,6 +146,16 @@ fn archive_expected(value: &mut Value) -> Result<&mut Vec<Value>, Box<dyn std::e
     }
 }
 
+fn archive_expected_results(
+    value: &mut Value,
+) -> Result<&mut Vec<Value>, Box<dyn std::error::Error>> {
+    let manifest = archive_array(value, 2)?;
+    match manifest.get_mut(5) {
+        Some(Value::Array(results)) => Ok(results),
+        _ => Err("archive expected results are missing".into()),
+    }
+}
+
 fn encode_archive(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
@@ -788,6 +798,88 @@ fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
     Ok(())
 }
 
+#[test]
+fn public_independent_verifier_rejects_re_signed_contract_invariant_mutations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+
+    let non_cfb1_manifest = signed_archive_variant(&bundle, &signing_key, |value| {
+        archive_array(value, 2)?[0] = Value::Text("not-cfb1".to_owned());
+        Ok(())
+    })?;
+    assert!(ConformanceBundleV1::from_canonical_cbor(&non_cfb1_manifest).is_err());
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&non_cfb1_manifest),
+        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+    );
+
+    let unordered_expected_results = signed_archive_variant(&bundle, &signing_key, |value| {
+        let expected_results = archive_expected_results(value)?;
+        expected_results.swap(0, 1);
+        Ok(())
+    })?;
+    assert!(ConformanceBundleV1::from_canonical_cbor(&unordered_expected_results).is_err());
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&unordered_expected_results),
+        Err(pos_conformance::BundleContractErrorV1::NonCanonicalOrder)
+    );
+
+    let malformed_profile = signed_archive_variant(&bundle, &signing_key, |value| {
+        mutate_profile(value, |fields| fields[6] = Value::Array(Vec::new()))
+    })?;
+    assert!(ConformanceBundleV1::from_canonical_cbor(&malformed_profile).is_err());
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&malformed_profile),
+        Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_secret_markers_and_invalid_caps(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+
+    for secret in [
+        b"PRIVATE_KEY credential".as_slice(),
+        b"BEGIN SECRET credential".as_slice(),
+        b"Bearer 0123456789abcdef".as_slice(),
+        br#"{"api_key":"0123456789abcdef"}"#.as_slice(),
+    ] {
+        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+            let member = archive_member(value, "support/normative-requirements.md")?;
+            member[1] = Value::Bytes(secret.to_vec());
+            let descriptor = archive_descriptor(value, "support/normative-requirements.md")?;
+            descriptor[1] = Value::Integer((secret.len() as u64).into());
+            descriptor[2] = Value::Bytes(blake3::hash(secret).as_bytes().to_vec());
+            Ok(())
+        })?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::SecretMaterialDetected)
+        );
+    }
+
+    for cap_index in [0_usize, 5] {
+        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+            mutate_profile(value, |fields| {
+                if let Some(Value::Array(protocol)) = fields.get_mut(10) {
+                    if let Some(Value::Array(caps)) = protocol.get_mut(4) {
+                        caps[cap_index] = Value::Integer(0_u64.into());
+                    }
+                }
+            })
+        })?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberOutOfBounds)
+        );
+    }
+    Ok(())
+}
+
 fn archive_with_changed_expected(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
@@ -1180,6 +1272,20 @@ fn mutate_bound_json_member(
         let provenance_bytes = serde_json::to_vec(&provenance)?;
         replace_member_bytes(&mut changed, provenance_index, provenance_bytes)?;
         rebind_profile_to_provenance(&mut changed, provenance_index)?;
+    } else if path == EXECUTION_MATRIX_MEMBER_PATH {
+        let provenance_index = changed
+            .members
+            .iter()
+            .position(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("provenance member is missing")?;
+        let mut provenance: JsonValue =
+            serde_json::from_slice(&changed.members[provenance_index].bytes)?;
+        provenance["adr_059_execution_matrix"]["blake3_digest"] =
+            JsonValue::String(hex_digest(blake3::hash(&bytes).as_bytes()));
+        let provenance_bytes = serde_json::to_vec(&provenance)?;
+        replace_member_bytes(&mut changed, provenance_index, provenance_bytes)?;
+        rebind_profile_to_provenance(&mut changed, provenance_index)?;
+        rebind_profile_to_execution_matrix(&mut changed, member_index)?;
     } else if path == "support/provenance.json" {
         rebind_profile_to_provenance(&mut changed, member_index)?;
     }
@@ -1205,6 +1311,24 @@ fn rebind_profile_to_provenance(
         fixture.provenance.publication_review_digest = provenance_digest;
     }
     profile.profile_digest = profile.digest();
+    let profile_bytes = profile.to_canonical_cbor()?;
+    replace_member_bytes(bundle, profile_index, profile_bytes)?;
+    bundle.manifest.profile_digest = profile.profile_digest;
+    Ok(())
+}
+
+fn rebind_profile_to_execution_matrix(
+    bundle: &mut ConformanceBundleV1,
+    matrix_index: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let profile_index = bundle
+        .members
+        .iter()
+        .position(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or("profile member is missing")?;
+    let mut profile =
+        ConformanceProfileV1::from_canonical_cbor(&bundle.members[profile_index].bytes)?;
+    profile.bind_execution_matrix_digest(bundle.members[matrix_index].digest)?;
     let profile_bytes = profile.to_canonical_cbor()?;
     replace_member_bytes(bundle, profile_index, profile_bytes)?;
     bundle.manifest.profile_digest = profile.profile_digest;
@@ -2236,6 +2360,28 @@ fn public_draft_authority_records_reject_each_malformed_shape(
         pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
         "inventory entries shape",
     )?;
+    for (label, mutate) in [
+        (
+            "inventory undeclared root key",
+            Box::new(|value: &mut JsonValue| {
+                value["candidate_evidence"] = JsonValue::Bool(true);
+            }) as JsonMutation,
+        ),
+        (
+            "inventory undeclared entry key",
+            Box::new(|value: &mut JsonValue| {
+                value["entries"][0]["candidate_evidence"] = JsonValue::Bool(true);
+            }) as JsonMutation,
+        ),
+    ] {
+        assert_json_member_rejected(
+            &bundle,
+            "authority/expected-authority-inventory.json",
+            mutate,
+            pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+            label,
+        )?;
+    }
 
     for (index, mutate) in [
         Box::new(|value: &mut JsonValue| {
@@ -2286,6 +2432,40 @@ fn public_draft_authority_records_reject_each_malformed_shape(
             mutate,
             pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
             &format!("matrix case {index}"),
+        )?;
+    }
+    for (label, mutate) in [
+        (
+            "matrix undeclared root key",
+            Box::new(|value: &mut JsonValue| {
+                value["candidate_evidence"] = JsonValue::Bool(true);
+            }) as JsonMutation,
+        ),
+        (
+            "matrix row undeclared key",
+            Box::new(|value: &mut JsonValue| {
+                value["rows"][0]["candidate_evidence"] = JsonValue::Bool(true);
+            }) as JsonMutation,
+        ),
+        (
+            "matrix case undeclared key",
+            Box::new(|value: &mut JsonValue| {
+                value["cases"][0]["candidate_evidence"] = JsonValue::Bool(true);
+            }) as JsonMutation,
+        ),
+        (
+            "matrix predicate undeclared key",
+            Box::new(|value: &mut JsonValue| {
+                value["equality_predicates"][0]["candidate_evidence"] = JsonValue::Bool(true);
+            }) as JsonMutation,
+        ),
+    ] {
+        assert_json_member_rejected(
+            &bundle,
+            "authority/execution-matrix.json",
+            mutate,
+            pos_conformance::BundleContractErrorV1::MemberDigestMismatch,
+            label,
         )?;
     }
     Ok(())
