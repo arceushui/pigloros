@@ -7479,7 +7479,7 @@ mod instrumented_public_entrypoints {
         role: BundleMemberRoleV1,
         update: impl FnOnce(&mut JsonValue),
     ) -> Result<Vec<BundleMemberV1>, Box<dyn std::error::Error>> {
-        let mut members = bundle.members.clone();
+        let mut members = bundle.members;
         mutate_authority_member_json(&mut members, role, update)?;
         Ok(members)
     }
