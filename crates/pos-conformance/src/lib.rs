@@ -1858,9 +1858,16 @@ pub mod strict_codec {
     fn encode_value(value: &Value) -> Result<Vec<u8>, StrictCborError> {
         validate_value(value)?;
         let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes)
-            .map_err(|error| StrictCborError::Serialization(error.to_string()))?;
+        encode_value_to_writer(value, &mut bytes)?;
         Ok(bytes)
+    }
+
+    fn encode_value_to_writer<W: std::io::Write>(
+        value: &Value,
+        writer: W,
+    ) -> Result<(), StrictCborError> {
+        ciborium::into_writer(value, writer)
+            .map_err(|error| StrictCborError::Serialization(error.to_string()))
     }
 
     pub(crate) fn encode_verification_result(
@@ -4918,6 +4925,26 @@ pub mod strict_codec {
     #[cfg_attr(coverage_nightly, coverage(off))]
     mod coverage_tests {
         use super::*;
+
+        #[test]
+        fn strict_encoding_maps_write_failures() {
+            struct FailingWriter;
+
+            impl std::io::Write for FailingWriter {
+                fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                    Err(std::io::Error::other("write failure"))
+                }
+
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            assert!(matches!(
+                encode_value_to_writer(&Value::Null, FailingWriter),
+                Err(StrictCborError::Serialization(_))
+            ));
+        }
 
         fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
             let mut fields = value.as_array().map_or_else(Vec::new, Clone::clone);
