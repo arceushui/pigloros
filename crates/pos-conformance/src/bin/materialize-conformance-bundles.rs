@@ -324,7 +324,7 @@ fn run(
         }
     }
     outputs.push(materialization_metadata(&lifecycles)?);
-    publish_materialized_tree(&output_root, &outputs).map_err(|error| error.into())
+    publish_materialized_tree(&output_root, &outputs).map_err(Into::into)
 }
 
 fn signing_key_from_encoded(
@@ -1273,7 +1273,7 @@ fn create_private_staging(parent: &OwnedFd) -> Result<(CString, OwnedFd), Materi
                 let staging = open_directory(parent, &name)?;
                 return Ok((name, staging));
             }
-            Err(Errno::EXIST) => continue,
+            Err(Errno::EXIST) => {}
             Err(Errno::LOOP) => return Err(MaterializationError::SymlinkDetected),
             Err(_) => return Err(MaterializationError::UntrustedOutputDirectory),
         }
@@ -1287,7 +1287,12 @@ fn random_staging_name() -> Result<CString, MaterializationError> {
     File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut random))
         .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
-    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut suffix = String::with_capacity(random.len() * 2);
+    for byte in random {
+        suffix.push(char::from(HEX[usize::from(byte >> 4)]));
+        suffix.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
     CString::new(format!(".pigloros-conformance-staging-{suffix}"))
         .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
 }
