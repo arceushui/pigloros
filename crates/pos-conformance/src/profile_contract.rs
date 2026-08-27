@@ -5825,6 +5825,7 @@ mod tests {
             .evaluator_protocol
             .hard_caps
             .max_coordinate_bytes = 127;
+        constrained.profile_digest = constrained.digest();
         let mut evidence = stable_evidence("alpha", 30);
         for case in &mut evidence.case_outcomes {
             case.first_coordinate = Some(vec![b'x'; 128]);
@@ -6468,18 +6469,28 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_typed_failure_outcomes_are_closed_and_error_bound() {
-        for outcome in [
-            VerificationOutcomeV1::InvalidManifest,
-            VerificationOutcomeV1::UnverifiableArtifactsMissing,
-            VerificationOutcomeV1::IncompatibleProfile,
-            VerificationOutcomeV1::ResourceLimitExceeded,
+        for (outcome, error) in [
+            (
+                VerificationOutcomeV1::InvalidManifest,
+                SafeErrorCodeV1::ClosureIncomplete,
+            ),
+            (
+                VerificationOutcomeV1::UnverifiableArtifactsMissing,
+                SafeErrorCodeV1::ProvenanceMissing,
+            ),
+            (
+                VerificationOutcomeV1::IncompatibleProfile,
+                SafeErrorCodeV1::ClosureIncomplete,
+            ),
+            (
+                VerificationOutcomeV1::ResourceLimitExceeded,
+                SafeErrorCodeV1::ClosureIncomplete,
+            ),
         ] {
             let mut typed = profile();
-            typed.fixtures[0].expected =
-                ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
+            typed.fixtures[0].expected = ExpectedResultV1::TypedFailure(error);
             typed.fixtures[0].expected_verification_outcome = outcome;
-            typed.fixtures[0].expected_verification_error =
-                Some(SafeErrorCodeV1::ClosureIncomplete);
+            typed.fixtures[0].expected_verification_error = Some(error);
             typed.profile_digest = typed.digest();
             assert!(typed.validate().is_ok());
         }

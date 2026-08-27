@@ -2600,14 +2600,17 @@ fn validate_member_path(path: &str) -> Result<(), BundleContractErrorV1> {
 
 fn contains_secret_marker(bytes: &[u8]) -> bool {
     let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
-    [b"private key".as_slice(), b"begin secret".as_slice()]
-        .iter()
-        .any(|marker| {
-            lowercase
-                .windows(marker.len())
-                .any(|window| window == *marker)
-        })
-        || json_contains_secret_value(bytes)
+    [
+        b"private key".as_slice(),
+        b"private_key".as_slice(),
+        b"begin secret".as_slice(),
+    ]
+    .iter()
+    .any(|marker| {
+        lowercase
+            .windows(marker.len())
+            .any(|window| window == *marker)
+    }) || json_contains_secret_value(bytes)
         || standalone_secret_string(bytes)
         || contains_prefixed_secret(&lowercase, b"bearer ", 16)
         || contains_prefixed_secret(&lowercase, b"basic ", 16)
@@ -3653,7 +3656,7 @@ mod tests {
         resign_archive(&mut embedded_digest_archive)?;
         assert_independent_error(
             &embedded_digest_archive,
-            BundleContractErrorV1::ProfileInvalid,
+            BundleContractErrorV1::MemberDigestMismatch,
         )?;
         let mut recomputed_digest_mismatch = embedded_digest_archive;
         if let Value::Array(fields) = &mut recomputed_digest_mismatch {
@@ -5695,40 +5698,41 @@ mod instrumented_public_entrypoints {
 
     fn public_archive_cap_boundaries(
         profile: &super::ConformanceProfileV1,
+        bundle: &ConformanceBundleV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let max_input_path_bytes = profile
-            .fixtures
+        let max_member_path_bytes = bundle
+            .members
             .iter()
-            .flat_map(|fixture| fixture.inputs.iter())
-            .map(|input| input.member_id.len())
+            .filter(|member| member.role != BundleMemberRoleV1::Profile)
+            .map(|member| member.path.len())
             .max()
-            .unwrap_or(1);
-        let max_input_bytes = profile
-            .fixtures
+            .ok_or("bundle has no non-profile members")?;
+        let max_member_bytes = bundle
+            .members
             .iter()
-            .flat_map(|fixture| fixture.inputs.iter())
-            .map(|input| input.size_bytes)
+            .filter(|member| member.role != BundleMemberRoleV1::Profile)
+            .map(|member| member.bytes.len())
             .max()
-            .unwrap_or(1);
-        let total_input_bytes = profile
-            .fixtures
+            .ok_or("bundle has no non-profile members")?;
+        let non_profile_member_bytes = bundle
+            .members
             .iter()
-            .flat_map(|fixture| fixture.inputs.iter())
-            .map(|input| input.size_bytes)
-            .sum();
+            .filter(|member| member.role != BundleMemberRoleV1::Profile)
+            .map(|member| u64::try_from(member.bytes.len()).unwrap_or(u64::MAX))
+            .sum::<u64>();
         let mut limited_profiles = [profile.clone(), profile.clone(), profile.clone()];
         limited_profiles[0]
             .evaluator_protocol
             .hard_caps
-            .max_member_path_bytes = u16::try_from(max_input_path_bytes)?;
+            .max_member_path_bytes = u16::try_from(max_member_path_bytes.saturating_sub(1))?;
         limited_profiles[1]
             .evaluator_protocol
             .hard_caps
-            .max_member_bytes = max_input_bytes;
+            .max_member_bytes = u64::try_from(max_member_bytes.saturating_sub(1))?;
         limited_profiles[2]
             .evaluator_protocol
             .hard_caps
-            .max_total_bundle_bytes = total_input_bytes;
+            .max_total_bundle_bytes = non_profile_member_bytes;
         for mut limited_profile in limited_profiles {
             limited_profile.profile_digest = limited_profile.digest();
             let (limited_members, limited_expected) =
@@ -5765,7 +5769,7 @@ mod instrumented_public_entrypoints {
         public_archive_decode_boundaries(&archive)?;
         public_archive_malformed_shapes_are_rejected();
         public_archive_validation_boundaries(&bundle);
-        public_archive_cap_boundaries(profile)
+        public_archive_cap_boundaries(profile, &bundle)
     }
 
     #[test]
