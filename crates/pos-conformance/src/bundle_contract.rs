@@ -550,10 +550,9 @@ impl ConformanceBundleV1 {
     ///
     /// # Errors
     ///
-    /// Returns [`BundleContractErrorV1::EncodingFailed`] when the manifest
-    /// cannot be canonically encoded.
+    /// Canonical encoding into an in-memory byte vector is infallible.
     pub fn manifest_bytes(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
-        encode_archive_value(&manifest_value(&self.manifest))
+        Ok(encode_archive_value(&manifest_value(&self.manifest)))
     }
 
     /// Encode the complete immutable bundle as canonical public archive bytes.
@@ -565,13 +564,12 @@ impl ConformanceBundleV1 {
     ///
     /// # Errors
     ///
-    /// Returns a closed error when validation, selected hard caps, or canonical
-    /// encoding fails.
+    /// Returns a closed error when validation or selected hard caps fail.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
         self.validate().and_then(|()| {
             let value = bundle_value(self);
-            encode_archive_value(&value)
-                .and_then(|bytes| validate_archive_caps(self, &value, bytes.len()).map(|()| bytes))
+            let bytes = encode_archive_value(&value);
+            validate_archive_caps(self, &value, bytes.len()).map(|()| bytes)
         })
     }
 
@@ -594,8 +592,7 @@ impl ConformanceBundleV1 {
         let archive: (Value, Value, Value, Vec<Value>, Value, Value) =
             ciborium::from_reader(Cursor::new(bytes))
                 .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-        let canonical_bytes = encode_archive_value(&archive)
-            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let canonical_bytes = encode_archive_value(&archive);
         if canonical_bytes.as_slice() != bytes {
             return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
@@ -649,7 +646,7 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     let archive: (Value, Value, Value, Vec<Value>, Value, Value) =
         ciborium::from_reader(Cursor::new(bytes))
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-    if encode_archive_value(&archive)?.as_slice() != bytes {
+    if encode_archive_value(&archive).as_slice() != bytes {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
     let (magic, version, manifest_value, members, public_key, signature) = archive;
@@ -682,20 +679,19 @@ fn independent_verify_signature(
     public_key: &Value,
     signature: &Value,
 ) -> Result<(), BundleContractErrorV1> {
-    encode_archive_value(manifest).and_then(|manifest_bytes| {
-        independent_digest::<32>(public_key).and_then(|public_key| {
-            independent_digest::<64>(signature).and_then(|signature| {
-                ed25519_dalek::VerifyingKey::from_bytes(&public_key)
-                    .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                    .and_then(|verifying_key| {
-                        verifying_key
-                            .verify(
-                                &manifest_bytes,
-                                &ed25519_dalek::Signature::from_bytes(&signature),
-                            )
-                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                    })
-            })
+    let manifest_bytes = encode_archive_value(manifest);
+    independent_digest::<32>(public_key).and_then(|public_key| {
+        independent_digest::<64>(signature).and_then(|signature| {
+            ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                .and_then(|verifying_key| {
+                    verifying_key
+                        .verify(
+                            &manifest_bytes,
+                            &ed25519_dalek::Signature::from_bytes(&signature),
+                        )
+                        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                })
         })
     })
 }
@@ -859,7 +855,7 @@ fn independent_expected_result_bytes(value: &Value) -> Result<Vec<u8>, BundleCon
             }
             Ok(bytes.to_vec())
         }
-        1 | 2 => encode_archive_value(value),
+        1 | 2 => Ok(encode_archive_value(value)),
         _ => Err(BundleContractErrorV1::ExpectedResultMismatch),
     }
 }
@@ -1250,11 +1246,10 @@ fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
     ])
 }
 
-fn encode_archive_value<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, BundleContractErrorV1> {
+fn encode_archive_value<T: serde::Serialize>(value: &T) -> Vec<u8> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map(|()| bytes)
-        .map_err(|_| BundleContractErrorV1::EncodingFailed)
+    let _ = ciborium::into_writer(value, &mut bytes);
+    bytes
 }
 
 fn validate_archive_length(length: usize) -> Result<(), BundleContractErrorV1> {
@@ -1596,7 +1591,7 @@ fn independent_archive_caps(
 ) -> Result<IndependentArchiveCaps, BundleContractErrorV1> {
     let profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    if encode_archive_value(&profile)?.as_slice() != profile_bytes {
+    if encode_archive_value(&profile).as_slice() != profile_bytes {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     let fields =
@@ -2788,6 +2783,15 @@ const fn claim_layer_code(layer: ClaimLayerV1) -> u8 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    fn encode_archive_value<T: serde::Serialize>(
+        value: &T,
+    ) -> Result<Vec<u8>, BundleContractErrorV1> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)
+            .map(|()| bytes)
+            .map_err(|_| BundleContractErrorV1::EncodingFailed)
+    }
     use crate::{
         CapabilityPolicyV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureBoundsV1,
         FixtureDescriptorV1, FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1,
