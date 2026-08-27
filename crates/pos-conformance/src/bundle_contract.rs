@@ -6666,15 +6666,9 @@ mod instrumented_public_entrypoints {
         Ok(())
     }
 
-    #[test]
-    fn remaining_independent_contract_regions_are_exercised(
+    fn exercise_independent_expected_result_regions(
+        profile_value: &Value,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let profile = tests::profile();
-        let profile_value = profile_value(&profile)?;
-        let bundle = signed_draft_bundle()?;
-        let encoded_bundle = bundle_value(&bundle);
-        let records = independent_records(&encoded_bundle)?;
-
         assert!(independent_verify_expected_results(
             &[],
             &[],
@@ -6729,7 +6723,38 @@ mod instrumented_public_entrypoints {
             )
             .is_err());
         }
+        for value in [
+            Value::Null,
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![Value::Null; 5]),
+        ] {
+            assert!(independent_expected_result_bytes(&value).is_err());
+        }
+        for value in [
+            Value::Array(vec![
+                Value::Integer(0_u64.into()),
+                Value::Null,
+                Value::Bytes(vec![0; 32]),
+                Value::Null,
+                Value::Null,
+            ]),
+            Value::Array(vec![
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![1]),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ]),
+        ] {
+            assert!(independent_expected_result_bytes(&value).is_err());
+        }
+        Ok(())
+    }
 
+    fn exercise_independent_fixture_input_regions(
+        profile_value: &Value,
+        records: &[IndependentMember<'_>],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for field in [0, 2, 3, 7] {
             let mut malformed_inputs = profile_value.clone();
             if let Value::Array(fields) = &mut malformed_inputs {
@@ -6742,7 +6767,7 @@ mod instrumented_public_entrypoints {
                 fixture[field] = Value::Null;
             }
             assert!(independent_verify_fixture_inputs(
-                &records,
+                records,
                 &malformed_inputs,
                 BundleModeV1::Local.code(),
             )
@@ -6766,14 +6791,14 @@ mod instrumented_public_entrypoints {
                 input[field] = Value::Null;
             }
             assert!(independent_verify_fixture_inputs(
-                &records,
+                records,
                 &malformed_input,
                 BundleModeV1::Local.code(),
             )
             .is_err());
         }
         assert!(independent_verify_fixture_inputs(
-            &records,
+            records,
             &Value::Null,
             BundleModeV1::Local.code(),
         )
@@ -6783,52 +6808,24 @@ mod instrumented_public_entrypoints {
             fields[8] = Value::Null;
         }
         assert!(independent_verify_fixture_inputs(
-            &records,
+            records,
             &missing_fixture_array,
             BundleModeV1::Local.code(),
         )
         .is_err());
+        Ok(())
+    }
 
-        for value in [
-            Value::Null,
-            Value::Array(vec![Value::Null]),
-            Value::Array(vec![
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-            ]),
-        ] {
-            assert!(independent_expected_result_bytes(&value).is_err());
-        }
-        for value in [
-            Value::Array(vec![
-                Value::Integer(0_u64.into()),
-                Value::Null,
-                Value::Bytes(vec![0; 32]),
-                Value::Null,
-                Value::Null,
-            ]),
-            Value::Array(vec![
-                Value::Integer(0_u64.into()),
-                Value::Bytes(vec![1]),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-            ]),
-        ] {
-            assert!(independent_expected_result_bytes(&value).is_err());
-        }
-
+    fn exercise_independent_support_regions(
+        profile_value: &Value,
+        records: &[IndependentMember<'_>],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         assert!(independent_verify_supporting_members(&[], &Value::Null).is_err());
         let mut missing_support_fixtures = profile_value.clone();
         if let Value::Array(fields) = &mut missing_support_fixtures {
             fields[8] = Value::Null;
         }
-        assert!(
-            independent_verify_supporting_members(&records, &missing_support_fixtures).is_err()
-        );
+        assert!(independent_verify_supporting_members(records, &missing_support_fixtures).is_err());
         for role in [
             BundleMemberRoleV1::NormativeSpecification,
             BundleMemberRoleV1::Schema,
@@ -6838,7 +6835,7 @@ mod instrumented_public_entrypoints {
             BundleMemberRoleV1::Provenance,
             BundleMemberRoleV1::Limitations,
         ] {
-            let fields = independent_array(&profile_value, 17)?;
+            let fields = independent_array(profile_value, 17)?;
             let fixtures = independent_array_bounded(&fields[8])?;
             assert!(!independent_support_digests(fields, fixtures, role)?.is_empty());
         }
@@ -6847,7 +6844,7 @@ mod instrumented_public_entrypoints {
             fields[5] = Value::Null;
         }
         assert!(
-            independent_verify_supporting_members(&records, &malformed_support_profile).is_err()
+            independent_verify_supporting_members(records, &malformed_support_profile).is_err()
         );
         for role in [
             BundleMemberRoleV1::Licence,
@@ -6870,19 +6867,24 @@ mod instrumented_public_entrypoints {
             let fixtures = independent_array_bounded(&fields[8])?;
             assert!(independent_support_digests(fields, fixtures, role).is_err());
         }
-
         Ok(())
     }
 
     #[test]
-    fn remaining_archive_and_authority_regions_are_exercised(
+    fn remaining_independent_contract_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = tests::profile();
         let profile_value = profile_value(&profile)?;
         let bundle = signed_draft_bundle()?;
         let encoded_bundle = bundle_value(&bundle);
         let records = independent_records(&encoded_bundle)?;
+        exercise_independent_expected_result_regions(&profile_value)?;
+        exercise_independent_fixture_input_regions(&profile_value, &records)?;
+        exercise_independent_support_regions(&profile_value, &records)?;
+        Ok(())
+    }
 
+    fn exercise_archive_preflight_regions() -> Result<(), Box<dyn std::error::Error>> {
         assert!(archive_preflight::scan(&[0x98]).is_err());
         assert!(archive_preflight::scan(&[0x86]).is_err());
         assert!(archive_preflight::scan(&[0x86, 0x18]).is_err());
@@ -6947,11 +6949,16 @@ mod instrumented_public_entrypoints {
         for value in [Value::Null, Value::Integer(99_u64.into())] {
             let mut invalid_manifest = empty_manifest();
             if let Value::Array(fields) = &mut invalid_manifest {
-                fields[0] = value.clone();
+                fields[0] = value;
             }
             assert!(decode_manifest(&invalid_manifest).is_err());
         }
+        Ok(())
+    }
 
+    fn exercise_archive_profile_regions(
+        bundle: &ConformanceBundleV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut missing_profile = bundle.clone();
         missing_profile
             .members
@@ -6971,7 +6978,21 @@ mod instrumented_public_entrypoints {
             validate_archive_caps(&invalid_profile, &Value::Null, 0),
             Err(BundleContractErrorV1::ProfileInvalid)
         );
+        Ok(())
+    }
 
+    fn exercise_authority_valid_regions(
+        profile: &ConformanceProfileV1,
+        bundle: &ConformanceBundleV1,
+        inventory_json: &JsonValue,
+        matrix_json: &JsonValue,
+        provenance_json: &JsonValue,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(validate_authority_members(profile, &bundle.members), Ok(()));
+        assert_eq!(
+            validate_provenance_authority_binding(provenance_json),
+            Ok(())
+        );
         let inventory = bundle
             .members
             .iter()
@@ -6982,32 +7003,16 @@ mod instrumented_public_entrypoints {
             .iter()
             .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
             .ok_or("missing matrix")?;
-        let provenance = bundle
-            .members
-            .iter()
-            .find(|member| member.role == BundleMemberRoleV1::Provenance)
-            .ok_or("missing provenance")?;
-        let inventory_json: JsonValue = serde_json::from_slice(&inventory.bytes)?;
-        let matrix_json: JsonValue = serde_json::from_slice(&matrix.bytes)?;
-        let provenance_json: JsonValue = serde_json::from_slice(&provenance.bytes)?;
         assert_eq!(
-            validate_authority_members(&profile, &bundle.members),
+            validate_authority_inventory_digest(provenance_json, &inventory.bytes),
             Ok(())
         );
         assert_eq!(
-            validate_provenance_authority_binding(&provenance_json),
+            validate_matrix_provenance_digest(provenance_json, &matrix.bytes),
             Ok(())
         );
-        assert_eq!(
-            validate_authority_inventory_digest(&provenance_json, &inventory.bytes),
-            Ok(())
-        );
-        assert_eq!(
-            validate_matrix_provenance_digest(&provenance_json, &matrix.bytes),
-            Ok(())
-        );
-        assert_eq!(validate_authority_inventory(&inventory_json), Ok(()));
-        assert_eq!(validate_execution_matrix(&matrix_json), Ok(()));
+        assert_eq!(validate_authority_inventory(inventory_json), Ok(()));
+        assert_eq!(validate_execution_matrix(matrix_json), Ok(()));
         let rows = matrix_json
             .get("rows")
             .and_then(JsonValue::as_array)
@@ -7023,7 +7028,7 @@ mod instrumented_public_entrypoints {
         let mut no_provenance = bundle.members.clone();
         no_provenance.retain(|member| member.role != BundleMemberRoleV1::Provenance);
         assert_eq!(
-            validate_authority_members(&profile, &no_provenance),
+            validate_authority_members(profile, &no_provenance),
             Err(BundleContractErrorV1::MemberMissing)
         );
         for role in [
@@ -7038,11 +7043,20 @@ mod instrumented_public_entrypoints {
                 .ok_or("missing authority member")?
                 .bytes = b"[".to_vec();
             assert_eq!(
-                validate_authority_members(&profile, &malformed),
+                validate_authority_members(profile, &malformed),
                 Err(BundleContractErrorV1::MemberDigestMismatch)
             );
         }
+        Ok(())
+    }
 
+    fn exercise_authority_json_guard_regions(
+        inventory_json: &JsonValue,
+        matrix_json: &JsonValue,
+        provenance_json: &JsonValue,
+        inventory_bytes: &[u8],
+        matrix_bytes: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut invalid_provenance = provenance_json.clone();
         invalid_provenance["authority_inventory"]["path"] = JsonValue::String("wrong".to_owned());
         assert!(validate_provenance_authority_binding(&invalid_provenance).is_err());
@@ -7050,13 +7064,13 @@ mod instrumented_public_entrypoints {
         invalid_inventory_digest["authority_inventory"]["sha256_digest"] =
             JsonValue::String("00".repeat(32));
         assert!(
-            validate_authority_inventory_digest(&invalid_inventory_digest, &inventory.bytes)
+            validate_authority_inventory_digest(&invalid_inventory_digest, inventory_bytes)
                 .is_err()
         );
         let mut invalid_matrix_digest = provenance_json.clone();
         invalid_matrix_digest["adr_059_execution_matrix"]["blake3_digest"] =
             JsonValue::String("00".repeat(32));
-        assert!(validate_matrix_provenance_digest(&invalid_matrix_digest, &matrix.bytes).is_err());
+        assert!(validate_matrix_provenance_digest(&invalid_matrix_digest, matrix_bytes).is_err());
 
         for field in ["magic", "version", "digest_algorithm"] {
             let mut invalid = inventory_json.clone();
@@ -7094,11 +7108,15 @@ mod instrumented_public_entrypoints {
                 | "variant_count"
                 | "mode_count"
                 | "case_count"
-                | "executed_case_count" => JsonValue::Number(1.into()),
+                | "executed_case_count" => JsonValue::Number(2.into()),
                 _ => JsonValue::String("wrong".to_owned()),
             };
             assert!(validate_execution_matrix(&invalid).is_err());
         }
+        let rows = matrix_json
+            .get("rows")
+            .and_then(JsonValue::as_array)
+            .ok_or("missing rows")?;
         let mut missing_rows = matrix_json.clone();
         missing_rows["rows"] = JsonValue::Null;
         assert!(validate_execution_matrix(&missing_rows).is_err());
@@ -7114,6 +7132,15 @@ mod instrumented_public_entrypoints {
             "z".repeat(64)
         ))
         .is_err());
+        Ok(())
+    }
+
+    fn exercise_authority_independent_regions(
+        profile_value: &Value,
+        records: &[IndependentMember<'_>],
+        bundle: &ConformanceBundleV1,
+        inventory_bytes: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         assert!(independent_verify_profile(b"not cbor", 0, &Value::Bytes(vec![0; 32])).is_err());
         assert!(independent_verify_profile(
             &encode_archive_value(&Value::Array(Vec::new()))?,
@@ -7125,17 +7152,69 @@ mod instrumented_public_entrypoints {
         let mut tied_payloads = bundle.clone();
         tied_payloads.members.push(BundleMemberV1::authority(
             AUTHORITY_INVENTORY_MEMBER_PATH,
-            inventory.bytes.clone(),
+            inventory_bytes.to_vec(),
             BundleMemberRoleV1::AuthorityInventory,
         ));
         let payloads = bundle_pair_payloads(&tied_payloads);
         assert!(payloads.windows(2).any(|pair| pair[0] == pair[1]));
         assert!(!records.is_empty());
-        let mut no_matrix_binding = profile_value;
+        let mut no_matrix_binding = profile_value.clone();
         if let Value::Array(fields) = &mut no_matrix_binding {
             fields[2] = Value::Null;
         }
-        assert!(independent_verify_authority_members(&records, &no_matrix_binding).is_err());
+        assert!(independent_verify_authority_members(records, &no_matrix_binding).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_archive_and_authority_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let profile_value = profile_value(&profile)?;
+        let bundle = signed_draft_bundle()?;
+        let encoded_bundle = bundle_value(&bundle);
+        let records = independent_records(&encoded_bundle)?;
+        exercise_archive_preflight_regions()?;
+        exercise_archive_profile_regions(&bundle)?;
+
+        let inventory = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
+            .ok_or("missing inventory")?;
+        let matrix = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix")?;
+        let provenance = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance")?;
+        let inventory_json: JsonValue = serde_json::from_slice(&inventory.bytes)?;
+        let matrix_json: JsonValue = serde_json::from_slice(&matrix.bytes)?;
+        let provenance_json: JsonValue = serde_json::from_slice(&provenance.bytes)?;
+        exercise_authority_valid_regions(
+            &profile,
+            &bundle,
+            &inventory_json,
+            &matrix_json,
+            &provenance_json,
+        )?;
+        exercise_authority_json_guard_regions(
+            &inventory_json,
+            &matrix_json,
+            &provenance_json,
+            &inventory.bytes,
+            &matrix.bytes,
+        )?;
+        exercise_authority_independent_regions(
+            &profile_value,
+            &records,
+            &bundle,
+            &inventory.bytes,
+        )?;
         Ok(())
     }
 }
