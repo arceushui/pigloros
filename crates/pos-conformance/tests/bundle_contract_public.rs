@@ -713,6 +713,26 @@ fn public_verifier_rejects_directory_input() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn public_verifier_rejects_missing_or_invalid_archive() -> Result<(), Box<dyn std::error::Error>> {
+    let verifier_binary = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
+        .ok_or("verifier binary path is unavailable")?;
+    assert!(!Command::new(&verifier_binary).status()?.success());
+
+    let path = std::env::temp_dir().join(format!(
+        "pigloros-invalid-public-cfb1-{}-{}.cbor",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    fs::write(&path, [0x9f, 0xff])?;
+    let status = Command::new(&verifier_binary).arg(&path).status()?;
+    fs::remove_file(path)?;
+    assert!(!status.success());
+    Ok(())
+}
+
+#[test]
 fn public_draft_archive_round_trip_and_independent_verification(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);

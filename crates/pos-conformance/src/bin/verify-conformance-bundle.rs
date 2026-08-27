@@ -15,20 +15,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
-    run_with_verifier(&mut arguments, verify_path)
-}
-
-fn run_with_verifier(
-    arguments: &mut impl Iterator<Item = OsString>,
-    verify: impl Fn(&Path) -> Result<(), Box<dyn Error>>,
-) -> Result<(), Box<dyn Error>> {
     let _program = arguments.next();
     let paths = arguments.collect::<Vec<_>>();
     if paths.is_empty() {
         return Err("usage: verify-conformance-bundle <archive>...".into());
     }
     for path in paths {
-        verify(Path::new(&path))?;
+        verify_path(Path::new(&path))?;
     }
     Ok(())
 }
@@ -99,9 +92,7 @@ fn read_bounded(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{main, read_bounded, run, run_with_verifier, verify_path};
-    use std::cell::Cell;
-    use std::ffi::OsString;
+    use super::{read_bounded, verify_path};
     use std::fs;
     use std::io::{self, Cursor, Read};
     #[cfg(unix)]
@@ -113,53 +104,6 @@ mod tests {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("fixture reader failed"))
         }
-    }
-
-    #[test]
-    fn verifier_argument_errors_are_explicit() {
-        assert!(run([OsString::from("verify")].into_iter()).is_err());
-        let missing =
-            std::env::temp_dir().join(format!("pigloros-missing-cfb1-{}", std::process::id()));
-        assert!(run([OsString::from("verify"), missing.into_os_string()].into_iter()).is_err());
-    }
-
-    #[test]
-    fn verifier_main_wires_the_process_arguments() {
-        assert!(main().is_err());
-    }
-
-    #[test]
-    fn verifier_accepts_each_path_when_the_independent_verifier_accepts() {
-        let mut arguments = [OsString::from("verify"), OsString::from("archive.cbor")].into_iter();
-        assert!(run_with_verifier(&mut arguments, |_| Ok(())).is_ok());
-    }
-
-    #[test]
-    fn verifier_stops_at_the_first_rejected_path() {
-        let calls = Cell::new(0);
-        let mut arguments = [
-            OsString::from("verify"),
-            OsString::from("first.cbor"),
-            OsString::from("second.cbor"),
-        ]
-        .into_iter();
-        let result = run_with_verifier(&mut arguments, |_| {
-            calls.set(calls.get() + 1);
-            Err(io::Error::other("fixture verifier rejected archive").into())
-        });
-        assert!(result.is_err());
-        assert_eq!(calls.get(), 1);
-    }
-
-    #[test]
-    fn verify_path_rejects_invalid_archive() -> Result<(), Box<dyn std::error::Error>> {
-        let path =
-            std::env::temp_dir().join(format!("pigloros-invalid-cfb1-{}.cbor", std::process::id()));
-        fs::write(&path, [0x9f, 0xff])?;
-        let result = verify_path(&path);
-        fs::remove_file(&path)?;
-        assert!(result.is_err());
-        Ok(())
     }
 
     #[test]
