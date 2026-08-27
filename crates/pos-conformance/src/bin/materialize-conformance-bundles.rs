@@ -1645,6 +1645,35 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_profile_matrix_binding_predicates_fail_closed() -> Result<(), Box<dyn Error>> {
+        let record: JsonValue =
+            serde_json::from_slice(profile_record_bytes(ClaimLayerV1::KnowledgeNonInterference))?;
+        for (field, replacement) in [
+            (
+                "adr_059_execution_matrix",
+                JsonValue::String("wrong".to_owned()),
+            ),
+            (
+                "adr_059_execution_matrix_status",
+                JsonValue::String("wrong".to_owned()),
+            ),
+            (
+                "adr_059_execution_matrix_blake3_digest",
+                JsonValue::String("00".repeat(32)),
+            ),
+        ] {
+            let mut invalid_record = record.clone();
+            invalid_record[field] = replacement;
+            assert!(validate_profile_record_bindings(
+                ClaimLayerV1::KnowledgeNonInterference,
+                &invalid_record,
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn canonical_record_required_fields_reject_missing_values() -> Result<(), Box<dyn Error>> {
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
