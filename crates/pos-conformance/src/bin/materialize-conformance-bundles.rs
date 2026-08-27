@@ -2107,6 +2107,20 @@ mod tests {
             ),
             None,
         );
+        for (input_path, expected_path) in [
+            ("inputs/", "expected/artifact-integrity/positive.json"),
+            ("inputs/artifact-integrity/positive.json", "expected/"),
+            (
+                "inputs/artifact-integrity/.json",
+                "expected/artifact-integrity/.json",
+            ),
+            (
+                "inputs/artifact-integrity/positive.json",
+                "wrong/artifact-integrity/positive.json",
+            ),
+        ] {
+            assert_eq!(family_for_path(input_path, expected_path), None);
+        }
     }
 
     fn materialized_output_paths_are_fail_closed() -> Result<(), Box<dyn Error>> {
