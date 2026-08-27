@@ -2885,11 +2885,10 @@ impl SqliteStore {
         registry
             .validate()
             .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        if let Some(previous) = self.load_key_registry()? {
-            previous
-                .validate_replacement(registry)
-                .map_err(|error| CoreError::Serialization(error.to_string()))?;
-        }
+        self.load_key_registry()?
+            .unwrap_or_default()
+            .validate_replacement(registry)
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
         #[cfg(not(test))]
         let mut state_cbor = Vec::new();
         #[cfg(test)]
@@ -9517,6 +9516,40 @@ mod tests {
             ),
             Err(CoreError::TimelineNotFound(_))
         ));
+    }
+
+    #[test]
+    fn sqlite_key_registry_rejects_non_live_initial_snapshots() {
+        let mut registry = KeyRegistryStateV1::new();
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = Hash::from_bytes([3; 32]);
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                material_digest,
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        let request =
+            KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([5; 32]));
+        registry.begin_key_destruction(request).test_ok();
+
+        let mut store = new_store();
+        assert!(matches!(
+            store.save_key_registry(&registry),
+            Err(CoreError::Serialization(_))
+        ));
+        assert!(store.load_key_registry().test_ok().is_none());
+
+        registry
+            .complete_key_destruction(request, pos_core::deletion_receipt(&request))
+            .test_ok();
+        let mut destroyed_store = new_store();
+        assert!(matches!(
+            destroyed_store.save_key_registry(&registry),
+            Err(CoreError::Serialization(_))
+        ));
+        assert!(destroyed_store.load_key_registry().test_ok().is_none());
     }
 
     #[test]

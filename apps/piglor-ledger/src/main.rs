@@ -177,13 +177,14 @@ mod tests {
         .test_ok()?;
 
         let pubkey_hex = derive_pubkey_hex(&key_path)?;
+        let trust_anchor = format!("piglor-ledger/2/1={pubkey_hex}");
         run(&[
             "piglor-ledger".into(),
             "verify".into(),
             "--source".into(),
             format!("store:{}", store_db.display()),
             "--pubkey".into(),
-            pubkey_hex.clone(),
+            trust_anchor,
         ])
         .test_ok()?;
 

@@ -230,7 +230,7 @@ pub struct KeyTombstoneV1 {
     pub destroyed_material_digest: Hash,
     /// Digest binding the destruction request to this tombstone.
     pub destruction_digest: Hash,
-    /// Adapter receipt proving that owned private material was deleted.
+    /// Request-bound lifecycle receipt retained with this tombstone.
     pub deletion_receipt: Hash,
 }
 
@@ -262,12 +262,10 @@ impl KeyDestructionRequestV1 {
     }
 }
 
-/// Derive the receipt value an owned-material adapter must return after
-/// deletion.
+/// Derive the deterministic lifecycle receipt bound to a destruction request.
 ///
-/// The receipt is an opaque, request-bound acknowledgement; the
-/// adapter remains responsible for ensuring that the deletion it acknowledges
-/// is durable in its own boundary.
+/// This receipt binds the registry transition to its request. It is not
+/// evidence that an adapter durably deleted owned private material.
 #[must_use]
 pub fn deletion_receipt(request: &KeyDestructionRequestV1) -> Hash {
     let mut hasher = blake3::Hasher::new();
@@ -642,7 +640,9 @@ impl KeyRegistryStateV1 {
             if self.records.contains_key(identity) {
                 continue;
             }
-            if next.tombstones.contains_key(identity) {
+            if next.tombstones.contains_key(identity)
+                || next.pending_destructions.contains_key(identity)
+            {
                 return Err(KeyRegistryErrorV1::InvalidState);
             }
             if self
@@ -1723,6 +1723,20 @@ mod tests {
         );
         assert_eq!(
             live.validate_replacement(&direct_tombstone),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+
+        let mut pending_initial_snapshot = live.clone();
+        pending_initial_snapshot.begin_key_destruction(direct_request)?;
+        assert_eq!(
+            KeyRegistryStateV1::new().validate_replacement(&pending_initial_snapshot),
+            Err(KeyRegistryErrorV1::InvalidState)
+        );
+        let mut destroyed_initial_snapshot = pending_initial_snapshot.clone();
+        destroyed_initial_snapshot
+            .complete_key_destruction(direct_request, deletion_receipt(&direct_request))?;
+        assert_eq!(
+            KeyRegistryStateV1::new().validate_replacement(&destroyed_initial_snapshot),
             Err(KeyRegistryErrorV1::InvalidState)
         );
         Ok(())

@@ -58,9 +58,8 @@ impl std::fmt::Display for VerifyReport {
 /// If `manifest_path` is provided (TOML tier), the recomputed hashes are
 /// compared against that manifest. For the store tier, the persisted registry
 /// resolves each event identity. Store verification requires `pubkey_hex` as
-/// an external trust anchor. A single bare key is accepted only when all
-/// events use one identity; rotated ledgers must provide explicit
-/// `owner/role-code/epoch=hex` anchors for every identity.
+/// an external trust anchor. Each anchor must use the explicit
+/// `owner/role-code/epoch=hex` format.
 ///
 /// # Errors
 /// Returns [`CliError`] on adapter failure. Verification *failures* are
@@ -196,24 +195,6 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
         ));
     }
     let n = events.len();
-    let identities: std::collections::BTreeSet<KeyIdentityV1> = events
-        .iter()
-        .filter_map(|event| event.signature_identity)
-        .collect();
-    if supplied_public_keys.len() == 1
-        && supplied_public_keys[0].identity.is_none()
-        && identities.len() > 1
-    {
-        return Ok(VerifyReport {
-            tier: "store".to_owned(),
-            n,
-            outcome: VerifyOutcome::Mismatch {
-                which: "trust-anchor".to_owned(),
-                reason: "rotated ledger requires owner/role/epoch keyed public-key trust anchors"
-                    .to_owned(),
-            },
-        });
-    }
     for event in &events {
         if let Some((which, reason)) =
             verify_store_event(event, Some(&supplied_public_keys), registry.as_ref())?
@@ -234,7 +215,7 @@ fn verify_store(db: &Path, pubkey_hex: Option<&str>) -> Result<VerifyReport, Cli
 
 #[derive(Clone, Copy)]
 struct TrustedPublicKey {
-    identity: Option<KeyIdentityV1>,
+    identity: KeyIdentityV1,
     public_key: pos_core::PublicKey,
 }
 
@@ -254,55 +235,47 @@ fn parse_supplied_public_keys(
     let Some(value) = pubkey_hex else {
         return Ok(None);
     };
-    let entries: Vec<&str> = value.split(',').collect();
-    let anchors = if entries.len() == 1 && !entries[0].contains('=') {
-        vec![TrustedPublicKey {
-            identity: None,
-            public_key: parse_public_key_hex(entries[0])?,
-        }]
-    } else {
-        entries
-            .into_iter()
-            .map(|entry| {
-                let (identity, public_key) = entry.split_once('=').ok_or_else(|| {
-                    CliError::BadKey(
-                        "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
-                    )
-                })?;
-                let mut identity_parts = identity.rsplitn(3, '/');
-                let epoch = identity_parts.next().unwrap_or_default();
-                let role = identity_parts.next().ok_or_else(|| {
-                    CliError::BadKey(
-                        "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
-                    )
-                })?;
-                let owner = identity_parts.next().ok_or_else(|| {
-                    CliError::BadKey(
-                        "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
-                    )
-                })?;
-                let owner_id = OwnerIdV1::new(owner.to_owned())
-                    .map_err(|_| CliError::BadKey("--pubkey owner is invalid".to_owned()))?;
-                let role_code = role
-                    .parse::<u8>()
-                    .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
-                let role = KeyRoleV1::from_code(role_code)
-                    .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
-                let epoch = epoch
-                    .parse::<u64>()
-                    .map_err(|_| CliError::BadKey("--pubkey epoch is invalid".to_owned()))?;
-                if epoch == 0 {
-                    return Err(CliError::BadKey(
-                        "--pubkey epoch must be greater than zero".to_owned(),
-                    ));
-                }
-                Ok(TrustedPublicKey {
-                    identity: Some(KeyIdentityV1::new(owner_id, role, epoch)),
-                    public_key: parse_public_key_hex(public_key)?,
-                })
+    let anchors = value
+        .split(',')
+        .map(|entry| {
+            let (identity, public_key) = entry.split_once('=').ok_or_else(|| {
+                CliError::BadKey(
+                    "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
+                )
+            })?;
+            let mut identity_parts = identity.rsplitn(3, '/');
+            let epoch = identity_parts.next().unwrap_or_default();
+            let role = identity_parts.next().ok_or_else(|| {
+                CliError::BadKey(
+                    "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
+                )
+            })?;
+            let owner = identity_parts.next().ok_or_else(|| {
+                CliError::BadKey(
+                    "--pubkey entries must use owner/role-code/epoch=hex format".to_owned(),
+                )
+            })?;
+            let owner_id = OwnerIdV1::new(owner.to_owned())
+                .map_err(|_| CliError::BadKey("--pubkey owner is invalid".to_owned()))?;
+            let role_code = role
+                .parse::<u8>()
+                .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
+            let role = KeyRoleV1::from_code(role_code)
+                .map_err(|_| CliError::BadKey("--pubkey role code is invalid".to_owned()))?;
+            let epoch = epoch
+                .parse::<u64>()
+                .map_err(|_| CliError::BadKey("--pubkey epoch is invalid".to_owned()))?;
+            if epoch == 0 {
+                return Err(CliError::BadKey(
+                    "--pubkey epoch must be greater than zero".to_owned(),
+                ));
+            }
+            Ok(TrustedPublicKey {
+                identity: KeyIdentityV1::new(owner_id, role, epoch),
+                public_key: parse_public_key_hex(public_key)?,
             })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(anchors))
 }
 
@@ -341,8 +314,7 @@ fn verify_store_event(
         .and_then(|record| record.public_verification_key);
     if let Some(supplied) = supplied_public_keys {
         let trusted = supplied.iter().any(|anchor| {
-            anchor.identity.is_none_or(|expected| expected == identity)
-                && Some(anchor.public_key) == registry_public_key
+            anchor.identity == identity && Some(anchor.public_key) == registry_public_key
         });
         if !trusted {
             return Ok(Some((
@@ -366,8 +338,8 @@ fn verify_store_event(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
-        run, verify_store_event, Source, TrustedPublicKey, VerifyOutcome, VerifyReport,
-        EVENT_TYPE_PREDICTION,
+        parse_supplied_public_keys, run, verify_store_event, Source, TrustedPublicKey,
+        VerifyOutcome, VerifyReport, EVENT_TYPE_PREDICTION,
     };
     use crate::cli::run as cli_run;
     use crate::hex::{hex_decode, nib};
@@ -383,6 +355,20 @@ mod tests {
             VerifyOutcome::Mismatch { which, reason } => Ok((which, reason)),
             VerifyOutcome::Ok => Err("expected Mismatch, got Ok".into()),
         }
+    }
+
+    fn ledger_trust_anchor(public_key: &str) -> String {
+        format!("piglor-ledger/2/1={public_key}")
+    }
+
+    #[test]
+    fn verify_store_requires_identity_qualified_trust_anchor(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let error = parse_supplied_public_keys(Some(&"aa".repeat(32))).test_err()?;
+        assert!(error
+            .to_string()
+            .contains("owner/role-code/epoch=hex format"));
+        Ok(())
     }
 
     fn run_store_event(
@@ -420,7 +406,22 @@ mod tests {
                 connection.execute("UPDATE events SET signature = zeroblob(64)", [])?;
             }
         }
-        let supplied_public_key = supplied_public_key.map(|key| crate::hex_encode(key.as_bytes()));
+        let supplied_public_key = supplied_public_key.map(|key| {
+            let identity = signature_identity.unwrap_or_else(|| {
+                pos_core::KeyIdentityV1::new(
+                    "ledger-owner",
+                    pos_core::KeyRoleV1::TimelineIntegritySigning,
+                    1,
+                )
+            });
+            format!(
+                "{}/{}/{}={}",
+                identity.owner_id.as_str(),
+                identity.role.code(),
+                identity.epoch,
+                crate::hex_encode(key.as_bytes())
+            )
+        });
         Ok(run(
             &Source::Store(db),
             supplied_public_key.as_deref(),
@@ -698,7 +699,8 @@ mod tests {
             "https://osf.io/example".into(),
         ])
         .test_ok()?;
-        let report = run(&Source::Store(db.clone()), Some(&pubkey), None).test_ok()?;
+        let trust_anchor = ledger_trust_anchor(&pubkey);
+        let report = run(&Source::Store(db.clone()), Some(&trust_anchor), None).test_ok()?;
         assert_eq!(report.tier, "store");
         assert_eq!(report.outcome, VerifyOutcome::Ok);
         assert!(report.n >= 1);
@@ -721,7 +723,8 @@ mod tests {
         .test_ok()?;
         let err = run(&Source::Store(db.clone()), None, None).test_err()?;
         assert!(err.to_string().contains("owner/role/epoch registry"));
-        let err = run(&Source::Store(db), Some(&"aa".repeat(32)), None).test_err()?;
+        let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
+        let err = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
         assert!(err.to_string().contains("owner/role/epoch registry"));
 
         Ok(())
@@ -742,7 +745,8 @@ mod tests {
             .test_ok()?;
         drop(store);
 
-        let error = run(&Source::Store(db), Some(&"aa".repeat(32)), None).test_err()?;
+        let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
+        let error = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
         assert!(error.to_string().contains("at least one ledger event"));
         Ok(())
     }
@@ -795,7 +799,8 @@ mod tests {
         let other_text = std::fs::read_to_string(&other_key).test_ok()?;
         let wrong_pubkey = crate::test_helpers::derive_pubkey_hex(other_text.trim());
 
-        let report = run(&Source::Store(db), Some(&wrong_pubkey), None).test_ok()?;
+        let trust_anchor = ledger_trust_anchor(&wrong_pubkey);
+        let report = run(&Source::Store(db), Some(&trust_anchor), None).test_ok()?;
         let (_which, reason) = expect_mismatch(report.outcome)?;
         // The persisted registry is authoritative before Ed25519 verification.
         assert!(
@@ -817,11 +822,16 @@ mod tests {
         })
         .test_ok()?;
         // Odd-length: fails before nib() is called (hex_decode returns early).
-        let err = run(&Source::Store(db.clone()), Some("not-hex"), None).test_err()?;
+        let err = run(
+            &Source::Store(db.clone()),
+            Some("piglor-ledger/2/1=not-hex"),
+            None,
+        )
+        .test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
 
         // Even-length with non-hex char: exercises the `_` error arm in nib().
-        let err2 = run(&Source::Store(db), Some("zz"), None).test_err()?;
+        let err2 = run(&Source::Store(db), Some("piglor-ledger/2/1=zz"), None).test_err()?;
         assert!(err2.to_string().contains("--pubkey"), "{err2}");
 
         Ok(())
@@ -837,8 +847,8 @@ mod tests {
             path: db.to_string_lossy().into_owned(),
         })
         .test_ok()?;
-        // "aabb" is valid hex (2 bytes) but not 32 bytes.
-        let err = run(&Source::Store(db), Some("aabb"), None).test_err()?;
+        // "aabb" is valid hex (2 bytes) but not a 32-byte key.
+        let err = run(&Source::Store(db), Some("piglor-ledger/2/1=aabb"), None).test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
 
         Ok(())
@@ -892,7 +902,7 @@ mod tests {
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         let supplied_public_keys = [TrustedPublicKey {
-            identity: Some(identity),
+            identity,
             public_key: invalid_key,
         }];
         let err = verify_store_event(&event, Some(&supplied_public_keys), Some(&invalid_registry))
@@ -915,7 +925,8 @@ mod tests {
             .save_key_registry(&pos_core::KeyRegistryStateV1::new())
             .test_ok()?;
         drop(store);
-        let err = run(&Source::Store(db), Some(&"0".repeat(64)), None).test_err()?;
+        let trust_anchor = ledger_trust_anchor(&"0".repeat(64));
+        let err = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
         assert!(err.to_string().contains("ledger"));
 
         Ok(())
@@ -927,8 +938,9 @@ mod tests {
         // Covers L180: `format!("open sqlite: {e}")` in verify_store.
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("no_such_dir").join("ledger.db");
-        // "a" * 64 is a valid 32-byte hex (all 0xaa bytes) to get past pubkey check.
-        let err = run(&Source::Store(bad_db), Some(&"a".repeat(64)), None).test_err()?;
+        // The explicit anchor carries a valid 32-byte key to reach store opening.
+        let trust_anchor = ledger_trust_anchor(&"a".repeat(64));
+        let err = run(&Source::Store(bad_db), Some(&trust_anchor), None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
 
         Ok(())
@@ -950,7 +962,8 @@ mod tests {
         )
         .test_ok()?;
 
-        let error = run(&Source::Store(db), Some(&"aa".repeat(32)), None).test_err()?;
+        let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
+        let error = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
         assert!(error.to_string().contains("serialization error"), "{error}");
         Ok(())
     }
@@ -962,8 +975,9 @@ mod tests {
         let tmp = TempDir::new().test_ok()?;
         let bad_db = tmp.path().join("corrupt.db");
         std::fs::write(&bad_db, b"not sqlite data at all\n").test_ok()?;
-        // Use a valid 32-byte pubkey (all 'aa') to get past the pubkey validation.
-        let err = run(&Source::Store(bad_db), Some(&"aa".repeat(32)), None);
+        // Use an explicit anchor with a valid 32-byte key to reach store opening.
+        let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
+        let err = run(&Source::Store(bad_db), Some(&trust_anchor), None);
         // Either open fails (L180) or list_timelines fails (L183).
         assert!(err.is_err(), "expected error for corrupted DB");
 
@@ -1150,7 +1164,8 @@ mod tests {
             .test_ok()?;
         drop(store);
 
-        let report = run(&Source::Store(db), Some(&pubkey), None).test_ok()?;
+        let trust_anchor = ledger_trust_anchor(&pubkey);
+        let report = run(&Source::Store(db), Some(&trust_anchor), None).test_ok()?;
         let (_which, reason) = expect_mismatch(report.outcome)?;
         assert!(reason.contains("unsigned"), "{reason}");
 
@@ -1210,7 +1225,8 @@ mod tests {
         drop(store);
 
         // verify_store should report the unknown event instead of silently accepting it.
-        let report = run(&Source::Store(db), Some(&pubkey), None).test_ok()?;
+        let trust_anchor = ledger_trust_anchor(&pubkey);
+        let report = run(&Source::Store(db), Some(&trust_anchor), None).test_ok()?;
         let (which, reason) = expect_mismatch(report.outcome)?;
         assert_eq!(which, "seq=1");
         assert!(reason.contains("unsupported event type"), "{reason}");
@@ -1392,7 +1408,8 @@ mod tests {
         content.extend_from_slice(&[0u8; 4078]);
         std::fs::write(&bad_db, content).test_ok()?;
         // Use a valid 32-byte pubkey hex (all 'aa').
-        let err = run(&Source::Store(bad_db), Some(&"aa".repeat(32)), None);
+        let trust_anchor = ledger_trust_anchor(&"aa".repeat(32));
+        let err = run(&Source::Store(bad_db), Some(&trust_anchor), None);
         // Either open or list_timelines fails — either is acceptable.
         assert!(err.is_err(), "expected error for corrupted DB");
 
@@ -1432,7 +1449,8 @@ mod tests {
             conn.execute("UPDATE timelines SET id = X'0102'", [])
                 .test_ok()?;
         }
-        let err = run(&Source::Store(db), Some(&pubkey), None).test_err()?;
+        let trust_anchor = ledger_trust_anchor(&pubkey);
+        let err = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
 
         Ok(())
@@ -1485,7 +1503,8 @@ mod tests {
             conn.execute("UPDATE events SET event_id = 'not-a-ulid'", [])
                 .test_ok()?;
         }
-        let err = run(&Source::Store(db), Some(&pubkey), None).test_err()?;
+        let trust_anchor = ledger_trust_anchor(&pubkey);
+        let err = run(&Source::Store(db), Some(&trust_anchor), None).test_err()?;
         assert!(!err.to_string().is_empty(), "{err}");
 
         Ok(())
@@ -1503,8 +1522,8 @@ mod tests {
             path: db.to_string_lossy().into_owned(),
         })
         .test_ok()?;
-        // "ag" = valid 'a' then invalid 'g' — triggers nib(l) error
-        let err = run(&Source::Store(db), Some("ag"), None).test_err()?;
+        // "ag" = valid 'a' then invalid 'g' — triggers nib(l) error.
+        let err = run(&Source::Store(db), Some("piglor-ledger/2/1=ag"), None).test_err()?;
         assert!(err.to_string().contains("--pubkey"), "{err}");
 
         Ok(())

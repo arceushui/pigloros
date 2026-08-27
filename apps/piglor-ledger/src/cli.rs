@@ -248,7 +248,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             output_stderr!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
             output_stderr!("  export --source toml:DIR|store:DB [--out FILE] [--today YYYY-MM-DD] [--pubkey HEX]");
             output_stderr!("  build  --source toml:DIR|store:DB --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
-            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX|ROLE/EPOCH=HEX,... (required trust anchor for store:)] [--manifest FILE]");
+            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey OWNER/ROLE-CODE/EPOCH=HEX,... (required trust anchor for store:)] [--manifest FILE]");
             Ok(())
         }
     }
