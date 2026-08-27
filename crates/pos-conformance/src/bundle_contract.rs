@@ -7482,6 +7482,72 @@ mod instrumented_public_entrypoints {
     }
 
     #[test]
+    fn independent_member_metadata_predicates_fail_closed() {
+        let digest = Value::Bytes(blake3::hash([1].as_slice()).as_bytes().to_vec());
+        let member = raw_record_member(
+            Value::Text("member".to_owned()),
+            Value::Bytes(vec![1]),
+            Value::Integer(BundleMemberRoleV1::Profile.code().into()),
+        );
+        let descriptor = |path, size, member_digest, role| {
+            raw_record_descriptor(
+                Value::Text(path.to_owned()),
+                Value::Integer(size.into()),
+                member_digest,
+                Value::Integer(role.into()),
+            )
+        };
+        assert_eq!(
+            independent_member_records(
+                std::slice::from_ref(&member),
+                &[descriptor(
+                    "other",
+                    1,
+                    digest.clone(),
+                    BundleMemberRoleV1::Profile.code()
+                )],
+            ),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            independent_member_records(
+                std::slice::from_ref(&member),
+                &[descriptor(
+                    "member",
+                    1,
+                    digest.clone(),
+                    BundleMemberRoleV1::FixtureInput.code(),
+                )],
+            ),
+            Err(BundleContractErrorV1::UndeclaredMember)
+        );
+        assert_eq!(
+            independent_member_records(
+                std::slice::from_ref(&member),
+                &[descriptor(
+                    "member",
+                    0,
+                    digest.clone(),
+                    BundleMemberRoleV1::Profile.code()
+                )],
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            independent_member_records(
+                std::slice::from_ref(&member),
+                &[descriptor(
+                    "member",
+                    1,
+                    Value::Bytes(vec![0; 32]),
+                    BundleMemberRoleV1::Profile.code(),
+                )],
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+    }
+
+    #[test]
     fn independent_expected_and_input_shape_errors_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = tests::profile();
