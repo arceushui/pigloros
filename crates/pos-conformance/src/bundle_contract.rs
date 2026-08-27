@@ -5569,13 +5569,12 @@ mod instrumented_public_entrypoints {
         }
         assert!(verify_archive_independently(&raw_archive(&[0x60], &exact_members)).is_err());
 
-        public_archive_rejects_malformed_member_container()?;
+        public_archive_rejects_malformed_member_container();
         public_archive_rejects_missing_profile(archive)?;
         Ok(())
     }
 
-    fn public_archive_rejects_malformed_member_container() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn public_archive_rejects_malformed_member_container() {
         let mut malformed = vec![0x86, 0x60, 0x01, 0x80, 0x81, 0x00, 0x58, 0x20];
         malformed.extend_from_slice(&[0; 32]);
         malformed.extend_from_slice(&[0x58, 0x40]);
@@ -5588,7 +5587,6 @@ mod instrumented_public_entrypoints {
             verify_archive_independently(&malformed),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
-        Ok(())
     }
 
     fn public_archive_rejects_missing_profile(
