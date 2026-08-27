@@ -44,7 +44,8 @@ jobs:
     name: diff mutation testing (shard ${{ matrix.shard }})
     needs: mutation-baseline
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The shell watchdog below exits with diagnostics before this outer limit.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -70,22 +71,39 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
-      # Four workers fit the hosted runner and shorten feedback without
-      # changing the mutant set or weakening the gate.
-       # Five minutes bounds a hung mutant without masking slow valid tests.
+      # changing the mutant set or weakening the gate. Build and test
+      # timeouts expose a single pathological mutant promptly.
       - name: Run mutants in changed lines
-        run: >
-          cargo mutants
-          --workspace
-          --all-features
-          --in-diff "${{ runner.temp }}/changes.diff"
-          --no-shuffle
-          --shard "${{ matrix.shard }}/4"
-          --baseline skip
-          --jobs 4
-          --timeout 300
-          --cap-lints true
-          --cargo-arg=--locked
+        run: |
+          set -euo pipefail
+          set +e
+          timeout --foreground 30m cargo mutants \
+            --workspace \
+            --all-features \
+            --in-diff "${{ runner.temp }}/changes.diff" \
+            --no-shuffle \
+            --shard "${{ matrix.shard }}/4" \
+            --baseline skip \
+            --jobs 4 \
+            --timeout 120 \
+            --build-timeout 120 \
+            --cap-lints true \
+            --cargo-arg=--locked
+          mutation_status=$?
+          set -e
+          if [[ "$mutation_status" -eq 124 ]]; then
+            echo "Mutation shard watchdog timed out after 30 minutes."
+            latest_log=""
+            if [[ -d mutants.out ]]; then
+              latest_log="$(find mutants.out -type f -name '*.log' -printf '%T@ %p\n' \
+                | sort -nr | head -n 1 | cut -d' ' -f2-)"
+            fi
+            if [[ -n "$latest_log" ]]; then
+              echo "Most recent mutant log: $latest_log"
+              tail -n 120 "$latest_log"
+            fi
+          fi
+          exit "$mutation_status"
       - name: Upload mutation report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
