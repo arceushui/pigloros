@@ -5783,9 +5783,9 @@ mod instrumented_public_entrypoints {
         ))?)
     }
 
-    fn independent_records<'a>(
-        value: &'a Value,
-    ) -> Result<Vec<IndependentMember<'a>>, BundleContractErrorV1> {
+    fn independent_records(
+        value: &Value,
+    ) -> Result<Vec<IndependentMember<'_>>, BundleContractErrorV1> {
         let fields = independent_array(value, 6)?;
         let manifest = independent_array(&fields[2], 6)?;
         let members = independent_array_bounded(&fields[3])?;
@@ -5833,7 +5833,6 @@ mod instrumented_public_entrypoints {
     #[test]
     fn remaining_archive_and_independent_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let profile = tests::profile();
         let bundle = signed_draft_bundle()?;
         let archive = bundle.to_canonical_cbor()?;
 
@@ -5846,7 +5845,7 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
 
-        let mut wide_integer = archive.clone();
+        let mut wide_integer = archive;
         wide_integer.remove(6);
         wide_integer.splice(6..6, [0x1b, 0, 0, 0, 0, 0, 0, 0, 1]);
         assert!(archive_preflight::scan(&wide_integer).is_ok());
@@ -5908,6 +5907,11 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn independent_member_order_error_region_is_exercised() {
         let member = Value::Array(vec![
             Value::Text("b".to_owned()),
             Value::Bytes(vec![1]),
@@ -5937,7 +5941,13 @@ mod instrumented_public_entrypoints {
             ),
             Err(BundleContractErrorV1::NonCanonicalOrder)
         ));
+    }
 
+    #[test]
+    fn independent_expected_result_error_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let bundle = signed_draft_bundle()?;
         let profile_value = profile_value(&profile)?;
         let value = bundle_value(&bundle);
         let records = independent_records(&value)?;
@@ -5998,6 +6008,11 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::MemberMissing)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn independent_expected_result_encoding_error_regions_are_exercised() {
         let canonical_result = Value::Array(vec![
             Value::Integer(0_u64.into()),
             Value::Bytes(vec![1]),
@@ -6030,7 +6045,16 @@ mod instrumented_public_entrypoints {
             independent_expected_result_bytes(&unknown_result),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
+    }
 
+    #[test]
+    fn independent_fixture_and_support_error_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let bundle = signed_draft_bundle()?;
+        let profile_value = profile_value(&profile)?;
+        let value = bundle_value(&bundle);
+        let records = independent_records(&value)?;
         let mut duplicate_input_profile = profile_value.clone();
         if let Value::Array(fields) = &mut duplicate_input_profile {
             let Value::Array(fixtures) = &mut fields[8] else {
@@ -6046,7 +6070,7 @@ mod instrumented_public_entrypoints {
         }
         assert_eq!(
             independent_verify_fixture_inputs(&[], &duplicate_input_profile, 0),
-            Err(BundleContractErrorV1::UndeclaredMember)
+            Err(BundleContractErrorV1::MemberMissing)
         );
 
         let input_index = records
@@ -6077,6 +6101,13 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::UndeclaredMember)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn independent_support_error_regions_are_exercised() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let profile_value = profile_value(&profile)?;
         for (role, fixture_replacement) in [
             (BundleMemberRoleV1::Schema, Value::Null),
             (BundleMemberRoleV1::Notice, Value::Null),
@@ -6124,6 +6155,16 @@ mod instrumented_public_entrypoints {
         )
         .is_ok());
 
+        Ok(())
+    }
+
+    #[test]
+    fn independent_authority_error_regions_are_exercised() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let profile = tests::profile();
+        let bundle = signed_draft_bundle()?;
+        let profile_value = profile_value(&profile)?;
+        let value = bundle_value(&bundle);
         for role in [
             BundleMemberRoleV1::AuthorityInventory,
             BundleMemberRoleV1::ExecutionMatrix,
@@ -6157,6 +6198,14 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::MemberMissing)
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn independent_authority_json_error_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let profile_value = profile_value(&profile)?;
         let mut no_matrix_binding = profile_value.clone();
         if let Value::Array(fields) = &mut no_matrix_binding {
             fields[2] = Value::Text("pigloros.w8.artifact-integrity.1.0.0".to_owned());
@@ -6236,6 +6285,14 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn direct_authority_and_matrix_error_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let bundle = signed_draft_bundle()?;
         let mut artifact_profile = tests::profile();
         artifact_profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
         artifact_profile.fixtures.retain(|fixture| {
@@ -6252,7 +6309,7 @@ mod instrumented_public_entrypoints {
             artifact_expected,
         )?
         .sign(&ed25519_dalek::SigningKey::from_bytes(&[42; 32]))?;
-        let mut stable_authority_members = artifact_bundle.members.clone();
+        let mut stable_authority_members = artifact_bundle.members;
         for member in &mut stable_authority_members {
             if matches!(
                 member.role,
@@ -6266,7 +6323,7 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::LifecycleInvalid)
         );
 
-        let mut missing_matrix = bundle.members.clone();
+        let mut missing_matrix = bundle.members;
         missing_matrix.retain(|member| member.role != BundleMemberRoleV1::ExecutionMatrix);
         assert_eq!(
             validate_authority_members(&profile, &missing_matrix),
@@ -6298,6 +6355,12 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn matrix_and_secret_error_regions_are_exercised() -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
         let matrix_bytes =
             include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
         let matrix: JsonValue = serde_json::from_slice(matrix_bytes)?;
