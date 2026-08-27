@@ -798,25 +798,29 @@ fn independent_verify_expected_results(
         ));
         let expected_mode = archive_u64(&expected[3])?;
         decode_bundle_mode(expected_mode)?;
-        let Some(fixture_value) = fixtures.iter().find(|fixture_value| {
+        let Some(fixture) = fixtures.iter().find_map(|fixture_value| {
             let Ok(fixture) = independent_array(fixture_value, 17) else {
-                return false;
+                return None;
             };
             let Ok(modes) = independent_array_bounded(&fixture[5]) else {
-                return false;
+                return None;
             };
-            expected_mode == bundle_mode
+            if expected_mode == bundle_mode
                 && archive_text(&fixture[0]).ok() == Some(case_id)
                 && archive_u64(&fixture[2]).ok() == Some(claim_layer_code)
                 && independent_digest::<32>(&fixture[3]).ok() == Some(execution_profile_digest)
                 && modes
                     .iter()
                     .any(|mode| archive_u64(mode).ok() == Some(bundle_mode))
+            {
+                Some(fixture)
+            } else {
+                None
+            }
         }) else {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         };
-        let expected_bytes =
-            independent_expected_result_bytes(&independent_array(fixture_value, 17)?[8])?;
+        let expected_bytes = independent_expected_result_bytes(&fixture[8])?;
         if path != independent_expected_member_path(case_id, claim_layer, &execution_profile_digest)
             || member.bytes != expected_bytes.as_slice()
         {
@@ -5564,6 +5568,52 @@ mod instrumented_public_entrypoints {
             exact_members.extend_from_slice(&[0x83, 0x60, 0x40, 0x00]);
         }
         assert!(verify_archive_independently(&raw_archive(&[0x60], &exact_members)).is_err());
+
+        let malformed_member = raw_archive(&[0x60], &[0x81, 0x00]);
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&malformed_member),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        assert_eq!(
+            verify_archive_independently(&malformed_member),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let mut missing_profile: ciborium::value::Value =
+            ciborium::from_reader(std::io::Cursor::new(archive))?;
+        let ciborium::value::Value::Array(fields) = &mut missing_profile else {
+            return Err("encoded bundle is not an array".into());
+        };
+        let ciborium::value::Value::Array(members) = &mut fields[3] else {
+            return Err("encoded members are not an array".into());
+        };
+        members.retain(|member| {
+            !matches!(
+                member,
+                ciborium::value::Value::Array(member_fields)
+                    if member_fields.first()
+                        == Some(&ciborium::value::Value::Text(PROFILE_MEMBER_PATH.to_owned()))
+            )
+        });
+        let ciborium::value::Value::Array(manifest) = &mut fields[2] else {
+            return Err("encoded manifest is not an array".into());
+        };
+        let ciborium::value::Value::Array(descriptors) = &mut manifest[4] else {
+            return Err("encoded descriptors are not an array".into());
+        };
+        descriptors.retain(|descriptor| {
+            !matches!(
+                descriptor,
+                ciborium::value::Value::Array(descriptor_fields)
+                    if descriptor_fields.first()
+                        == Some(&ciborium::value::Value::Text(PROFILE_MEMBER_PATH.to_owned()))
+            )
+        });
+        let missing_profile = encode_archive_value(&missing_profile)?;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&missing_profile),
+            Err(BundleContractErrorV1::MemberMissing)
+        );
         Ok(())
     }
 
@@ -7567,6 +7617,33 @@ mod instrumented_public_entrypoints {
                 "version" => JsonValue::Number(2.into()),
                 _ => JsonValue::String("wrong".to_owned()),
             };
+            let invalid_bytes = serde_json::to_vec(&invalid)?;
+            assert!(independent_verify_authority_members(
+                &raw_authority_members(inventory, &invalid_bytes, b"{}"),
+                &profile,
+            )
+            .is_err());
+        }
+        for (field, value) in [
+            ("magic", JsonValue::Null),
+            ("version", JsonValue::String("wrong".to_owned())),
+            ("digest_algorithm", JsonValue::Null),
+        ] {
+            let mut invalid: JsonValue = serde_json::from_slice(inventory)?;
+            invalid[field] = value;
+            let invalid_bytes = serde_json::to_vec(&invalid)?;
+            assert!(independent_verify_authority_members(
+                &raw_authority_members(&invalid_bytes, matrix, b"{}"),
+                &profile,
+            )
+            .is_err());
+        }
+        for (field, value) in [
+            ("magic", JsonValue::Null),
+            ("version", JsonValue::String("wrong".to_owned())),
+        ] {
+            let mut invalid: JsonValue = serde_json::from_slice(matrix)?;
+            invalid[field] = value;
             let invalid_bytes = serde_json::to_vec(&invalid)?;
             assert!(independent_verify_authority_members(
                 &raw_authority_members(inventory, &invalid_bytes, b"{}"),
