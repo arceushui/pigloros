@@ -2515,6 +2515,19 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
     if rows.len() != 12 || cases.len() != 192 {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
+    validate_execution_matrix_rows(rows)?;
+    validate_execution_matrix_cases(cases)?;
+    if !matrix_cases_are_open(cases) {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    let predicates = matrix
+        .get("equality_predicates")
+        .and_then(JsonValue::as_array)
+        .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
+    validate_execution_matrix_predicates(predicates)
+}
+
+fn validate_execution_matrix_rows(rows: &[JsonValue]) -> Result<(), BundleContractErrorV1> {
     for (index, row) in rows.iter().enumerate() {
         if !json_has_exact_keys(row, &EXECUTION_MATRIX_ROW_KEYS) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
@@ -2535,6 +2548,10 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
+    Ok(())
+}
+
+fn validate_execution_matrix_cases(cases: &[JsonValue]) -> Result<(), BundleContractErrorV1> {
     for (index, case) in cases.iter().enumerate() {
         let row_index = index / 16;
         let variant_index = (index % 16) / 4;
@@ -2561,13 +2578,12 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
-    if !matrix_cases_are_open(cases) {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    let predicates = matrix
-        .get("equality_predicates")
-        .and_then(JsonValue::as_array)
-        .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
+    Ok(())
+}
+
+fn validate_execution_matrix_predicates(
+    predicates: &[JsonValue],
+) -> Result<(), BundleContractErrorV1> {
     if predicates.len() != NON_INTERFERENCE_ROW_IDS.len() {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
@@ -3728,7 +3744,7 @@ mod tests {
         resign_archive(&mut invalid_fixture_archive)?;
         assert_independent_error(
             &invalid_fixture_archive,
-            BundleContractErrorV1::ExpectedResultMismatch,
+            BundleContractErrorV1::ProfileInvalid,
         )?;
 
         let mut invalid_modes = profile_value;
@@ -3751,7 +3767,7 @@ mod tests {
         resign_archive(&mut invalid_modes_archive)?;
         assert_independent_error(
             &invalid_modes_archive,
-            BundleContractErrorV1::ExpectedResultMismatch,
+            BundleContractErrorV1::ProfileInvalid,
         )?;
 
         let mut mismatched_path = valid.clone();

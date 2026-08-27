@@ -1811,8 +1811,9 @@ fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
     // Digest inputs are encoded directly into an in-memory Vec. `Value` is
     // always serializable and Vec does not report a recoverable write failure;
     // an impossible codec failure must abort rather than hash placeholder bytes.
-    ciborium::into_writer(value, &mut bytes)
-        .expect("canonical CBOR encoding into an in-memory Vec must succeed");
+    if let Err(error) = ciborium::into_writer(value, &mut bytes) {
+        panic!("canonical CBOR encoding into an in-memory Vec must succeed: {error}");
+    }
     let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
     source.push(0);
