@@ -797,31 +797,20 @@ fn independent_verify_expected_results(
         ));
         let expected_mode = archive_u64(&expected[3])?;
         decode_bundle_mode(expected_mode)?;
-        if expected_mode != bundle_mode
-            || !fixtures.iter().any(|fixture_value| {
-                let Ok(fixture) = independent_array(fixture_value, 17) else {
-                    return false;
-                };
-                let Ok(modes) = independent_array_bounded(&fixture[5]) else {
-                    return false;
-                };
-                archive_text(&fixture[0]).ok() == Some(case_id)
-                    && archive_u64(&fixture[2]).ok() == Some(claim_layer_code)
-                    && independent_digest::<32>(&fixture[3]).ok() == Some(execution_profile_digest)
-                    && modes
-                        .iter()
-                        .any(|mode| archive_u64(mode).ok() == Some(bundle_mode))
-            })
-        {
-            return Err(BundleContractErrorV1::ExpectedResultMismatch);
-        }
         let Some(fixture_value) = fixtures.iter().find(|fixture_value| {
             let Ok(fixture) = independent_array(fixture_value, 17) else {
                 return false;
             };
-            archive_text(&fixture[0]).ok() == Some(case_id)
+            let Ok(modes) = independent_array_bounded(&fixture[5]) else {
+                return false;
+            };
+            expected_mode == bundle_mode
+                && archive_text(&fixture[0]).ok() == Some(case_id)
                 && archive_u64(&fixture[2]).ok() == Some(claim_layer_code)
                 && independent_digest::<32>(&fixture[3]).ok() == Some(execution_profile_digest)
+                && modes
+                    .iter()
+                    .any(|mode| archive_u64(mode).ok() == Some(bundle_mode))
         }) else {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         };
@@ -995,9 +984,8 @@ fn independent_support_digests(
                 digests.insert(independent_digest::<32>(digest)?);
             }
             for fixture_value in fixtures {
-                digests.insert(independent_digest::<32>(
-                    &independent_array(fixture_value, 17)?[4],
-                )?);
+                let fixture = independent_array(fixture_value, 17)?;
+                digests.insert(independent_digest::<32>(&fixture[4])?);
             }
         }
         BundleMemberRoleV1::Licence => {
@@ -1011,20 +999,14 @@ fn independent_support_digests(
         }
         BundleMemberRoleV1::Notice => {
             for fixture_value in fixtures {
-                digests.insert(independent_digest::<32>(
-                    &independent_array(fixture_value, 17)?[15]
-                        .as_array()
-                        .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?[1],
-                )?);
+                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                digests.insert(independent_digest::<32>(&provenance[1])?);
             }
         }
         BundleMemberRoleV1::Sbom => {
             for fixture_value in fixtures {
-                digests.insert(independent_digest::<32>(
-                    &independent_array(fixture_value, 17)?[15]
-                        .as_array()
-                        .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?[2],
-                )?);
+                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                digests.insert(independent_digest::<32>(&provenance[2])?);
             }
         }
         BundleMemberRoleV1::Provenance => {
@@ -1039,9 +1021,8 @@ fn independent_support_digests(
         BundleMemberRoleV1::Limitations => {
             digests.insert(independent_digest::<32>(&profile_fields[13])?);
             for fixture_value in fixtures {
-                digests.insert(independent_digest::<32>(
-                    &independent_array(&independent_array(fixture_value, 17)?[15], 7)?[6],
-                )?);
+                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                digests.insert(independent_digest::<32>(&provenance[6])?);
             }
         }
         _ => {}
@@ -5885,7 +5866,7 @@ mod instrumented_public_entrypoints {
         ));
 
         let huge_member = vec![
-            0x86, 0x64, b'C', b'F', b'B', b'1', 0x01, 0xf6, 0x81, 0x83, 0x61, b'x', 0x1a, 0x04,
+            0x86, 0x64, b'C', b'F', b'B', b'1', 0x01, 0xf6, 0x81, 0x83, 0x61, b'x', 0x5a, 0x04,
             0x00, 0x00, 0x01,
         ];
         assert!(matches!(
@@ -5906,6 +5887,17 @@ mod instrumented_public_entrypoints {
             archive_preflight::scan(&invalid_simple),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         ));
+
+        let mut unlisted_expected_result = signed_draft_bundle()?;
+        let expected_member = unlisted_expected_result
+            .members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::ExpectedResult)
+            .ok_or("missing expected-result member")?;
+        expected_member.path = "expected/unlisted.bin".to_owned();
+        assert!(bundle_pair_payloads(&unlisted_expected_result)
+            .iter()
+            .any(|(identity, _, _)| identity == "expected/unlisted.bin"));
 
         Ok(())
     }
@@ -6069,8 +6061,8 @@ mod instrumented_public_entrypoints {
             inputs.push(inputs[0].clone());
         }
         assert_eq!(
-            independent_verify_fixture_inputs(&[], &duplicate_input_profile, 0),
-            Err(BundleContractErrorV1::MemberMissing)
+            independent_verify_fixture_inputs(&records, &duplicate_input_profile, 0),
+            Err(BundleContractErrorV1::UndeclaredMember)
         );
 
         let input_index = records
@@ -6107,6 +6099,7 @@ mod instrumented_public_entrypoints {
     #[test]
     fn independent_support_error_regions_are_exercised() -> Result<(), Box<dyn std::error::Error>> {
         let profile = tests::profile();
+        let bundle = signed_draft_bundle()?;
         let profile_value = profile_value(&profile)?;
         for (role, fixture_replacement) in [
             (BundleMemberRoleV1::Schema, Value::Null),
@@ -6154,6 +6147,45 @@ mod instrumented_public_entrypoints {
             BundleMemberRoleV1::FixtureInput
         )
         .is_ok());
+
+        let profile_fields = independent_array(&profile_value, 17)?;
+        let profile_fixtures = independent_array_bounded(&profile_fields[8])?;
+        assert!(!independent_support_digests(
+            profile_fields,
+            profile_fixtures,
+            BundleMemberRoleV1::Licence
+        )?
+        .is_empty());
+
+        let mut malformed_limitations = profile_value.clone();
+        if let Value::Array(fields) = &mut malformed_limitations {
+            let Value::Array(fixtures) = &mut fields[8] else {
+                return Err("fixtures must be an array".into());
+            };
+            let Value::Array(fixture) = &mut fixtures[0] else {
+                return Err("fixture must be an array".into());
+            };
+            let Value::Array(provenance) = &mut fixture[15] else {
+                return Err("provenance must be an array".into());
+            };
+            provenance[6] = Value::Null;
+        }
+        let fields = independent_array(&malformed_limitations, 17)?;
+        let fixtures = independent_array_bounded(&fields[8])?;
+        assert!(
+            independent_support_digests(fields, fixtures, BundleMemberRoleV1::Limitations).is_err()
+        );
+
+        let mut bad_support_records = independent_records(&bundle_value(&bundle))?;
+        let schema = bad_support_records
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Schema)
+            .ok_or("missing schema member")?;
+        schema.digest = [0; 32];
+        assert_eq!(
+            independent_verify_supporting_members(&bad_support_records, &profile_value),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
 
         Ok(())
     }
@@ -6289,6 +6321,101 @@ mod instrumented_public_entrypoints {
     }
 
     #[test]
+    fn independent_authority_metadata_and_entry_shapes_are_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut profile = tests::profile();
+        profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
+        let profile_value = profile_value(&profile)?;
+        let valid_matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
+        let entries = AUTHORITY_FIXTURE_IDS
+            .iter()
+            .map(|fixture_id| {
+                serde_json::json!({
+                    "fixture_id": fixture_id,
+                    "materialization_status": "pending",
+                    "fixture_bytes_path": null,
+                    "fixture_bytes_digest": null,
+                    "expected_result_path": null,
+                    "expected_result_digest": null
+                })
+            })
+            .collect::<Vec<_>>();
+        let valid_inventory = serde_json::json!({
+            "lifecycle": "Draft",
+            "magic": "W8H1",
+            "version": 1,
+            "digest_algorithm": "BLAKE3-256",
+            "entries": entries
+        });
+        let valid_inventory_bytes = serde_json::to_vec(&valid_inventory)?;
+        let wrong_matrix_version = br#"{"lifecycle":"Draft","magic":"NIM1","version":2}"#;
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(&valid_inventory_bytes, wrong_matrix_version, b"{}"),
+                &profile_value,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        let stable_matrix = br#"{"lifecycle":"Stable","magic":"NIM1","version":1}"#;
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(&valid_inventory_bytes, stable_matrix, b"{}"),
+                &profile_value,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut no_entries = valid_inventory.clone();
+        no_entries["entries"] = JsonValue::Null;
+        let no_entries_bytes = serde_json::to_vec(&no_entries)?;
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(&no_entries_bytes, valid_matrix, b"{}"),
+                &profile_value,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut wrong_fixture_id = valid_inventory.clone();
+        wrong_fixture_id["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned());
+        let wrong_fixture_id_bytes = serde_json::to_vec(&wrong_fixture_id)?;
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(&wrong_fixture_id_bytes, valid_matrix, b"{}"),
+                &profile_value,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        for field in [
+            "materialization_status",
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            "expected_result_path",
+            "expected_result_digest",
+        ] {
+            let mut invalid_entries = valid_inventory["entries"].clone();
+            match field {
+                "materialization_status" => {
+                    invalid_entries[0][field] = JsonValue::String("materialized".to_owned());
+                }
+                _ => invalid_entries[0][field] = JsonValue::String("present".to_owned()),
+            }
+            let mut invalid_inventory = valid_inventory.clone();
+            invalid_inventory["entries"] = invalid_entries;
+            let invalid_inventory_bytes = serde_json::to_vec(&invalid_inventory)?;
+            assert_eq!(
+                independent_verify_authority_members(
+                    &raw_authority_members(&invalid_inventory_bytes, valid_matrix, b"{}"),
+                    &profile_value,
+                ),
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn direct_authority_and_matrix_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = tests::profile();
@@ -6420,7 +6547,108 @@ mod instrumented_public_entrypoints {
         assert!(contains_secret_marker(br#"{"password":1}"#));
         assert!(!contains_jwt(b"eyj"));
         assert!(!contains_jwt(b"eyjshort.x.y"));
+        assert!(contains_jwt(b"eyjabcdefgh.klmnopqrst.uvwxyzabcd"));
+        assert_eq!(token_length(b"abc!def", 0), 3);
+        assert_eq!(token_length(b"abc", 9), 0);
+        assert!(is_empty_sensitive_value(&JsonValue::Null));
+        assert!(is_empty_sensitive_value(&JsonValue::String(String::new())));
+        assert!(!is_empty_sensitive_value(&JsonValue::Bool(false)));
+        assert_eq!(value_depth(&Value::Tag(1, Box::new(Value::Null))), 2);
+        assert_eq!(
+            value_depth(&Value::Map(vec![(
+                Value::Text("key".to_owned()),
+                Value::Array(vec![Value::Null]),
+            )])),
+            3
+        );
+        let support = BundleMemberV1::supporting(
+            "support/schema.cddl",
+            b"schema".to_vec(),
+            BundleMemberRoleV1::Schema,
+        );
+        assert_eq!(support.role, BundleMemberRoleV1::Schema);
+        let authority = BundleMemberV1::authority(
+            AUTHORITY_INVENTORY_MEMBER_PATH,
+            b"inventory".to_vec(),
+            BundleMemberRoleV1::AuthorityInventory,
+        );
+        assert_eq!(authority.role, BundleMemberRoleV1::AuthorityInventory);
         assert_eq!(decode_lifecycle(1), Ok(ProfileLifecycleV1::Candidate));
+        Ok(())
+    }
+
+    #[test]
+    fn unsigned_validation_reaches_count_and_profile_guards(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut too_many_members = signed_draft_bundle()?;
+        too_many_members.members =
+            vec![BundleMemberV1::new("placeholder", Vec::new(), false); MAX_MEMBERS + 1];
+        assert_eq!(
+            too_many_members.validate_unsigned(),
+            Err(BundleContractErrorV1::MemberOutOfBounds)
+        );
+
+        let mut invalid_profile = signed_draft_bundle()?;
+        invalid_profile
+            .members
+            .iter_mut()
+            .find(|member| member.role == BundleMemberRoleV1::Profile)
+            .ok_or("missing profile member")?
+            .bytes = b"not a profile".to_vec();
+        assert_eq!(
+            invalid_profile.validate_unsigned(),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn public_decoder_reaches_structural_field_guards() -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_draft_bundle()?;
+        let archive = bundle.to_canonical_cbor()?;
+        let mut value: Value = ciborium::from_reader(Cursor::new(&archive))?;
+        let Value::Array(fields) = &mut value else {
+            return Err("archive must be an array".into());
+        };
+        fields[0] = Value::Text("wrong".to_owned());
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&value)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        fields[0] = Value::Text(CONFORMANCE_BUNDLE_MAGIC_V1.to_owned());
+        fields[1] = Value::Integer(2_u64.into());
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&value)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        fields[1] = Value::Integer(1_u64.into());
+        fields[2] = Value::Null;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&value)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+        let mut invalid_profile: Value = ciborium::from_reader(Cursor::new(&archive))?;
+        let Value::Array(invalid_fields) = &mut invalid_profile else {
+            return Err("archive must be an array".into());
+        };
+        let Value::Array(members) = &mut invalid_fields[3] else {
+            return Err("members must be an array".into());
+        };
+        let profile_member = members
+            .iter_mut()
+            .find(|member| {
+                matches!(member, Value::Array(fields) if fields[0]
+                    == Value::Text(PROFILE_MEMBER_PATH.to_owned()))
+            })
+            .ok_or("missing profile member")?;
+        let Value::Array(profile_fields) = profile_member else {
+            return Err("profile member must be an array".into());
+        };
+        profile_fields[1] = Value::Bytes(b"not a profile".to_vec());
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&invalid_profile)?),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        );
         Ok(())
     }
 }
