@@ -323,7 +323,7 @@ pub mod fixtures {
         ));
         let fixture = fixture(provenance_digest, input, expected, schema_digest);
         let mut profile = ConformanceProfileV1 {
-            profile_id: "pigloros.public-draft-test".to_owned(),
+            profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(include_bytes!(
