@@ -3,7 +3,7 @@
 //! This boundary materializes public bytes and expected results. It never
 //! invokes the implementation under test: callers provide fixture and
 //! expected-result members, while this module recomputes their digests,
-//! validates them against CPF1, and verifies the bundle signature.
+//! validates them against CPF2, and verifies the bundle signature.
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, Verifier};
@@ -16,7 +16,7 @@ use std::io::Cursor;
 use thiserror::Error;
 
 use crate::{
-    ClaimLayerV1, ConformanceProfileV1, ExecutionModeV1, ExpectedResultV1, ProfileLifecycleV1,
+    ClaimLayerV1, ConformanceProfileV2, ExecutionModeV1, ExpectedResultV1, ProfileLifecycleV1,
 };
 
 /// Magic for a materialized conformance bundle manifest.
@@ -29,7 +29,7 @@ const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = MAX_CONFORMANCE_BUNDLE_BYTES_V1;
 const MAX_PROFILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
-const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
+const PROFILE_MEMBER_PATH: &str = "profile/CPF2.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/execution-matrix.json";
@@ -166,13 +166,13 @@ pub enum BundleContractErrorV1 {
     /// The member manifest is not canonical.
     #[error("conformance bundle manifest is not in canonical order")]
     NonCanonicalOrder,
-    /// A fixture expected result is empty or not bound to the CPF1 fixture.
+    /// A fixture expected result is empty or not bound to the CPF2 fixture.
     #[error("conformance bundle expected result is missing or mismatched")]
     ExpectedResultMismatch,
     /// Air-Gapped materialization attempted to use network-enabled input.
     #[error("Air-Gapped conformance bundle permits network access")]
     AirGappedNetwork,
-    /// CPF1 bytes or the profile identity are invalid.
+    /// CPF2 bytes or the profile identity are invalid.
     #[error("conformance bundle profile is invalid")]
     ProfileInvalid,
     /// The signature over the immutable manifest is invalid or absent.
@@ -210,11 +210,11 @@ impl BundleModeV1 {
 /// The authority-bearing role of one bundle member.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum BundleMemberRoleV1 {
-    /// A public fixture input declared by CPF1.
+    /// A public fixture input declared by CPF2.
     FixtureInput,
-    /// A public expected-result record declared by CPF1.
+    /// A public expected-result record declared by CPF2.
     ExpectedResult,
-    /// The canonical CPF1 profile bytes.
+    /// The canonical CPF2 profile bytes.
     Profile,
     /// The normative requirements and specification artifact.
     NormativeSpecification,
@@ -340,11 +340,11 @@ impl BundleMemberV1 {
 /// One expected-result pointer in the immutable manifest.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BundleExpectedResultV1 {
-    /// CPF1 fixture identity.
+    /// CPF2 fixture identity.
     pub case_id: String,
-    /// CPF1 claim layer.
+    /// CPF2 claim layer.
     pub claim_layer: ClaimLayerV1,
-    /// CPF1 execution-profile identity.
+    /// CPF2 execution-profile identity.
     pub execution_profile_digest: [u8; 32],
     /// Execution mode represented by this bundle.
     pub mode: BundleModeV1,
@@ -363,7 +363,7 @@ pub struct BundleManifestV1 {
     pub lifecycle: ProfileLifecycleV1,
     /// Local or Air-Gapped execution mode.
     pub mode: BundleModeV1,
-    /// Logical CPF1 profile identity; the member descriptor commits its raw
+    /// Logical CPF2 profile identity; the member descriptor commits its raw
     /// canonical bytes separately.
     pub profile_digest: [u8; 32],
     /// Canonically ordered member descriptors.
@@ -403,7 +403,7 @@ pub struct ConformanceBundleV1 {
 }
 
 impl ConformanceBundleV1 {
-    /// Materialize an unsigned bundle from a validated CPF1 profile and public
+    /// Materialize an unsigned bundle from a validated CPF2 profile and public
     /// member bytes. The profile member is added from its canonical bytes.
     ///
     /// # Errors
@@ -411,7 +411,7 @@ impl ConformanceBundleV1 {
     /// Returns a closed error when the profile, members, or expected-result
     /// pointers cannot form a valid Draft bundle.
     pub fn materialize(
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         mode: BundleModeV1,
         mut members: Vec<BundleMemberV1>,
         expected_results: Vec<BundleExpectedResultV1>,
@@ -515,7 +515,7 @@ impl ConformanceBundleV1 {
                     && !member.expected_result
             })
             .ok_or(BundleContractErrorV1::MemberMissing)?;
-        let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+        let profile = ConformanceProfileV2::from_canonical_cbor(&profile_member.bytes)
             .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
         let execution_mode = execution_mode_for_bundle(self.manifest.mode);
         if profile.lifecycle != self.manifest.lifecycle
@@ -641,7 +641,7 @@ impl ConformanceBundleV1 {
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, BundleContractErrorV1> {
         validate_archive_length(bytes.len())?;
         let preflight = preflight_archive_caps(bytes)?;
-        let preflight_profile = ConformanceProfileV1::from_canonical_cbor(
+        let preflight_profile = ConformanceProfileV2::from_canonical_cbor(
             preflight
                 .profile_bytes
                 .ok_or(BundleContractErrorV1::MemberMissing)?,
@@ -703,7 +703,7 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps = independent_archive_caps(profile_bytes)?;
     validate_independent_preflight_caps(&caps, &preflight, bytes.len())?;
-    let profile_contract = ConformanceProfileV1::from_canonical_cbor(profile_bytes)
+    let profile_contract = ConformanceProfileV2::from_canonical_cbor(profile_bytes)
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let archive: (Value, Value, Value, Vec<Value>, Value, Value) =
         ciborium::from_reader(Cursor::new(bytes))
@@ -853,8 +853,8 @@ fn independent_verify_expected_results(
     profile: &Value,
     bundle_mode: u64,
 ) -> Result<(), BundleContractErrorV1> {
-    let profile_fields = independent_array(profile, 17)?;
-    let fixtures = independent_array_bounded(&profile_fields[8])?;
+    let profile_fields = independent_array(profile, 18)?;
+    let fixtures = independent_array_bounded(&profile_fields[9])?;
     let mut referenced_expected_results = BTreeSet::new();
     let mut referenced_fixture_identities = BTreeSet::new();
     for expected_value in expected_results {
@@ -960,8 +960,8 @@ fn independent_verify_fixture_inputs(
     profile: &Value,
     bundle_mode: u64,
 ) -> Result<(), BundleContractErrorV1> {
-    let profile_fields = independent_array(profile, 17)?;
-    let fixtures = independent_array_bounded(&profile_fields[8])?;
+    let profile_fields = independent_array(profile, 18)?;
+    let fixtures = independent_array_bounded(&profile_fields[9])?;
     let mut declared_paths = BTreeSet::new();
     for fixture_value in fixtures {
         let fixture = independent_array(fixture_value, 17)?;
@@ -1015,7 +1015,7 @@ fn independent_input_member_path(
     member_id: &str,
 ) -> String {
     let mut input = Vec::new();
-    input.extend_from_slice(b"PiglorOS.CPF1InputPath.v1\0");
+    input.extend_from_slice(b"PiglorOS.CPF2InputPath.v2\0");
     append_path_component(&mut input, case_id);
     input.push(u8::try_from(claim_layer_code).unwrap_or(u8::MAX));
     input.extend_from_slice(execution_profile_digest);
@@ -1028,7 +1028,7 @@ const INDEPENDENT_SUPPORT_MEMBERS: [(BundleMemberRoleV1, &str); 7] = [
         BundleMemberRoleV1::NormativeSpecification,
         "support/normative-requirements.md",
     ),
-    (BundleMemberRoleV1::Schema, "support/schema-cpf1-v1.cddl"),
+    (BundleMemberRoleV1::Schema, "support/schema-cpf2-v2.cddl"),
     (BundleMemberRoleV1::Licence, "support/LICENSE"),
     (BundleMemberRoleV1::Notice, "support/NOTICE"),
     (BundleMemberRoleV1::Sbom, "support/sbom.json"),
@@ -1040,8 +1040,8 @@ fn independent_verify_supporting_members(
     members: &[IndependentMember<'_>],
     profile: &Value,
 ) -> Result<(), BundleContractErrorV1> {
-    let profile_fields = independent_array(profile, 17)?;
-    let fixtures = independent_array_bounded(&profile_fields[8])?;
+    let profile_fields = independent_array(profile, 18)?;
+    let fixtures = independent_array_bounded(&profile_fields[9])?;
     for (role, path) in INDEPENDENT_SUPPORT_MEMBERS {
         let matching = members
             .iter()
@@ -1069,7 +1069,7 @@ fn independent_support_digests(
             digests.insert(independent_digest::<32>(&profile_fields[5])?);
         }
         BundleMemberRoleV1::Schema => {
-            for digest in independent_array_bounded(&profile_fields[7])? {
+            for digest in independent_array_bounded(&profile_fields[8])? {
                 digests.insert(independent_digest::<32>(digest)?);
             }
             for fixture_value in fixtures {
@@ -1099,7 +1099,7 @@ fn independent_support_digests(
             }
         }
         BundleMemberRoleV1::Provenance => {
-            digests.insert(independent_digest::<32>(&profile_fields[14])?);
+            digests.insert(independent_digest::<32>(&profile_fields[15])?);
             for fixture_value in fixtures {
                 let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
                 for index in [3, 4, 5] {
@@ -1108,7 +1108,7 @@ fn independent_support_digests(
             }
         }
         BundleMemberRoleV1::Limitations => {
-            digests.insert(independent_digest::<32>(&profile_fields[13])?);
+            digests.insert(independent_digest::<32>(&profile_fields[14])?);
             for fixture_value in fixtures {
                 let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
                 digests.insert(independent_digest::<32>(&provenance[6])?);
@@ -1140,13 +1140,10 @@ fn independent_verify_authority_members(
     )?;
     let inventory_json = parse_authority_json(inventory.bytes)?;
     let matrix_json = parse_authority_json(matrix.bytes)?;
-    let profile_fields = independent_array(profile, 17)?;
-    let profile_id = archive_text(&profile_fields[2])?;
-    if crate::requires_execution_matrix_binding(profile_id) || profile_id.contains("#matrix=") {
-        let bound_matrix_digest = independent_matrix_digest(profile_id)?;
-        if bound_matrix_digest != *blake3::hash(matrix.bytes).as_bytes() {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
+    let profile_fields = independent_array(profile, 18)?;
+    let matrix_digest = independent_digest::<32>(&profile_fields[6])?;
+    if matrix_digest == [0; 32] || matrix_digest != *blake3::hash(matrix.bytes).as_bytes() {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     let inventory_lifecycle = json_text(&inventory_json, "lifecycle")?;
     let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
@@ -1205,33 +1202,13 @@ fn independent_unique_member<'a>(
     }
 }
 
-fn independent_matrix_digest(profile_id: &str) -> Result<[u8; 32], BundleContractErrorV1> {
-    let Some((base, encoded_digest)) = profile_id.split_once("#matrix=") else {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    };
-    if !crate::requires_execution_matrix_binding(profile_id)
-        || base.is_empty()
-        || encoded_digest.contains("#matrix=")
-        || encoded_digest.len() != 64
-    {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    let digest = crate::decode_hex_digest(encoded_digest)
-        .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
-    if digest == [0; 32] {
-        Err(BundleContractErrorV1::MemberDigestMismatch)
-    } else {
-        Ok(digest)
-    }
-}
-
 fn independent_expected_member_path(
     case_id: &str,
     claim_layer: ClaimLayerV1,
     execution_profile_digest: &[u8; 32],
 ) -> String {
     let mut input = Vec::new();
-    input.extend_from_slice(b"PiglorOS.CPF1ExpectedPath.v1\0");
+    input.extend_from_slice(b"PiglorOS.CPF2ExpectedPath.v2\0");
     append_path_component(&mut input, case_id);
     input.push(claim_layer_code(claim_layer));
     input.extend_from_slice(execution_profile_digest);
@@ -1239,7 +1216,7 @@ fn independent_expected_member_path(
 }
 
 fn independent_verify_profile_contract(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     lifecycle: u64,
     manifest_profile_digest: &Value,
 ) -> Result<(), BundleContractErrorV1> {
@@ -1619,7 +1596,7 @@ fn preflight_archive_caps(bytes: &[u8]) -> Result<ArchivePreflight<'_>, BundleCo
 }
 
 fn validate_preflight_archive_caps(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     preflight: &ArchivePreflight<'_>,
     encoded_len: usize,
 ) -> Result<(), BundleContractErrorV1> {
@@ -1651,9 +1628,9 @@ fn independent_archive_caps(
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     let fields =
-        independent_array(&profile, 17).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        independent_array(&profile, 18).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let protocol =
-        independent_array(&fields[10], 5).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        independent_array(&fields[11], 5).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps =
         independent_array(&protocol[4], 10).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let values = caps
@@ -1770,7 +1747,7 @@ fn validate_archive_caps(
         .iter()
         .find(|member| member.role == BundleMemberRoleV1::Profile)
         .ok_or(BundleContractErrorV1::MemberMissing)?;
-    let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+    let profile = ConformanceProfileV2::from_canonical_cbor(&profile_member.bytes)
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps = &profile.evaluator_protocol.hard_caps;
     if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.max_total_bundle_bytes {
@@ -1973,7 +1950,7 @@ fn accumulate_member_bytes(
     Ok(total_bytes.saturating_add(member_size))
 }
 
-/// Derive the deterministic archive path for one CPF1 fixture-input member.
+/// Derive the deterministic archive path for one CPF2 fixture-input member.
 #[must_use]
 pub fn fixture_input_member_path(
     case_id: &str,
@@ -1982,7 +1959,7 @@ pub fn fixture_input_member_path(
     member_id: &str,
 ) -> String {
     let mut input = Vec::new();
-    input.extend_from_slice(b"PiglorOS.CPF1InputPath.v1\0");
+    input.extend_from_slice(b"PiglorOS.CPF2InputPath.v2\0");
     append_path_component(&mut input, case_id);
     input.push(claim_layer_code(claim_layer));
     input.extend_from_slice(execution_profile_digest);
@@ -1990,7 +1967,7 @@ pub fn fixture_input_member_path(
     format!("{INPUT_MEMBER_PREFIX}{}.bin", blake3::hash(&input).to_hex())
 }
 
-/// Derive the deterministic archive path for one CPF1 expected-result member.
+/// Derive the deterministic archive path for one CPF2 expected-result member.
 #[must_use]
 pub fn expected_result_member_path(
     case_id: &str,
@@ -1998,7 +1975,7 @@ pub fn expected_result_member_path(
     execution_profile_digest: &[u8; 32],
 ) -> String {
     let mut input = Vec::new();
-    input.extend_from_slice(b"PiglorOS.CPF1ExpectedPath.v1\0");
+    input.extend_from_slice(b"PiglorOS.CPF2ExpectedPath.v2\0");
     append_path_component(&mut input, case_id);
     input.push(claim_layer_code(claim_layer));
     input.extend_from_slice(execution_profile_digest);
@@ -2018,7 +1995,7 @@ const fn execution_mode_for_bundle(mode: BundleModeV1) -> ExecutionModeV1 {
 }
 
 fn validate_fixture_inputs_for_mode(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     mode: Option<BundleModeV1>,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
@@ -2131,7 +2108,7 @@ fn bundle_pair_payloads(
 }
 
 fn validate_expected_results(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     manifest: &BundleManifestV1,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
@@ -2230,7 +2207,7 @@ fn expected_identity(values: &[BundleExpectedResultV1]) -> ExpectedIdentity<'_> 
 type ExpectedIdentity<'a> = Vec<(&'a str, ClaimLayerV1, [u8; 32])>;
 
 fn validate_supporting_members(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
     const REQUIRED_MEMBERS: [(BundleMemberRoleV1, &str); 7] = [
@@ -2238,7 +2215,7 @@ fn validate_supporting_members(
             BundleMemberRoleV1::NormativeSpecification,
             "support/normative-requirements.md",
         ),
-        (BundleMemberRoleV1::Schema, "support/schema-cpf1-v1.cddl"),
+        (BundleMemberRoleV1::Schema, "support/schema-cpf2-v2.cddl"),
         (BundleMemberRoleV1::Licence, "support/LICENSE"),
         (BundleMemberRoleV1::Notice, "support/NOTICE"),
         (BundleMemberRoleV1::Sbom, "support/sbom.json"),
@@ -2269,7 +2246,7 @@ fn validate_supporting_members(
 }
 
 fn validate_authority_members(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
     let provenance = members
@@ -2292,10 +2269,10 @@ fn validate_authority_members(
     let provenance = parse_authority_json(&provenance.bytes)?;
     let inventory_json = parse_authority_json(&inventory.bytes)?;
     let matrix_json = parse_authority_json(&matrix.bytes)?;
-    if let Ok(bound_matrix_digest) = profile.execution_matrix_digest() {
-        if bound_matrix_digest != *blake3::hash(&matrix.bytes).as_bytes() {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
+    if profile.execution_matrix_digest == [0; 32]
+        || profile.execution_matrix_digest != *blake3::hash(&matrix.bytes).as_bytes()
+    {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     validate_matrix_provenance_digest(&provenance, &matrix.bytes)?;
     let inventory_lifecycle = json_text(&inventory_json, "lifecycle")?;
@@ -2640,7 +2617,7 @@ fn json_string_array<'a>(
 }
 
 fn required_support_digests(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     role: BundleMemberRoleV1,
 ) -> BTreeSet<[u8; 32]> {
     let mut digests = BTreeSet::new();
@@ -2708,7 +2685,7 @@ fn required_support_digests(
 }
 
 fn support_digest_is_bound(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     role: BundleMemberRoleV1,
     digest: &[u8; 32],
 ) -> bool {
@@ -2716,7 +2693,7 @@ fn support_digest_is_bound(
 }
 
 fn validate_selected_bundle_caps(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     bundle: &ConformanceBundleV1,
 ) -> Result<(), BundleContractErrorV1> {
     let caps = &profile.evaluator_protocol.hard_caps;
@@ -3170,7 +3147,7 @@ mod tests {
         }
     }
 
-    pub(super) fn profile() -> ConformanceProfileV1 {
+    pub(super) fn profile() -> ConformanceProfileV2 {
         let claim_layers = [
             ClaimLayerV1::ArtifactIntegrity,
             ClaimLayerV1::ReplayConformance,
@@ -3202,11 +3179,12 @@ mod tests {
                 fixture.execution_profile_digest,
             )
         });
-        let mut profile = ConformanceProfileV1 {
+        let mut profile = ConformanceProfileV2 {
             profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(12),
+            execution_matrix_digest: digest(21),
             execution_profile_digests: vec![digest(1), digest(2)],
             public_schema_digests: vec![digest(2)],
             fixtures,
@@ -3225,7 +3203,7 @@ mod tests {
         ))
         .as_bytes();
         let schema_digest = *blake3::hash(include_bytes!(
-            "../../../fixtures/conformance/support/schema-cpf1-v1.cddl"
+            "../../../fixtures/conformance/support/schema-cpf2-v2.cddl"
         ))
         .as_bytes();
         let notice_digest = *blake3::hash(include_bytes!(
@@ -3257,21 +3235,15 @@ mod tests {
             fixture.provenance.publication_review_digest = provenance_digest;
             fixture.provenance.limitations_digest = limitations_digest;
         }
-        assert!(
-            profile
-                .bind_execution_matrix_digest(
-                    *blake3::hash(include_bytes!(
-                        "../../../fixtures/conformance/matrix/execution-matrix.json"
-                    ))
-                    .as_bytes(),
-                )
-                .is_ok(),
-            "knowledge test profile matrix binding must succeed"
-        );
+        profile.execution_matrix_digest = *blake3::hash(include_bytes!(
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
+        ))
+        .as_bytes();
+        profile.profile_digest = profile.digest();
         profile
     }
 
-    fn wide_profile() -> ConformanceProfileV1 {
+    fn wide_profile() -> ConformanceProfileV2 {
         let mut profile = profile();
         let caps = &mut profile.evaluator_protocol.hard_caps;
         caps.max_profile_bytes = 16 * 1024 * 1024;
@@ -3300,56 +3272,28 @@ mod tests {
         }
     }
 
-    fn profile_for_claim_layer(claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
+    fn profile_for_claim_layer(claim_layer: ClaimLayerV1) -> ConformanceProfileV2 {
         let mut profile = profile();
         profile.profile_id = claim_layer_profile_id(claim_layer).to_owned();
         profile.fixtures.retain(|fixture| {
             fixture.claim_layer == claim_layer && fixture.modes == [ExecutionModeV1::Local]
         });
-        if claim_layer == ClaimLayerV1::KnowledgeNonInterference {
-            assert!(
-                profile
-                    .bind_execution_matrix_digest(
-                        *blake3::hash(include_bytes!(
-                            "../../../fixtures/conformance/matrix/execution-matrix.json"
-                        ))
-                        .as_bytes(),
-                    )
-                    .is_ok(),
-                "knowledge test profile matrix binding must succeed"
-            );
-        } else {
-            profile.profile_digest = profile.digest();
-        }
+        profile.profile_digest = profile.digest();
         profile
     }
 
-    fn profile_for_claim_layer_families(claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
+    fn profile_for_claim_layer_families(claim_layer: ClaimLayerV1) -> ConformanceProfileV2 {
         let mut profile = profile();
         profile.profile_id = claim_layer_profile_id(claim_layer).to_owned();
         for fixture in &mut profile.fixtures {
             fixture.claim_layer = claim_layer;
         }
-        if claim_layer == ClaimLayerV1::KnowledgeNonInterference {
-            assert!(
-                profile
-                    .bind_execution_matrix_digest(
-                        *blake3::hash(include_bytes!(
-                            "../../../fixtures/conformance/matrix/execution-matrix.json"
-                        ))
-                        .as_bytes(),
-                    )
-                    .is_ok(),
-                "knowledge test profile matrix binding must succeed"
-            );
-        } else {
-            profile.profile_digest = profile.digest();
-        }
+        profile.profile_digest = profile.digest();
         profile
     }
 
     pub(super) fn bundle_inputs(
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         mode: BundleModeV1,
     ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn std::error::Error>>
     {
@@ -3414,8 +3358,8 @@ mod tests {
                 BundleMemberRoleV1::NormativeSpecification,
             ),
             BundleMemberV1::supporting(
-                "support/schema-cpf1-v1.cddl",
-                include_bytes!("../../../fixtures/conformance/support/schema-cpf1-v1.cddl")
+                "support/schema-cpf2-v2.cddl",
+                include_bytes!("../../../fixtures/conformance/support/schema-cpf2-v2.cddl")
                     .to_vec(),
                 BundleMemberRoleV1::Schema,
             ),
@@ -3460,7 +3404,7 @@ mod tests {
     }
 
     fn signed_bundle(
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         mode: BundleModeV1,
     ) -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
         let (members, expected_results) = bundle_inputs(profile, mode)?;
@@ -6013,7 +5957,7 @@ mod instrumented_public_entrypoints {
     }
 
     fn public_archive_cap_boundaries(
-        profile: &super::ConformanceProfileV1,
+        profile: &super::ConformanceProfileV2,
         bundle: &ConformanceBundleV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let max_member_path_bytes = bundle
@@ -6067,7 +6011,7 @@ mod instrumented_public_entrypoints {
     }
 
     fn exercise_public_archive_boundaries(
-        profile: &super::ConformanceProfileV1,
+        profile: &super::ConformanceProfileV2,
         members: Vec<super::BundleMemberV1>,
         expected_results: Vec<super::BundleExpectedResultV1>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -6104,7 +6048,7 @@ mod instrumented_public_entrypoints {
         Ok(())
     }
 
-    fn profile_value(profile: &ConformanceProfileV1) -> Result<Value, Box<dyn std::error::Error>> {
+    fn profile_value(profile: &ConformanceProfileV2) -> Result<Value, Box<dyn std::error::Error>> {
         Ok(ciborium::from_reader(Cursor::new(
             profile.to_canonical_cbor()?,
         ))?)
@@ -7368,7 +7312,7 @@ mod instrumented_public_entrypoints {
     }
 
     fn exercise_authority_valid_regions(
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         bundle: &ConformanceBundleV1,
         inventory_json: &JsonValue,
         matrix_json: &JsonValue,
@@ -7541,9 +7485,9 @@ mod instrumented_public_entrypoints {
         bundle: &ConformanceBundleV1,
         inventory_bytes: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        assert!(ConformanceProfileV1::from_canonical_cbor(b"not cbor").is_err());
+        assert!(ConformanceProfileV2::from_canonical_cbor(b"not cbor").is_err());
         assert!(
-            ConformanceProfileV1::from_canonical_cbor(&encode_archive_value(&Value::Array(
+            ConformanceProfileV2::from_canonical_cbor(&encode_archive_value(&Value::Array(
                 Vec::new()
             ),)?)
             .is_err()
@@ -8055,7 +7999,7 @@ mod instrumented_public_entrypoints {
     }
 
     fn exercise_validate_authority_error_regions(
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         bundle: &ConformanceBundleV1,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let bad_matrix_digest =
