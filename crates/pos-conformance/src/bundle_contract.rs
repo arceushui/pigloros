@@ -729,6 +729,7 @@ fn independent_member_records<'a>(
         let member_bytes = archive_bytes(&member[1])?;
         let member_role = decode_member_role(archive_u64(&member[2])?)?;
         let descriptor_role = decode_member_role(archive_u64(&descriptor[3])?)?;
+        let descriptor_digest = independent_digest::<32>(&descriptor[2])?;
         validate_member_path(member_path)?;
         if previous_member_path.is_some_and(|previous| previous >= member_path)
             || !normalized_member_paths.insert(member_path.to_ascii_lowercase())
@@ -740,7 +741,7 @@ fn independent_member_records<'a>(
             return Err(BundleContractErrorV1::UndeclaredMember);
         }
         if archive_u64(&descriptor[1])? != u64::try_from(member_bytes.len()).unwrap_or(u64::MAX)
-            || independent_digest::<32>(&descriptor[2])? != *blake3::hash(member_bytes).as_bytes()
+            || descriptor_digest != *blake3::hash(member_bytes).as_bytes()
         {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
@@ -755,7 +756,7 @@ fn independent_member_records<'a>(
         records.push(IndependentMember {
             path: member_path,
             bytes: member_bytes,
-            digest: independent_digest::<32>(&descriptor[2])?,
+            digest: descriptor_digest,
             role: member_role,
         });
     }
@@ -7162,6 +7163,588 @@ mod instrumented_public_entrypoints {
             fields[2] = Value::Null;
         }
         assert!(independent_verify_authority_members(records, &no_matrix_binding).is_err());
+        Ok(())
+    }
+
+    fn profile_with_field(
+        profile_value: &Value,
+        field: usize,
+        replacement: Value,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mut profile = profile_value.clone();
+        let Value::Array(fields) = &mut profile else {
+            return Err("profile must be an array".into());
+        };
+        fields[field] = replacement;
+        Ok(profile)
+    }
+
+    fn profile_with_fixture_field(
+        profile_value: &Value,
+        field: usize,
+        replacement: Value,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mut profile = profile_value.clone();
+        let Value::Array(fields) = &mut profile else {
+            return Err("profile must be an array".into());
+        };
+        let Value::Array(fixtures) = &mut fields[8] else {
+            return Err("fixtures must be an array".into());
+        };
+        let Value::Array(fixture) = &mut fixtures[0] else {
+            return Err("fixture must be an array".into());
+        };
+        fixture[field] = replacement;
+        Ok(profile)
+    }
+
+    fn profile_with_fixture_provenance_field(
+        profile_value: &Value,
+        field: usize,
+        replacement: Value,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mut profile = profile_value.clone();
+        let Value::Array(fields) = &mut profile else {
+            return Err("profile must be an array".into());
+        };
+        let Value::Array(fixtures) = &mut fields[8] else {
+            return Err("fixtures must be an array".into());
+        };
+        let Value::Array(fixture) = &mut fixtures[0] else {
+            return Err("fixture must be an array".into());
+        };
+        let Value::Array(provenance) = &mut fixture[15] else {
+            return Err("provenance must be an array".into());
+        };
+        provenance[field] = replacement;
+        Ok(profile)
+    }
+
+    fn raw_record_member(path: Value, bytes: Value, role: Value) -> Value {
+        Value::Array(vec![path, bytes, role])
+    }
+
+    fn raw_record_descriptor(path: Value, size: Value, digest: Value, role: Value) -> Value {
+        Value::Array(vec![path, size, digest, role])
+    }
+
+    #[test]
+    fn independent_member_shape_errors_are_exercised() {
+        let member = || {
+            raw_record_member(
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![1]),
+                Value::Integer(0_u64.into()),
+            )
+        };
+        let descriptor = || {
+            raw_record_descriptor(
+                Value::Text("member".to_owned()),
+                Value::Integer(1_u64.into()),
+                Value::Bytes(blake3::hash([1].as_slice()).as_bytes().to_vec()),
+                Value::Integer(0_u64.into()),
+            )
+        };
+        assert!(independent_member_records(&[Value::Null], &[descriptor()]).is_err());
+        assert!(independent_member_records(&[member()], &[Value::Null]).is_err());
+        assert!(independent_member_records(
+            &[raw_record_member(
+                Value::Null,
+                Value::Bytes(vec![1]),
+                Value::Integer(0_u64.into()),
+            )],
+            &[descriptor()],
+        )
+        .is_err());
+        assert!(independent_member_records(
+            &[raw_record_member(
+                Value::Text("member".to_owned()),
+                Value::Null,
+                Value::Integer(0_u64.into()),
+            )],
+            &[descriptor()],
+        )
+        .is_err());
+        assert!(independent_member_records(
+            &[raw_record_member(
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![1]),
+                Value::Integer(99_u64.into()),
+            )],
+            &[descriptor()],
+        )
+        .is_err());
+        assert!(independent_member_records(
+            &[member()],
+            &[raw_record_descriptor(
+                Value::Text("member".to_owned()),
+                Value::Integer(1_u64.into()),
+                Value::Bytes(blake3::hash([1].as_slice()).as_bytes().to_vec()),
+                Value::Integer(99_u64.into()),
+            )],
+        )
+        .is_err());
+        assert!(independent_member_records(
+            &[raw_record_member(
+                Value::Text("/member".to_owned()),
+                Value::Bytes(vec![1]),
+                Value::Integer(0_u64.into()),
+            )],
+            &[raw_record_descriptor(
+                Value::Text("/member".to_owned()),
+                Value::Integer(1_u64.into()),
+                Value::Bytes(blake3::hash([1].as_slice()).as_bytes().to_vec()),
+                Value::Integer(0_u64.into()),
+            )],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn independent_expected_and_input_shape_errors_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let profile_value = profile_value(&profile)?;
+        let bundle = signed_draft_bundle()?;
+        let encoded_bundle = bundle_value(&bundle);
+        let records = independent_records(&encoded_bundle)?;
+        let archive_fields = independent_array(&encoded_bundle, 6)?;
+        let manifest = independent_array(&archive_fields[2], 6)?;
+        let expected_results = independent_array_bounded(&manifest[5])?;
+
+        let malformed_expected = profile_with_fixture_field(&profile_value, 8, Value::Null)?;
+        assert!(independent_verify_expected_results(
+            expected_results,
+            &records,
+            &malformed_expected,
+            BundleModeV1::Local.code(),
+        )
+        .is_err());
+        let malformed_fixture = profile_with_fixture_field(&profile_value, 8, Value::Null)?;
+        assert!(independent_verify_fixture_inputs(
+            &records,
+            &malformed_fixture,
+            BundleModeV1::Local.code(),
+        )
+        .is_err());
+        let malformed_modes = profile_with_fixture_field(&profile_value, 5, Value::Null)?;
+        assert!(independent_verify_fixture_inputs(
+            &records,
+            &malformed_modes,
+            BundleModeV1::Local.code(),
+        )
+        .is_err());
+        for (field, replacement) in [
+            (0, Value::Null),
+            (2, Value::Null),
+            (3, Value::Null),
+            (7, Value::Array(vec![Value::Null])),
+        ] {
+            let malformed = profile_with_fixture_field(&profile_value, field, replacement)?;
+            assert!(independent_verify_fixture_inputs(
+                &records,
+                &malformed,
+                BundleModeV1::Local.code(),
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    fn assert_support_digest_error(
+        profile_value: &Value,
+        role: BundleMemberRoleV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let fields = independent_array(profile_value, 17)?;
+        let fixtures = independent_array_bounded(&fields[8])?;
+        assert!(independent_support_digests(fields, fixtures, role).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn independent_support_digest_shape_errors_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile_value = profile_value(&tests::profile())?;
+        assert_support_digest_error(
+            &profile_with_field(&profile_value, 5, Value::Null)?,
+            BundleMemberRoleV1::NormativeSpecification,
+        )?;
+        assert_support_digest_error(
+            &profile_with_field(&profile_value, 7, Value::Null)?,
+            BundleMemberRoleV1::Schema,
+        )?;
+        assert_support_digest_error(
+            &profile_with_field(&profile_value, 7, Value::Array(vec![Value::Null]))?,
+            BundleMemberRoleV1::Schema,
+        )?;
+        assert_support_digest_error(
+            &profile_with_fixture_field(&profile_value, 4, Value::Null)?,
+            BundleMemberRoleV1::Schema,
+        )?;
+        assert_support_digest_error(
+            &profile_with_fixture_field(&profile_value, 15, Value::Null)?,
+            BundleMemberRoleV1::Licence,
+        )?;
+        for (role, field) in [
+            (BundleMemberRoleV1::Licence, 0),
+            (BundleMemberRoleV1::Notice, 1),
+            (BundleMemberRoleV1::Sbom, 2),
+            (BundleMemberRoleV1::Provenance, 3),
+            (BundleMemberRoleV1::Limitations, 6),
+        ] {
+            assert_support_digest_error(
+                &profile_with_fixture_provenance_field(&profile_value, field, Value::Null)?,
+                role,
+            )?;
+        }
+        assert_support_digest_error(
+            &profile_with_field(&profile_value, 14, Value::Null)?,
+            BundleMemberRoleV1::Provenance,
+        )?;
+        assert_support_digest_error(
+            &profile_with_fixture_field(&profile_value, 15, Value::Null)?,
+            BundleMemberRoleV1::Notice,
+        )?;
+        assert_support_digest_error(
+            &profile_with_fixture_field(&profile_value, 15, Value::Null)?,
+            BundleMemberRoleV1::Sbom,
+        )?;
+        assert_support_digest_error(
+            &profile_with_fixture_field(&profile_value, 15, Value::Null)?,
+            BundleMemberRoleV1::Provenance,
+        )?;
+        assert_support_digest_error(
+            &profile_with_field(&profile_value, 13, Value::Null)?,
+            BundleMemberRoleV1::Limitations,
+        )?;
+        assert_support_digest_error(
+            &profile_with_fixture_field(&profile_value, 15, Value::Null)?,
+            BundleMemberRoleV1::Limitations,
+        )?;
+        Ok(())
+    }
+
+    fn profile_without_matrix_binding(
+        profile_value: &Value,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        profile_with_field(
+            profile_value,
+            2,
+            Value::Text("pigloros.w8.artifact-integrity.1.0.0".to_owned()),
+        )
+    }
+
+    fn mutate_authority_member_json(
+        members: &mut [BundleMemberV1],
+        role: BundleMemberRoleV1,
+        update: impl FnOnce(&mut JsonValue),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let member = members
+            .iter_mut()
+            .find(|member| member.role == role)
+            .ok_or("missing authority member")?;
+        let mut value: JsonValue = serde_json::from_slice(&member.bytes)?;
+        update(&mut value);
+        member.bytes = serde_json::to_vec(&value)?;
+        Ok(())
+    }
+
+    fn authority_members_with_json(
+        bundle: &ConformanceBundleV1,
+        role: BundleMemberRoleV1,
+        update: impl FnOnce(&mut JsonValue),
+    ) -> Result<Vec<BundleMemberV1>, Box<dyn std::error::Error>> {
+        let mut members = bundle.members.clone();
+        mutate_authority_member_json(&mut members, role, update)?;
+        Ok(members)
+    }
+
+    #[test]
+    fn independent_authority_parse_error_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile_value = profile_value(&tests::profile())?;
+        let profile_without_binding = profile_without_matrix_binding(&profile_value)?;
+        let inventory = br#"{"lifecycle":"Draft","magic":"W8H1","version":1,"digest_algorithm":"BLAKE3-256","entries":[]}"#;
+        let matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(b"[", matrix, b"{}"),
+                &profile_without_binding,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(inventory, b"[", b"{}"),
+                &profile_without_binding,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(inventory, matrix, b"{}"),
+                &Value::Null,
+            ),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
+        let invalid_matrix_binding = profile_with_field(
+            &profile_value,
+            2,
+            Value::Text("pigloros.w8.knowledge-non-interference.1.0.0#matrix=bad".to_owned()),
+        )?;
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(inventory, matrix, b"{}"),
+                &invalid_matrix_binding,
+            ),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn independent_authority_metadata_error_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile_value = profile_value(&tests::profile())?;
+        let profile = profile_without_matrix_binding(&profile_value)?;
+        let inventory = br#"{"lifecycle":"Draft","magic":"W8H1","version":1,"digest_algorithm":"BLAKE3-256","entries":[]}"#;
+        let matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
+        let missing_inventory_lifecycle =
+            br#"{"magic":"W8H1","version":1,"digest_algorithm":"BLAKE3-256","entries":[]}"#;
+        assert!(independent_verify_authority_members(
+            &raw_authority_members(missing_inventory_lifecycle, matrix, b"{}"),
+            &profile,
+        )
+        .is_err());
+        let missing_matrix_lifecycle = br#"{"magic":"NIM1","version":1}"#;
+        assert!(independent_verify_authority_members(
+            &raw_authority_members(inventory, missing_matrix_lifecycle, b"{}"),
+            &profile,
+        )
+        .is_err());
+        for field in ["magic", "version", "digest_algorithm"] {
+            let mut invalid: JsonValue = serde_json::from_slice(inventory)?;
+            invalid[field] = match field {
+                "version" => JsonValue::Number(2.into()),
+                _ => JsonValue::String("wrong".to_owned()),
+            };
+            let invalid_bytes = serde_json::to_vec(&invalid)?;
+            assert!(independent_verify_authority_members(
+                &raw_authority_members(&invalid_bytes, matrix, b"{}"),
+                &profile,
+            )
+            .is_err());
+        }
+        for field in ["magic", "version"] {
+            let mut invalid: JsonValue = serde_json::from_slice(matrix)?;
+            invalid[field] = match field {
+                "version" => JsonValue::Number(2.into()),
+                _ => JsonValue::String("wrong".to_owned()),
+            };
+            let invalid_bytes = serde_json::to_vec(&invalid)?;
+            assert!(independent_verify_authority_members(
+                &raw_authority_members(inventory, &invalid_bytes, b"{}"),
+                &profile,
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    fn exercise_validate_authority_error_regions(
+        profile: &ConformanceProfileV1,
+        bundle: &ConformanceBundleV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bad_matrix_digest =
+            authority_members_with_json(bundle, BundleMemberRoleV1::Provenance, |value| {
+                value["adr_059_execution_matrix"]["blake3_digest"] =
+                    JsonValue::String("00".repeat(32))
+            })?;
+        assert_eq!(
+            validate_authority_members(profile, &bad_matrix_digest),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        for (role, field) in [
+            (BundleMemberRoleV1::AuthorityInventory, "lifecycle"),
+            (BundleMemberRoleV1::ExecutionMatrix, "lifecycle"),
+        ] {
+            let invalid = authority_members_with_json(bundle, role, |value| {
+                value[field] = JsonValue::Null;
+            })?;
+            assert_eq!(
+                validate_authority_members(profile, &invalid),
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            );
+        }
+        let bad_binding =
+            authority_members_with_json(bundle, BundleMemberRoleV1::Provenance, |value| {
+                value["authority_inventory"]["path"] = JsonValue::String("wrong".to_owned())
+            })?;
+        assert_eq!(
+            validate_authority_members(profile, &bad_binding),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+
+        let mut bad_matrix =
+            authority_members_with_json(bundle, BundleMemberRoleV1::ExecutionMatrix, |value| {
+                value["magic"] = JsonValue::String("NIM0".to_owned())
+            })?;
+        let matrix_bytes = bad_matrix
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix")?
+            .bytes
+            .clone();
+        mutate_authority_member_json(&mut bad_matrix, BundleMemberRoleV1::Provenance, |value| {
+            value["adr_059_execution_matrix"]["blake3_digest"] =
+                JsonValue::String(blake3::hash(&matrix_bytes).to_hex().to_string());
+        })?;
+        assert_eq!(
+            validate_authority_members(profile, &bad_matrix),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
+        Ok(())
+    }
+
+    fn exercise_provenance_json_error_regions(
+        provenance: &JsonValue,
+        inventory_bytes: &[u8],
+        matrix_bytes: &[u8],
+    ) {
+        assert!(validate_provenance_authority_binding(&JsonValue::Null).is_err());
+        let mut missing_inventory = provenance.clone();
+        missing_inventory["authority_inventory"] = JsonValue::Null;
+        assert!(validate_provenance_authority_binding(&missing_inventory).is_err());
+        let mut missing_matrix = provenance.clone();
+        missing_matrix["adr_059_execution_matrix"] = JsonValue::Null;
+        assert!(validate_provenance_authority_binding(&missing_matrix).is_err());
+        for field in ["path", "digest_algorithm", "status"] {
+            let mut invalid = provenance.clone();
+            invalid["authority_inventory"][field] = JsonValue::Null;
+            assert!(validate_provenance_authority_binding(&invalid).is_err());
+        }
+        for field in ["path", "digest_algorithm", "status", "executed_case_count"] {
+            let mut invalid = provenance.clone();
+            invalid["adr_059_execution_matrix"][field] = JsonValue::Null;
+            assert!(validate_provenance_authority_binding(&invalid).is_err());
+        }
+
+        assert!(validate_authority_inventory_digest(&JsonValue::Null, inventory_bytes).is_err());
+        let mut missing_digest = provenance.clone();
+        missing_digest["authority_inventory"] = JsonValue::Null;
+        assert!(validate_authority_inventory_digest(&missing_digest, inventory_bytes).is_err());
+        let mut invalid_digest = provenance.clone();
+        invalid_digest["authority_inventory"]["sha256_digest"] =
+            JsonValue::String("not-hex".to_owned());
+        assert!(validate_authority_inventory_digest(&invalid_digest, inventory_bytes).is_err());
+
+        assert!(validate_matrix_provenance_digest(&JsonValue::Null, matrix_bytes).is_err());
+        let mut missing_matrix_digest = provenance.clone();
+        missing_matrix_digest["adr_059_execution_matrix"] = JsonValue::Null;
+        assert!(validate_matrix_provenance_digest(&missing_matrix_digest, matrix_bytes).is_err());
+        let mut invalid_matrix_digest = provenance.clone();
+        invalid_matrix_digest["adr_059_execution_matrix"]["blake3_digest"] =
+            JsonValue::String("not-hex".to_owned());
+        assert!(validate_matrix_provenance_digest(&invalid_matrix_digest, matrix_bytes).is_err());
+    }
+
+    fn exercise_inventory_json_error_regions(inventory: &JsonValue) {
+        for field in ["magic", "version", "lifecycle", "digest_algorithm"] {
+            let mut invalid = inventory.clone();
+            invalid[field] = JsonValue::Null;
+            assert!(validate_authority_inventory(&invalid).is_err());
+        }
+        let mut invalid_status = inventory.clone();
+        invalid_status["entries"][0]["materialization_status"] = JsonValue::Null;
+        assert!(validate_authority_inventory(&invalid_status).is_err());
+    }
+
+    fn exercise_matrix_json_error_regions(matrix: &JsonValue) {
+        for field in [
+            "magic",
+            "version",
+            "lifecycle",
+            "row_count",
+            "variant_count",
+            "mode_count",
+            "case_count",
+            "executed_case_count",
+        ] {
+            let mut invalid = matrix.clone();
+            invalid[field] = JsonValue::Null;
+            assert!(validate_execution_matrix(&invalid).is_err());
+        }
+        let mut missing_rows = matrix.clone();
+        missing_rows["rows"] = JsonValue::Null;
+        assert!(validate_execution_matrix(&missing_rows).is_err());
+        let mut missing_cases = matrix.clone();
+        missing_cases["cases"] = JsonValue::Null;
+        assert!(validate_execution_matrix(&missing_cases).is_err());
+        let mut missing_predicates = matrix.clone();
+        missing_predicates["equality_predicates"] = JsonValue::Null;
+        assert!(validate_execution_matrix(&missing_predicates).is_err());
+    }
+
+    #[test]
+    fn direct_authority_json_error_regions_are_exercised() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bundle = signed_draft_bundle()?;
+        let inventory = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
+            .ok_or("missing inventory")?;
+        let matrix = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix")?;
+        let provenance = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance")?;
+        let inventory_json: JsonValue = serde_json::from_slice(&inventory.bytes)?;
+        let matrix_json: JsonValue = serde_json::from_slice(&matrix.bytes)?;
+        let provenance_json: JsonValue = serde_json::from_slice(&provenance.bytes)?;
+        exercise_provenance_json_error_regions(&provenance_json, &inventory.bytes, &matrix.bytes);
+        exercise_inventory_json_error_regions(&inventory_json);
+        exercise_matrix_json_error_regions(&matrix_json);
+        let mut profile = tests::profile();
+        profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
+        exercise_validate_authority_error_regions(&profile, &bundle)?;
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_archive_shape_and_secret_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert!(archive_preflight::scan(&[
+            0x86, 0x64, b'C', b'F', b'B', b'1', 0x01, 0xf6, 0x81, 0x83, 0x62, b'x',
+        ])
+        .is_err());
+        assert!(archive_preflight::scan(&[
+            0x86, 0x64, b'C', b'F', b'B', b'1', 0x01, 0xf6, 0x81, 0x82, 0xf6, 0xf6,
+        ])
+        .is_err());
+        assert!(contains_aws_access_key(b"akiaABCDEFGHIJKLMNOP"));
+        assert!(contains_aws_access_key(b"asiaABCDEFGHIJKLMNOP"));
+
+        let profile_value = profile_value(&tests::profile())?;
+        assert!(independent_archive_caps(&[0x81, 0x18, 0x00]).is_err());
+        assert!(validate_selected_bundle_caps(
+            &tests::profile(),
+            &ConformanceBundleV1 {
+                members: Vec::new(),
+                ..signed_draft_bundle()?
+            },
+        )
+        .is_err());
+        let archive = signed_draft_bundle()?;
+        let manifest = manifest_value(&archive.manifest);
+        assert!(decode_manifest(&manifest).is_ok());
+        assert!(profile_value.is_array());
         Ok(())
     }
 
