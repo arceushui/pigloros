@@ -7044,10 +7044,10 @@ mod instrumented_public_entrypoints {
             };
             caps[index] = Value::Integer(replacement.into());
             let encoded_profile = encode_archive_value(&encoded_profile)?;
-            assert_eq!(
+            assert!(matches!(
                 independent_archive_caps(&encoded_profile),
                 Err(BundleContractErrorV1::MemberOutOfBounds)
-            );
+            ));
         }
         Ok(())
     }
@@ -7489,7 +7489,7 @@ mod instrumented_public_entrypoints {
             Value::Bytes(vec![1]),
             Value::Integer(BundleMemberRoleV1::Profile.code().into()),
         );
-        let descriptor = |path, size, member_digest, role| {
+        let descriptor = |path: &str, size: u64, member_digest: Value, role: u64| {
             raw_record_descriptor(
                 Value::Text(path.to_owned()),
                 Value::Integer(size.into()),
