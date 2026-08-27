@@ -3615,20 +3615,22 @@ mod tests {
         assert_independent_error(&mismatched_count, BundleContractErrorV1::UndeclaredMember)?;
         let mut mismatched_member = valid.clone();
         if let Value::Array(fields) = &mut mismatched_member {
-            if let Value::Array(members) = &mut fields[3] {
-                let member = members
+            if let Value::Array(manifest) = &mut fields[2] {
+                let Value::Array(descriptors) = &mut manifest[4] else {
+                    return Err("member descriptors must be an array".into());
+                };
+                let descriptor = descriptors
                     .iter_mut()
-                    .find(|member| {
-                        matches!(member, Value::Array(fields) if !matches!(fields.first(), Some(Value::Text(path)) if path == PROFILE_MEMBER_PATH))
+                    .find(|descriptor| {
+                        matches!(descriptor, Value::Array(fields) if !matches!(fields.first(), Some(Value::Text(path)) if path == PROFILE_MEMBER_PATH))
                     })
-                    .ok_or("missing non-profile member")?;
-                if let Value::Array(member) = member {
-                    if let Value::Bytes(bytes) = &mut member[1] {
-                        bytes.push(0);
-                    }
+                    .ok_or("missing non-profile descriptor")?;
+                if let Value::Array(descriptor) = descriptor {
+                    descriptor[2] = Value::Bytes(vec![9; 32]);
                 }
             }
         }
+        resign_archive(&mut mismatched_member)?;
         assert_independent_error(
             &mismatched_member,
             BundleContractErrorV1::MemberDigestMismatch,
