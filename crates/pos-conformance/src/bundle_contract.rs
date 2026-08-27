@@ -5354,6 +5354,7 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod instrumented_public_entrypoints {
+    use super::tests;
     use super::*;
     use ed25519_dalek::Signer;
 
@@ -5832,8 +5833,8 @@ mod instrumented_public_entrypoints {
     #[test]
     fn remaining_archive_and_independent_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let profile = profile();
-        let bundle = signed_bundle(&profile, BundleModeV1::Local)?;
+        let profile = tests::profile();
+        let bundle = signed_draft_bundle()?;
         let archive = bundle.to_canonical_cbor()?;
 
         let mut noncanonical = archive.clone();
@@ -6008,7 +6009,7 @@ mod instrumented_public_entrypoints {
             independent_expected_result_bytes(&canonical_result),
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         );
-        for code in [1, 2] {
+        for code in [1_u64, 2_u64] {
             let typed_result = Value::Array(vec![
                 Value::Integer(code.into()),
                 Value::Null,
@@ -6114,9 +6115,11 @@ mod instrumented_public_entrypoints {
         assert!(
             independent_support_digests(fields, fixtures, BundleMemberRoleV1::Provenance).is_err()
         );
+        let profile_fields = independent_array(&profile_value, 17)?;
+        let profile_fixtures = independent_array_bounded(&profile_fields[8])?;
         assert!(independent_support_digests(
-            independent_array(&profile_value, 17)?,
-            independent_array_bounded(&independent_array(&profile_value, 17)?[8])?,
+            profile_fields,
+            profile_fixtures,
             BundleMemberRoleV1::FixtureInput
         )
         .is_ok());
@@ -6233,8 +6236,22 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let artifact_profile = profile_for_claim_layer(ClaimLayerV1::ArtifactIntegrity);
-        let artifact_bundle = signed_bundle(&artifact_profile, BundleModeV1::Local)?;
+        let mut artifact_profile = tests::profile();
+        artifact_profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
+        artifact_profile.fixtures.retain(|fixture| {
+            fixture.claim_layer == ClaimLayerV1::ArtifactIntegrity
+                && fixture.modes == [ExecutionModeV1::Local]
+        });
+        artifact_profile.profile_digest = artifact_profile.digest();
+        let (artifact_members, artifact_expected) =
+            tests::bundle_inputs(&artifact_profile, BundleModeV1::Local)?;
+        let artifact_bundle = ConformanceBundleV1::materialize(
+            &artifact_profile,
+            BundleModeV1::Local,
+            artifact_members,
+            artifact_expected,
+        )?
+        .sign(&ed25519_dalek::SigningKey::from_bytes(&[42; 32]))?;
         let mut stable_authority_members = artifact_bundle.members.clone();
         for member in &mut stable_authority_members {
             if matches!(
