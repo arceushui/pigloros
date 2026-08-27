@@ -6084,7 +6084,7 @@ mod instrumented_public_entrypoints {
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
 
-        let mut no_declared_inputs = profile_value.clone();
+        let mut no_declared_inputs = profile_value;
         if let Value::Array(fields) = &mut no_declared_inputs {
             let Value::Array(fixtures) = &mut fields[8] else {
                 return Err("fixtures must be an array".into());
@@ -6206,7 +6206,7 @@ mod instrumented_public_entrypoints {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = tests::profile();
         let profile_value = profile_value(&profile)?;
-        let mut no_matrix_binding = profile_value.clone();
+        let mut no_matrix_binding = profile_value;
         if let Value::Array(fields) = &mut no_matrix_binding {
             fields[2] = Value::Text("pigloros.w8.artifact-integrity.1.0.0".to_owned());
         }
