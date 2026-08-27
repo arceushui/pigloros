@@ -6328,11 +6328,7 @@ mod instrumented_public_entrypoints {
         }))?;
         for member in &mut stable_authority_members {
             match member.role {
-                BundleMemberRoleV1::AuthorityInventory => {
-                    member.bytes = stable_matrix.to_vec();
-                    member.digest = *blake3::hash(&member.bytes).as_bytes();
-                }
-                BundleMemberRoleV1::ExecutionMatrix => {
+                BundleMemberRoleV1::AuthorityInventory | BundleMemberRoleV1::ExecutionMatrix => {
                     member.bytes = stable_matrix.to_vec();
                     member.digest = *blake3::hash(&member.bytes).as_bytes();
                 }
