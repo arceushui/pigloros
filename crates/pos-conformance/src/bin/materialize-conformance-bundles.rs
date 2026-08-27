@@ -1193,19 +1193,6 @@ mod tests {
     }
 
     #[test]
-    fn materializer_run_covers_all_profile_layers() {
-        let output = output_root("run");
-        let arguments = [
-            OsString::from("materialize"),
-            output.clone().into_os_string(),
-        ];
-        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_ok());
-        assert!(output.join("artifact-integrity/draft").is_dir());
-        assert!(output.join("empirical-evaluation/draft").is_dir());
-        assert!(std::fs::remove_dir_all(output).is_ok());
-    }
-
-    #[test]
     fn profile_binds_one_execution_profile_per_mode_and_preserves_pair_parity(
     ) -> Result<(), Box<dyn Error>> {
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
@@ -1254,48 +1241,6 @@ mod tests {
         .sign(&signing_key)?;
         ConformanceBundlePairV1 { local, air_gapped }.validate()?;
         Ok(())
-    }
-
-    #[test]
-    fn materializer_argument_and_key_errors_are_explicit() {
-        let entry: fn() -> Result<(), Box<dyn Error>> = main;
-        assert!(entry().is_err());
-        assert!(run(
-            [OsString::from("materialize")].into_iter(),
-            Ok(signing_key_hex())
-        )
-        .is_err());
-        let output = output_root("extra");
-        let arguments = [
-            OsString::from("materialize"),
-            output.clone().into_os_string(),
-            OsString::from("extra"),
-        ];
-        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        assert!(std::fs::create_dir_all(&output).is_ok());
-        let arguments = [
-            OsString::from("materialize"),
-            output.clone().into_os_string(),
-        ];
-        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        assert!(std::fs::remove_dir_all(output).is_ok());
-        let arguments = [OsString::from("materialize"), OsString::from("missing")];
-        assert!(run(
-            arguments.into_iter(),
-            std::env::var("PIGLOROS_CONFORMANCE_MISSING_SIGNING_KEY")
-        )
-        .is_err());
-        let blocker = output_root("blocker");
-        assert!(std::fs::write(&blocker, b"not a directory").is_ok());
-        let child = blocker.join("child");
-        let arguments = [OsString::from("materialize"), child.into_os_string()];
-        assert!(run(arguments.into_iter(), Ok(signing_key_hex())).is_err());
-        assert!(std::fs::remove_file(blocker).is_ok());
-        assert!(signing_key_from_encoded(std::env::var(
-            "PIGLOROS_CONFORMANCE_MISSING_SIGNING_KEY"
-        ))
-        .is_err());
-        assert!(signing_key_from_encoded(Ok("not-a-key".to_owned())).is_err());
     }
 
     #[test]

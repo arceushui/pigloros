@@ -582,6 +582,61 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn public_materializer_rejects_invalid_invocations() -> Result<(), Box<dyn std::error::Error>> {
+    let materializer_binary = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    let signing_key = "0707070707070707070707070707070707070707070707070707070707070707";
+    let unique = format!(
+        "pigloros-conformance-invalid-cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let missing_key_output = std::env::temp_dir().join(format!("{unique}-missing-key"));
+    let invalid_key_output = std::env::temp_dir().join(format!("{unique}-invalid-key"));
+    let existing_output = std::env::temp_dir().join(format!("{unique}-existing"));
+    let blocked_root = std::env::temp_dir().join(format!("{unique}-blocked"));
+    fs::create_dir_all(&existing_output)?;
+    fs::write(&blocked_root, b"not a directory")?;
+
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .status()?
+        .success());
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .args([&missing_key_output, &invalid_key_output])
+        .status()?
+        .success());
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(&existing_output)
+        .status()?
+        .success());
+    assert!(!Command::new(&materializer_binary)
+        .arg(&missing_key_output)
+        .status()?
+        .success());
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", "not-a-key")
+        .arg(&invalid_key_output)
+        .status()?
+        .success());
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(blocked_root.join("child"))
+        .status()?
+        .success());
+
+    fs::remove_dir_all(existing_output)?;
+    fs::remove_file(blocked_root)?;
+    assert!(!missing_key_output.exists());
+    assert!(!invalid_key_output.exists());
+    Ok(())
+}
+
+#[test]
 fn public_verifier_rejects_directory_input() -> Result<(), Box<dyn std::error::Error>> {
     let directory = std::env::temp_dir().join(format!(
         "pigloros-conformance-directory-{}",
