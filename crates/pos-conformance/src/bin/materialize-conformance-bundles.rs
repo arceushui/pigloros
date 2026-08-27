@@ -1567,6 +1567,84 @@ mod tests {
     }
 
     #[test]
+    fn fixture_record_predicates_fail_closed_independently() -> Result<(), Box<dyn Error>> {
+        let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
+        let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
+        let fixture = &canonical_record["fixtures"][0];
+        let (positive_input, positive_expected) = canonical_fixture_bytes(
+            ClaimLayerV1::ArtifactIntegrity,
+            json_text(fixture, "input")?,
+            json_text(fixture, "expected")?,
+        )?;
+        let input_record: JsonValue = serde_json::from_slice(positive_input)?;
+        let expected_record: JsonValue = serde_json::from_slice(positive_expected)?;
+        for field in ["claim_layer", "family"] {
+            let mut invalid_expected = expected_record.clone();
+            invalid_expected[field] = JsonValue::String("wrong".to_owned());
+            let invalid_expected = serde_json::to_vec(&invalid_expected)?;
+            assert!(validate_fixture_records(
+                positive_input,
+                &invalid_expected,
+                "artifact-integrity-positive",
+                "positive",
+                "artifact-integrity",
+            )
+            .is_err());
+        }
+        for field in ["kind", "error_code"] {
+            let mut invalid_expected = expected_record.clone();
+            invalid_expected["draft_expected_result"][field] =
+                JsonValue::String("wrong".to_owned());
+            let invalid_expected = serde_json::to_vec(&invalid_expected)?;
+            assert!(validate_fixture_records(
+                positive_input,
+                &invalid_expected,
+                "artifact-integrity-positive",
+                "positive",
+                "artifact-integrity",
+            )
+            .is_err());
+        }
+        for field in ["subject", "assertion"] {
+            let mut invalid_input = input_record.clone();
+            invalid_input[field] = JsonValue::String(String::new());
+            let invalid_input = serde_json::to_vec(&invalid_input)?;
+            let mut matching_expected = expected_record.clone();
+            matching_expected["input_blake3_digest"] = JsonValue::String(
+                pos_conformance::hex_digest(blake3::hash(&invalid_input).as_bytes()),
+            );
+            let matching_expected = serde_json::to_vec(&matching_expected)?;
+            assert!(validate_fixture_records(
+                &invalid_input,
+                &matching_expected,
+                "artifact-integrity-positive",
+                "positive",
+                "artifact-integrity",
+            )
+            .is_err());
+        }
+        for (field, replacement) in [
+            ("result", JsonValue::String(String::new())),
+            ("status", JsonValue::String("verified".to_owned())),
+            ("verification", JsonValue::Bool(true)),
+            ("source", JsonValue::Bool(true)),
+        ] {
+            let mut invalid_expected = expected_record.clone();
+            invalid_expected[field] = replacement;
+            let invalid_expected = serde_json::to_vec(&invalid_expected)?;
+            assert!(validate_fixture_records(
+                positive_input,
+                &invalid_expected,
+                "artifact-integrity-positive",
+                "positive",
+                "artifact-integrity",
+            )
+            .is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn canonical_record_required_fields_reject_missing_values() -> Result<(), Box<dyn Error>> {
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
