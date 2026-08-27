@@ -31,6 +31,7 @@ struct TestCoordinatorPort {
     >,
     acknowledgement_admitted: bool,
     freeze_error: Option<ErasureErrorV1>,
+    required_targets_error: Option<ErasureErrorV1>,
     admitted_freeze_provenance: Option<ErasureReferenceV1>,
     admitted_freeze_position: Option<u64>,
     admitted_freeze_closure: Option<ErasureReferenceV1>,
@@ -123,6 +124,9 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         &self,
         _request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
+        if let Some(error) = self.required_targets_error {
+            return Err(error);
+        }
         Ok(self.targets.clone())
     }
     fn admit_freeze(
@@ -239,6 +243,7 @@ fn test_port(accepted: bool, targets: Vec<ErasureRequiredTargetV1>) -> TestCoord
         authorization_decisions: Rc::new(RefCell::new(Vec::new())),
         acknowledgement_admitted: true,
         freeze_error: None,
+        required_targets_error: None,
         admitted_freeze_provenance: None,
         admitted_freeze_position: None,
         admitted_freeze_closure: None,
@@ -653,6 +658,272 @@ fn reject_terminal_receipt_mutation(
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
+}
+
+fn reject_terminal_input_mutation(
+    record: &ErasureCoordinatorRecordV1,
+    mutate: impl FnOnce(&mut ErasureReceiptInputV1),
+) -> Result<(), ErasureErrorV1> {
+    let mut parts = record_parts(record);
+    let rebuilt = {
+        let input = parts
+            .receipt_input
+            .as_mut()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        mutate(input);
+        ErasureReceiptV1::new(input.clone())?
+    };
+    parts.receipt = Some(rebuilt);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+fn exercise_lifecycle_edge_cases() {
+    for (current, next, permitted) in [
+        (
+            ErasureLifecycleV1::Submitted,
+            ErasureLifecycleV1::Authorized,
+            true,
+        ),
+        (
+            ErasureLifecycleV1::Submitted,
+            ErasureLifecycleV1::Rejected,
+            true,
+        ),
+        (
+            ErasureLifecycleV1::Authorized,
+            ErasureLifecycleV1::AccessFrozen,
+            true,
+        ),
+        (
+            ErasureLifecycleV1::AccessFrozen,
+            ErasureLifecycleV1::DestructionDispatched,
+            true,
+        ),
+        (
+            ErasureLifecycleV1::DestructionDispatched,
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+            true,
+        ),
+        (
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+            ErasureLifecycleV1::Complete,
+            true,
+        ),
+        (
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+            ErasureLifecycleV1::PartialFailure,
+            true,
+        ),
+        (
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+            ErasureLifecycleV1::Submitted,
+            false,
+        ),
+        (
+            ErasureLifecycleV1::Complete,
+            ErasureLifecycleV1::Authorized,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            std::hint::black_box(current).permits(std::hint::black_box(next)),
+            permitted
+        );
+    }
+}
+
+fn exercise_receipt_record_edges() -> Result<(), ErasureErrorV1> {
+    let first = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let second = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut outside_closure = receipt_input(
+        ErasureLifecycleV1::Complete,
+        vec![first],
+        Vec::new(),
+        Vec::new(),
+    );
+    outside_closure.required_targets = vec![second.target];
+    assert_eq!(
+        ErasureReceiptV1::new(outside_closure),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let awaiting = record_after_acknowledgement()?;
+    let mut invalid_owner = record_parts(&awaiting);
+    invalid_owner.acknowledgements[0].owner = reference(99);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(invalid_owner, reference(2)),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let complete = complete_record()?;
+    reject_terminal_input_mutation(&complete, |input| input.terminal_state = reference(99))?;
+    reject_terminal_input_mutation(&complete, |input| {
+        input.lifecycle = ErasureLifecycleV1::PartialFailure;
+        input.acknowledgements[0].outcome = ErasureAcknowledgementOutcomeV1::Negative;
+        input.failed_owners = vec![first.target.replica_id];
+    })?;
+    reject_terminal_input_mutation(&complete, |input| input.coordinator = reference(99))?;
+    reject_terminal_input_mutation(&complete, |input| input.request = reference(99))?;
+    reject_terminal_input_mutation(&complete, |input| {
+        input.required_targets = vec![second.target];
+        input.acknowledgements = vec![second];
+        input.inventories.artifacts = vec![inventory_result(second.target)];
+    })?;
+    reject_terminal_input_mutation(&complete, |input| {
+        input.acknowledgements[0].evidence = reference(99);
+    })?;
+
+    let mut invalid_receipt_input = record_parts(&complete);
+    invalid_receipt_input.receipt_input = Some(receipt_input(
+        ErasureLifecycleV1::Submitted,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(invalid_receipt_input, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+fn exercise_state_machine_edges() -> Result<(), ErasureErrorV1> {
+    let first = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let persisted = record_after_submit()?;
+    let mut mismatched_request_input = request_input(vec![reference(8), reference(7)]);
+    mismatched_request_input.subject = reference(99);
+    let mismatched_request = ErasureRequestV1::new(mismatched_request_input)?;
+    let mismatch_port = test_port(true, Vec::new());
+    mismatch_port.records.replace(vec![persisted]);
+    let mut mismatch = ErasureCoordinatorStateMachineV1::new(mismatch_port, reference(2));
+    assert_eq!(
+        mismatch.submit(mismatched_request, reference(3)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut rejected_port = test_port(true, Vec::new());
+    rejected_port.authorization_admitted = false;
+    let mut rejected = ErasureCoordinatorStateMachineV1::new(rejected_port, reference(2));
+    rejected.submit(request()?, reference(3))?;
+    assert_eq!(
+        rejected.reject(reference(1), reference(9)),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut missing_targets_port = test_port(true, vec![first.target]);
+    missing_targets_port.required_targets_error = Some(ErasureErrorV1::AccessFreezeFailed);
+    let mut missing_targets =
+        ErasureCoordinatorStateMachineV1::new(missing_targets_port, reference(2));
+    missing_targets.submit(request()?, reference(3))?;
+    missing_targets.authorize(reference(1), reference(9))?;
+    assert_eq!(
+        missing_targets.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        Err(ErasureErrorV1::AccessFreezeFailed)
+    );
+
+    let mut reservation_commit_port = test_port(true, vec![first.target]);
+    reservation_commit_port.commit_error_on_call = Some(3);
+    let mut reservation_commit =
+        ErasureCoordinatorStateMachineV1::new(reservation_commit_port, reference(2));
+    reservation_commit.submit(request()?, reference(3))?;
+    reservation_commit.authorize(reference(1), reference(9))?;
+    assert_eq!(
+        reservation_commit.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    Ok(())
+}
+
+fn exercise_normalization_and_trait_edges() -> Result<(), ErasureErrorV1> {
+    let first = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let submitted = record_after_submit()?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::<TestCoordinatorPort>::normalize_receipt_input(
+            reference(1),
+            reference(2),
+            &submitted,
+            receipt_input(
+                ErasureLifecycleV1::Complete,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let frozen = record_after_freeze(vec![first.target])?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::<TestCoordinatorPort>::normalize_receipt_input(
+            reference(1),
+            reference(2),
+            &frozen,
+            receipt_input(
+                ErasureLifecycleV1::Complete,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut trait_coordinator =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, Vec::new()), reference(2));
+    let api: &mut dyn ErasureCoordinator = &mut trait_coordinator;
+    api.submit(request()?)?;
+    assert_eq!(
+        api.reject(reference(1), reference(9))?.lifecycle(),
+        ErasureLifecycleV1::Rejected
+    );
+
+    let mut malformed = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    malformed.lifecycle = ErasureLifecycleV1::Authorized;
+    malformed.previous_state = None;
+    assert_eq!(
+        verify_predecessor_chain(malformed, &test_port(true, Vec::new())),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn lifecycle_edges_are_exercised() {
+    exercise_lifecycle_edge_cases();
+}
+
+#[test]
+fn receipt_record_edges_are_exercised() -> Result<(), ErasureErrorV1> {
+    exercise_receipt_record_edges()
+}
+
+#[test]
+fn state_machine_edges_are_exercised() -> Result<(), ErasureErrorV1> {
+    exercise_state_machine_edges()
+}
+
+#[test]
+fn normalization_and_trait_edges_are_exercised() -> Result<(), ErasureErrorV1> {
+    exercise_normalization_and_trait_edges()
 }
 
 #[test]

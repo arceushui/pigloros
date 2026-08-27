@@ -6,7 +6,7 @@
 //! |--------|--------|--------|-------|
 //! | Independent clone | [`export_timeline`] | [`import_timeline`] | Remints timeline/event ids; converts to drafts (signatures dropped) |
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] | Parent first, then child; forks need `parent_fork_hash` |
-//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must be signed under one key |
+//! | Verified identity | [`export_timeline_own`] | `pos_store::import_timeline_with_verified_signatures` | Every event must carry an owner/role/epoch-bound signature under one key |
 //!
 //! Prefer [`export_timeline_own`] (alias: [`export_timeline_cow`]) for copy-on-write sync.
 //! [`export_timeline_raw`] is the same function kept for existing call sites.
@@ -764,6 +764,175 @@ pub trait EventStore: Send {
             "import_committed not supported by this store".to_owned(),
         ))
     }
+
+    /// Load the durable owner-scoped key registry owned by this store, when present.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the backend cannot read the registry
+    /// snapshot, or [`CoreError::Serialization`] when the snapshot cannot be
+    /// decoded or violates the registry invariants.
+    fn load_key_registry(&self) -> Result<Option<crate::KeyRegistryStateV1>, CoreError> {
+        Ok(None)
+    }
+
+    /// Replace the durable owner-scoped key registry owned by this store.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the adapter cannot persist the
+    /// registry snapshot, or [`CoreError::Serialization`] when the supplied
+    /// registry is invalid or violates the replacement invariants.
+    fn save_key_registry(
+        &mut self,
+        _registry: &crate::KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        Err(CoreError::Storage(
+            "durable key registry is unsupported by this EventStore".to_owned(),
+        ))
+    }
+
+    /// Initialize a named ledger Timeline and its durable signing registry.
+    ///
+    /// Durable adapters should override this operation with one transaction
+    /// covering registry validation/persistence and Timeline creation. The
+    /// default composes the existing seams and rolls back a newly created
+    /// Timeline if registry persistence fails.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the registry changed since the
+    /// caller authorized it, when the backend cannot persist the registry or
+    /// create the Timeline, or when rollback itself fails.
+    #[cfg_attr(test, inline(never))]
+    fn initialize_timeline_with_key_registry(
+        &mut self,
+        name: &str,
+        expected_registry: &crate::KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        let persisted = self.load_key_registry()?;
+        if persisted
+            .as_ref()
+            .is_some_and(|current| current != expected_registry)
+        {
+            return Err(CoreError::Storage(
+                "durable key registry changed during ledger initialization".to_owned(),
+            ));
+        }
+
+        let Some(timeline) = self
+            .list_timelines()?
+            .into_iter()
+            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+        else {
+            let timeline = self.create_timeline(name)?;
+            if persisted.is_some() {
+                return Ok(timeline);
+            }
+            return persist_registry_after_timeline_creation(self, timeline, expected_registry);
+        };
+        if persisted.is_none() {
+            self.save_key_registry(expected_registry)?;
+        }
+        Ok(timeline)
+    }
+    /// Atomically recheck a registry snapshot, create, and append one
+    /// authorized event.
+    ///
+    /// Durable stores must hold their database-wide serialization boundary across
+    /// both the registry recheck and the event append.  The default is a closed
+    /// snapshot check for small in-memory adapters; `SQLite` overrides it with one
+    /// transaction so another connection cannot destroy the owner-scoped key between the
+    /// authorization callback and append.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the persisted registry differs from
+    /// `expected_registry`, the registry is unavailable, or the append fails.
+    fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &crate::KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&crate::KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+    ) -> Result<(), CoreError> {
+        let persisted = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        if persisted != *expected_registry {
+            return Err(CoreError::Storage(
+                "durable key registry changed during signing".to_owned(),
+            ));
+        }
+        let head = self
+            .get_timeline(timeline)?
+            .ok_or(CoreError::TimelineNotFound(timeline))?;
+        let event = create_event(&persisted, head.head.next())?;
+        self.append_committed(timeline, &[event])
+    }
+
+    /// Persist the `DestructionPending` state and return the resulting snapshot.
+    ///
+    /// This is intentionally separate from [`Self::complete_key_registry_destruction`].
+    /// An owned-material adapter must delete its private bytes between these
+    /// durable commits; a crash in that interval therefore leaves authorization
+    /// revoked and the request recoverable rather than falsely claiming a final
+    /// tombstone.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the registry is unavailable, the
+    /// request is invalid, or persistence fails.
+    fn begin_key_registry_destruction(
+        &mut self,
+        request: crate::KeyDestructionRequestV1,
+    ) -> Result<
+        (
+            crate::KeyDestructionBeginOutcomeV1,
+            crate::KeyRegistryStateV1,
+        ),
+        CoreError,
+    > {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .begin_key_destruction(request)
+            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
+    }
+
+    /// Persist the final `Destroyed` tombstone after private-material deletion
+    /// has been acknowledged by the owned-material adapter.
+    ///
+    /// # Errors
+    /// Returns [`CoreError::Storage`] when the registry is unavailable, the
+    /// request/receipt is invalid, or persistence fails.
+    fn complete_key_registry_destruction(
+        &mut self,
+        request: crate::KeyDestructionRequestV1,
+        deletion_receipt: crate::Hash,
+    ) -> Result<(crate::KeyDestructionOutcomeV1, crate::KeyRegistryStateV1), CoreError> {
+        let mut registry = self
+            .load_key_registry()?
+            .ok_or_else(|| CoreError::Storage("durable key registry is unavailable".to_owned()))?;
+        let outcome = registry
+            .complete_key_destruction(request, deletion_receipt)
+            .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+        self.save_key_registry(&registry)?;
+        Ok((outcome, registry))
+    }
+}
+
+fn persist_registry_after_timeline_creation<S: EventStore + ?Sized>(
+    store: &mut S,
+    timeline: Timeline,
+    expected_registry: &crate::KeyRegistryStateV1,
+) -> Result<Timeline, CoreError> {
+    if let Err(error) = store.save_key_registry(expected_registry) {
+        return match store.delete_timeline(timeline.id()) {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(CoreError::Storage(format!(
+                "ledger initialization failed ({error}); Timeline rollback also failed ({rollback_error})"
+            ))),
+        };
+    }
+    Ok(timeline)
 }
 
 /// Export a timeline's **logical** event stream as a portable snapshot.
@@ -856,7 +1025,8 @@ pub fn export_timeline_raw(
 ///
 /// Creates a fresh [`TimelineId`], converts events to [`EventDraft`]s, and appends
 /// via [`EventStore::append`] — so **event ids are reminted**, seqs restart from the
-/// store, and **signatures are not carried** (`EventDraft` has no signature field).
+/// store, and signed exports are rejected rather than silently stripping their
+/// signatures (`EventDraft` has no signature field).
 ///
 /// For identity-preserving `CoW` sync, use [`export_timeline_own`] +
 /// [`import_timeline_with_id`] instead. For crypto-checked identity import, see
@@ -874,12 +1044,14 @@ pub fn import_timeline(
         parent_fork_hash: _,
     } = export;
     let name = timeline.meta.name.unwrap_or_default();
-    ensure_import_events_are_non_geographic(&events).and_then(|()| {
-        let create_result = store.create_timeline(&name);
-        import_timeline_using(create_result, events, |timeline_id, drafts| {
-            store.append(timeline_id, drafts)
+    ensure_import_events_are_non_geographic(&events)
+        .and_then(|()| ensure_import_events_are_unsigned(&events))
+        .and_then(|()| {
+            let create_result = store.create_timeline(&name);
+            import_timeline_using(create_result, events, |timeline_id, drafts| {
+                store.append(timeline_id, drafts)
+            })
         })
-    })
 }
 
 /// Import a timeline snapshot preserving the original [`TimelineId`] and event IDs.
@@ -901,9 +1073,8 @@ pub fn import_timeline(
 /// returned (the id may remain occupied).
 ///
 /// Signatures are persisted as opaque blobs; cryptographic verification is the caller's
-/// responsibility (see `pos_crypto::signing::verify_events_all_signed` / store helpers).
-/// For mixed unsigned events or multiple signers, call `verify_events` yourself then
-/// this function — do not use the all-signed store helper.
+/// responsibility. For owner-scoped role-bound Event signatures, resolve the persisted
+/// identity and use `pos_crypto::key_roles::verify_for_role` with that identity.
 ///
 /// # Errors
 /// Returns a [`CoreError::Storage`] error if a timeline with that ID already exists,
@@ -946,6 +1117,20 @@ fn ensure_import_events_are_non_geographic(events: &[Event]) -> Result<(), CoreE
     {
         Err(CoreError::Storage(
             "generic import of geographic evidence is disabled".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Refuse signed events before a generic import can discard their signature fields.
+fn ensure_import_events_are_unsigned(events: &[Event]) -> Result<(), CoreError> {
+    if events
+        .iter()
+        .any(|event| event.signature.is_some() || event.signature_identity.is_some())
+    {
+        Err(CoreError::Storage(
+            "generic import of signed events is disabled; use verified identity import".to_owned(),
         ))
     } else {
         Ok(())
@@ -1016,6 +1201,7 @@ fn materialize_fork_export_as_root(export: &mut TimelineExport) {
             event.causation_id = id_map.get(&cid).copied();
         }
         event.signature = None;
+        event.signature_identity = None;
     }
 }
 
@@ -1040,6 +1226,7 @@ pub fn validate_committed_batch(
     let mut expected = head.next();
     let mut seen = std::collections::HashSet::new();
     for event in &ordered {
+        validate_event_signature(event)?;
         if event.seq.as_u64() == 0 {
             return Err(CoreError::Storage(
                 "committed event seq must be >= 1".to_owned(),
@@ -1066,6 +1253,40 @@ pub fn validate_committed_batch(
         expected = expected.next();
     }
     Ok(ordered)
+}
+
+/// Validate the owner/role/epoch binding of a committed event signature.
+///
+/// An unsigned event has neither field. A signed event must carry a non-zero
+/// Timeline-integrity identity; an identity without a signature is never valid.
+/// The former ADR-041 subject-data-key signed-event shape is rejected rather
+/// than interpreted as a compatibility case. Existing historical signatures
+/// remain mathematically verifiable through their retained public keys, but
+/// no private key migration or re-issuance is supported.
+///
+/// # Errors
+///
+/// Returns [`CoreError::Storage`] when the two fields are inconsistent or the
+/// identity is not eligible to sign.
+pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
+    match (event.signature.as_ref(), event.signature_identity) {
+        (None, None) => Ok(()),
+        (Some(_), None) => Err(CoreError::Storage(
+            "signed event must carry an owner/role/epoch identity".to_owned(),
+        )),
+        (Some(_), Some(identity)) => {
+            if identity.epoch == 0 || identity.role != crate::KeyRoleV1::TimelineIntegritySigning {
+                return Err(CoreError::Storage(
+                    "signed event must carry a TimelineIntegritySigning owner/role/epoch identity"
+                        .to_owned(),
+                ));
+            }
+            Ok(())
+        }
+        (None, Some(_)) => Err(CoreError::Storage(
+            "signed event must carry a signature for its owner/role/epoch identity".to_owned(),
+        )),
+    }
 }
 
 fn export_timeline_using(
@@ -1219,6 +1440,7 @@ mod tests {
                         correlation_id: d.correlation_id,
                         schema_version: d.schema_version,
                         signature: None,
+                        signature_identity: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1283,6 +1505,7 @@ mod tests {
                         correlation_id: d.correlation_id,
                         schema_version: d.schema_version,
                         signature: None,
+                        signature_identity: None,
                         payload_hash: Hash::from_bytes([0u8; 32]),
                     }
                 })
@@ -1322,6 +1545,254 @@ mod tests {
         fn get_timeline(&self, _id: TimelineId) -> Result<Option<Timeline>, CoreError> {
             Ok(None)
         }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum InitializationFailure {
+        None,
+        Load,
+        List,
+        Create,
+        Save,
+    }
+
+    struct RegistryStore {
+        registry: Option<crate::KeyRegistryStateV1>,
+        timeline: Option<Timeline>,
+        appended: bool,
+        initialization_failure: InitializationFailure,
+    }
+
+    impl RegistryStore {
+        fn new(registry: crate::KeyRegistryStateV1) -> Self {
+            Self {
+                registry: Some(registry),
+                timeline: Some(Timeline::new(TimelineMeta::root("registry"))),
+                appended: false,
+                initialization_failure: InitializationFailure::None,
+            }
+        }
+    }
+
+    impl EventStore for RegistryStore {
+        fn create_timeline(&mut self, _name: &str) -> Result<Timeline, CoreError> {
+            if self.initialization_failure == InitializationFailure::Create {
+                return Err(CoreError::Storage("create_timeline failed".to_owned()));
+            }
+            Ok(Timeline::new(TimelineMeta::root("registry-created")))
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: Seq,
+            _name: &str,
+        ) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root("registry-fork")))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            if self.initialization_failure == InitializationFailure::List {
+                return Err(CoreError::Storage("list_timelines failed".to_owned()));
+            }
+            Ok(self.timeline.clone().into_iter().collect())
+        }
+
+        fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            Ok(self.timeline.clone().filter(|timeline| timeline.id() == id))
+        }
+
+        fn load_key_registry(&self) -> Result<Option<crate::KeyRegistryStateV1>, CoreError> {
+            if self.initialization_failure == InitializationFailure::Load {
+                return Err(CoreError::Storage("load_key_registry failed".to_owned()));
+            }
+            Ok(self.registry.clone())
+        }
+
+        fn save_key_registry(
+            &mut self,
+            registry: &crate::KeyRegistryStateV1,
+        ) -> Result<(), CoreError> {
+            if self.initialization_failure == InitializationFailure::Save {
+                return Err(CoreError::Storage("save_key_registry failed".to_owned()));
+            }
+            self.registry = Some(registry.clone());
+            Ok(())
+        }
+
+        fn append_committed(
+            &mut self,
+            _timeline: TimelineId,
+            _events: &[Event],
+        ) -> Result<(), CoreError> {
+            self.appended = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_key_registry_methods_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = TrivialStore::new();
+        assert!(store.load_key_registry()?.is_none());
+        let error = store
+            .save_key_registry(&crate::KeyRegistryStateV1::new())
+            .test_err()?;
+        assert!(error.to_string().contains("unsupported"));
+
+        let mut create_event = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(
+                TimelineId::new(),
+                &crate::KeyRegistryStateV1::new(),
+                &mut create_event,
+            )
+            .test_err()?;
+        assert!(error.to_string().contains("unavailable"));
+
+        let error = store
+            .begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
+                crate::KeyIdentityV1::new(
+                    "test-owner",
+                    crate::KeyRoleV1::TimelineIntegritySigning,
+                    1,
+                ),
+                crate::Hash::from_bytes([1; 32]),
+                crate::Hash::from_bytes([2; 32]),
+            ))
+            .test_err()?;
+        assert!(error.to_string().contains("unavailable"));
+        Ok(())
+    }
+
+    #[test]
+    fn default_key_registry_methods_cover_authorized_paths(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let identity =
+            crate::KeyIdentityV1::new("test-owner", crate::KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = crate::Hash::from_bytes([1; 32]);
+        let mut registry = crate::KeyRegistryStateV1::new();
+        registry.register_key(crate::KeyRegistrationV1::new(
+            identity,
+            material_digest,
+            Some(crate::PublicKey::from_bytes([2; 32])),
+        ))?;
+
+        let mut store = RegistryStore::new(registry.clone());
+        let timeline = store.timeline.as_ref().map(Timeline::id).test_ok()?;
+        let mut create_event = |_registry: &crate::KeyRegistryStateV1, seq: Seq| {
+            Ok(Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("registry.test"),
+                payload: CanonicalBytes::from_static(b"payload"),
+                wall_time: WallTime::from_micros(1),
+                seq,
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                payload_hash: Hash::from_bytes([0; 32]),
+            })
+        };
+        store.append_signed_authorized(timeline, &registry, &mut create_event)?;
+        assert!(store.appended);
+
+        let mut mismatch_callback = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let mismatch = store.append_signed_authorized(
+            timeline,
+            &crate::KeyRegistryStateV1::new(),
+            &mut mismatch_callback,
+        );
+        assert!(mismatch
+            .test_err()?
+            .to_string()
+            .contains("changed during signing"));
+
+        let mut missing_timeline = RegistryStore::new(registry.clone());
+        missing_timeline.timeline = None;
+        let mut missing_callback = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            missing_timeline
+                .append_signed_authorized(timeline, &registry, &mut missing_callback)
+                .test_err()?,
+            CoreError::TimelineNotFound(found) if found == timeline
+        ));
+
+        let mut callback_error = |_registry: &crate::KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
+        };
+        assert!(store
+            .append_signed_authorized(timeline, &registry, &mut callback_error)
+            .test_err()?
+            .to_string()
+            .contains("callback failed"));
+
+        let request = crate::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            crate::Hash::from_bytes([3; 32]),
+        );
+        let (begin, _pending) = store.begin_key_registry_destruction(request)?;
+        assert_eq!(begin, crate::KeyDestructionBeginOutcomeV1::Started);
+        let (outcome, destroyed) =
+            store.complete_key_registry_destruction(request, crate::deletion_receipt(&request))?;
+        assert!(matches!(
+            outcome,
+            crate::KeyDestructionOutcomeV1::Destroyed(_)
+        ));
+        assert_eq!(
+            destroyed
+                .key_record(identity)
+                .and_then(|record| record.private_material_digest),
+            None
+        );
+        assert!(store.registry.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn default_timeline_initialization_propagates_backend_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for failure in [
+            InitializationFailure::Load,
+            InitializationFailure::List,
+            InitializationFailure::Create,
+            InitializationFailure::Save,
+        ] {
+            let mut store = RegistryStore::new(crate::KeyRegistryStateV1::new());
+            store.initialization_failure = failure;
+            store.timeline = match failure {
+                InitializationFailure::Create => None,
+                _ => Some(Timeline::new(TimelineMeta::root("ledger"))),
+            };
+            if failure == InitializationFailure::Save {
+                store.registry = None;
+            }
+            let error = store
+                .initialize_timeline_with_key_registry("ledger", &crate::KeyRegistryStateV1::new())
+                .test_err()?;
+            assert!(!error.to_string().is_empty());
+        }
+        Ok(())
     }
 
     #[test]
@@ -1419,6 +1890,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let meta = TimelineMeta::root("original");
@@ -1562,6 +2034,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -1573,6 +2046,49 @@ mod tests {
         let imported = import_timeline(&mut store, export).test_ok()?;
         assert!(!imported.id().to_string().is_empty());
 
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn generic_import_rejects_signed_events_before_stripping_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let entity = EntityId::new();
+        for (signature, signature_identity) in [
+            (Some(crate::Signature::from_bytes([1u8; 64])), None),
+            (
+                None,
+                Some(crate::KeyIdentityV1::new(
+                    "test-owner",
+                    crate::KeyRoleV1::TimelineIntegritySigning,
+                    1,
+                )),
+            ),
+        ] {
+            let event = Event {
+                id: EventId::new(),
+                entity,
+                event_type: Kind::new("test.event"),
+                payload: CanonicalBytes::from_vec(b"signed payload".to_vec()),
+                wall_time: WallTime::from_micros(1_000),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature,
+                signature_identity,
+                payload_hash: Hash::from_bytes([0u8; 32]),
+            };
+            let export = TimelineExport {
+                timeline: Timeline::new(TimelineMeta::root("signed-events")),
+                events: vec![event],
+                parent_fork_hash: None,
+            };
+            let error = import_timeline(&mut TrivialStore::new(), export).test_err()?;
+            assert!(error
+                .to_string()
+                .contains("generic import of signed events is disabled"));
+        }
         Ok(())
     }
 
@@ -1641,6 +2157,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -1726,6 +2243,7 @@ mod tests {
                 correlation_id: None,
                 schema_version: SchemaVersion::V1,
                 signature: None,
+                signature_identity: None,
                 payload_hash: Hash::from_bytes([0u8; 32]),
             }],
             parent_fork_hash: None,
@@ -1891,43 +2409,11 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn validate_committed_batch_rejects_gaps_and_dup_ids() -> Result<(), Box<dyn std::error::Error>>
-    {
-        struct TestHasher {
-            should_match: bool,
-        }
-        impl Hasher for TestHasher {
-            fn genesis_hash(&self) -> Hash {
-                Hash::zero()
-            }
-            fn hash_payload(&self, _payload: &CanonicalBytes) -> Hash {
-                if self.should_match {
-                    Hash::zero()
-                } else {
-                    Hash::from_bytes([1u8; 32])
-                }
-            }
-            fn hash_event(
-                &self,
-                previous_hash: &Hash,
-                _event_id_bytes: &[u8],
-                _payload: &CanonicalBytes,
-            ) -> Hash {
-                *previous_hash
-            }
-        }
-        let match_hasher = TestHasher { should_match: true };
-        let mismatch_hasher = TestHasher {
-            should_match: false,
-        };
-
-        let entity = crate::ids::EntityId::new();
-        let mk = |seq: u64, id: crate::ids::EventId| Event {
+    fn validation_test_event(seq: u64, id: crate::ids::EventId) -> Event {
+        Event {
             id,
-            entity,
-            event_type: Kind::new("t"),
+            entity: crate::ids::EntityId::new(),
+            event_type: Kind::new("test.validation"),
             payload: CanonicalBytes::from_vec(b"x".to_vec()),
             wall_time: WallTime::now(),
             seq: Seq::from_u64(seq),
@@ -1935,16 +2421,57 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::zero(),
+        }
+    }
+
+    struct ValidationTestHasher {
+        should_match: bool,
+    }
+
+    impl Hasher for ValidationTestHasher {
+        fn genesis_hash(&self) -> Hash {
+            Hash::zero()
+        }
+        fn hash_payload(&self, _payload: &CanonicalBytes) -> Hash {
+            if self.should_match {
+                Hash::zero()
+            } else {
+                Hash::from_bytes([1u8; 32])
+            }
+        }
+        fn hash_event(
+            &self,
+            previous_hash: &Hash,
+            _event_id_bytes: &[u8],
+            _payload: &CanonicalBytes,
+        ) -> Hash {
+            *previous_hash
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_committed_batch_rejects_gaps_duplicates_and_hashes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let match_hasher = ValidationTestHasher { should_match: true };
+        let mismatch_hasher = ValidationTestHasher {
+            should_match: false,
         };
         let id = crate::ids::EventId::new();
-        let err = validate_committed_batch(Seq::ZERO, &[mk(2, id)], &mut |_| false, &match_hasher)
-            .test_err()?;
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[validation_test_event(2, id)],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains("contiguous")));
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(1, id), mk(2, id)],
+            &[validation_test_event(1, id), validation_test_event(2, id)],
             &mut |_| false,
             &match_hasher,
         )
@@ -1953,7 +2480,7 @@ mod tests {
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(1, crate::ids::EventId::new())],
+            &[validation_test_event(1, crate::ids::EventId::new())],
             &mut |_| true,
             &match_hasher,
         )
@@ -1962,7 +2489,7 @@ mod tests {
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(1, crate::ids::EventId::new())],
+            &[validation_test_event(1, crate::ids::EventId::new())],
             &mut |_| false,
             &mismatch_hasher,
         )
@@ -1971,23 +2498,89 @@ mod tests {
 
         let err = validate_committed_batch(
             Seq::ZERO,
-            &[mk(0, crate::ids::EventId::new())],
+            &[validation_test_event(0, crate::ids::EventId::new())],
             &mut |_| false,
             &match_hasher,
         )
         .test_err()?;
         assert!(matches!(err, CoreError::Storage(ref m) if m.contains(">= 1")));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn validate_committed_batch_rejects_incomplete_signature_and_sorts(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let match_hasher = ValidationTestHasher { should_match: true };
+        let mut signature_without_identity = validation_test_event(1, crate::ids::EventId::new());
+        signature_without_identity.signature = Some(crate::Signature::from_bytes([1; 64]));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[signature_without_identity],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(
+            matches!(err, CoreError::Storage(ref m) if m.contains("owner/role/epoch identity"))
+        );
+
+        let mut identity_without_signature = validation_test_event(1, crate::ids::EventId::new());
+        identity_without_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            "test-owner",
+            crate::KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[identity_without_signature],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("signature for its")));
+
+        let mut zero_epoch_signature = validation_test_event(1, crate::ids::EventId::new());
+        zero_epoch_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
+        zero_epoch_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            "test-owner",
+            crate::KeyRoleV1::TimelineIntegritySigning,
+            0,
+        ));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[zero_epoch_signature],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("TimelineIntegritySigning")));
+
+        let mut encryption_signature = validation_test_event(1, crate::ids::EventId::new());
+        encryption_signature.signature = Some(crate::Signature::from_bytes([1; 64]));
+        encryption_signature.signature_identity = Some(crate::KeyIdentityV1::new(
+            "test-owner",
+            crate::KeyRoleV1::SubjectDataEncryption,
+            1,
+        ));
+        let err = validate_committed_batch(
+            Seq::ZERO,
+            &[encryption_signature],
+            &mut |_| false,
+            &match_hasher,
+        )
+        .test_err()?;
+        assert!(matches!(err, CoreError::Storage(ref m) if m.contains("TimelineIntegritySigning")));
 
         let ok =
             validate_committed_batch(Seq::ZERO, &[], &mut |_| false, &match_hasher).test_ok()?;
         assert!(ok.is_empty());
 
-        // Success path with contiguous events (covers Ok(ordered)).
-        let e1 = mk(1, crate::ids::EventId::new());
-        let e2 = mk(2, crate::ids::EventId::new());
+        let e1 = validation_test_event(1, crate::ids::EventId::new());
+        let e2 = validation_test_event(2, crate::ids::EventId::new());
         let accepted = validate_committed_batch(
             Seq::ZERO,
-            &[e2.clone(), e1.clone()], // out of order — must sort
+            &[e2.clone(), e1.clone()],
             &mut |_| false,
             &match_hasher,
         )
@@ -1995,7 +2588,6 @@ mod tests {
         assert_eq!(accepted.len(), 2);
         assert_eq!(accepted[0].id, e1.id);
         assert_eq!(accepted[1].id, e2.id);
-
         Ok(())
     }
 
@@ -2672,6 +3264,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([1u8; 64])),
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let original_id = event.id;
@@ -2759,6 +3352,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(crate::Signature::from_bytes([9u8; 64])),
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -2851,6 +3445,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::zero(),
         };
         let export = export_timeline(
@@ -3156,6 +3751,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -3196,6 +3792,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0u8; 32]),
         };
         let export = TimelineExport {
@@ -3208,5 +3805,394 @@ mod tests {
         assert!(!imported.id().to_string().is_empty());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod key_registry_coverage {
+    use crate::{
+        clock::{Seq, WallTime},
+        crypto::Hash,
+        event::{CanonicalBytes, EventDraft, Kind, SchemaVersion},
+        ids::{EntityId, EventId, TimelineId},
+        key_registry::{KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1},
+        timeline::{Timeline, TimelineMeta},
+        CoreError, Event, EventStore, PublicKey, SeqRange,
+    };
+
+    struct MinimalStore {
+        timeline: Timeline,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl MinimalStore {
+        fn new() -> Self {
+            Self {
+                timeline: Timeline::new(TimelineMeta::root("minimal-key-registry")),
+            }
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl EventStore for MinimalStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root(name)))
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root(name)))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            Ok(vec![self.timeline.clone()])
+        }
+
+        fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            Ok((self.timeline.id() == id).then(|| self.timeline.clone()))
+        }
+    }
+
+    struct PersistedStore {
+        registry: KeyRegistryStateV1,
+        timeline: Option<Timeline>,
+        committed: bool,
+        failure: PersistedFailure,
+    }
+
+    #[derive(Clone, Copy)]
+    enum PersistedFailure {
+        None,
+        Load,
+        Timeline,
+        Save,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl PersistedStore {
+        fn new(registry: KeyRegistryStateV1) -> Self {
+            Self {
+                registry,
+                timeline: Some(Timeline::new(TimelineMeta::root("persisted-key-registry"))),
+                committed: false,
+                failure: PersistedFailure::None,
+            }
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl EventStore for PersistedStore {
+        fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root(name)))
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn read(&self, _timeline: TimelineId, _range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: Seq,
+            name: &str,
+        ) -> Result<Timeline, CoreError> {
+            Ok(Timeline::new(TimelineMeta::root(name)))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<Timeline>, CoreError> {
+            Ok(self.timeline.clone().into_iter().collect())
+        }
+
+        fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            if matches!(self.failure, PersistedFailure::Timeline) {
+                return Err(CoreError::Storage("timeline lookup failed".to_owned()));
+            }
+            Ok(self.timeline.clone().filter(|timeline| timeline.id() == id))
+        }
+
+        fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+            if matches!(self.failure, PersistedFailure::Load) {
+                return Err(CoreError::Storage("registry lookup failed".to_owned()));
+            }
+            Ok(Some(self.registry.clone()))
+        }
+
+        fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+            if matches!(self.failure, PersistedFailure::Save) {
+                return Err(CoreError::Storage("registry persistence failed".to_owned()));
+            }
+            self.registry = registry.clone();
+            Ok(())
+        }
+
+        fn append_committed(
+            &mut self,
+            _timeline: TimelineId,
+            _events: &[Event],
+        ) -> Result<(), CoreError> {
+            self.committed = true;
+            Ok(())
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn registered_state(
+    ) -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = Hash::from_bytes([3; 32]);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material_digest,
+            Some(PublicKey::from_bytes([4; 32])),
+        ))?;
+        Ok((registry, identity, material_digest))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn event_at(seq: Seq) -> Event {
+        Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("registry.coverage"),
+            payload: CanonicalBytes::from_static(b"payload"),
+            wall_time: WallTime::from_micros(1),
+            seq,
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authorized_registry_error_paths(
+        store: &mut PersistedStore,
+        registry: &KeyRegistryStateV1,
+        identity: KeyIdentityV1,
+        material_digest: Hash,
+        timeline: TimelineId,
+    ) {
+        let mut load_failure = PersistedStore::new(registry.clone());
+        load_failure.failure = PersistedFailure::Load;
+        let mut load_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            load_failure.append_signed_authorized(timeline, registry, &mut load_callback,),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut timeline_failure = PersistedStore::new(registry.clone());
+        timeline_failure.failure = PersistedFailure::Timeline;
+        let mut timeline_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            timeline_failure.append_signed_authorized(timeline, registry, &mut timeline_callback,),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut missing_timeline = PersistedStore::new(registry.clone());
+        missing_timeline.timeline = None;
+        let mut missing_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            missing_timeline.append_signed_authorized(timeline, registry, &mut missing_callback,),
+            Err(CoreError::TimelineNotFound(_))
+        ));
+
+        let mut callback_failure = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(timeline, registry, &mut callback_failure),
+            Err(CoreError::Storage(_))
+        ));
+
+        let invalid_request = crate::KeyDestructionRequestV1::new(
+            identity,
+            Hash::from_bytes([9; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        assert!(matches!(
+            store.begin_key_registry_destruction(invalid_request),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut load_destroy_failure = PersistedStore::new(registry.clone());
+        load_destroy_failure.failure = PersistedFailure::Load;
+        assert!(matches!(
+            load_destroy_failure.begin_key_registry_destruction(
+                crate::KeyDestructionRequestV1::new(
+                    identity,
+                    material_digest,
+                    Hash::from_bytes([2; 32]),
+                )
+            ),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut save_failure = PersistedStore::new(registry.clone());
+        save_failure.failure = PersistedFailure::Save;
+        assert!(matches!(
+            save_failure.begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
+                identity,
+                material_digest,
+                Hash::from_bytes([2; 32]),
+            )),
+            Err(CoreError::Storage(_))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn default_key_registry_trait_contracts() -> Result<(), CoreError> {
+        let mut store = MinimalStore::new();
+        assert!(store.load_key_registry()?.is_none());
+        assert!(matches!(
+            store.save_key_registry(&KeyRegistryStateV1::new()),
+            Err(CoreError::Storage(_))
+        ));
+        let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(
+                TimelineId::new(),
+                &KeyRegistryStateV1::new(),
+                &mut callback,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            store.begin_key_registry_destruction(crate::KeyDestructionRequestV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([1; 32]),
+                Hash::from_bytes([2; 32]),
+            )),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            store.initialize_timeline_with_key_registry(
+                "minimal-key-registry",
+                &KeyRegistryStateV1::new(),
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn authorized_key_registry_trait_contracts() -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = PersistedStore::new(registry.clone());
+        let timeline = store
+            .timeline
+            .as_ref()
+            .map(Timeline::id)
+            .ok_or("missing coverage timeline")?;
+        let mut callback = |_registry: &KeyRegistryStateV1, seq: Seq| Ok(event_at(seq));
+        store.append_signed_authorized(timeline, &registry, &mut callback)?;
+        assert!(store.committed);
+
+        let mut mismatch_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(
+                timeline,
+                &KeyRegistryStateV1::new(),
+                &mut mismatch_callback,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+        authorized_registry_error_paths(&mut store, &registry, identity, material_digest, timeline);
+
+        let request = crate::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            Hash::from_bytes([2; 32]),
+        );
+        store.begin_key_registry_destruction(request)?;
+        let (_, destroyed) =
+            store.complete_key_registry_destruction(request, crate::deletion_receipt(&request))?;
+        assert!(destroyed.key_record(identity).is_some());
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn complete_key_registry_destruction_propagates_load_and_save_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let request = crate::KeyDestructionRequestV1::new(
+            identity,
+            material_digest,
+            Hash::from_bytes([2; 32]),
+        );
+
+        let mut load_failure = PersistedStore::new(registry.clone());
+        load_failure.failure = PersistedFailure::Load;
+        assert!(matches!(
+            load_failure
+                .complete_key_registry_destruction(request, crate::deletion_receipt(&request),),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut save_failure = PersistedStore::new(registry);
+        save_failure.begin_key_registry_destruction(request)?;
+        save_failure.failure = PersistedFailure::Save;
+        assert!(matches!(
+            save_failure
+                .complete_key_registry_destruction(request, crate::deletion_receipt(&request),),
+            Err(CoreError::Storage(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn existing_timeline_without_registry_propagates_save_failure() {
+        let mut store = MinimalStore::new();
+        assert!(store
+            .initialize_timeline_with_key_registry(
+                "minimal-key-registry",
+                &KeyRegistryStateV1::new(),
+            )
+            .is_err());
+
+        let registry = KeyRegistryStateV1::new();
+        let mut persisted = PersistedStore::new(registry.clone());
+        assert!(persisted
+            .initialize_timeline_with_key_registry("persisted-key-registry", &registry)
+            .is_ok());
     }
 }

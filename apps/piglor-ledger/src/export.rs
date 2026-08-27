@@ -60,6 +60,9 @@ pub struct SignedEventRecord {
     /// Hex Ed25519 signature, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_hex: Option<String>,
+    /// Role/epoch identity used for the signature, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_identity: Option<pos_core::KeyIdentityV1>,
 }
 
 /// Build an [`ExportManifest`] for `source` using `today` for overdue derivation.
@@ -139,18 +142,7 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
         .find(|t| t.meta.name.as_deref() == Some("ledger"))
         .ok_or_else(|| CliError::BadSource("no 'ledger' timeline in store".into()))?;
     let events = store.read(timeline.id(), SeqRange::all())?;
-    // Fold the ledger view via the port by reusing EventLedgerStore's load.
-    // We have no key here — synthesise a throwaway one because load() doesn't
-    // sign; only writes need a live key.
-    let (sk, _) = pos_crypto::signing::generate_keypair();
-    let ledger_store = pos_plugin_ledger::EventLedgerStore::new(
-        store,
-        timeline.id(),
-        crate::well_known_entity(),
-        sk,
-        Box::new(pos_crypto::chain::Blake3Hasher),
-    );
-    let ledger = ledger_store.load(today)?;
+    let ledger = pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline.id(), today)?;
     let view = LedgerView::from(&ledger);
     let records: Vec<SignedEventRecord> = events
         .iter()
@@ -159,6 +151,7 @@ fn build_store(db: &Path, today: &str, pubkey: Option<String>) -> Result<ExportM
             event_type: e.event_type.as_str().to_owned(),
             payload_hex: hex_encode(e.payload.as_slice()),
             signature_hex: e.signature.as_ref().map(|s| hex_encode(s.as_bytes())),
+            signature_identity: e.signature_identity,
         })
         .collect();
     Ok(ExportManifest::Store {

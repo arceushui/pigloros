@@ -2605,6 +2605,7 @@ mod tests {
     // lifecycle transitions, and hard-cap entrypoints. Closed enum mapping
     // tests below only enumerate the representation used by those seams.
     use super::*;
+    use ed25519_dalek::Signer;
 
     const MAX_FIXTURE_COUNT: u32 = 65_536;
     const MAX_MEMBER_PATH_BYTES: u16 = 256;
@@ -2980,14 +2981,8 @@ mod tests {
         let signing_key = trusted_root_signing_key();
         evidence.attestation.signer_public_key = signing_key.verifying_key().to_bytes();
         evidence.attestation.trust_root_digest = trusted_root_digest();
-        evidence.attestation.signature = pos_crypto::signing::sign(
-            &signing_key,
-            &CanonicalBytes::from_vec(
-                encode_value(&stable_attestation_payload(evidence)).unwrap_or_default(),
-            ),
-        )
-        .as_bytes()
-        .to_owned();
+        let payload = encode_value(&stable_attestation_payload(evidence)).unwrap_or_default();
+        evidence.attestation.signature = signing_key.sign(&payload).to_bytes();
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

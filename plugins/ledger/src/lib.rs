@@ -43,7 +43,7 @@ pub mod store;
 mod toml_store;
 
 pub use entry::{LedgerEntry, LedgerEntryView, LedgerView, Status};
-pub use event_store::EventLedgerStore;
+pub use event_store::{load_ledger_from_store, EventLedgerStore};
 pub use ledger::{Ledger, LedgerWarning};
 pub use payload::{
     decode_outcome, decode_prediction, draft_outcome, draft_prediction, LedgerOutcome,

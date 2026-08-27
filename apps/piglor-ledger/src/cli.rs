@@ -6,10 +6,16 @@
 //! binary in `src/main.rs` is just `run(&env::args().collect())`.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use pos_core::ids::TimelineId;
+use pos_core::{
+    ids::TimelineId, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+};
 use pos_crypto::chain::Blake3Hasher;
-use pos_crypto::signing::generate_keypair;
+use pos_crypto::{
+    key_roles::key_material_digest,
+    signing::{generate_keypair, public_key_from_verifying_key},
+};
 use pos_plugin_ledger::{
     EventLedgerStore, LedgerStore, LedgerView, NewPrediction, TomlLedgerStore,
 };
@@ -17,6 +23,10 @@ use pos_store::StoreConfig;
 
 use crate::hex::hex_decode;
 use crate::{hex_encode, render_html, render_json, render_redirect, CliError};
+
+fn ledger_owner_id() -> OwnerIdV1 {
+    OwnerIdV1::from_static("piglor-ledger")
+}
 
 /// Parsed `--source toml:DIR|store:DB` value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +69,44 @@ fn load_signing_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliError> 
     Ok(ed25519_dalek::SigningKey::from_bytes(&arr))
 }
 
+fn register_initial_key(
+    registry: &mut KeyRegistryStateV1,
+    registration: KeyRegistrationV1,
+) -> Result<(), CliError> {
+    registry
+        .register_key(registration)
+        .map(|_| ())
+        .map_err(|error| CliError::BadSource(format!("initial ledger registration: {error}")))
+}
+
+fn ledger_signing_registry(
+    signing_key: &ed25519_dalek::SigningKey,
+    persisted_registry: Option<&KeyRegistryStateV1>,
+) -> Result<(KeyRegistryStateV1, KeyIdentityV1), CliError> {
+    let material_digest = key_material_digest(signing_key.as_bytes());
+    let public_verification_key = public_key_from_verifying_key(&signing_key.verifying_key());
+    let owner_id = ledger_owner_id();
+    let identity = persisted_registry
+        .and_then(|registry| registry.active_key(&owner_id, KeyRoleV1::TimelineIntegritySigning))
+        .map_or_else(
+            || KeyIdentityV1::from_parts(owner_id, KeyRoleV1::TimelineIntegritySigning, 1),
+            |record| record.identity,
+        );
+    let mut registry = persisted_registry.cloned().unwrap_or_default();
+    if persisted_registry.is_none() {
+        // The initial owner/role/epoch and generated key material are valid by
+        // construction. Later epochs come from the durable active registry.
+        register_initial_key(
+            &mut registry,
+            KeyRegistrationV1::new(identity, material_digest, Some(public_verification_key)),
+        )?;
+    }
+    registry
+        .with_signing_authorization(identity, material_digest, public_verification_key, || ())
+        .map_err(|error| CliError::BadSource(format!("ledger signing authorization: {error}")))?;
+    Ok((registry, identity))
+}
+
 /// Open the source as a `Box<dyn LedgerStore>`. Store tier requires
 /// `--key` pointing at a hex-encoded Ed25519 secret key (ADR-017 Decision 5b).
 ///
@@ -77,14 +125,28 @@ pub fn open_store(source: &Source, key: Option<&Path>) -> Result<Box<dyn LedgerS
                 path: db.to_string_lossy().into_owned(),
             })
             .map_err(|e| CliError::BadSource(e.to_string()))?;
-            let timeline_id = find_or_create_ledger_timeline(&mut *event_store)?;
-            Ok(Box::new(EventLedgerStore::new(
-                event_store,
-                timeline_id,
-                crate::well_known_entity(),
-                signing_key,
-                Box::new(Blake3Hasher),
-            )))
+            let persisted_registry = event_store
+                .load_key_registry()
+                .map_err(|e| CliError::BadSource(e.to_string()))?;
+            let (registry_state, identity) =
+                ledger_signing_registry(&signing_key, persisted_registry.as_ref())?;
+            let timeline_id = event_store
+                .initialize_timeline_with_key_registry("ledger", &registry_state)
+                .map_err(|error| CliError::BadSource(error.to_string()))?
+                .id();
+            let registry = Arc::new(Mutex::new(registry_state));
+            Ok(Box::new(
+                EventLedgerStore::new(
+                    event_store,
+                    timeline_id,
+                    crate::well_known_entity(),
+                    signing_key,
+                    registry,
+                    identity,
+                    Box::new(Blake3Hasher),
+                )
+                .map_err(|error| CliError::BadSource(error.to_string()))?,
+            ))
         }
     }
 }
@@ -148,17 +210,14 @@ fn days_since_epoch_to_date(mut days: u32) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// Find the timeline named `"ledger"`; create it if the store is empty.
-fn find_or_create_ledger_timeline(
-    store: &mut dyn pos_core::store::EventStore,
-) -> Result<TimelineId, CliError> {
-    for tl in store.list_timelines()? {
-        if tl.meta.name.as_deref() == Some("ledger") {
-            return Ok(tl.id());
-        }
-    }
-    let tl = store.create_timeline("ledger")?;
-    Ok(tl.id())
+/// Find the existing ledger timeline without mutating the store.
+fn find_ledger_timeline(store: &dyn pos_core::store::EventStore) -> Result<TimelineId, CliError> {
+    store
+        .list_timelines()?
+        .into_iter()
+        .find(|tl| tl.meta.name.as_deref() == Some("ledger"))
+        .map(|tl| tl.id())
+        .ok_or_else(|| CliError::BadSource("no 'ledger' timeline in store".to_owned()))
 }
 
 /// Dispatch `args` as a CLI invocation.
@@ -189,7 +248,7 @@ pub fn run(args: &[String]) -> Result<(), CliError> {
             output_stderr!("  resolve --source toml:DIR|store:DB [--key <path>] --id ULID --outcome true|false --resolved-at TS");
             output_stderr!("  export --source toml:DIR|store:DB [--out FILE] [--today YYYY-MM-DD] [--pubkey HEX]");
             output_stderr!("  build  --source toml:DIR|store:DB --site DIR [--today YYYY-MM-DD] [--pubkey HEX]");
-            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey HEX (required for store:)] [--manifest FILE]");
+            output_stderr!("  verify --source toml:DIR|store:DB [--pubkey OWNER/ROLE-CODE/EPOCH=HEX,... (required trust anchor for store:)] [--manifest FILE]");
             Ok(())
         }
     }
@@ -311,20 +370,10 @@ fn cmd_build(args: &[String]) -> Result<(), CliError> {
     let ledger = match &source {
         Source::Toml(dir) => TomlLedgerStore::new(dir).load(&today)?,
         Source::Store(db) => {
-            let mut store = pos_store::open_store(StoreConfig::Sqlite {
-                path: db.to_string_lossy().into_owned(),
-            })
-            .map_err(|e| CliError::BadSource(e.to_string()))?;
-            let timeline_id = find_or_create_ledger_timeline(&mut *store)?;
-            let (sk, _) = pos_crypto::signing::generate_keypair();
-            let ledger_store = EventLedgerStore::new(
-                store,
-                timeline_id,
-                crate::well_known_entity(),
-                sk,
-                Box::new(Blake3Hasher),
-            );
-            ledger_store.load(&today)?
+            let store = pos_store::open_store_read_only(&db.to_string_lossy())
+                .map_err(|e| CliError::BadSource(e.to_string()))?;
+            let timeline_id = find_ledger_timeline(store.as_ref())?;
+            pos_plugin_ledger::load_ledger_from_store(store.as_ref(), timeline_id, &today)?
         }
     };
     let view = LedgerView::from(&ledger);
@@ -348,8 +397,14 @@ fn cmd_verify(args: &[String]) -> Result<(), CliError> {
     let manifest_path = flag(args, "--manifest").map(PathBuf::from);
     let pubkey = flag(args, "--pubkey").map(str::to_owned);
     let report = crate::verify::run(&source, pubkey.as_deref(), manifest_path.as_deref())?;
+    let failure = match &report.outcome {
+        crate::verify::VerifyOutcome::Ok => None,
+        crate::verify::VerifyOutcome::Mismatch { which, reason } => {
+            Some(format!("{which}: {reason}"))
+        }
+    };
     output_stdout!("{report}");
-    Ok(())
+    failure.map_or(Ok(()), |reason| Err(CliError::VerificationFailed(reason)))
 }
 
 #[cfg(test)]
@@ -360,6 +415,7 @@ mod tests {
     use super::*;
     use crate::hex::nib;
     use crate::test_helpers::{running_as_root, TestOptionExt, TestResultExt};
+    use pos_core::store::EventStore;
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -1332,10 +1388,10 @@ mod tests {
             "verify".into(),
             "--source".into(),
             format!("store:{}", db.display()),
-            // No --pubkey → verify::run returns Err("store tier verify requires --pubkey")
+            // No --pubkey on an empty store → the persisted registry is required first.
         ])
         .test_err()?;
-        assert!(err.to_string().contains("--pubkey"), "{err}");
+        assert!(err.to_string().contains("role/epoch registry"), "{err}");
 
         Ok(())
     }
@@ -1416,10 +1472,16 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_without_key_succeeds() -> Result<(), Box<dyn std::error::Error>> {
-        // build --source store:DB no longer requires --key (uses throwaway key).
+    fn build_store_without_key_is_read_only() -> Result<(), Box<dyn std::error::Error>> {
+        // A store-backed build reads an existing ledger without signing or creating it.
         let tmp = TempDir::new().test_ok()?;
         let db_path = tmp.path().join("x.db");
+        let mut store = pos_store::open_store(StoreConfig::Sqlite {
+            path: db_path.to_string_lossy().into_owned(),
+        })
+        .test_ok()?;
+        store.create_timeline("ledger").test_ok()?;
+        drop(store);
         run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -1429,13 +1491,7 @@ mod tests {
             tmp.path().join("site").to_str().test_ok()?.to_owned(),
         ])
         .test_ok()?;
-        assert!(tmp
-            .path()
-            .join("site")
-            .join("ledger")
-            .join("index.html")
-            .exists());
-        assert!(tmp.path().join("site").join("index.html").exists());
+        assert!(tmp.path().join("site/ledger/index.html").is_file());
 
         Ok(())
     }
@@ -1708,7 +1764,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_readonly_db_fails_on_create_timeline() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L135: `?` on create_timeline when the DB is read-only.
+        // Covers the atomic initialization failure when the DB is read-only.
         // Creates a valid empty SQLite DB, then makes it read-only so that
         // create_timeline fails.
         use std::os::unix::fs::PermissionsExt;
@@ -1731,15 +1787,15 @@ mod tests {
                 path: db.to_string_lossy().into_owned(),
             })
             .test_ok()?;
-            // Create a non-ledger timeline so list_timelines iterates without finding "ledger".
+            // Create a non-ledger timeline so initialization must inspect the list.
             store.create_timeline("other").test_ok()?;
         }
-        // Make it read-only so create_timeline("ledger") fails.
+        // Make it read-only so ledger initialization fails.
         std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).test_ok()?;
         let err = open_store(&Source::Store(db.clone()), Some(&key_path));
         // Restore permissions so cleanup works.
         std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).test_ok()?;
-        // Either list_timelines or create_timeline failed due to read-only DB.
+        // Either registry initialization or timeline creation failed due to read-only DB.
         assert!(err.is_err(), "expected error from read-only DB");
 
         Ok(())
@@ -1748,10 +1804,9 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn find_or_create_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>>
-    {
-        // Covers L130: `?` on list_timelines when the DB has a corrupt
-        // timeline name column (cannot be decoded as UTF-8/ULID).
+    fn open_store_list_timelines_fails_on_corrupt_db() -> Result<(), Box<dyn std::error::Error>> {
+        // Covers list-timeline failure when the DB has a corrupt timeline
+        // name column (cannot be decoded as UTF-8/ULID).
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[
@@ -1786,8 +1841,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn open_store_reuse_existing_ledger_timeline() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L133 (return Ok early when ledger timeline found) and
-        // also exercises the `?` on list_timelines with a valid store.
+        // Also exercises reuse of an existing ledger Timeline after
+        // list_timelines succeeds.
         let tmp = TempDir::new().test_ok()?;
         let key_path = tmp.path().join("sk");
         run(&[
@@ -1817,6 +1872,109 @@ mod tests {
         assert!(err.is_err());
         assert!(err.test_err()?.to_string().contains("invalid --key"));
 
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn ledger_signing_registry_rejects_invalid_identity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 0);
+        let mut registry = KeyRegistryStateV1::new();
+        let error = registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                key_material_digest(&signing_key.to_bytes()),
+                Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+            ))
+            .test_err()?;
+        assert!(error.to_string().contains("key epoch zero"), "{error}");
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn ledger_signing_registry_requires_both_key_fingerprints(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = pos_crypto::signing::generate_keypair();
+        let (different_key, _) = pos_crypto::signing::generate_keypair();
+        let persisted_identity =
+            KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 2);
+        let mut persisted = KeyRegistryStateV1::new();
+        assert!(
+            persisted
+                .register_key(KeyRegistrationV1::new(
+                    persisted_identity,
+                    key_material_digest(&different_key.to_bytes()),
+                    Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+                ))
+                .is_ok(),
+            "test registry registration must succeed"
+        );
+
+        let error = ledger_signing_registry(&signing_key, Some(&persisted)).test_err()?;
+        assert!(error.to_string().contains("authorization"), "{error}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn store_signing_uses_the_persisted_active_epoch() -> Result<(), Box<dyn Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("rotated.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
+        let key_text = std::fs::read_to_string(&key_path).test_ok()?;
+        let bytes = crate::hex::hex_decode(key_text.trim()).test_ok()?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(bytes.as_slice().try_into()?);
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 2);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            key_material_digest(&signing_key.to_bytes()),
+            Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+        ))?;
+        let mut store = pos_store::open_store(StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .test_ok()?;
+        store.save_key_registry(&registry).test_ok()?;
+        drop(store);
+
+        run(&[
+            "piglor-ledger".into(),
+            "predict".into(),
+            "--source".into(),
+            format!("store:{}", db.display()),
+            "--key".into(),
+            key_path.to_string_lossy().into_owned(),
+            "--title".into(),
+            "rotated".into(),
+            "--statement".into(),
+            "S".into(),
+            "--predicted-outcome".into(),
+            "O".into(),
+            "--confidence".into(),
+            "0.7".into(),
+            "--made-at".into(),
+            "2026-07-25T12:00:00Z".into(),
+            "--resolve-by".into(),
+            "2026-08-01".into(),
+            "--osf".into(),
+            "https://osf.io/example".into(),
+        ])
+        .test_ok()?;
+
+        let store = pos_store::open_store_read_only(&db.to_string_lossy()).test_ok()?;
+        let timeline = find_ledger_timeline(store.as_ref())?;
+        let event = store
+            .read(timeline, pos_core::store::SeqRange::all())
+            .test_ok()?
+            .pop()
+            .ok_or("missing rotated event")?;
+        assert_eq!(event.signature_identity, Some(identity));
         Ok(())
     }
 
@@ -1857,7 +2015,7 @@ mod tests {
     fn open_store_store_with_key_succeeds_and_well_known_entity_covered(
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Exercises: well_known_entity(), the store: branch of open_store,
-        // and find_or_create_ledger_timeline (new timeline).
+        // and the atomic ledger initialization seam (new timeline).
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("l.db");
         let key_path = tmp.path().join("sk");
@@ -1875,8 +2033,7 @@ mod tests {
         );
 
         // Open a second time: now the timeline already exists, so
-        // find_or_create_ledger_timeline returns early from the `for` loop
-        // (the "already-exists" branch — previously uncovered).
+        // initialization seam reuses it without changing the registry.
         let store2 = open_store(&Source::Store(db), Some(&key_path));
         assert!(store2.is_ok(), "second open (reuse branch) must succeed");
 
@@ -1886,11 +2043,31 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn find_or_create_skips_non_ledger_timelines_in_loop() -> Result<(), Box<dyn std::error::Error>>
-    {
-        // Exercises line 134: the `}` closing the inner `if` in the `for` loop
-        // of find_or_create_ledger_timeline — hit when we iterate a non-ledger
-        // timeline and skip it, then find or create "ledger".
+    fn open_store_rejects_a_persisted_registry_for_another_key() -> Result<(), Box<dyn Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("mismatched.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
+        let mut raw = pos_store::sqlite::SqliteStore::open(db.to_str().test_ok()?).test_ok()?;
+        raw.save_key_registry(&KeyRegistryStateV1::new())
+            .test_ok()?;
+        drop(raw);
+
+        let error = open_store(&Source::Store(db), Some(&key_path)).test_err()?;
+        assert!(error.to_string().contains("authorization"), "{error}");
+        let reopened = pos_store::sqlite::SqliteStore::open(
+            tmp.path().join("mismatched.db").to_str().test_ok()?,
+        )
+        .test_ok()?;
+        assert!(reopened.list_timelines()?.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn open_store_skips_non_ledger_timelines() -> Result<(), Box<dyn std::error::Error>> {
+        // Exercise initialization after a non-ledger timeline already exists.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("l.db");
         let key_path = tmp.path().join("sk");
@@ -1908,7 +2085,7 @@ mod tests {
         .test_ok()?;
         raw.create_timeline("other").test_ok()?;
         drop(raw);
-        // Now open_store will iterate "other" (skips it), then create "ledger".
+        // Now open_store skips "other" and creates the "ledger" timeline.
         let store = open_store(&Source::Store(db), Some(&key_path));
         assert!(
             store.is_ok(),
@@ -2010,6 +2187,40 @@ mod tests {
         ])
         .test_ok()?;
 
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn verify_via_run_returns_error_for_a_manifest_mismatch() -> Result<(), Box<dyn Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let dir = tmp.path().join("ledger");
+        std::fs::create_dir_all(&dir).test_ok()?;
+        run_predict(&dir, "VerifyMismatch", "S", 0.7)?;
+        let manifest_path = tmp.path().join("manifest.json");
+        run(&[
+            "piglor-ledger".into(),
+            "export".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--out".into(),
+            manifest_path.to_str().test_ok()?.to_owned(),
+        ])
+        .test_ok()?;
+        std::fs::write(dir.join("predictions").join("extra.toml"), "extra = true\n").test_ok()?;
+
+        let error = run(&[
+            "piglor-ledger".into(),
+            "verify".into(),
+            "--source".into(),
+            format!("toml:{}", dir.display()),
+            "--manifest".into(),
+            manifest_path.to_str().test_ok()?.to_owned(),
+        ])
+        .test_err()?;
+        assert!(
+            matches!(error, CliError::VerificationFailed(reason) if reason.contains("extra.toml"))
+        );
         Ok(())
     }
 
@@ -2246,13 +2457,8 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
-    fn build_store_create_timeline_fails() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L322: `?` on find_or_create_ledger_timeline in cmd_build
-        // when create_timeline fails (read-only DB with non-ledger timeline).
-        use std::os::unix::fs::PermissionsExt;
-        if running_as_root() {
-            return Ok(());
-        }
+    fn build_store_without_ledger_timeline_errors() -> Result<(), Box<dyn std::error::Error>> {
+        // A read-only build must reject a store without an existing ledger timeline.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
         {
@@ -2262,7 +2468,6 @@ mod tests {
             .test_ok()?;
             store.create_timeline("other").test_ok()?;
         }
-        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).test_ok()?;
         let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -2271,19 +2476,45 @@ mod tests {
             "--site".into(),
             tmp.path().join("site").to_str().test_ok()?.to_owned(),
         ]);
-        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).test_ok()?;
-        assert!(err.is_err(), "expected error from read-only DB");
+        assert!(err.test_err()?.to_string().contains("no 'ledger' timeline"));
 
         Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
+    fn open_store_reports_a_malformed_registry_schema() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = TempDir::new().test_ok()?;
+        let db = tmp.path().join("malformed-registry.db");
+        let key_path = tmp.path().join("sk");
+        run_keygen(&key_path)?;
+        let raw = pos_store::sqlite::SqliteStore::open(db.to_str().test_ok()?).test_ok()?;
+        drop(raw);
+        let connection = rusqlite::Connection::open(&db)?;
+        connection.execute_batch(
+            "DROP TABLE key_registry;
+             CREATE TABLE key_registry (singleton INTEGER PRIMARY KEY, wrong_column BLOB);",
+        )?;
+        drop(connection);
+
+        let error = open_store(&Source::Store(db), Some(&key_path)).test_err()?;
+        assert!(error.to_string().contains("state_cbor"), "{error}");
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
     fn build_store_invalid_today_errors() -> Result<(), Box<dyn std::error::Error>> {
-        // Covers L331: `?` on ledger_store.load(&today) in cmd_build
+        // Covers the read-only store loader's date validation in cmd_build
         // when the today string is not a valid date.
         let tmp = TempDir::new().test_ok()?;
         let db = tmp.path().join("ledger.db");
+        let mut store = pos_store::open_store(StoreConfig::Sqlite {
+            path: db.to_string_lossy().into_owned(),
+        })
+        .test_ok()?;
+        store.create_timeline("ledger").test_ok()?;
+        drop(store);
         let err = run(&[
             "piglor-ledger".into(),
             "build".into(),
@@ -2297,5 +2528,69 @@ mod tests {
         assert!(err.is_err(), "expected error for invalid today");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coverage_entrypoints {
+    use super::*;
+    use crate::test_helpers::TestResultExt;
+    use tempfile::TempDir;
+
+    #[test]
+    fn initial_registration_reports_registry_rejection() -> Result<(), Box<dyn std::error::Error>> {
+        let (signing_key, _) = generate_keypair();
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 0);
+        let mut registry = KeyRegistryStateV1::new();
+        let error = register_initial_key(
+            &mut registry,
+            KeyRegistrationV1::new(
+                identity,
+                key_material_digest(signing_key.as_bytes()),
+                Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+            ),
+        )
+        .test_err()?;
+        assert!(error.to_string().contains("initial ledger registration"));
+        Ok(())
+    }
+
+    #[test]
+    fn export_serialization_entrypoint_is_covered() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let source = temp.path().join("ledger");
+        std::fs::create_dir_all(&source)?;
+        run(&[
+            "piglor-ledger".to_owned(),
+            "export".to_owned(),
+            "--source".to_owned(),
+            format!("toml:{}", source.display()),
+            "--today".to_owned(),
+            "2026-07-25".to_owned(),
+        ])
+        .test_ok()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod coverage_regressions {
+    use super::*;
+
+    #[test]
+    fn initial_registration_failure_is_instrumented() {
+        let (signing_key, _) = generate_keypair();
+        let identity = KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 0);
+        let mut registry = KeyRegistryStateV1::new();
+        assert!(register_initial_key(
+            &mut registry,
+            KeyRegistrationV1::new(
+                identity,
+                key_material_digest(signing_key.as_bytes()),
+                Some(public_key_from_verifying_key(&signing_key.verifying_key())),
+            ),
+        )
+        .is_err());
     }
 }

@@ -40,7 +40,8 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, CoreError, Hash, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -51,6 +52,19 @@ thread_local! {
     static FAIL_STMT_QUERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only fault injection: force `BEGIN IMMEDIATE` in append/import to fail.
     static FAIL_BEGIN_IMMEDIATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: force SQLite busy-timeout configuration to fail.
+    static FAIL_BUSY_TIMEOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: force event-signature schema statement preparation to fail.
+    static FAIL_SIGNATURE_SCHEMA_PREPARE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: force event-signature schema parameter binding to fail.
+    static FAIL_SIGNATURE_SCHEMA_QUERY: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: force event-signature schema row decoding to fail.
+    static FAIL_SIGNATURE_SCHEMA_ROW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only fault injection: force key-registry CBOR serialization to fail.
+    static FAIL_REGISTRY_SERIALIZATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
     /// Test-only fault injection: make import_committed see a vanished timeline after write.
     static FAIL_IMPORT_VANISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only fault injection: make import_committed's get_timeline hit a storage error.
@@ -75,6 +89,30 @@ thread_local! {
 }
 
 #[cfg(test)]
+struct RegistryStateWriter {
+    bytes: Vec<u8>,
+    fail: bool,
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl std::io::Write for RegistryStateWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.fail {
+            return Err(std::io::Error::other(
+                "injected registry serialization failure",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 fn bounded_materialization_delay_for_test() {
     let delay_millis = BOUNDED_MATERIALIZATION_DELAY_MILLIS.with(std::cell::Cell::get);
     if delay_millis != 0 {
@@ -94,9 +132,20 @@ pub struct SqliteStore {
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
     consent_authority_permit: Option<ConsentAppendPermit>,
+    #[cfg(test)]
+    destruction_transaction_hook:
+        Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
 impl SqliteStore {
+    fn configure_busy_timeout(conn: &Connection) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        if FAIL_BUSY_TIMEOUT.with(std::cell::Cell::get) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
+    }
+
     fn geo_cell_consent_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         consent_record_id: &AdmissionSnapshotId,
@@ -227,6 +276,7 @@ impl SqliteStore {
             correlation_id: draft.correlation_id,
             schema_version: draft.schema_version,
             signature: None,
+            signature_identity: None,
             payload_hash,
         })
     }
@@ -283,33 +333,64 @@ impl SqliteStore {
         Self::open_with_hasher(path, Box::new(pos_crypto::chain::Blake3Hasher))
     }
 
+    /// Open an existing `SQLite` store without creating or initializing it.
+    ///
+    /// This is intended for read-only consumers such as static-site builds.
+    /// The database must already exist and contain the current schema.
+    ///
+    /// # Errors
+    /// Returns `CoreError::Storage` if the database cannot be opened, has an
+    /// unsupported encoding/schema, or fails invariant validation.
+    pub fn open_read_only(path: &str) -> Result<Self, CoreError> {
+        Self::open_with_options(
+            path,
+            Box::new(pos_crypto::chain::Blake3Hasher),
+            OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_URI),
+            false,
+        )
+    }
+
     /// Open a `SQLite` WAL store with a custom hasher.
     ///
     /// # Errors
     /// Returns `CoreError::Storage` if the database cannot be opened or schema initialisation fails.
     pub fn open_with_hasher(path: &str, hasher: Box<dyn Hasher>) -> Result<Self, CoreError> {
-        let conn = Connection::open_with_flags(
+        Self::open_with_options(
             path,
+            hasher,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI,
+            true,
         )
-        .map_err(|e| CoreError::Storage(e.to_string()))?;
+    }
 
-        conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-            .map_err(|e| CoreError::Storage(e.to_string()))
-            .and_then(|()| Self::require_utf8_encoding(&conn))
-            .and_then(|()| {
-                let store = Self {
-                    conn,
-                    hasher,
-                    clock: Box::new(SystemAdmissionClock),
-                    consent_authority_permit: None,
-                };
-                store
-                    .init_schema()
-                    .and_then(|()| store.validate_event_sequence_invariant().map(|()| store))
-            })
+    fn open_with_options(
+        path: &str,
+        hasher: Box<dyn Hasher>,
+        flags: OpenFlags,
+        initialize_schema: bool,
+    ) -> Result<Self, CoreError> {
+        let conn = Connection::open_with_flags(path, flags)
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Self::configure_busy_timeout(&conn).map_err(|e| CoreError::Storage(e.to_string()))?;
+
+        Self::require_utf8_encoding(&conn)?;
+        let store = Self {
+            conn,
+            hasher,
+            clock: Box::new(SystemAdmissionClock),
+            consent_authority_permit: None,
+            #[cfg(test)]
+            destruction_transaction_hook: None,
+        };
+        if initialize_schema {
+            store.init_schema()?;
+        }
+        store.validate_event_signature_schema()?;
+        store.validate_event_sequence_invariant()?;
+        Ok(store)
     }
 
     /// Open a `SQLite` store with a trusted admission clock.
@@ -419,7 +500,14 @@ impl SqliteStore {
                  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                  payload_hash BLOB NOT NULL,
                  signature   BLOB,
+                 signature_owner_id TEXT,
+                 signature_role INTEGER,
+                 signature_epoch INTEGER,
                  PRIMARY KEY (timeline_id, seq)
+             );
+             CREATE TABLE IF NOT EXISTS key_registry (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 state_cbor BLOB NOT NULL
              );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
              CREATE TABLE IF NOT EXISTS append_identities (
@@ -511,6 +599,53 @@ impl SqliteStore {
              );",
             )
             .map_err(|error| Self::storage_error(&error))
+    }
+
+    fn validate_event_signature_schema(&self) -> Result<(), CoreError> {
+        #[cfg(test)]
+        let schema_query = if FAIL_SIGNATURE_SCHEMA_PREPARE.with(std::cell::Cell::get) {
+            "PRAGMA table_info("
+        } else if FAIL_SIGNATURE_SCHEMA_ROW.with(std::cell::Cell::get) {
+            "SELECT 1"
+        } else {
+            "PRAGMA table_info(events)"
+        };
+        #[cfg(not(test))]
+        let schema_query = "PRAGMA table_info(events)";
+        let mut statement = self
+            .conn
+            .prepare(schema_query)
+            .map_err(Self::into_storage_error)?;
+        #[cfg(test)]
+        let rows = {
+            let invalid_parameter = 0_i64;
+            let invalid_params: [&dyn ToSql; 1] = [&invalid_parameter];
+            let query_params: &[&dyn ToSql] =
+                if FAIL_SIGNATURE_SCHEMA_QUERY.with(std::cell::Cell::get) {
+                    &invalid_params
+                } else {
+                    &[]
+                };
+            statement.query_map(query_params, |row| row.get::<_, String>(1))
+        };
+        #[cfg(not(test))]
+        let rows = statement.query_map([], |row| row.get::<_, String>(1));
+        let rows = rows.map_err(Self::into_storage_error)?;
+        let mut columns = HashSet::new();
+        for row in rows {
+            columns.insert(row.map_err(Self::into_storage_error)?);
+        }
+        drop(statement);
+        match (
+            columns.contains("signature_owner_id"),
+            columns.contains("signature_role"),
+            columns.contains("signature_epoch"),
+        ) {
+            (true, true, true) => Ok(()),
+            _ => Err(CoreError::Storage(
+                "SQLite events table is missing required signature identity columns".to_owned(),
+            )),
+        }
     }
 
     fn geographic_fence_permits(
@@ -764,7 +899,8 @@ impl SqliteStore {
         max_elapsed_micros: u64,
     ) -> Result<Vec<Event>, CoreError> {
         const SQL: &str = "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                                causation_id, correlation_id, schema_version, payload_hash, signature
+                                causation_id, correlation_id, schema_version, payload_hash, signature,
+                                signature_owner_id, signature_role, signature_epoch
                          FROM events
                          WHERE timeline_id = ?1
                            AND seq >= ?2
@@ -810,47 +946,7 @@ impl SqliteStore {
             if limit.is_some() {
                 BOUNDED_EVENT_ROWS.with(|count| count.set(count.get().saturating_add(1)));
             }
-            let seq: i64 = row.get(0).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let event_id: String = row.get(1).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let entity_id: String = row.get(2).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let event_type: String = row.get(3).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let payload: Vec<u8> = row.get(4).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let wall_time: i64 = row.get(5).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let causation_id: Option<String> =
-                row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let correlation_id: Option<String> =
-                row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let sig_bytes: Option<Vec<u8>> =
-                row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
-            let ph_arr: [u8; 32] = ph_bytes
-                .try_into()
-                .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
-            let signature = match sig_bytes {
-                None => None,
-                Some(bytes) => {
-                    let arr: [u8; 64] = bytes
-                        .try_into()
-                        .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))?;
-                    Some(pos_core::Signature::from_bytes(arr))
-                }
-            };
-            events.push(Event {
-                id: parse_event_id(&event_id)?,
-                entity: parse_entity_id(&entity_id)?,
-                event_type: Kind::new(event_type),
-                payload: CanonicalBytes::from_vec(payload),
-                wall_time: WallTime::from_micros(u64::try_from(wall_time).unwrap_or(0)),
-                seq: Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
-                causation_id: causation_id.as_deref().map(parse_event_id).transpose()?,
-                correlation_id: correlation_id
-                    .as_deref()
-                    .map(parse_correlation_id)
-                    .transpose()?,
-                schema_version: SchemaVersion::V1,
-                signature,
-                payload_hash: pos_core::Hash::from_bytes(ph_arr),
-            });
+            events.push(decode_event_row(row)?);
         }
 
         #[cfg(test)]
@@ -1192,14 +1288,14 @@ impl SqliteStore {
                     if chain.is_empty() {
                         leaf_head = head;
                     }
-                    chain.push((current, None));
+                    chain.push((current, Seq::ZERO));
                     break;
                 }
                 Some(DecodedForkChainRow::Fork { parent, fork, head }) => {
                     if chain.is_empty() {
                         leaf_head = head;
                     }
-                    chain.push((current, Some(fork)));
+                    chain.push((current, fork));
                     current = parent;
                 }
             }
@@ -1210,23 +1306,19 @@ impl SqliteStore {
 
     fn logical_segment_length(
         &self,
-        chain: &[(TimelineId, Option<Seq>)],
+        chain: &[(TimelineId, Seq)],
         index: usize,
         timeline: TimelineId,
     ) -> Result<u64, CoreError> {
-        let prefix = chain[index].1.map_or(0, Seq::as_u64);
+        let prefix = chain[index].1.as_u64();
         let local_head = self.get_head_seq(timeline)?.as_u64();
-        let length =
-            chain
-                .get(index + 1)
-                .and_then(|(_, fork)| *fork)
-                .map_or(Ok(local_head), |fork| {
-                    fork.as_u64().checked_sub(prefix).ok_or_else(|| {
-                        CoreError::Storage(format!(
-                            "Fork point precedes inherited history for timeline {timeline}"
-                        ))
-                    })
-                })?;
+        let length = chain.get(index + 1).map_or(Ok(local_head), |(_, fork)| {
+            fork.as_u64().checked_sub(prefix).ok_or_else(|| {
+                CoreError::Storage(format!(
+                    "Fork point precedes inherited history for timeline {timeline}"
+                ))
+            })
+        })?;
         if length > local_head {
             return Err(CoreError::Storage(format!(
                 "Fork point exceeds parent logical Event head for timeline {timeline}"
@@ -1342,7 +1434,9 @@ struct ForkChainRow {
     head_seq: i64,
 }
 
-type ForkChain = Vec<(TimelineId, Option<Seq>)>;
+/// A stitched Timeline ancestry entry. The root's prefix is always zero;
+/// non-root entries carry their validated fork sequence.
+type ForkChain = Vec<(TimelineId, Seq)>;
 type ForkChainWithLeafHead = (ForkChain, u64);
 
 #[derive(Debug)]
@@ -1675,10 +1769,7 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| CoreError::Storage(error.to_string()))?;
         let (chain, owned_head) = Self::fork_chain_with_leaf_head_on(&tx, timeline)?;
-        let logical_prefix = chain
-            .last()
-            .and_then(|(_, fork)| *fork)
-            .map_or(0, Seq::as_u64);
+        let logical_prefix = chain.last().map_or(0, |(_, fork)| fork.as_u64());
         let owner = if gateway_consent {
             Some(crate::ensure_gateway_consent_drafts(
                 drafts,
@@ -1962,6 +2053,7 @@ impl SqliteStore {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         })
     }
@@ -2785,6 +2877,62 @@ impl SqliteStore {
             })
             .map(Seq::from_u64)
     }
+
+    fn save_key_registry_in_transaction(
+        &self,
+        registry: &KeyRegistryStateV1,
+    ) -> Result<(), CoreError> {
+        registry
+            .validate()
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        self.load_key_registry()?
+            .unwrap_or_default()
+            .validate_replacement(registry)
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        #[cfg(not(test))]
+        let mut state_cbor = Vec::new();
+        #[cfg(test)]
+        let mut state_cbor = RegistryStateWriter {
+            bytes: Vec::new(),
+            fail: FAIL_REGISTRY_SERIALIZATION.with(std::cell::Cell::get),
+        };
+        ciborium::into_writer(registry, &mut state_cbor)
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        #[cfg(test)]
+        let state_cbor = state_cbor.bytes;
+        self.conn
+            .execute(
+                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET state_cbor = excluded.state_cbor",
+                params![state_cbor],
+            )
+            .map(|_| ())
+            .map_err(|error| CoreError::Storage(error.to_string()))
+    }
+
+    fn initialize_timeline_with_key_registry_in_transaction(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        let persisted = self.load_key_registry()?;
+        if persisted
+            .as_ref()
+            .is_some_and(|current| current != expected_registry)
+        {
+            return Err(CoreError::Storage(
+                "durable key registry changed during ledger initialization".to_owned(),
+            ));
+        }
+        if persisted.is_none() {
+            self.save_key_registry_in_transaction(expected_registry)?;
+        }
+
+        self.list_timelines()?
+            .into_iter()
+            .find(|timeline| timeline.meta.name.as_deref() == Some(name))
+            .map_or_else(|| self.create_timeline(name), Ok)
+    }
 }
 
 impl EventStore for SqliteStore {
@@ -2828,6 +2976,121 @@ impl EventStore for SqliteStore {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.append_visible(timeline, drafts))
+    }
+
+    fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+        let state_cbor = match self.conn.query_row(
+            "SELECT state_cbor FROM key_registry WHERE singleton = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(bytes) => bytes,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(error) => return Err(CoreError::Storage(error.to_string())),
+        };
+        ciborium::from_reader(state_cbor.as_slice())
+            .map_err(|error| CoreError::Serialization(error.to_string()))
+            .and_then(|registry: KeyRegistryStateV1| {
+                registry
+                    .validate()
+                    .map(|()| registry)
+                    .map_err(|error| CoreError::Serialization(error.to_string()))
+            })
+            .map(Some)
+    }
+
+    fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = self.save_key_registry_in_transaction(registry);
+        finish_immediate_transaction(&self.conn, result)
+    }
+
+    fn initialize_timeline_with_key_registry(
+        &mut self,
+        name: &str,
+        expected_registry: &KeyRegistryStateV1,
+    ) -> Result<Timeline, CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result =
+            self.initialize_timeline_with_key_registry_in_transaction(name, expected_registry);
+        finish_immediate_transaction(&self.conn, result)
+    }
+
+    fn append_signed_authorized(
+        &mut self,
+        timeline: TimelineId,
+        expected_registry: &KeyRegistryStateV1,
+        create_event: &mut dyn FnMut(&KeyRegistryStateV1, Seq) -> Result<Event, CoreError>,
+    ) -> Result<(), CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = (|| {
+            let persisted = self.load_key_registry()?.ok_or_else(|| {
+                CoreError::Storage("durable key registry is unavailable".to_owned())
+            })?;
+            if persisted != *expected_registry {
+                return Err(CoreError::Storage(
+                    "durable key registry changed during signing".to_owned(),
+                ));
+            }
+            let head = self
+                .get_timeline(timeline)?
+                .ok_or(CoreError::TimelineNotFound(timeline))?;
+            let event = create_event(&persisted, head.head.next())?;
+            self.append_committed(timeline, &[event])
+        })();
+        finish_immediate_transaction(&self.conn, result)
+    }
+
+    fn begin_key_registry_destruction(
+        &mut self,
+        request: KeyDestructionRequestV1,
+    ) -> Result<(pos_core::KeyDestructionBeginOutcomeV1, KeyRegistryStateV1), CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        #[cfg(test)]
+        if let Some((started, release)) = self.destruction_transaction_hook.take() {
+            assert!(started.send(()).is_ok());
+            assert!(release.recv().is_ok());
+        }
+        let result = (|| {
+            let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                CoreError::Storage("durable key registry is unavailable".to_owned())
+            })?;
+            let outcome = registry
+                .begin_key_destruction(request)
+                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+            self.save_key_registry_in_transaction(&registry)?;
+            Ok((outcome, registry))
+        })();
+        finish_immediate_transaction(&self.conn, result)
+    }
+
+    fn complete_key_registry_destruction(
+        &mut self,
+        request: KeyDestructionRequestV1,
+        deletion_receipt: Hash,
+    ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let result = (|| {
+            let mut registry = self.load_key_registry()?.ok_or_else(|| {
+                CoreError::Storage("durable key registry is unavailable".to_owned())
+            })?;
+            let outcome = registry
+                .complete_key_destruction(request, deletion_receipt)
+                .map_err(|error| CoreError::Storage(format!("ledger key destruction: {error}")))?;
+            self.save_key_registry_in_transaction(&registry)?;
+            Ok((outcome, registry))
+        })();
+        finish_immediate_transaction(&self.conn, result)
     }
 
     fn append_bounded(
@@ -2962,7 +3225,7 @@ impl EventStore for SqliteStore {
         let Some(index) = chain.iter().position(|(id, _)| *id == owner) else {
             return Ok(None);
         };
-        let prefix = chain[index].1.map_or(0, Seq::as_u64);
+        let prefix = chain[index].1.as_u64();
         let local_limit = self.logical_segment_length(&chain, index, owner)?;
         let local_seq = u64::try_from(local_seq).map_err(|_| {
             CoreError::Storage(format!("timeline {owner} has a negative Event sequence"))
@@ -3130,13 +3393,9 @@ impl EventStore for SqliteStore {
                 let mut all: Vec<Event> = Vec::new();
 
                 for (i, &(tid, _)) in chain.iter().enumerate() {
-                    let logical_prefix = chain[i].1.map_or(0, Seq::as_u64);
+                    let logical_prefix = chain[i].1.as_u64();
                     if i + 1 < chain.len() {
-                        let Some(logical_fork) = chain[i + 1].1 else {
-                            return Err(CoreError::Storage(
-                                "non-root chain entry is missing its fork sequence".to_owned(),
-                            ));
-                        };
+                        let logical_fork = chain[i + 1].1;
                         let fork_point_error = CoreError::Storage(format!(
                             "Fork point precedes inherited history for timeline {tid}"
                         ));
@@ -3664,12 +3923,29 @@ impl SqliteStore {
                 .hasher
                 .hash_event(&prev_hash, id_str.as_bytes(), &event.payload);
             let sig_bytes = event.signature.as_ref().map(|s| s.as_bytes().as_slice());
+            let signature_owner_id = event
+                .signature_identity
+                .map(|identity| identity.owner_id.as_str().to_owned());
+            let signature_role = event
+                .signature_identity
+                .map(|identity| i64::from(identity.role.code()));
+            let signature_epoch = event
+                .signature_identity
+                .map(|identity| {
+                    i64::try_from(identity.epoch).map_err(|_| {
+                        CoreError::Storage(
+                            "signature key epoch exceeds SQLite INTEGER range".to_owned(),
+                        )
+                    })
+                })
+                .transpose()?;
             self.conn
                 .execute(
                     "INSERT INTO events
                      (timeline_id, seq, event_id, entity_id, event_type, payload, wall_time,
-                      causation_id, correlation_id, schema_version, payload_hash, signature)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                      causation_id, correlation_id, schema_version, payload_hash, signature,
+                      signature_owner_id, signature_role, signature_epoch)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
                         timeline.to_string(),
                         seq_as_i64(event.seq),
@@ -3683,6 +3959,9 @@ impl SqliteStore {
                         i64::from(event.schema_version.as_u32()),
                         event.payload_hash.as_bytes().as_slice(),
                         sig_bytes,
+                        signature_owner_id,
+                        signature_role,
+                        signature_epoch,
                     ],
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -3740,6 +4019,31 @@ const fn begin_immediate_sql() -> &'static str {
     "BEGIN IMMEDIATE"
 }
 
+fn finish_immediate_transaction<T>(
+    conn: &Connection,
+    result: Result<T, CoreError>,
+) -> Result<T, CoreError> {
+    match result {
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(commit_error) => match conn.execute_batch("ROLLBACK") {
+                Ok(()) => Err(CoreError::Storage(format!(
+                    "transaction commit failed: {commit_error}"
+                ))),
+                Err(rollback_error) => Err(CoreError::Storage(format!(
+                    "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
+                ))),
+            },
+        },
+        Err(error) => match conn.execute_batch("ROLLBACK") {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(CoreError::Storage(format!(
+                "{error}; rollback failed: {rollback_error}"
+            ))),
+        },
+    }
+}
+
 const fn mode_str(mode: TimelineMode) -> &'static str {
     match mode {
         TimelineMode::Historical => "historical",
@@ -3763,6 +4067,88 @@ fn parse_mode(s: &str) -> TimelineMode {
         "historical" => TimelineMode::Historical,
         "future" => TimelineMode::Future,
         _ => TimelineMode::Live,
+    }
+}
+
+fn decode_signature(bytes: Option<Vec<u8>>) -> Result<Option<pos_core::Signature>, CoreError> {
+    bytes
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map(pos_core::Signature::from_bytes)
+                .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))
+        })
+        .transpose()
+}
+
+fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
+    let seq: i64 = row.get(0).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let event_id: String = row.get(1).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let entity_id: String = row.get(2).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let event_type: String = row.get(3).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let payload: Vec<u8> = row.get(4).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let wall_time: i64 = row.get(5).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let causation_id: Option<String> = row.get(6).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let correlation_id: Option<String> =
+        row.get(7).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let sig_bytes: Option<Vec<u8>> = row.get(10).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let signature_owner_id: Option<String> =
+        row.get(11).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let signature_role: Option<i64> = row.get(12).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let signature_epoch: Option<i64> =
+        row.get(13).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let ph_arr: [u8; 32] = ph_bytes
+        .try_into()
+        .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
+    let signature = decode_signature(sig_bytes)?;
+    let signature_identity =
+        decode_signature_identity(signature_owner_id, signature_role, signature_epoch)?;
+    let event = Event {
+        id: parse_event_id(&event_id)?,
+        entity: parse_entity_id(&entity_id)?,
+        event_type: Kind::new(event_type),
+        payload: CanonicalBytes::from_vec(payload),
+        wall_time: WallTime::from_micros(u64::try_from(wall_time).unwrap_or(0)),
+        seq: Seq::from_u64(u64::try_from(seq).unwrap_or(0)),
+        causation_id: causation_id.as_deref().map(parse_event_id).transpose()?,
+        correlation_id: correlation_id
+            .as_deref()
+            .map(parse_correlation_id)
+            .transpose()?,
+        schema_version: SchemaVersion::V1,
+        signature,
+        signature_identity,
+        payload_hash: pos_core::Hash::from_bytes(ph_arr),
+    };
+    pos_core::store::validate_event_signature(&event)?;
+    Ok(event)
+}
+
+fn decode_signature_identity(
+    owner_id: Option<String>,
+    role: Option<i64>,
+    epoch: Option<i64>,
+) -> Result<Option<KeyIdentityV1>, CoreError> {
+    match (owner_id, role, epoch) {
+        (None, None, None) => Ok(None),
+        (Some(owner_id), Some(role), Some(epoch)) => {
+            let owner_id = OwnerIdV1::new(owner_id)
+                .map_err(|_| CoreError::Serialization("bad signature owner".to_owned()))?;
+            Ok(Some(KeyIdentityV1::new(
+                owner_id,
+                KeyRoleV1::from_code(
+                    u8::try_from(role)
+                        .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+                )
+                .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+                u64::try_from(epoch)
+                    .map_err(|_| CoreError::Serialization("bad signature epoch".to_owned()))?,
+            )))
+        }
+        _ => Err(CoreError::Serialization(
+            "signature identity is incomplete".to_owned(),
+        )),
     }
 }
 
@@ -3813,7 +4199,7 @@ mod tests {
         geo_admission::GeoLocationAdmissionFenceV1,
         ids::{EntityId, EventId},
         store::{EventReadBounds, SeqRange},
-        CoreError, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
+        CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };
 
@@ -3883,6 +4269,14 @@ mod tests {
 
     pub(super) fn new_store() -> SqliteStore {
         SqliteStore::open_in_memory().test_ok()
+    }
+
+    fn destroy_store(
+        store: &mut SqliteStore,
+        request: KeyDestructionRequestV1,
+    ) -> Result<(KeyDestructionOutcomeV1, KeyRegistryStateV1), CoreError> {
+        store.begin_key_registry_destruction(request)?;
+        store.complete_key_registry_destruction(request, pos_core::deletion_receipt(&request))
     }
 
     #[test]
@@ -6257,6 +6651,109 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_rejects_an_events_table_without_role_columns() {
+        let file = tempfile::NamedTempFile::new().test_ok();
+        {
+            let conn = Connection::open(file.path()).test_ok();
+            conn.execute_batch(
+                "CREATE TABLE events (
+                    timeline_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    event_id TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    wall_time INTEGER NOT NULL,
+                    causation_id TEXT,
+                    correlation_id TEXT,
+                    schema_version INTEGER NOT NULL,
+                    payload_hash BLOB NOT NULL,
+                    signature BLOB,
+                    PRIMARY KEY (timeline_id, seq)
+                );",
+            )
+            .test_ok();
+        }
+
+        let error = SqliteStore::open(file.path().to_str().test_ok())
+            .err()
+            .test_ok();
+        assert!(matches!(
+            error,
+            CoreError::Storage(message)
+                if message.contains("missing required signature identity columns")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_rejects_events_table_with_only_one_signature_identity_column() {
+        for identity_column in [
+            "signature_owner_id TEXT",
+            "signature_role INTEGER",
+            "signature_epoch INTEGER",
+        ] {
+            let file = tempfile::NamedTempFile::new().test_ok();
+            {
+                let conn = Connection::open(file.path()).test_ok();
+                conn.execute_batch(&format!(
+                    "CREATE TABLE events (
+                        timeline_id TEXT NOT NULL,
+                        seq INTEGER NOT NULL,
+                        event_id TEXT NOT NULL,
+                        entity_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload BLOB NOT NULL,
+                        wall_time INTEGER NOT NULL,
+                        causation_id TEXT,
+                        correlation_id TEXT,
+                        schema_version INTEGER NOT NULL,
+                        payload_hash BLOB NOT NULL,
+             signature BLOB,
+                         {identity_column},
+                        PRIMARY KEY (timeline_id, seq)
+                    );"
+                ))
+                .test_ok();
+            }
+
+            let error = SqliteStore::open(file.path().to_str().test_ok())
+                .err()
+                .test_ok();
+            assert!(matches!(
+                error,
+                CoreError::Storage(message)
+                    if message.contains("missing required signature identity columns")
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_read_only_requires_and_reads_an_existing_current_schema() {
+        let directory = tempfile::tempdir().test_ok();
+        let missing = directory.path().join("missing.db");
+        let error = SqliteStore::open_read_only(missing.to_str().test_ok())
+            .err()
+            .test_ok();
+        assert!(matches!(error, CoreError::Storage(_)));
+        assert!(!missing.exists());
+
+        let path = directory.path().join("ledger.db");
+        let mut writable = SqliteStore::open(path.to_str().test_ok()).test_ok();
+        writable.create_timeline("ledger").test_ok();
+        drop(writable);
+
+        let readonly = SqliteStore::open_read_only(path.to_str().test_ok()).test_ok();
+        assert_eq!(readonly.list_timelines().test_ok().len(), 1);
+
+        let uri = format!("file:{}?mode=ro", path.to_str().test_ok());
+        let readonly_uri = SqliteStore::open_read_only(&uri).test_ok();
+        assert_eq!(readonly_uri.list_timelines().test_ok().len(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn open_rejects_existing_utf16_databases_before_schema_use() {
         for encoding in ["UTF-16le", "UTF-16be"] {
             let file = tempfile::NamedTempFile::new().test_ok();
@@ -7086,7 +7583,9 @@ mod tests {
             .execute(
                 "CREATE VIEW events AS SELECT timeline_id, seq, row_error() AS event_id,
                  entity_id, event_type, payload, wall_time, causation_id, correlation_id,
-                 schema_version, payload_hash, signature FROM events_real",
+                 schema_version, payload_hash, signature, NULL AS signature_owner_id,
+                 NULL AS signature_role,
+                 NULL AS signature_epoch FROM events_real",
                 [],
             )
             .test_ok();
@@ -8777,10 +9276,449 @@ mod tests {
         ev.seq = Seq::from_u64(1);
         ev.id = EventId::new();
         ev.signature = Some(pos_core::Signature::from_bytes([7u8; 64]));
+        ev.signature_identity = Some(KeyIdentityV1::new(
+            "test-owner",
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
         ev.payload_hash = hash_payload(&ev.payload);
         store.append_committed(other.id(), &[ev.clone()]).test_ok();
         let read = store.read(other.id(), SeqRange::all()).test_ok();
         assert_eq!(read[0].signature, ev.signature);
+        assert_eq!(read[0].signature_identity, ev.signature_identity);
+
+        let mut too_large = ev;
+        too_large.id = EventId::new();
+        too_large.signature_identity = Some(KeyIdentityV1::new(
+            "test-owner",
+            KeyRoleV1::TimelineIntegritySigning,
+            u64::try_from(i64::MAX).unwrap_or_default() + 1,
+        ));
+        too_large.seq = Seq::from_u64(2);
+        assert!(matches!(
+            store.append_committed(other.id(), &[too_large]),
+            Err(CoreError::Storage(message)) if message.contains("SQLite INTEGER range")
+        ));
+    }
+
+    #[test]
+    fn read_rejects_malformed_signature_identity() {
+        let mut store = new_store();
+        let timeline = store.create_timeline("signature-identity").test_ok();
+        store
+            .append(timeline.id(), &[make_draft(EntityId::new(), b"identity")])
+            .test_ok();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature_owner_id = 'test-owner',
+                 signature_role = -1, signature_epoch = 1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature = zeroblob(64), signature_role = NULL,
+                 signature_epoch = NULL WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(message))
+                if message.contains("signature identity is incomplete")
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature_owner_id = 'test-owner',
+                 signature_role = 99, signature_epoch = 1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature_owner_id = 'test-owner',
+                 signature_role = 1, signature_epoch = -1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+        store
+            .conn
+            .execute(
+                "UPDATE events SET signature_role = NULL, signature_epoch = 1
+                 WHERE timeline_id = ?1",
+                params![timeline.id().to_string()],
+            )
+            .test_ok();
+        assert!(matches!(
+            store.read(timeline.id(), SeqRange::all()),
+            Err(CoreError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn registry_storage_errors_are_reported_by_sqlite_port() {
+        let store = new_store();
+        store.conn.execute("DROP TABLE key_registry", []).test_ok();
+        assert!(matches!(
+            store.load_key_registry(),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut save_store = new_store();
+        save_store
+            .conn
+            .execute("DROP TABLE key_registry", [])
+            .test_ok();
+        assert!(matches!(
+            save_store.save_key_registry(&KeyRegistryStateV1::new()),
+            Err(CoreError::Storage(_))
+        ));
+
+        let malformed = new_store();
+        malformed
+            .conn
+            .execute(
+                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
+                [],
+            )
+            .test_ok();
+        assert!(matches!(
+            malformed.load_key_registry(),
+            Err(CoreError::Serialization(_))
+        ));
+
+        let mut missing = new_store();
+        let timeline = missing.create_timeline("missing-registry").test_ok();
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = missing
+            .append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut create_event)
+            .test_err();
+        assert!(error.to_string().contains("durable key registry"));
+    }
+
+    #[test]
+    fn sqlite_ledger_initialization_is_atomic() {
+        let mut store = new_store();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_ledger_timeline BEFORE INSERT ON timelines
+                 BEGIN SELECT RAISE(ABORT, 'reject ledger timeline'); END",
+            )
+            .test_ok();
+
+        let error = store
+            .initialize_timeline_with_key_registry("ledger", &KeyRegistryStateV1::new())
+            .test_err();
+        assert!(error.to_string().contains("reject ledger timeline"));
+        assert!(store.load_key_registry().test_ok().is_none());
+        assert!(store.list_timelines().test_ok().is_empty());
+    }
+
+    #[test]
+    fn sqlite_ledger_initialization_rejects_a_changed_registry() {
+        let mut store = new_store();
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        store.save_key_registry(&persisted).test_ok();
+
+        let error = store
+            .initialize_timeline_with_key_registry("ledger", &KeyRegistryStateV1::new())
+            .test_err();
+        assert!(error
+            .to_string()
+            .contains("changed during ledger initialization"));
+        assert!(store.list_timelines().test_ok().is_empty());
+    }
+
+    #[test]
+    fn sqlite_key_registry_persists_and_rejects_stale_authorization() {
+        let mut store = new_store();
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        store.save_key_registry(&persisted).test_ok();
+        assert_eq!(store.load_key_registry().test_ok(), Some(persisted.clone()));
+
+        let timeline = store.create_timeline("stale-registry").test_ok();
+        let mut callback_called = false;
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            callback_called = true;
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(timeline.id(), &KeyRegistryStateV1::new(), &mut create_event)
+            .test_err();
+        assert!(error.to_string().contains("changed during signing"));
+        assert!(!callback_called);
+
+        let mut successful = new_store();
+        successful.save_key_registry(&persisted).test_ok();
+        let successful_timeline = successful.create_timeline("successful-signing").test_ok();
+        let mut event = successful
+            .append(
+                successful_timeline.id(),
+                &[make_draft(EntityId::new(), b"seed")],
+            )
+            .test_ok()
+            .remove(0);
+        event.id = EventId::new();
+        let mut create_event = |_: &KeyRegistryStateV1, seq: Seq| {
+            event.seq = seq;
+            Ok::<Event, CoreError>(event.clone())
+        };
+        successful
+            .append_signed_authorized(successful_timeline.id(), &persisted, &mut create_event)
+            .test_ok();
+
+        let mut missing_timeline = new_store();
+        missing_timeline.save_key_registry(&persisted).test_ok();
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            missing_timeline.append_signed_authorized(
+                TimelineId::new(),
+                &persisted,
+                &mut create_event,
+            ),
+            Err(CoreError::TimelineNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn sqlite_key_registry_rejects_non_live_initial_snapshots() {
+        let mut registry = KeyRegistryStateV1::new();
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = Hash::from_bytes([3; 32]);
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                material_digest,
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        let request =
+            KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([5; 32]));
+        registry.begin_key_destruction(request).test_ok();
+
+        let mut store = new_store();
+        assert!(matches!(
+            store.save_key_registry(&registry),
+            Err(CoreError::Serialization(_))
+        ));
+        assert!(store.load_key_registry().test_ok().is_none());
+
+        registry
+            .complete_key_destruction(request, pos_core::deletion_receipt(&request))
+            .test_ok();
+        let mut destroyed_store = new_store();
+        assert!(matches!(
+            destroyed_store.save_key_registry(&registry),
+            Err(CoreError::Serialization(_))
+        ));
+        assert!(destroyed_store.load_key_registry().test_ok().is_none());
+    }
+
+    #[test]
+    fn sqlite_key_registry_destruction_wins_when_started_before_signing() {
+        let database = tempfile::NamedTempFile::new().test_ok();
+        let path = database.path().to_str().test_ok();
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = Hash::from_bytes([3; 32]);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                material_digest,
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+
+        let mut setup = SqliteStore::open(path).test_ok();
+        setup.save_key_registry(&registry).test_ok();
+        let timeline = setup.create_timeline("destruction-first").test_ok();
+        let timeline_id = timeline.id();
+        setup
+            .append(timeline_id, &[make_draft(EntityId::new(), b"seed")])
+            .test_ok();
+        drop(setup);
+
+        let mut destruction_store = SqliteStore::open(path).test_ok();
+        let mut signing_store = SqliteStore::open(path).test_ok();
+        signing_store.conn.busy_timeout(Duration::ZERO).test_ok();
+        let request =
+            KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([7; 32]));
+        let (destruction_started_tx, destruction_started_rx) = std::sync::mpsc::channel();
+        let (release_destruction_tx, release_destruction_rx) = std::sync::mpsc::channel();
+        destruction_store.destruction_transaction_hook =
+            Some((destruction_started_tx, release_destruction_rx));
+        let (callback_called_tx, callback_called_rx) = std::sync::mpsc::channel();
+        let (signing_result_tx, signing_result_rx) = std::sync::mpsc::channel();
+
+        let (destruction_result, signing_result) = std::thread::scope(|scope| {
+            let destruction_handle =
+                scope.spawn(move || destroy_store(&mut destruction_store, request));
+            destruction_started_rx.recv().test_ok();
+
+            let signing_handle = scope.spawn(move || {
+                let mut callback = move |_registry: &KeyRegistryStateV1, _seq: Seq| {
+                    assert!(callback_called_tx.send(()).is_ok());
+                    Err::<Event, _>(CoreError::Storage(
+                        "destroyed signing key callback must not run".to_owned(),
+                    ))
+                };
+                let result =
+                    signing_store.append_signed_authorized(timeline_id, &registry, &mut callback);
+                assert!(signing_result_tx.send(result).is_ok());
+            });
+            let signing_result = signing_result_rx.recv_timeout(Duration::from_secs(1));
+            let release_result = release_destruction_tx.send(());
+            let signing_join = signing_handle.join();
+            let destruction_join = destruction_handle.join();
+
+            release_result.test_ok();
+            signing_join.test_ok();
+            (destruction_join.test_ok(), signing_result.test_ok())
+        });
+
+        assert!(destruction_result.is_ok());
+        assert!(matches!(
+            signing_result,
+            Err(CoreError::Storage(message))
+                if message.to_ascii_lowercase().contains("database is locked")
+        ));
+        assert!(callback_called_rx.try_recv().is_err());
+
+        let verify = SqliteStore::open(path).test_ok();
+        assert_eq!(verify.read(timeline_id, SeqRange::all()).test_ok().len(), 1);
+        assert!(verify
+            .load_key_registry()
+            .test_ok()
+            .and_then(|value| value.tombstone(identity))
+            .is_some());
+    }
+
+    #[test]
+    fn registry_destruction_reports_a_missing_durable_snapshot() {
+        let mut store = new_store();
+        let request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+            Hash::from_bytes([1; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        let error = store.begin_key_registry_destruction(request).test_err();
+        assert!(error.to_string().contains("durable key registry"));
+    }
+
+    #[test]
+    fn sqlite_registry_transaction_and_callback_failures_are_reported() {
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(pos_core::PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+
+        let mut locked = new_store();
+        locked.conn.execute_batch("BEGIN IMMEDIATE").test_ok();
+        let mut locked_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            locked.append_signed_authorized(TimelineId::new(), &persisted, &mut locked_callback,),
+            Err(CoreError::Storage(_))
+        ));
+        assert!(matches!(
+            locked.begin_key_registry_destruction(KeyDestructionRequestV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Hash::from_bytes([2; 32]),
+            )),
+            Err(CoreError::Storage(_))
+        ));
+        locked.conn.execute_batch("ROLLBACK").test_ok();
+
+        let mut callback_failure = new_store();
+        callback_failure.save_key_registry(&persisted).test_ok();
+        let timeline = callback_failure
+            .create_timeline("callback-failure")
+            .test_ok();
+        let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
+        };
+        assert!(callback_failure
+            .append_signed_authorized(timeline.id(), &persisted, &mut callback)
+            .test_err()
+            .to_string()
+            .contains("callback failed"));
+
+        let mut invalid_destruction = new_store();
+        invalid_destruction.save_key_registry(&persisted).test_ok();
+        let invalid_request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+            Hash::from_bytes([9; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        assert!(invalid_destruction
+            .begin_key_registry_destruction(invalid_request)
+            .test_err()
+            .to_string()
+            .contains("ledger key destruction"));
+
+        let mut save_failure = new_store();
+        save_failure.save_key_registry(&persisted).test_ok();
+        save_failure
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_key_registry_update BEFORE UPDATE ON key_registry
+                 BEGIN SELECT RAISE(ABORT, 'reject registry update'); END",
+            )
+            .test_ok();
+        let valid_request = KeyDestructionRequestV1::new(
+            KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+            Hash::from_bytes([3; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        assert!(save_failure
+            .begin_key_registry_destruction(valid_request)
+            .test_err()
+            .to_string()
+            .contains("reject registry update"));
     }
 
     #[test]
@@ -8926,6 +9864,52 @@ mod tests {
             .import_committed(TimelineMeta::root("x"), &[])
             .test_err();
         assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    #[test]
+    fn registry_transaction_reports_commit_and_rollback_failures() {
+        let conn = Connection::open_in_memory().test_ok();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             BEGIN;
+             CREATE TABLE transaction_parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE transaction_child(
+                 parent_id INTEGER REFERENCES transaction_parent(id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );
+             INSERT INTO transaction_child(parent_id) VALUES (1);",
+        )
+        .test_ok();
+        let commit_error = finish_immediate_transaction::<()>(&conn, Ok(())).test_err();
+        assert!(matches!(commit_error, CoreError::Storage(_)));
+        assert!(commit_error
+            .to_string()
+            .contains("transaction commit failed"));
+
+        let rollback_conn = Connection::open_in_memory().test_ok();
+        rollback_conn
+            .execute_batch(
+                "BEGIN;
+                 CREATE TABLE transaction_marker(value INTEGER);
+                 INSERT INTO transaction_marker(value) VALUES (1);",
+            )
+            .test_ok();
+        rollback_conn.commit_hook(Some(|| true)).test_ok();
+        let rollback_error = finish_immediate_transaction::<()>(&rollback_conn, Ok(())).test_err();
+        assert!(matches!(rollback_error, CoreError::Storage(_)));
+        assert!(rollback_error
+            .to_string()
+            .contains("transaction commit failed"));
+        assert!(rollback_error.to_string().contains("rollback failed"));
+
+        let error_conn = Connection::open_in_memory().test_ok();
+        let error_rollback = finish_immediate_transaction::<()>(
+            &error_conn,
+            Err(CoreError::Storage("operation failed".to_owned())),
+        )
+        .test_err();
+        assert!(matches!(error_rollback, CoreError::Storage(_)));
+        assert!(error_rollback.to_string().contains("rollback failed"));
     }
 
     #[test]
@@ -9162,6 +10146,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         assert!(store.append_committed(timeline.id(), &[event]).is_err());
@@ -9423,6 +10408,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         corrupt_store
@@ -9592,7 +10578,8 @@ mod coverage_entrypoints {
              'event' AS event_id, 'entity' AS entity_id, zeroblob(1) AS event_type,\
              zeroblob(1) AS payload, 1 AS wall_time, NULL AS causation_id,\
              NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
-             NULL AS signature",
+             NULL AS signature, NULL AS signature_owner_id, NULL AS signature_role,
+             NULL AS signature_epoch",
             id = timeline.id()
         );
         ok(store.conn.execute_batch(&sql));
@@ -9622,7 +10609,8 @@ mod coverage_entrypoints {
              'event' AS event_id, 'entity' AS entity_id, NULL AS event_type,\
              NULL AS payload, 1 AS wall_time, NULL AS causation_id,\
              NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
-             NULL AS signature",
+             NULL AS signature, NULL AS signature_owner_id, NULL AS signature_role,
+             NULL AS signature_epoch",
             id = timeline.id()
         );
         ok(store.conn.execute_batch(&sql));
@@ -9647,7 +10635,8 @@ mod coverage_entrypoints {
              'event' AS event_id, 'entity' AS entity_id, NULL AS event_type,\
              zeroblob(1) AS payload, 1 AS wall_time, NULL AS causation_id,\
              NULL AS correlation_id, 1 AS schema_version, zeroblob(32) AS payload_hash,\
-             NULL AS signature",
+             NULL AS signature, NULL AS signature_owner_id, NULL AS signature_role,
+             NULL AS signature_epoch",
             id = timeline.id()
         );
         ok(store.conn.execute_batch(&sql));
@@ -10725,5 +11714,325 @@ mod coverage_entrypoints {
             ok(store.owntracks_enrollment_status()).status(),
             OwnTracksEnrollmentStatusV1::Revoked
         );
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+pub(super) mod key_registry_coverage {
+    use super::*;
+    use pos_core::{
+        CanonicalBytes, EntityId, Event, EventDraft, EventId, EventStore, KeyRegistrationV1,
+        PublicKey,
+    };
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn registered_state(
+    ) -> Result<(KeyRegistryStateV1, KeyIdentityV1, Hash), Box<dyn std::error::Error>> {
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let material_digest = Hash::from_bytes([3; 32]);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material_digest,
+            Some(PublicKey::from_bytes([4; 32])),
+        ))?;
+        Ok((registry, identity, material_digest))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn seed_event(store: &mut SqliteStore, timeline: TimelineId) -> Result<Event, CoreError> {
+        store
+            .append(
+                timeline,
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("registry.coverage"),
+                    CanonicalBytes::from_static(b"seed"),
+                )],
+            )?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CoreError::Storage("seed append returned no event".to_owned()))
+    }
+
+    #[cfg(test)]
+    mod sqlite_key_registry_failure_paths {
+        use super::{
+            CoreError, Event, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+            KeyRegistryStateV1, Seq, SqliteStore, TimelineId, FAIL_BEGIN_IMMEDIATE,
+        };
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        pub(super) fn run(
+            registry: &KeyRegistryStateV1,
+            identity: KeyIdentityV1,
+            material_digest: Hash,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let mut missing_registry = SqliteStore::open_in_memory()?;
+            let missing_timeline = missing_registry.create_timeline("missing-registry")?;
+            let mut missing_registry_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+                Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+            };
+            assert!(matches!(
+                missing_registry.append_signed_authorized(
+                    missing_timeline.id(),
+                    registry,
+                    &mut missing_registry_callback,
+                ),
+                Err(CoreError::Storage(_))
+            ));
+            assert!(matches!(
+                missing_registry.begin_key_registry_destruction(KeyDestructionRequestV1::new(
+                    identity,
+                    material_digest,
+                    Hash::from_bytes([2; 32]),
+                )),
+                Err(CoreError::Storage(_))
+            ));
+            let missing_completion =
+                KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
+            assert!(matches!(
+                missing_registry.complete_key_registry_destruction(
+                    missing_completion,
+                    pos_core::deletion_receipt(&missing_completion),
+                ),
+                Err(CoreError::Storage(_))
+            ));
+
+            let mut begin_failure = SqliteStore::open_in_memory()?;
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+            let mut begin_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+                Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+            };
+            assert!(matches!(
+                begin_failure.append_signed_authorized(
+                    TimelineId::new(),
+                    registry,
+                    &mut begin_callback,
+                ),
+                Err(CoreError::Storage(_))
+            ));
+            assert!(matches!(
+                begin_failure.begin_key_registry_destruction(KeyDestructionRequestV1::new(
+                    identity,
+                    material_digest,
+                    Hash::from_bytes([2; 32]),
+                )),
+                Err(CoreError::Storage(_))
+            ));
+            FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+
+            let malformed = SqliteStore::open_in_memory()?;
+            malformed.conn.execute(
+                "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
+                [],
+            )?;
+            assert!(matches!(
+                malformed.load_key_registry(),
+                Err(CoreError::Serialization(_))
+            ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sqlite_key_registry_public_paths_are_exercised() -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let mut store = SqliteStore::open_in_memory()?;
+        assert!(store.load_key_registry()?.is_none());
+        store.save_key_registry(&registry)?;
+        assert_eq!(store.load_key_registry()?, Some(registry.clone()));
+
+        let mut existing_timeline_store = SqliteStore::open_in_memory()?;
+        let existing_timeline = existing_timeline_store.create_timeline("existing-ledger")?;
+        let initialized_timeline = existing_timeline_store
+            .initialize_timeline_with_key_registry("existing-ledger", &KeyRegistryStateV1::new())?;
+        assert_eq!(initialized_timeline.id(), existing_timeline.id());
+
+        let timeline = store.create_timeline("registry-coverage")?;
+        let mut event = seed_event(&mut store, timeline.id())?;
+        event.id = EventId::new();
+        let mut callback = move |_registry: &KeyRegistryStateV1, seq: Seq| {
+            event.seq = seq;
+            Ok::<Event, CoreError>(event.clone())
+        };
+        store.append_signed_authorized(timeline.id(), &registry, &mut callback)?;
+
+        let mut mismatch_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(
+                timeline.id(),
+                &KeyRegistryStateV1::new(),
+                &mut mismatch_callback,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut missing_callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(TimelineId::new(), &registry, &mut missing_callback,),
+            Err(CoreError::TimelineNotFound(_))
+        ));
+
+        let mut callback_failure = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback failed".to_owned()))
+        };
+        assert!(matches!(
+            store.append_signed_authorized(timeline.id(), &registry, &mut callback_failure,),
+            Err(CoreError::Storage(_))
+        ));
+
+        let invalid_request = KeyDestructionRequestV1::new(
+            identity,
+            Hash::from_bytes([9; 32]),
+            Hash::from_bytes([2; 32]),
+        );
+        assert!(matches!(
+            store.begin_key_registry_destruction(invalid_request),
+            Err(CoreError::Storage(_))
+        ));
+
+        let valid_request =
+            KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
+        store.begin_key_registry_destruction(valid_request)?;
+        let (_, destroyed) = store.complete_key_registry_destruction(
+            valid_request,
+            pos_core::deletion_receipt(&valid_request),
+        )?;
+        assert!(destroyed.key_record(identity).is_some());
+        sqlite_key_registry_failure_paths::run(&registry, identity, material_digest)?;
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_key_registry_transaction_boundaries_fail_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (registry, identity, material_digest) = registered_state()?;
+        let request =
+            KeyDestructionRequestV1::new(identity, material_digest, Hash::from_bytes([2; 32]));
+
+        let mut save_failure = SqliteStore::open_in_memory()?;
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let save_result = save_failure.save_key_registry(&registry);
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(matches!(save_result, Err(CoreError::Storage(_))));
+
+        let mut initialization_failure = SqliteStore::open_in_memory()?;
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let initialization_result = initialization_failure
+            .initialize_timeline_with_key_registry("transaction-failure", &registry);
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(matches!(initialization_result, Err(CoreError::Storage(_))));
+
+        let mut completion_begin_failure = SqliteStore::open_in_memory()?;
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let completion_result = completion_begin_failure
+            .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request));
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        assert!(matches!(completion_result, Err(CoreError::Storage(_))));
+
+        let mut malformed = SqliteStore::open_in_memory()?;
+        malformed.conn.execute(
+            "INSERT INTO key_registry (singleton, state_cbor) VALUES (1, X'01')",
+            [],
+        )?;
+        let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            malformed.append_signed_authorized(TimelineId::new(), &registry, &mut callback),
+            Err(CoreError::Serialization(_))
+        ));
+        assert!(matches!(
+            malformed.begin_key_registry_destruction(request),
+            Err(CoreError::Serialization(_))
+        ));
+        assert!(matches!(
+            malformed
+                .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request),),
+            Err(CoreError::Serialization(_))
+        ));
+
+        let mut timeline_failure = SqliteStore::open_in_memory()?;
+        timeline_failure.save_key_registry(&registry)?;
+        timeline_failure
+            .conn
+            .execute_batch("DROP TABLE timelines")?;
+        let mut callback = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        assert!(matches!(
+            timeline_failure.append_signed_authorized(TimelineId::new(), &registry, &mut callback),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut invalid_completion = SqliteStore::open_in_memory()?;
+        invalid_completion.save_key_registry(&registry)?;
+        assert!(matches!(
+            invalid_completion
+                .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request),),
+            Err(CoreError::Storage(_))
+        ));
+
+        let mut save_transaction_failure = SqliteStore::open_in_memory()?;
+        save_transaction_failure.save_key_registry(&registry)?;
+        save_transaction_failure.begin_key_registry_destruction(request)?;
+        save_transaction_failure.conn.execute_batch(
+            "CREATE TRIGGER deny_key_registry_update
+             BEFORE UPDATE ON key_registry
+             BEGIN SELECT RAISE(ABORT, 'registry update denied'); END",
+        )?;
+        assert!(matches!(
+            save_transaction_failure
+                .complete_key_registry_destruction(request, pos_core::deletion_receipt(&request),),
+            Err(CoreError::Storage(_))
+        ));
+        Ok(())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[cfg(test)]
+    fn fixture<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected SQLite coverage fixture error: {error:?}"
+            )))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn sqlite_error_mapping_boundaries_are_exercised() {
+        FAIL_BUSY_TIMEOUT.with(|flag| flag.set(true));
+        let busy_timeout = SqliteStore::open_in_memory();
+        FAIL_BUSY_TIMEOUT.with(|flag| flag.set(false));
+        assert!(matches!(busy_timeout, Err(CoreError::Storage(_))));
+
+        FAIL_SIGNATURE_SCHEMA_PREPARE.with(|flag| flag.set(true));
+        let prepare = SqliteStore::open_in_memory();
+        FAIL_SIGNATURE_SCHEMA_PREPARE.with(|flag| flag.set(false));
+        assert!(matches!(prepare, Err(CoreError::Storage(_))));
+
+        FAIL_SIGNATURE_SCHEMA_QUERY.with(|flag| flag.set(true));
+        let query = SqliteStore::open_in_memory();
+        FAIL_SIGNATURE_SCHEMA_QUERY.with(|flag| flag.set(false));
+        assert!(matches!(query, Err(CoreError::Storage(_))));
+
+        FAIL_SIGNATURE_SCHEMA_ROW.with(|flag| flag.set(true));
+        let row = SqliteStore::open_in_memory();
+        FAIL_SIGNATURE_SCHEMA_ROW.with(|flag| flag.set(false));
+        assert!(matches!(row, Err(CoreError::Storage(_))));
+
+        let mut store = fixture(SqliteStore::open_in_memory());
+        FAIL_REGISTRY_SERIALIZATION.with(|flag| flag.set(true));
+        let serialization = store.save_key_registry(&KeyRegistryStateV1::new());
+        FAIL_REGISTRY_SERIALIZATION.with(|flag| flag.set(false));
+        assert!(matches!(serialization, Err(CoreError::Serialization(_))));
     }
 }

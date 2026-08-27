@@ -22,7 +22,8 @@
 //! | Identity `CoW` | [`export_timeline_own`] | [`import_timeline_with_id`] |
 //! | Verified identity | [`export_timeline_own`] | [`import_timeline_with_verified_signatures`] |
 //!
-//! Signatures cover **payload bytes only** (not metadata). See
+//! Signatures cover the owner/role/epoch domain and **payload bytes only** (not
+//! event metadata). See
 //! [`import_timeline_with_verified_signatures`].
 //!
 //! # Backend features
@@ -158,7 +159,10 @@ pub(crate) fn ensure_gateway_consent_drafts(
     expected_first_seq: u64,
 ) -> Result<pos_core::EntityId, CoreError> {
     ensure_gateway_consent_types(drafts, timeline)?;
-    let mut owner = existing_owner;
+    // `ensure_gateway_consent_types` guarantees a non-empty batch, so the
+    // first draft supplies a safe initial owner when the Timeline has not
+    // recorded one yet. Coordinate validation below rejects any mismatch.
+    let owner = existing_owner.unwrap_or(drafts[0].entity);
     for (index, draft) in drafts.iter().enumerate() {
         let expected_seq =
             expected_first_seq.saturating_add(u64::try_from(index).unwrap_or(u64::MAX));
@@ -170,15 +174,11 @@ pub(crate) fn ensure_gateway_consent_drafts(
                     "consent grant coordinate mismatch".to_owned(),
                 ));
             }
-            owner = match owner {
-                Some(owner) if owner != grant.subject_id => {
-                    return Err(CoreError::Storage(
-                        "consent Timeline owner mismatch".to_owned(),
-                    ));
-                }
-                Some(owner) => Some(owner),
-                None => Some(grant.subject_id),
-            };
+            if owner != grant.subject_id {
+                return Err(CoreError::Storage(
+                    "consent Timeline owner mismatch".to_owned(),
+                ));
+            }
         } else {
             let revocation = pos_core::ConsentRevokedV1::decode(&draft.payload)
                 .map_err(|error| CoreError::Storage(error.to_string()))?;
@@ -187,18 +187,14 @@ pub(crate) fn ensure_gateway_consent_drafts(
                     "consent revocation coordinate mismatch".to_owned(),
                 ));
             }
-            owner = match owner {
-                Some(owner) if owner != revocation.subject_id => {
-                    return Err(CoreError::Storage(
-                        "consent Timeline owner mismatch".to_owned(),
-                    ));
-                }
-                Some(owner) => Some(owner),
-                None => Some(revocation.subject_id),
-            };
+            if owner != revocation.subject_id {
+                return Err(CoreError::Storage(
+                    "consent Timeline owner mismatch".to_owned(),
+                ));
+            }
         }
     }
-    owner.ok_or_else(|| CoreError::Storage("consent Timeline owner is missing".to_owned()))
+    Ok(owner)
 }
 
 /// Refuse committed sensitive Events before a generic import or append path can
@@ -328,6 +324,20 @@ pub fn open_store(config: StoreConfig) -> Result<Box<dyn EventStore>, CoreError>
     open_store_with_hasher(config, Box::new(pos_crypto::chain::Blake3Hasher))
 }
 
+/// Open an existing `SQLite` store for read-only consumers.
+///
+/// Unlike [`open_store`], this never creates a database, initializes schema,
+/// or returns a writable backend.
+///
+/// # Errors
+/// Returns `CoreError::Storage` if the database cannot be opened or its current
+/// schema/invariants are invalid.
+#[cfg(feature = "sqlite")]
+pub fn open_store_read_only(sqlite_path: &str) -> Result<Box<dyn EventStore>, CoreError> {
+    sqlite::SqliteStore::open_read_only(sqlite_path)
+        .map(|store| Box::new(store) as Box<dyn EventStore>)
+}
+
 /// Open the SQLite-backed local `OwnTracks` enrollment administration capability.
 ///
 /// This deliberately returns only [`OwnTracksEnrollmentStore`], not generic
@@ -369,12 +379,15 @@ pub fn open_store_with_hasher(
 
 /// Cryptographically verify signed events in `export`, then identity-import.
 ///
-/// Every event must carry a signature that verifies under `public_key` against its
-/// **payload bytes only** (event metadata is not covered). An empty event list is allowed.
+/// Every event must carry a signature and a `TimelineIntegritySigning`
+/// owner/role/epoch identity that is present in the destination registry and whose
+/// retained public key matches `public_key`. Verification uses the owner/role/epoch
+/// domain and **payload bytes only** (event metadata is not covered). An empty
+/// event list is allowed.
 ///
 /// Use this when the export is uniformly signed by one key. For mixed unsigned events
-/// or multiple signers, call [`pos_crypto::signing::verify_events`] (or filter) yourself,
-/// then [`import_timeline_with_id`].
+/// or multiple signers, apply the appropriate role-bound verifier per event (or filter)
+/// yourself, then call [`import_timeline_with_id`].
 ///
 /// # Errors
 /// Returns [`CoreError::SignatureVerificationFailed`] if any event is unsigned or fails
@@ -385,7 +398,41 @@ pub fn import_timeline_with_verified_signatures(
     public_key: &pos_core::PublicKey,
 ) -> Result<pos_core::Timeline, CoreError> {
     let vk = pos_crypto::signing::verifying_key_from_public_key(public_key)?;
-    pos_crypto::signing::verify_events_all_signed(&vk, &export.events)?;
+    let registry = if export.events.is_empty() {
+        None
+    } else {
+        Some(store.load_key_registry()?.ok_or_else(|| {
+            CoreError::Storage(
+                "verified Timeline import requires a persisted key registry".to_owned(),
+            )
+        })?)
+    };
+    let mut verified_identity = None;
+    for event in &export.events {
+        let Some(signature) = &event.signature else {
+            return Err(CoreError::SignatureVerificationFailed);
+        };
+        let Some(identity) = event.signature_identity else {
+            return Err(CoreError::SignatureVerificationFailed);
+        };
+        if identity.role != pos_core::KeyRoleV1::TimelineIntegritySigning {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        if verified_identity.is_some_and(|expected| expected != identity) {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        let Some(record) = registry
+            .as_ref()
+            .and_then(|value| value.key_record(identity))
+        else {
+            return Err(CoreError::SignatureVerificationFailed);
+        };
+        if record.public_verification_key != Some(*public_key) {
+            return Err(CoreError::SignatureVerificationFailed);
+        }
+        verified_identity = Some(identity);
+        pos_crypto::key_roles::verify_for_role(&vk, identity, &event.payload, signature)?;
+    }
     import_timeline_with_id(store, export)
 }
 
@@ -1017,13 +1064,28 @@ mod tests {
             ids::EventId,
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
+            KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
         };
-        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key, sign};
+        use pos_crypto::{
+            key_roles::{key_material_digest, sign_for_registered_role, SigningKeyMaterial},
+            signing::{generate_keypair, public_key_from_verifying_key},
+        };
 
         let (sk, vk) = generate_keypair();
+        let signing_material = SigningKeyMaterial::new(sk.clone());
         let pk = public_key_from_verifying_key(&vk);
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry
+            .register_key(KeyRegistrationV1::new(
+                identity,
+                key_material_digest(&sk.to_bytes()),
+                Some(pk),
+            ))
+            .test_ok();
         let payload = CanonicalBytes::from_vec(b"signed".to_vec());
-        let sig = sign(&sk, &payload);
+        let sig = sign_for_registered_role(&mut registry, &signing_material, identity, &payload)
+            .test_ok();
         let entity = EntityId::new();
         let event = Event {
             id: EventId::new(),
@@ -1036,23 +1098,143 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: Some(sig),
+            signature_identity: Some(identity),
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
+        let second_payload = CanonicalBytes::from_vec(b"signed-second".to_vec());
+        let second_sig =
+            sign_for_registered_role(&mut registry, &signing_material, identity, &second_payload)
+                .test_ok();
+        let mut second_event = event.clone();
+        second_event.id = EventId::new();
+        second_event.payload = second_payload.clone();
+        second_event.seq = Seq::from_u64(2);
+        second_event.signature = Some(second_sig);
+        second_event.payload_hash = pos_crypto::chain::hash_payload(&second_payload);
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("signed")),
-            events: vec![event],
+            events: vec![event, second_event],
             parent_fork_hash: None,
         };
 
         let mut ok_store = open_store(StoreConfig::Memory).test_ok();
+        ok_store.save_key_registry(&registry).test_ok();
         import_timeline_with_verified_signatures(ok_store.as_mut(), export.clone(), &pk).test_ok();
+        assert_verified_import_rejections(&export, &registry, &pk);
 
         let (_, reject_vk) = generate_keypair();
         let reject_key = public_key_from_verifying_key(&reject_vk);
         let mut bad_store = open_store(StoreConfig::Memory).test_ok();
+        bad_store.save_key_registry(&registry).test_ok();
         let err = import_timeline_with_verified_signatures(bad_store.as_mut(), export, &reject_key)
             .test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
+    }
+
+    fn assert_verified_import_rejections(
+        export: &pos_core::store::TimelineExport,
+        registry: &pos_core::KeyRegistryStateV1,
+        public_key: &pos_core::PublicKey,
+    ) {
+        use pos_core::{KeyIdentityV1, KeyRoleV1};
+
+        let mut missing_registry_store = open_store(StoreConfig::Memory).test_ok();
+        let missing_registry = import_timeline_with_verified_signatures(
+            missing_registry_store.as_mut(),
+            export.clone(),
+            public_key,
+        )
+        .test_err();
+        assert!(missing_registry
+            .to_string()
+            .contains("persisted key registry"));
+
+        let mut missing_identity = export.clone();
+        missing_identity.events[0].signature_identity = None;
+        let mut missing_identity_store = open_store(StoreConfig::Memory).test_ok();
+        missing_identity_store.save_key_registry(registry).test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                missing_identity_store.as_mut(),
+                missing_identity,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut wrong_role = export.clone();
+        wrong_role.events[0].signature_identity = Some(KeyIdentityV1::new(
+            "test-owner",
+            KeyRoleV1::SubjectDataEncryption,
+            1,
+        ));
+        let mut wrong_role_store = open_store(StoreConfig::Memory).test_ok();
+        wrong_role_store.save_key_registry(registry).test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                wrong_role_store.as_mut(),
+                wrong_role,
+                public_key
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut mismatched_identity = export.clone();
+        mismatched_identity.events[1].signature_identity = Some(KeyIdentityV1::new(
+            "test-owner",
+            KeyRoleV1::TimelineIntegritySigning,
+            2,
+        ));
+        let mut mismatched_identity_store = open_store(StoreConfig::Memory).test_ok();
+        mismatched_identity_store
+            .save_key_registry(registry)
+            .test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                mismatched_identity_store.as_mut(),
+                mismatched_identity,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut missing_record = export.clone();
+        missing_record.events.truncate(1);
+        missing_record.events[0].signature_identity = Some(KeyIdentityV1::new(
+            "test-owner",
+            KeyRoleV1::TimelineIntegritySigning,
+            2,
+        ));
+        let mut missing_record_store = open_store(StoreConfig::Memory).test_ok();
+        missing_record_store.save_key_registry(registry).test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                missing_record_store.as_mut(),
+                missing_record,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
+
+        let mut invalid_signature = export.clone();
+        invalid_signature.events[0].signature = Some(pos_core::Signature::from_bytes([0; 64]));
+        let mut invalid_signature_store = open_store(StoreConfig::Memory).test_ok();
+        invalid_signature_store
+            .save_key_registry(registry)
+            .test_ok();
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                invalid_signature_store.as_mut(),
+                invalid_signature,
+                public_key,
+            )
+            .test_err(),
+            CoreError::SignatureVerificationFailed
+        ));
     }
 
     #[test]
@@ -1063,6 +1245,7 @@ mod tests {
             timeline::{Timeline, TimelineMeta},
             PublicKey,
         };
+        use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
 
         let export = TimelineExport {
             timeline: Timeline::new(TimelineMeta::root("x")),
@@ -1070,6 +1253,9 @@ mod tests {
             parent_fork_hash: None,
         };
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        let (_, verifying_key) = generate_keypair();
+        let valid = public_key_from_verifying_key(&verifying_key);
+        import_timeline_with_verified_signatures(store.as_mut(), export.clone(), &valid).test_ok();
         let mut bytes = [0u8; 32];
         bytes[31] = 0xff;
         let bad = PublicKey::from_bytes(bytes);
@@ -1086,6 +1272,7 @@ mod tests {
             ids::EventId,
             store::TimelineExport,
             timeline::{Timeline, TimelineMeta},
+            KeyRegistryStateV1,
         };
         use pos_crypto::signing::{generate_keypair, public_key_from_verifying_key};
 
@@ -1105,11 +1292,15 @@ mod tests {
                 correlation_id: None,
                 schema_version: SchemaVersion::V1,
                 signature: None,
+                signature_identity: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }],
             parent_fork_hash: None,
         };
         let mut store = open_store(StoreConfig::Memory).test_ok();
+        store
+            .save_key_registry(&KeyRegistryStateV1::new())
+            .test_ok();
         let err = import_timeline_with_verified_signatures(store.as_mut(), export, &pk).test_err();
         assert!(matches!(err, CoreError::SignatureVerificationFailed));
     }
@@ -1208,6 +1399,52 @@ mod tests {
 mod coverage_entrypoints {
     use super::*;
 
+    struct RegistryLoadErrorStore;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl EventStore for RegistryLoadErrorStore {
+        fn create_timeline(&mut self, name: &str) -> Result<pos_core::Timeline, CoreError> {
+            Ok(pos_core::Timeline::new(pos_core::TimelineMeta::root(name)))
+        }
+
+        fn append(
+            &mut self,
+            _timeline: TimelineId,
+            _drafts: &[EventDraft],
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn read(
+            &self,
+            _timeline: TimelineId,
+            _range: pos_core::store::SeqRange,
+        ) -> Result<Vec<Event>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn fork(
+            &mut self,
+            _parent: TimelineId,
+            _at_seq: pos_core::clock::Seq,
+            name: &str,
+        ) -> Result<pos_core::Timeline, CoreError> {
+            Ok(pos_core::Timeline::new(pos_core::TimelineMeta::root(name)))
+        }
+
+        fn list_timelines(&self) -> Result<Vec<pos_core::Timeline>, CoreError> {
+            Ok(Vec::new())
+        }
+
+        fn get_timeline(&self, _id: TimelineId) -> Result<Option<pos_core::Timeline>, CoreError> {
+            Ok(None)
+        }
+
+        fn load_key_registry(&self) -> Result<Option<pos_core::KeyRegistryStateV1>, CoreError> {
+            Err(CoreError::Storage("registry load failed".to_owned()))
+        }
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
         value.unwrap_or_else(|error| {
@@ -1218,7 +1455,7 @@ mod coverage_entrypoints {
     }
 
     #[test]
-    fn consent_guard_boundaries_are_instrumented() {
+    fn consent_type_boundaries_are_instrumented() {
         let timeline = TimelineId::new();
         assert!(ensure_gateway_consent_types(&[], timeline).is_err());
         let invalid = EventDraft::new(
@@ -1227,7 +1464,21 @@ mod coverage_entrypoints {
             CanonicalBytes::from_static(b"invalid"),
         );
         assert!(ensure_gateway_consent_types(&[invalid], timeline).is_err());
+    }
 
+    #[test]
+    fn consent_draft_type_errors_propagate_through_the_public_guard() {
+        let invalid = EventDraft::new(
+            EntityId::new(),
+            Kind::new("not-consent"),
+            CanonicalBytes::from_static(b"invalid"),
+        );
+        assert!(ensure_gateway_consent_drafts(&[invalid], TimelineId::new(), None, 1,).is_err());
+    }
+
+    #[test]
+    fn consent_grant_boundaries_are_instrumented() {
+        let timeline = TimelineId::new();
         let subject = EntityId::new();
         let grant = pos_core::ConsentGrantedV1 {
             subject_id: subject,
@@ -1248,10 +1499,46 @@ mod coverage_entrypoints {
         );
         assert!(ensure_gateway_consent_drafts(&[grant_draft], timeline, None, 1).is_ok());
 
+        let malformed_grant = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            CanonicalBytes::from_static(b"malformed-grant"),
+        );
+        assert!(ensure_gateway_consent_drafts(&[malformed_grant], timeline, None, 1).is_err());
+
+        let mut mismatched_grant = EventDraft::new(
+            EntityId::new(),
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            ok(grant.encode()),
+        );
+        mismatched_grant.payload = ok((pos_core::ConsentGrantedV1 {
+            grant_seq: 2,
+            ..grant.clone()
+        })
+        .encode());
+        assert!(ensure_gateway_consent_drafts(&[mismatched_grant], timeline, None, 1).is_err());
+        let owner_mismatch_grant = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_GRANTED_V1),
+            ok(grant.encode()),
+        );
+        assert!(ensure_gateway_consent_drafts(
+            &[owner_mismatch_grant],
+            timeline,
+            Some(EntityId::new()),
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn consent_revocation_boundaries_are_instrumented() {
+        let timeline = TimelineId::new();
+        let subject = EntityId::new();
         let revocation = pos_core::ConsentRevokedV1 {
             subject_id: subject,
-            grantee_id: grant.grantee_id,
-            grant_seq: grant.grant_seq,
+            grantee_id: EntityId::new(),
+            grant_seq: 1,
             fence_seq: 2,
         };
         let revocation_draft = EventDraft::new(
@@ -1262,5 +1549,108 @@ mod coverage_entrypoints {
         assert!(
             ensure_gateway_consent_drafts(&[revocation_draft], timeline, Some(subject), 2).is_ok()
         );
+
+        let malformed_revocation = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            CanonicalBytes::from_static(b"malformed-revocation"),
+        );
+        assert!(
+            ensure_gateway_consent_drafts(&[malformed_revocation], timeline, Some(subject), 2)
+                .is_err()
+        );
+
+        let mismatched_revocation = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok((pos_core::ConsentRevokedV1 {
+                fence_seq: 3,
+                ..revocation
+            })
+            .encode()),
+        );
+        assert!(ensure_gateway_consent_drafts(
+            &[mismatched_revocation],
+            timeline,
+            Some(subject),
+            2,
+        )
+        .is_err());
+        let owner_mismatch_revocation = EventDraft::new(
+            subject,
+            Kind::new(pos_core::EVENT_TYPE_CONSENT_REVOKED_V1),
+            ok(revocation.encode()),
+        );
+        assert!(ensure_gateway_consent_drafts(
+            &[owner_mismatch_revocation],
+            timeline,
+            Some(EntityId::new()),
+            2,
+        )
+        .is_err());
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn verified_import_requires_a_registry_snapshot() {
+        let (_, verifying_key) = pos_crypto::signing::generate_keypair();
+        let public_key = pos_crypto::signing::public_key_from_verifying_key(&verifying_key);
+        let export = TimelineExport {
+            timeline: pos_core::Timeline::new(pos_core::TimelineMeta::root("missing-registry")),
+            events: vec![pos_core::Event {
+                id: pos_core::EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("coverage.event"),
+                payload: CanonicalBytes::from_static(b"coverage"),
+                wall_time: WallTime::from_micros(1),
+                seq: pos_core::Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: pos_core::SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                payload_hash: pos_core::Hash::from_bytes([0; 32]),
+            }],
+            parent_fork_hash: None,
+        };
+        let mut missing_registry = ok(open_store(StoreConfig::Memory));
+        assert!(matches!(
+            import_timeline_with_verified_signatures(
+                missing_registry.as_mut(),
+                export,
+                &public_key,
+            ),
+            Err(CoreError::Storage(_))
+        ));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn verified_import_propagates_registry_load_failure() {
+        let (_, verifying_key) = pos_crypto::signing::generate_keypair();
+        let public_key = pos_crypto::signing::public_key_from_verifying_key(&verifying_key);
+        let export = TimelineExport {
+            timeline: pos_core::Timeline::new(pos_core::TimelineMeta::root("registry-load-error")),
+            events: vec![pos_core::Event {
+                id: pos_core::EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("coverage.event"),
+                payload: CanonicalBytes::from_static(b"coverage"),
+                wall_time: WallTime::from_micros(1),
+                seq: pos_core::Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: pos_core::SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                payload_hash: pos_core::Hash::from_bytes([0; 32]),
+            }],
+            parent_fork_hash: None,
+        };
+        let mut store = RegistryLoadErrorStore;
+        assert!(matches!(
+            import_timeline_with_verified_signatures(&mut store, export, &public_key),
+            Err(CoreError::Storage(message)) if message == "registry load failed"
+        ));
     }
 }

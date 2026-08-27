@@ -2197,6 +2197,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let effect = Event {
@@ -2210,6 +2211,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let ids = [(cause.id, 1), (effect.id, 2)].into_iter().collect();
@@ -2233,6 +2235,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         assert_eq!(authoritative_events(&[event])[0].tick, 7);
@@ -2292,6 +2295,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let mut driver = ProofAgentDriver::new(entity, 0.5);
@@ -2348,6 +2352,7 @@ mod tests {
             correlation_id: None,
             schema_version: SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: Hash::from_bytes([0; 32]),
         };
         let reducer = ProofAgentReducer;
@@ -2693,6 +2698,7 @@ mod coverage_entrypoints {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod run_coverage_entrypoints {
     use super::*;
 
@@ -2835,5 +2841,97 @@ mod run_coverage_entrypoints {
             }
             .run(),
         );
+    }
+
+    #[test]
+    fn minimal_resource_budget_exercises_run_failure_propagation() {
+        let mut input = proof_input();
+        input.scenario_id = "minimal-budget".to_owned();
+        input.resource_limit = 1;
+        assert!(MoatProofRun {
+            input,
+            mode: ExecutionModeV1::Local,
+        }
+        .run()
+        .is_err());
+    }
+
+    #[test]
+    fn malformed_coordinates_reach_topology_digest_failure() {
+        let mut input = proof_input();
+        input.initial_position[0] = f64::NAN;
+        assert!(MoatProofRun {
+            input,
+            mode: ExecutionModeV1::Local,
+        }
+        .run()
+        .is_err());
+    }
+
+    #[test]
+    fn duplicate_plugin_ids_reach_both_registration_seams() {
+        let topology = test_ok(ProofTopology::new(proof_input()));
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "coverage-duplicate-world".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        });
+        test_ok(experiment.register(
+            &topology.world_plugin,
+            Some(Box::new(WorldReducer)),
+            Some(Box::new(world_driver(
+                &topology.input,
+                topology.body,
+                topology.config_entity,
+            ))),
+        ));
+        assert!(register_plugins(&mut experiment, &topology).is_err());
+
+        let mut duplicate_agent = topology;
+        duplicate_agent.agent_plugin.id = duplicate_agent.world_plugin.id();
+        assert!(build_registry(&duplicate_agent).is_err());
+    }
+
+    #[test]
+    fn finish_propagates_a_driver_failure() {
+        let plugin = FailureProbePlugin {
+            id: PluginId::new(),
+        };
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "coverage-finish-failure".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: pos_store::StoreConfig::Memory,
+        })
+        .with_resource_limit(3);
+        test_ok(experiment.register(
+            &plugin,
+            None,
+            Some(Box::new(FailureProbeDriver {
+                class: "invalid_payload",
+                resource_limit: 3,
+            })),
+        ));
+        let mut session = test_ok(experiment.start());
+        assert!(finish(&mut session).is_err());
+    }
+
+    #[test]
+    fn unvalidated_zero_budget_reaches_host_step_boundary() {
+        let mut input = proof_input();
+        input.scenario_id = "zero-budget-host".to_owned();
+        input.resource_limit = 0;
+        assert!(MoatProofRun {
+            input,
+            mode: ExecutionModeV1::Local
+        }
+        .run()
+        .is_err());
+    }
+
+    #[test]
+    fn invalid_public_input_reaches_local_profile_validation() {
+        let mut input = proof_input();
+        input.scenario_id.clear();
+        assert!(run_local_and_air_gapped(input).is_err());
     }
 }

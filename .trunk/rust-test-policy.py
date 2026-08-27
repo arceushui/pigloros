@@ -72,8 +72,11 @@ def mask_non_code(text: str) -> str:
             i += 1
             while i < n:
                 if text[i] == "\\":
-                    out.append("  ")
-                    i += 2
+                    out.append(" ")
+                    i += 1
+                    if i < n:
+                        out.append("\n" if text[i] == "\n" else " ")
+                        i += 1
                     continue
                 if text[i] == '"':
                     out.append(" ")

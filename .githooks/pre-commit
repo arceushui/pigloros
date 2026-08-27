@@ -6,28 +6,149 @@ set -euo pipefail
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all -- --check
 
-echo "pre-commit: cargo clippy (changed crates)"
-# Only lint changed crates to keep pre-commit fast
-changed=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' | sed 's|/.*||' | sort -u)
-crates=()
-for d in $changed; do
-    if [ -f "$d/Cargo.toml" ]; then
-        crates+=("$d")
-    fi
-done
-# Try to use --workspace if too many crates changed
-if [ ${#crates[@]} -gt 5 ] || [ ${#crates[@]} -eq 0 ]; then
-    crates=()
+if ! command -v trunk >/dev/null 2>&1; then
+    echo "pre-commit: Trunk is required for rust-test-policy; install it before committing" >&2
+    exit 1
 fi
-if [ ${#crates[@]} -eq 0 ]; then
-    # Fall back to workspace-level clippy (only on relevant targets)
-    echo "  (workspace-level clippy — many or no crates changed)"
-    cargo clippy --all-targets -- -D warnings -W clippy::pedantic
+
+echo "pre-commit: trunk rust-test-policy (staged files)"
+trunk check --filter rust-test-policy --index --no-fix --no-progress
+
+changed_files=$(git diff --cached --name-only --diff-filter=ACMRT)
+changed_cargo_manifests=$(printf '%s\n' "$changed_files" | awk '
+    $0 == "Cargo.toml" || $0 ~ /\/Cargo\.toml$/
+')
+if [ -n "$changed_cargo_manifests" ]; then
+    staged_tree=$(mktemp -d)
+    trap 'rm -rf "$staged_tree"' EXIT
+    git checkout-index --prefix="$staged_tree/" -a
+
+    check_staged_lockfile() {
+        local manifest=$1
+        local lockfile=$2
+        echo "pre-commit: verify staged $lockfile from $manifest"
+        cargo generate-lockfile --manifest-path "$staged_tree/$manifest"
+        if ! cmp -s <(git show ":$lockfile") "$staged_tree/$lockfile"; then
+            echo "pre-commit: $lockfile is stale for the staged manifests; generate and stage it before committing" >&2
+            exit 1
+        fi
+    }
+
+    workspace_manifest_changed=false
+    fuzz_manifest_changed=false
+    while IFS= read -r manifest; do
+        [ -n "$manifest" ] || continue
+        if [ "$manifest" = "fuzz/Cargo.toml" ]; then
+            fuzz_manifest_changed=true
+        else
+            workspace_manifest_changed=true
+        fi
+    done <<< "$changed_cargo_manifests"
+    if [ "$workspace_manifest_changed" = true ]; then
+        check_staged_lockfile "Cargo.toml" "Cargo.lock"
+    fi
+    if [ "$fuzz_manifest_changed" = true ]; then
+        check_staged_lockfile "fuzz/Cargo.toml" "fuzz/Cargo.lock"
+    fi
+fi
+
+changed_files=$(git diff --cached --name-only --diff-filter=ACMRT)
+changed_rust_files=$(printf '%s\n' "$changed_files" | awk '$0 ~ /\.rs$/')
+changed_cargo_files=$(printf '%s\n' "$changed_files" | awk '
+    $0 == "Cargo.toml" || $0 == "Cargo.lock" || $0 == "rust-toolchain.toml" ||
+    $0 ~ /\/Cargo\.toml$/ || $0 ~ /\/Cargo\.lock$/
+')
+if [ -z "$changed_rust_files" ] && [ -z "$changed_cargo_files" ]; then
+    echo "pre-commit: no Rust or Cargo metadata staged; skipping clippy"
+    echo "pre-commit: OK"
+    exit 0
+fi
+
+echo "pre-commit: cargo clippy (changed packages)"
+declare -A packages=()
+declare -A isolated_manifests=()
+needs_workspace=false
+if [ -z "$changed_rust_files" ]; then
+    needs_workspace=true
+fi
+package_name() {
+    awk '
+        /^\[package\][[:space:]]*$/ { in_package = 1; next }
+        /^\[/ { in_package = 0 }
+        in_package && /^[[:space:]]*name[[:space:]]*=/ {
+            sub(/^[^=]*=[[:space:]]*/, "")
+            gsub(/["[:space:]]/, "")
+            print
+            exit
+        }
+    ' "$1"
+}
+
+while IFS= read -r file; do
+    case "$file" in
+        Cargo.toml|Cargo.lock|rust-toolchain.toml)
+            needs_workspace=true
+            ;;
+        fuzz/Cargo.toml|fuzz/Cargo.lock)
+            isolated_manifests["fuzz/Cargo.toml"]="fuzz/Cargo.toml"
+            ;;
+        */Cargo.toml)
+            package=$(package_name "$file")
+            if [ -n "$package" ]; then
+                packages["$package"]="$file"
+            else
+                needs_workspace=true
+            fi
+            ;;
+        */Cargo.lock)
+            needs_workspace=true
+            ;;
+    esac
+done <<< "$changed_cargo_files"
+
+while IFS= read -r file; do
+    directory=$(dirname "$file")
+    manifest=""
+    while true; do
+        if [ -f "$directory/Cargo.toml" ]; then
+            manifest="$directory/Cargo.toml"
+            break
+        fi
+        if [ "$directory" = "." ] || [ "$directory" = "/" ]; then
+            break
+        fi
+        directory=$(dirname "$directory")
+    done
+    if [ -z "$manifest" ]; then
+        needs_workspace=true
+        continue
+    fi
+    manifest=${manifest#./}
+    if [ "$manifest" = "fuzz/Cargo.toml" ]; then
+        isolated_manifests["$manifest"]="$manifest"
+        continue
+    fi
+    package=$(package_name "$manifest")
+    if [ -n "$package" ]; then
+        packages["$package"]="$manifest"
+    else
+        needs_workspace=true
+    fi
+done <<< "$changed_rust_files"
+
+if [ "$needs_workspace" = true ] || [ "${#packages[@]}" -gt 5 ]; then
+    echo "  (workspace-level clippy)"
+    cargo clippy --workspace --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
 else
-    for crate in "${crates[@]}"; do
-        echo "  clippy: $crate"
-        cargo clippy -p "$crate" --all-targets -- -D warnings -W clippy::pedantic
+    for package in "${!packages[@]}"; do
+        echo "  clippy: $package"
+        cargo clippy -p "$package" --all-features --all-targets --locked -- -D warnings -W clippy::pedantic
     done
 fi
+
+for manifest in "${!isolated_manifests[@]}"; do
+    echo "  clippy: $manifest"
+    cargo clippy --manifest-path "$manifest" --all-targets --locked -- -D warnings -W clippy::pedantic
+done
 
 echo "pre-commit: OK"

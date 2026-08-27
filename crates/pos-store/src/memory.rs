@@ -42,7 +42,7 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, KeyRegistryStateV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -148,6 +148,8 @@ pub struct MemoryStore {
     geographic_cell_links: HashMap<(TimelineId, EventId), GeographicCellLink>,
     /// Trusted Gateway authority bound to this adapter's protected append port.
     consent_authority_permit: Option<ConsentAppendPermit>,
+    /// Durable-equivalent owner-scoped key registry for adapter tests.
+    key_registry: Option<KeyRegistryStateV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -440,6 +442,7 @@ impl MemoryStore {
             geographic_cell_snapshots: HashMap::new(),
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
+            key_registry: None,
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -595,6 +598,7 @@ impl MemoryStore {
             correlation_id: draft.correlation_id,
             schema_version: draft.schema_version,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         state.events.push(event.clone());
@@ -1413,6 +1417,7 @@ impl GeographicAdmissionStore for MemoryStore {
             correlation_id: None,
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash,
         };
         staged_state.timeline.head = event_seq;
@@ -1633,6 +1638,31 @@ impl EventStore for MemoryStore {
         crate::ensure_non_geographic_drafts(drafts, timeline)
             .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
             .and_then(|()| self.append_visible(timeline, drafts))
+    }
+
+    fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+        self.key_registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .validate()
+                    .map(|()| registry.clone())
+                    .map_err(|error| CoreError::Serialization(error.to_string()))
+            })
+            .transpose()
+    }
+
+    fn save_key_registry(&mut self, registry: &KeyRegistryStateV1) -> Result<(), CoreError> {
+        registry
+            .validate()
+            .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        if let Some(previous) = &self.key_registry {
+            previous
+                .validate_replacement(registry)
+                .map_err(|error| CoreError::Serialization(error.to_string()))?;
+        }
+        self.key_registry = Some(registry.clone());
+        Ok(())
     }
 
     fn append_bounded(
@@ -2046,7 +2076,8 @@ mod tests {
         },
         ids::{EntityId, EventId},
         store::{SeqRange, TimelineExport},
-        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore,
+        KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+        OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
     };
 
     trait TestValueExt<T> {
@@ -4382,6 +4413,7 @@ mod tests {
                 correlation_id: None,
                 schema_version: pos_core::SchemaVersion::V1,
                 signature: None,
+                signature_identity: None,
                 payload_hash: pos_crypto::chain::hash_payload(&payload),
             }
         };
@@ -4407,6 +4439,7 @@ mod tests {
             correlation_id: None,
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         assert!(store.append_committed(timeline.id(), &[event]).is_err());
@@ -4652,6 +4685,7 @@ mod tests {
             correlation_id: None,
             schema_version: pos_core::SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_crypto::chain::hash_payload(&payload),
         };
         store.append_committed(leaf.id(), &[ev]).test_ok();
@@ -4845,6 +4879,35 @@ mod tests {
     }
 
     #[test]
+    fn key_registry_snapshot_and_authorized_append_reject_stale_state() {
+        let mut store = MemoryStore::new();
+        assert_eq!(store.load_key_registry().test_ok(), None);
+        let mut persisted = KeyRegistryStateV1::new();
+        persisted
+            .register_key(KeyRegistrationV1::new(
+                KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1),
+                Hash::from_bytes([3; 32]),
+                Some(PublicKey::from_bytes([4; 32])),
+            ))
+            .test_ok();
+        store.save_key_registry(&persisted).test_ok();
+        assert_eq!(store.load_key_registry().test_ok(), Some(persisted.clone()));
+
+        let timeline = store.create_timeline("stale-registry").test_ok();
+        let expected = KeyRegistryStateV1::new();
+        let mut callback_called = false;
+        let mut create_event = |_registry: &KeyRegistryStateV1, _seq: Seq| {
+            callback_called = true;
+            Err::<Event, _>(CoreError::Storage("callback must not run".to_owned()))
+        };
+        let error = store
+            .append_signed_authorized(timeline.id(), &expected, &mut create_event)
+            .test_err();
+        assert!(error.to_string().contains("changed during signing"));
+        assert!(!callback_called);
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn memory_boundary_rejects_non_v1_serialized_draft() {
         let draft = make_draft(EntityId::new(), b"payload");
@@ -4857,7 +4920,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
-    use pos_core::ConsentAuthority;
+    use pos_core::{ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey};
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
@@ -4896,6 +4959,52 @@ mod coverage_entrypoints {
             AppendDedupKey::from_keyed_hash([key; 32]),
             AppendDedupScope::from_keyed_hash([scope; 32]),
         )
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn invalid_registry() -> KeyRegistryStateV1 {
+        fn replace_first_integer(value: &mut ciborium::value::Value) -> bool {
+            match value {
+                ciborium::value::Value::Integer(integer)
+                    if u64::try_from(*integer).ok() == Some(1) =>
+                {
+                    *integer = 0.into();
+                    true
+                }
+                ciborium::value::Value::Array(values) => {
+                    values.iter_mut().any(replace_first_integer)
+                }
+                ciborium::value::Value::Map(entries) => entries
+                    .iter_mut()
+                    .any(|(key, value)| replace_first_integer(key) || replace_first_integer(value)),
+                ciborium::value::Value::Tag(_, value) => replace_first_integer(value),
+                _ => false,
+            }
+        }
+
+        let identity = KeyIdentityV1::new("test-owner", KeyRoleV1::TimelineIntegritySigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        ok(registry.register_key(KeyRegistrationV1::new(
+            identity,
+            Hash::from_bytes([31; 32]),
+            Some(PublicKey::from_bytes([32; 32])),
+        )));
+        let mut encoded = Vec::new();
+        ok(ciborium::into_writer(&registry, &mut encoded));
+        let mut value: ciborium::value::Value = ok(ciborium::from_reader(encoded.as_slice()));
+        assert!(replace_first_integer(&mut value));
+        let mut invalid_encoded = Vec::new();
+        ok(ciborium::into_writer(&value, &mut invalid_encoded));
+        ok(ciborium::from_reader(invalid_encoded.as_slice()))
+    }
+
+    #[test]
+    fn memory_key_registry_revalidates_loaded_and_saved_snapshots() {
+        let invalid = invalid_registry();
+        let mut store = MemoryStore::new();
+        store.key_registry = Some(invalid.clone());
+        assert!(store.load_key_registry().is_err());
+        assert!(store.save_key_registry(&invalid).is_err());
     }
 
     #[test]

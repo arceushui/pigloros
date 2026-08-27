@@ -2673,6 +2673,7 @@ mod tests {
                     correlation_id: d.correlation_id,
                     schema_version: d.schema_version,
                     signature: None,
+                    signature_identity: None,
                     payload_hash: Hash::from_bytes([0u8; 32]),
                 })
                 .collect())
@@ -2748,6 +2749,7 @@ mod tests {
                     correlation_id: None,
                     schema_version: SchemaVersion::V1,
                     signature: None,
+                    signature_identity: None,
                     payload_hash: Hash::from_bytes([0; 32]),
                 }]);
             }

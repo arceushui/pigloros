@@ -72,6 +72,7 @@ jobs:
             > "${RUNNER_TEMP}/changes.diff"
       # Four workers fit the hosted runner and shorten feedback without
       # changing the mutant set or weakening the gate.
+       # Five minutes bounds a hung mutant without masking slow valid tests.
       - name: Run mutants in changed lines
         run: >
           cargo mutants
@@ -82,7 +83,7 @@ jobs:
           --shard "${{ matrix.shard }}/4"
           --baseline skip
           --jobs 4
-          --timeout 1800
+          --timeout 300
           --cap-lints true
           --cargo-arg=--locked
       - name: Upload mutation report

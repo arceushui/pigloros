@@ -2418,6 +2418,7 @@ mod tests {
             correlation_id: None,
             schema_version: pos_core::event::SchemaVersion::V1,
             signature: None,
+            signature_identity: None,
             payload_hash: pos_core::crypto::Hash::zero(),
         });
         let projected = result
