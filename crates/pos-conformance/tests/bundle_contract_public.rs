@@ -847,6 +847,16 @@ fn public_independent_verifier_rejects_secret_markers_and_invalid_caps(
         b"BEGIN SECRET credential".as_slice(),
         b"Bearer 0123456789abcdef".as_slice(),
         br#"{"api_key":"0123456789abcdef"}"#.as_slice(),
+        b"Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==".as_slice(),
+        b"ghp_0123456789abcdefghij".as_slice(),
+        b"github_pat_0123456789abcdefghij".as_slice(),
+        b"glpat-0123456789abcdefghij".as_slice(),
+        b"xoxb-0123456789abcdefghij".as_slice(),
+        b"sk_live_0123456789abcdef".as_slice(),
+        b"sk_test_0123456789abcdef".as_slice(),
+        b"AIza0123456789abcdefghijklmnopqrst".as_slice(),
+        b"AKIA0123456789ABCDEF".as_slice(),
+        b"eyjabcdefgh.klmnopqrst.uvwxyzabcd".as_slice(),
     ] {
         let archive = signed_archive_variant(&bundle, &signing_key, |value| {
             let member = archive_member(value, "support/normative-requirements.md")?;
