@@ -4202,6 +4202,15 @@ mod tests {
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
         );
 
+        let mut missing_version = bundle_value(&bundle);
+        if let Value::Array(fields) = &mut missing_version {
+            fields[1] = Value::Null;
+        }
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&encode_archive_value(&missing_version)?),
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        );
+
         assert_eq!(
             archive_array_exact(&Value::Null, 1),
             Err(BundleContractErrorV1::ArchiveEncodingInvalid)
@@ -5299,6 +5308,7 @@ mod tests {
             Value::Integer(99_u64.into()),
         )?)
         .is_err());
+        assert!(decode_manifest(&replace_member_field(&manifest, 3, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(&manifest, 0, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(
             &manifest,
@@ -5306,6 +5316,7 @@ mod tests {
             Value::Integer(99_u64.into()),
         )?)
         .is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 1, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(&manifest, 2, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(
             &manifest,
@@ -5313,8 +5324,13 @@ mod tests {
             Value::Integer(99_u64.into()),
         )?)
         .is_err());
+        assert!(decode_manifest(&replace_expected_field(&manifest, 3, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(&manifest, 4, Value::Null)?).is_err());
         assert!(decode_manifest(&replace_expected_field(&manifest, 5, Value::Null)?).is_err());
+
+        for field in [1, 2] {
+            assert!(decode_manifest(&replace_array_field(&manifest, field, Value::Null)?).is_err());
+        }
 
         let mut member_fields = vec![
             Value::Text("member".to_owned()),
@@ -7298,6 +7314,15 @@ mod instrumented_public_entrypoints {
             )],
         )
         .is_err());
+        assert!(independent_member_records(
+            &[raw_record_member(
+                Value::Text("member".to_owned()),
+                Value::Bytes(vec![1]),
+                Value::Null,
+            )],
+            &[descriptor()],
+        )
+        .is_err());
     }
 
     #[test]
@@ -7647,6 +7672,11 @@ mod instrumented_public_entrypoints {
         invalid_matrix_digest["adr_059_execution_matrix"]["blake3_digest"] =
             JsonValue::String("not-hex".to_owned());
         assert!(validate_matrix_provenance_digest(&invalid_matrix_digest, matrix_bytes).is_err());
+        let mut missing_matrix_digest_shape = provenance.clone();
+        missing_matrix_digest_shape["adr_059_execution_matrix"]["blake3_digest"] = JsonValue::Null;
+        assert!(
+            validate_matrix_provenance_digest(&missing_matrix_digest_shape, matrix_bytes).is_err()
+        );
     }
 
     fn exercise_inventory_json_error_regions(inventory: &JsonValue) {
@@ -7745,6 +7775,84 @@ mod instrumented_public_entrypoints {
         let manifest = manifest_value(&archive.manifest);
         assert!(decode_manifest(&manifest).is_ok());
         assert!(profile_value.is_array());
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_fixture_containers_reach_independent_error_boundaries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile_value = profile_value(&tests::profile())?;
+        let malformed = profile_with_field(&profile_value, 8, Value::Array(vec![Value::Null]))?;
+        assert!(
+            independent_verify_fixture_inputs(&[], &malformed, BundleModeV1::Local.code(),)
+                .is_err()
+        );
+        for role in [
+            BundleMemberRoleV1::Licence,
+            BundleMemberRoleV1::Notice,
+            BundleMemberRoleV1::Sbom,
+            BundleMemberRoleV1::Provenance,
+            BundleMemberRoleV1::Limitations,
+        ] {
+            assert_support_digest_error(&malformed, role)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn independent_authority_valid_metadata_is_verified() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let bundle = signed_draft_bundle()?;
+        let profile = profile_without_matrix_binding(&profile_value(&tests::profile())?)?;
+        let inventory = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::AuthorityInventory)
+            .ok_or("missing inventory")?;
+        let matrix = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix")?;
+        let provenance = bundle
+            .members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::Provenance)
+            .ok_or("missing provenance")?;
+        assert_eq!(
+            independent_verify_authority_members(
+                &raw_authority_members(&inventory.bytes, &matrix.bytes, &provenance.bytes),
+                &profile,
+            ),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authority_matrix_lifecycle_shape_is_checked_after_digest_binding(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut profile = tests::profile();
+        profile.profile_id = "pigloros.w8.artifact-integrity.1.0.0".to_owned();
+        let bundle = signed_draft_bundle()?;
+        let mut members = bundle.members.clone();
+        mutate_authority_member_json(&mut members, BundleMemberRoleV1::ExecutionMatrix, |value| {
+            value["lifecycle"] = JsonValue::Null;
+        })?;
+        let matrix_bytes = members
+            .iter()
+            .find(|member| member.role == BundleMemberRoleV1::ExecutionMatrix)
+            .ok_or("missing matrix")?
+            .bytes
+            .clone();
+        mutate_authority_member_json(&mut members, BundleMemberRoleV1::Provenance, |value| {
+            value["adr_059_execution_matrix"]["blake3_digest"] =
+                JsonValue::String(blake3::hash(&matrix_bytes).to_hex().to_string());
+        })?;
+        assert_eq!(
+            validate_authority_members(&profile, &members),
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        );
         Ok(())
     }
 
