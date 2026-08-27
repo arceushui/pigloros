@@ -7144,12 +7144,17 @@ mod instrumented_public_entrypoints {
             .and_then(JsonValue::as_array)
             .ok_or("missing rows")?;
         assert!(!json_string_array(&rows[0], "variants")?.is_empty());
-        assert!(matrix_cases_are_open(
-            matrix_json
-                .get("cases")
-                .and_then(JsonValue::as_array)
-                .ok_or("missing cases")?
-        ));
+        let cases = matrix_json
+            .get("cases")
+            .and_then(JsonValue::as_array)
+            .ok_or("missing cases")?;
+        assert!(matrix_cases_are_open(cases));
+        let mut executed_case = cases.clone();
+        executed_case[0]["executed"] = JsonValue::Bool(true);
+        assert!(!matrix_cases_are_open(&executed_case));
+        let mut bound_case = cases.clone();
+        bound_case[0]["expected_result_digest"] = JsonValue::String("bound".to_owned());
+        assert!(!matrix_cases_are_open(&bound_case));
 
         let mut no_provenance = bundle.members.clone();
         no_provenance.retain(|member| member.role != BundleMemberRoleV1::Provenance);
