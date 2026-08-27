@@ -1300,13 +1300,13 @@ fn independent_verify_profile_contract(
 }
 
 struct IndependentCpf2Caps {
-    max_cases: u64,
-    max_bundle_members: u64,
-    max_member_path_bytes: u64,
-    max_member_bytes: u64,
-    max_total_bundle_bytes: u64,
-    max_structural_nesting: u64,
-    max_coordinate_bytes: u64,
+    cases: u64,
+    bundle_members: u64,
+    member_path_bytes: u64,
+    member_bytes: u64,
+    total_bundle_bytes: u64,
+    structural_nesting: u64,
+    coordinate_bytes: u64,
 }
 
 fn independent_verify_cpf2(profile: &Value) -> Result<(), BundleContractErrorV1> {
@@ -1317,7 +1317,7 @@ fn independent_verify_cpf2(profile: &Value) -> Result<(), BundleContractErrorV1>
     let caps = independent_verify_cpf2_protocol(&fields[11])?;
     independent_verify_cpf2_root(fields, &execution_profiles, &public_schemas)?;
     independent_verify_cpf2_requirements(&fields[12])?;
-    independent_verify_cpf2_allowed_divergences(&fields[10], caps.max_coordinate_bytes)?;
+    independent_verify_cpf2_allowed_divergences(&fields[10], caps.coordinate_bytes)?;
     independent_verify_cpf2_fixtures(
         &fields[9],
         &fields[10],
@@ -1351,8 +1351,8 @@ fn independent_verify_cpf2_root(
             .any(|index| independent_profile_digest(&fields[*index]) == Ok([0; 32]))
         || execution_profiles.is_empty()
         || execution_profiles.len() > 64
-        || execution_profiles.iter().any(|digest| *digest == [0; 32])
-        || public_schemas.iter().any(|digest| *digest == [0; 32])
+        || execution_profiles.contains(&[0; 32])
+        || public_schemas.contains(&[0; 32])
         || !independent_strictly_ordered(execution_profiles)
         || !independent_strictly_ordered(public_schemas)
     {
@@ -1410,13 +1410,13 @@ fn independent_verify_cpf2_hard_caps(
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     Ok(IndependentCpf2Caps {
-        max_cases: values[1],
-        max_bundle_members: values[2],
-        max_member_path_bytes: values[3],
-        max_member_bytes: values[4],
-        max_total_bundle_bytes: values[5],
-        max_structural_nesting: values[7],
-        max_coordinate_bytes: values[8],
+        cases: values[1],
+        bundle_members: values[2],
+        member_path_bytes: values[3],
+        member_bytes: values[4],
+        total_bundle_bytes: values[5],
+        structural_nesting: values[7],
+        coordinate_bytes: values[8],
     })
 }
 
@@ -1510,7 +1510,7 @@ fn independent_verify_cpf2_fixture(
     let modes = independent_profile_modes(&fields[5])?;
     independent_profile_adapter(&fields[6])?;
     independent_verify_cpf2_fixture_inputs(&fields[7], caps)?;
-    independent_verify_cpf2_expected(&fields[8], allowed, caps.max_coordinate_bytes)?;
+    independent_verify_cpf2_expected(&fields[8], allowed, caps.coordinate_bytes)?;
     independent_verify_cpf2_fixture_outcome(&fields[8], &fields[9], &fields[10])?;
     independent_verify_cpf2_fixture_claim(&fields[11], &fields[12])?;
     independent_verify_cpf2_bounds(&fields[13])?;
@@ -1538,8 +1538,8 @@ fn independent_verify_cpf2_fixture_inputs(
         let size = independent_profile_u64(&fields[1])?;
         if size == 0
             || size > MAX_MEMBER_BYTES
-            || size > caps.max_member_bytes
-            || u64::try_from(member_id.len()).unwrap_or(u64::MAX) > caps.max_member_path_bytes
+            || size > caps.member_bytes
+            || u64::try_from(member_id.len()).unwrap_or(u64::MAX) > caps.member_path_bytes
             || independent_profile_digest(&fields[2])? == [0; 32]
             || independent_profile_digest(&fields[3])? == [0; 32]
             || previous
@@ -1551,7 +1551,7 @@ fn independent_verify_cpf2_fixture_inputs(
         previous = Some(member_id);
         total = total.saturating_add(size);
     }
-    if total > caps.max_total_bundle_bytes {
+    if total > caps.total_bundle_bytes {
         Err(BundleContractErrorV1::ProfileInvalid)
     } else {
         Ok(())
@@ -1647,7 +1647,7 @@ fn independent_verify_cpf2_expected_bounds(
     let bytes = independent_profile_bytes(&expected[1])?;
     let bounds = independent_profile_array(bounds, 8)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > independent_profile_u64(&bounds[3])?
-        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > caps.member_bytes
     {
         Err(BundleContractErrorV1::ProfileInvalid)
     } else {
@@ -1703,11 +1703,11 @@ fn independent_verify_cpf2_selected_caps(
     divergences: &Value,
     caps: &IndependentCpf2Caps,
 ) -> Result<(), BundleContractErrorV1> {
-    if u64::try_from(value_depth(profile)).unwrap_or(u64::MAX) > caps.max_structural_nesting {
+    if u64::try_from(value_depth(profile)).unwrap_or(u64::MAX) > caps.structural_nesting {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     let fixtures = independent_profile_array_bounded(fixtures)?;
-    if u64::try_from(fixtures.len()).unwrap_or(u64::MAX) > caps.max_cases {
+    if u64::try_from(fixtures.len()).unwrap_or(u64::MAX) > caps.cases {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     let member_count = fixtures.iter().try_fold(0_u64, |count, fixture| {
@@ -1717,10 +1717,10 @@ fn independent_verify_cpf2_selected_caps(
             count.saturating_add(u64::try_from(inputs.len()).unwrap_or(u64::MAX)),
         )
     })?;
-    if member_count > caps.max_bundle_members {
+    if member_count > caps.bundle_members {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    independent_verify_cpf2_allowed_divergences(divergences, caps.max_coordinate_bytes)
+    independent_verify_cpf2_allowed_divergences(divergences, caps.coordinate_bytes)
 }
 
 fn independent_verify_cpf2_digest(
