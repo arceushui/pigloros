@@ -230,7 +230,7 @@ const LAYER_SPECS: [LayerSpec; 7] = [
     },
 ];
 
-fn layer_spec(claim_layer: ClaimLayerV1) -> &'static LayerSpec {
+const fn layer_spec(claim_layer: ClaimLayerV1) -> &'static LayerSpec {
     match claim_layer {
         ClaimLayerV1::ArtifactIntegrity => &LAYER_SPECS[0],
         ClaimLayerV1::ReplayConformance => &LAYER_SPECS[1],
