@@ -1841,6 +1841,7 @@ mod tests {
         materializer_rejects_matrix_binding_changes()?;
         materializer_rejects_invalid_fixture_records()?;
         materializer_recognizes_every_fixture_family();
+        materialized_output_paths_are_fail_closed()?;
         Ok(())
     }
 
@@ -1983,5 +1984,24 @@ mod tests {
             ),
             None,
         );
+    }
+
+    fn materialized_output_paths_are_fail_closed() -> Result<(), Box<dyn Error>> {
+        let missing_root = output_root("missing-root");
+        assert!(write_materialized_file(&missing_root, "file", b"bytes").is_err());
+
+        let root = output_root("path-boundaries");
+        std::fs::create_dir(&root)?;
+        assert!(write_materialized_file(&root, "", b"bytes").is_err());
+        assert!(write_materialized_file(&root, ".", b"bytes").is_err());
+        assert!(write_materialized_file(&root, "../escape", b"bytes").is_err());
+
+        std::fs::write(root.join("file-parent"), b"blocker")?;
+        assert!(write_materialized_file(&root, "file-parent/child", b"bytes").is_err());
+        assert!(write_materialized_file(&root, "created/nested/file", b"bytes").is_ok());
+        assert_eq!(std::fs::read(root.join("created/nested/file"))?, b"bytes");
+        assert!(write_materialized_file(&root, "created/nested/file", b"bytes").is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
