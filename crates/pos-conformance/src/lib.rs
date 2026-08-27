@@ -19,16 +19,6 @@ use std::io::Cursor;
 mod bundle_contract;
 mod profile_contract;
 
-pub(crate) fn requires_execution_matrix_binding(profile_id: &str) -> bool {
-    const EXECUTION_MATRIX_BINDING_MARKER: &str = "#matrix=";
-    const KNOWLEDGE_PROFILE_ID: &str = "pigloros.w8.knowledge-non-interference.1.0.0";
-
-    profile_id
-        .split_once(EXECUTION_MATRIX_BINDING_MARKER)
-        .map_or(profile_id, |(base, _)| base)
-        == KNOWLEDGE_PROFILE_ID
-}
-
 pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
 }
@@ -40,12 +30,12 @@ pub use bundle_contract::{
     CONFORMANCE_BUNDLE_MAGIC_V1, MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 pub use profile_contract::{
-    AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
+    AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV2,
     EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
     ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
     FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
-    TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
+    TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V2, EVALUATOR_REQUEST_MAGIC_V1,
 };
 
 /// Version of the first independent proof-evidence envelope.

@@ -15,8 +15,8 @@ use pos_crypto::{canonical, signing};
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-/// Magic for the first immutable conformance-profile record.
-pub const CONFORMANCE_PROFILE_MAGIC_V1: &str = "CPF1";
+/// Magic for the immutable CPF2 conformance-profile record.
+pub const CONFORMANCE_PROFILE_MAGIC_V2: &str = "CPF2";
 /// Magic for the public evaluator request record.
 pub const EVALUATOR_REQUEST_MAGIC_V1: &str = "EVR1";
 type CaseOutcomeV1 = ProfileCaseOutcomeV1;
@@ -31,30 +31,7 @@ const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_COMPRESSION_EXPANSION: u32 = 100;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
-const EXECUTION_MATRIX_BINDING_MARKER: &str = "#matrix=";
-const KNOWLEDGE_PROFILE_ID: &str = "pigloros.w8.knowledge-non-interference.1.0.0";
-
-/// Typed content identity for the ADR-059 execution matrix.
-///
-/// The CPF1 V1 wire record has no dedicated matrix field. To preserve its
-/// canonical 17-field encoding, the knowledge profile carries this value in
-/// the profile-ID binding suffix and validates it as part of its identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ExecutionMatrixBindingV1 {
-    digest: [u8; 32],
-}
-
-impl ExecutionMatrixBindingV1 {
-    const fn from_digest(digest: [u8; 32]) -> Self {
-        Self { digest }
-    }
-
-    fn is_valid(self) -> bool {
-        self.digest != [0; 32]
-    }
-}
-
-/// Closed safe errors exposed by the CPF1 and evaluator-request interfaces.
+/// Closed safe errors exposed by the CPF2 and evaluator-request interfaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ConformanceContractError {
     /// The bytes are malformed, noncanonical, or contain a forbidden CBOR type.
@@ -77,9 +54,9 @@ pub enum ConformanceContractError {
     ProfileLifecycleInvalid,
     /// Required source, build, licence, or publication provenance is absent.
     ProvenanceMissing,
-    /// A fixture references an execution profile outside the CPF1 inventory.
+    /// A fixture references an execution profile outside the CPF2 inventory.
     UnknownExecutionProfile,
-    /// A fixture references a public schema outside the CPF1 inventory.
+    /// A fixture references a public schema outside the CPF2 inventory.
     UnknownPublicSchema,
     /// A fixture's replay claim is stronger than its redaction state permits;
     /// `IncompatibleProfile` remains orthogonal to that state.
@@ -172,7 +149,7 @@ pub enum ExpectedResultV1 {
 }
 
 impl ExpectedResultV1 {
-    /// Encode this expected result using the canonical CPF1 wire representation.
+    /// Encode this expected result using the canonical CPF2 wire representation.
     ///
     /// This is the same representation used by the bundle expected-result
     /// member, including typed failures and allowed divergences.
@@ -232,7 +209,7 @@ pub struct FixtureProvenanceV1 {
     pub limitations_digest: [u8; 32],
 }
 
-/// One ordered fixture/expected-result descriptor in a CPF1 bundle.
+/// One ordered fixture/expected-result descriptor in a CPF2 bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureDescriptorV1 {
     pub case_id: String,
@@ -320,10 +297,10 @@ impl EvaluatorHardCapsV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluatorProtocolV1 {
     pub protocol_id: String,
-    /// Externally governed identity of the evaluator protocol bundle. CPF1
+    /// Externally governed identity of the evaluator protocol bundle. CPF2
     /// commits every protocol field, while request validation requires this
     /// declared identity to match the selected profile; this crate does not
-    /// invent a second canonical protocol bundle outside CPF1.
+    /// invent a second canonical protocol bundle outside CPF2.
     pub protocol_digest: [u8; 32],
     pub request_schema_digest: [u8; 32],
     pub report_schema_digest: [u8; 32],
@@ -343,7 +320,7 @@ pub struct IndependenceRequirementsV1 {
 
 /// Externally supplied trust authority for Stable evidence.
 ///
-/// A CPF1 profile may name the policy snapshot it requires, but it cannot
+/// A CPF2 profile may name the policy snapshot it requires, but it cannot
 /// select the keys in that policy. Callers must supply this root set when
 /// validating Stable evidence; a signer is accepted only when its public key
 /// is a member of this independently obtained set.
@@ -421,18 +398,20 @@ pub struct StableEvidenceAttestationV1 {
     pub trust_root_digest: [u8; 32],
 }
 
-/// Immutable CPF1 public contract. It deliberately carries no aggregate pass flag.
+/// Immutable CPF2 public contract. It deliberately carries no aggregate pass flag.
 ///
 /// `profile_digest` commits the selected profile and a nested digest of the
 /// separately transported Stable-evidence sidecar. Signed Stable reports bind
 /// the evidence-independent selected profile identity so their signature does
 /// not become recursively self-referential.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConformanceProfileV1 {
+pub struct ConformanceProfileV2 {
     pub profile_id: String,
     pub semantic_version: String,
     pub lifecycle: ProfileLifecycleV1,
     pub normative_spec_digest: [u8; 32],
+    /// Exact digest of the canonical `authority/execution-matrix.json` member.
+    pub execution_matrix_digest: [u8; 32],
     pub execution_profile_digests: Vec<[u8; 32]>,
     pub public_schema_digests: Vec<[u8; 32]>,
     pub fixtures: Vec<FixtureDescriptorV1>,
@@ -443,7 +422,7 @@ pub struct ConformanceProfileV1 {
     pub limitations_digest: [u8; 32],
     pub provenance_digest: [u8; 32],
     pub previous_profile_digest: Option<[u8; 32]>,
-    /// Stable-promotion evidence is a signed sidecar, not a CPF1 wire field.
+    /// Stable-promotion evidence is a signed sidecar, not a CPF2 wire field.
     /// It must be supplied when validating or decoding a Stable profile.
     pub stable_evidence: Vec<StableImplementationEvidenceV1>,
     pub profile_digest: [u8; 32],
@@ -474,8 +453,8 @@ pub struct EvaluatorRequestV1 {
     pub request_digest: [u8; 32],
 }
 
-impl ConformanceProfileV1 {
-    /// Validate the closed CPF1 contract without reading private implementation state.
+impl ConformanceProfileV2 {
+    /// Validate the closed CPF2 contract without reading private implementation state.
     ///
     /// # Errors
     ///
@@ -490,7 +469,7 @@ impl ConformanceProfileV1 {
         })
     }
 
-    /// Return canonical CPF1 bytes after validating the immutable contract and digest.
+    /// Return canonical CPF2 bytes after validating the immutable contract and digest.
     ///
     /// # Errors
     ///
@@ -513,11 +492,11 @@ impl ConformanceProfileV1 {
             .and_then(|()| encode_bounded(&encode_profile(self, true)))
     }
 
-    /// Decode exact-length canonical CPF1 bytes and validate every contract invariant.
+    /// Decode exact-length canonical CPF2 bytes and validate every contract invariant.
     ///
     /// # Errors
     ///
-    /// Returns a closed safe error for malformed, noncanonical, or invalid CPF1 bytes.
+    /// Returns a closed safe error for malformed, noncanonical, or invalid CPF2 bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ConformanceContractError> {
         if bytes.len() > MAX_PROFILE_BYTES {
             return Err(ConformanceContractError::FieldOutOfBounds);
@@ -535,7 +514,7 @@ impl ConformanceProfileV1 {
     ///
     /// # Errors
     ///
-    /// Returns a closed safe error for malformed, noncanonical, or policy-incompatible CPF1 bytes.
+    /// Returns a closed safe error for malformed, noncanonical, or policy-incompatible CPF2 bytes.
     pub fn from_canonical_cbor_with_trust_policy(
         bytes: &[u8],
         policy: &TrustedRootPolicyV1,
@@ -548,10 +527,10 @@ impl ConformanceProfileV1 {
             .and_then(|profile| profile.validate_with_trust_policy(policy).map(|()| profile))
     }
 
-    /// Decode a Stable CPF1 record together with its separately transported
+    /// Decode a Stable CPF2 record together with its separately transported
     /// signed promotion evidence and external trust policy.
     ///
-    /// Stable evidence is intentionally a sidecar: ADR-062's exact CPF1 wire
+    /// Stable evidence is intentionally a sidecar: ADR-062's exact CPF2 wire
     /// record does not contain an undocumented evidence field. The profile
     /// digest still commits the canonical sidecar so the two artifacts cannot
     /// be substituted independently.
@@ -596,54 +575,6 @@ impl ConformanceProfileV1 {
         })
     }
 
-    /// Bind the canonical ADR-059 execution matrix to this profile identity.
-    ///
-    /// The digest is carried in a structured profile-ID suffix because the
-    /// CPF1 V1 record has no spare wire field. The suffix is not free-form
-    /// metadata: it is parsed, bounded, and included in `profile_digest`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error when the digest is zero, the existing
-    /// profile-ID binding is malformed, or the resulting profile is invalid.
-    pub fn bind_execution_matrix_digest(
-        &mut self,
-        matrix_digest: [u8; 32],
-    ) -> Result<(), ConformanceContractError> {
-        let binding = ExecutionMatrixBindingV1::from_digest(matrix_digest);
-        if !binding.is_valid() {
-            return Err(ConformanceContractError::FieldOutOfBounds);
-        }
-        let base_profile_id = if self.profile_id.contains(EXECUTION_MATRIX_BINDING_MARKER) {
-            matrix_binding_parts(&self.profile_id)?.0
-        } else {
-            self.profile_id.as_str()
-        };
-        if base_profile_id != KNOWLEDGE_PROFILE_ID {
-            return Err(ConformanceContractError::FieldOutOfBounds);
-        }
-        let suffix = format!(
-            "{EXECUTION_MATRIX_BINDING_MARKER}{}",
-            crate::hex_digest(&binding.digest)
-        );
-        let mut bound = self.clone();
-        bound.profile_id = format!("{base_profile_id}{suffix}");
-        bound.profile_digest = bound.digest();
-        bound.validate().map(|()| *self = bound)
-    }
-
-    /// Return the bound ADR-059 matrix digest.
-    ///
-    /// Only the knowledge-non-interference profile may carry this binding.
-    /// Other profiles omit it because ADR-059 execution belongs to #193.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error when a profile-ID binding is missing or malformed.
-    pub fn execution_matrix_digest(&self) -> Result<[u8; 32], ConformanceContractError> {
-        matrix_binding_parts(&self.profile_id).map(|(_, binding)| binding.digest)
-    }
-
     /// Digest the immutable CPF fields and the attached Stable-evidence commitment.
     ///
     /// Stable evidence contains reports that attest the selected-profile digest,
@@ -652,7 +583,7 @@ impl ConformanceProfileV1 {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let stable_evidence_digest = digest_bytes(
-            b"PiglorOS.ConformanceProfileStableEvidence.v1",
+            b"PiglorOS.ConformanceProfileStableEvidence.v2",
             &Value::Array(
                 self.stable_evidence
                     .iter()
@@ -670,7 +601,7 @@ impl ConformanceProfileV1 {
         }
         identity.profile_digest = [0; 32];
         digest_bytes(
-            b"PiglorOS.ConformanceProfile.v1",
+            b"PiglorOS.ConformanceProfile.v2",
             &Value::Array(vec![
                 encode_profile(&identity, false),
                 digest(&stable_evidence_digest),
@@ -774,7 +705,7 @@ impl EvaluatorRequestV1 {
         })
     }
 
-    /// Validate this request against the selected immutable CPF1 inventory.
+    /// Validate this request against the selected immutable CPF2 inventory.
     ///
     /// A structurally valid request is not enough: the profile, fixture
     /// bundle, execution profile, adapter, evaluator protocol, and output
@@ -785,7 +716,7 @@ impl EvaluatorRequestV1 {
     /// Returns a closed safe error when the request or any selected profile identity is invalid.
     pub fn validate_against_profile(
         &self,
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
     ) -> Result<(), ConformanceContractError> {
         self.validate().and_then(|()| {
             profile.validate()?;
@@ -800,7 +731,7 @@ impl EvaluatorRequestV1 {
     /// Returns a closed safe error when the request, profile, policy, or selected identity is invalid.
     pub fn validate_against_profile_with_trust_policy(
         &self,
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         policy: &TrustedRootPolicyV1,
     ) -> Result<(), ConformanceContractError> {
         self.validate().and_then(|()| {
@@ -811,7 +742,7 @@ impl EvaluatorRequestV1 {
 
     fn validate_against_validated_profile(
         &self,
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
     ) -> Result<(), ConformanceContractError> {
         if self.conformance_profile_digest != profile.profile_digest
             || self.fixture_bundle_digest != fixture_bundle_digest(profile)
@@ -957,12 +888,14 @@ impl EvaluatorRequestV1 {
 }
 
 fn validate_profile(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     policy: Option<&TrustedRootPolicyV1>,
 ) -> Result<(), ConformanceContractError> {
     if !bounded_text(&profile.profile_id, MAX_STRING_BYTES)
+        || profile.profile_id.contains("#matrix=")
         || !semantic_version(&profile.semantic_version)
         || zero_digest(&profile.normative_spec_digest)
+        || zero_digest(&profile.execution_matrix_digest)
         || zero_digest(&profile.compatibility_digest)
         || zero_digest(&profile.limitations_digest)
         || zero_digest(&profile.provenance_digest)
@@ -980,11 +913,6 @@ fn validate_profile(
         || !crate::strictly_ordered(&profile.public_schema_digests)
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
-    }
-    if crate::requires_execution_matrix_binding(&profile.profile_id)
-        || profile.profile_id.contains(EXECUTION_MATRIX_BINDING_MARKER)
-    {
-        matrix_binding_parts(&profile.profile_id)?;
     }
     validate_protocol(&profile.evaluator_protocol)
         .and_then(|()| validate_independence_requirements(&profile.independence_requirements))
@@ -1009,7 +937,7 @@ fn validate_profile(
         })
 }
 
-fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
+fn validate_fixtures(profile: &ConformanceProfileV2) -> Result<(), ConformanceContractError> {
     if profile
         .fixtures
         .windows(2)
@@ -1048,7 +976,7 @@ fn validate_fixture_claim(fixture: &FixtureDescriptorV1) -> Result<(), Conforman
     }
 }
 
-fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
+fn validate_selected_caps(profile: &ConformanceProfileV2) -> Result<(), ConformanceContractError> {
     let caps = &profile.evaluator_protocol.hard_caps;
     caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))?;
     let encoded_value = encode_profile(profile, true);
@@ -1092,7 +1020,7 @@ fn value_depth(value: &Value) -> usize {
 
 fn validate_fixture(
     fixture: &FixtureDescriptorV1,
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
 ) -> Result<(), ConformanceContractError> {
     if !bounded_text(&fixture.case_id, 128)
         || zero_digest(&fixture.public_schema_digest)
@@ -1160,7 +1088,7 @@ fn validate_fixture(
 }
 
 fn validate_stable_evidence(
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     policy: Option<&TrustedRootPolicyV1>,
 ) -> Result<(), ConformanceContractError> {
     if !profile
@@ -1198,7 +1126,7 @@ fn validate_stable_evidence(
 
 fn validate_stable_implementation(
     evidence: &StableImplementationEvidenceV1,
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
     policy: Option<&TrustedRootPolicyV1>,
 ) -> Result<(), ConformanceContractError> {
     let seen = evidence
@@ -1343,7 +1271,7 @@ fn stable_case_key(case: &CaseOutcomeV1) -> (&str, ExecutionModeV1, ClaimLayerV1
 
 fn validate_report_binding(
     evidence: &StableImplementationEvidenceV1,
-    profile: &ConformanceProfileV1,
+    profile: &ConformanceProfileV2,
 ) -> Result<(), ConformanceContractError> {
     let report = &evidence.report;
     report
@@ -1400,7 +1328,7 @@ fn validate_report_binding(
     Ok(())
 }
 
-fn selected_profile_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
+fn selected_profile_digest(profile: &ConformanceProfileV2) -> [u8; 32] {
     let mut selected = profile.clone();
     selected.lifecycle = ProfileLifecycleV1::Candidate;
     selected.stable_evidence.clear();
@@ -1408,7 +1336,7 @@ fn selected_profile_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
     selected.digest()
 }
 
-fn fixture_bundle_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
+fn fixture_bundle_digest(profile: &ConformanceProfileV2) -> [u8; 32] {
     digest_bytes(
         b"PiglorOS.ConformanceFixtureBundle.v1",
         &Value::Array(profile.fixtures.iter().map(encode_fixture).collect()),
@@ -1770,30 +1698,6 @@ fn zero_digest(value: &[u8; 32]) -> bool {
     *value == [0; 32]
 }
 
-fn matrix_binding_parts(
-    profile_id: &str,
-) -> Result<(&str, ExecutionMatrixBindingV1), ConformanceContractError> {
-    let Some((base, encoded_digest)) = profile_id.split_once(EXECUTION_MATRIX_BINDING_MARKER)
-    else {
-        return Err(ConformanceContractError::FieldOutOfBounds);
-    };
-    if base.is_empty()
-        || encoded_digest.contains(EXECUTION_MATRIX_BINDING_MARKER)
-        || encoded_digest.len() != 64
-        || base != KNOWLEDGE_PROFILE_ID
-    {
-        return Err(ConformanceContractError::FieldOutOfBounds);
-    }
-    let digest = crate::decode_hex_digest(encoded_digest)
-        .ok_or(ConformanceContractError::FieldOutOfBounds)?;
-    let binding = ExecutionMatrixBindingV1::from_digest(digest);
-    if binding.is_valid() {
-        Ok((base, binding))
-    } else {
-        Err(ConformanceContractError::FieldOutOfBounds)
-    }
-}
-
 fn fixture_key(value: &FixtureDescriptorV1) -> (&str, ClaimLayerV1, [u8; 32]) {
     (
         &value.case_id,
@@ -1821,14 +1725,15 @@ fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
     *blake3::hash(&source).as_bytes()
 }
 
-fn encode_profile(profile: &ConformanceProfileV1, include_digest: bool) -> Value {
+fn encode_profile(profile: &ConformanceProfileV2, include_digest: bool) -> Value {
     Value::Array(vec![
-        text(CONFORMANCE_PROFILE_MAGIC_V1),
-        uint(1),
+        text(CONFORMANCE_PROFILE_MAGIC_V2),
+        uint(2),
         text(&profile.profile_id),
         text(&profile.semantic_version),
         lifecycle(profile.lifecycle),
         digest(&profile.normative_spec_digest),
+        digest(&profile.execution_matrix_digest),
         digest_list(&profile.execution_profile_digests),
         digest_list(&profile.public_schema_digests),
         Value::Array(profile.fixtures.iter().map(encode_fixture).collect()),
@@ -2043,34 +1948,42 @@ fn encode_output_capability(value: &EvaluatorOutputCapabilityV1) -> Value {
     ])
 }
 
-fn decode_profile(value: &Value) -> Result<ConformanceProfileV1, ConformanceContractError> {
-    let fields = array(value, 17)?;
-    if text_value(&fields[0])? != CONFORMANCE_PROFILE_MAGIC_V1 || uint_value(&fields[1])? != 1 {
+fn decode_profile(value: &Value) -> Result<ConformanceProfileV2, ConformanceContractError> {
+    let fields = array_values(value)?;
+    let Some(magic) = fields.first() else {
+        return Err(ConformanceContractError::InvalidEncoding);
+    };
+    let Some(version) = fields.get(1) else {
+        return Err(ConformanceContractError::InvalidEncoding);
+    };
+    if text_value(magic)? != CONFORMANCE_PROFILE_MAGIC_V2 || uint_value(version)? != 2 {
         return Err(ConformanceContractError::UnsupportedVersion);
     }
-    Ok(ConformanceProfileV1 {
+    let fields = array(value, 18)?;
+    Ok(ConformanceProfileV2 {
         profile_id: text_value(&fields[2])?,
         semantic_version: text_value(&fields[3])?,
         lifecycle: decode_lifecycle(&fields[4])?,
         normative_spec_digest: digest_value(&fields[5])?,
-        execution_profile_digests: digest_list_value(&fields[6])?,
-        public_schema_digests: digest_list_value(&fields[7])?,
-        fixtures: array_values(&fields[8])?
+        execution_matrix_digest: digest_value(&fields[6])?,
+        execution_profile_digests: digest_list_value(&fields[7])?,
+        public_schema_digests: digest_list_value(&fields[8])?,
+        fixtures: array_values(&fields[9])?
             .iter()
             .map(decode_fixture)
             .collect::<Result<Vec<_>, _>>()?,
-        allowed_divergences: array_values(&fields[9])?
+        allowed_divergences: array_values(&fields[10])?
             .iter()
             .map(decode_divergence)
             .collect::<Result<Vec<_>, _>>()?,
-        evaluator_protocol: decode_protocol(&fields[10])?,
-        independence_requirements: decode_requirements(&fields[11])?,
-        compatibility_digest: digest_value(&fields[12])?,
-        limitations_digest: digest_value(&fields[13])?,
-        provenance_digest: digest_value(&fields[14])?,
-        previous_profile_digest: optional_digest(&fields[15])?,
+        evaluator_protocol: decode_protocol(&fields[11])?,
+        independence_requirements: decode_requirements(&fields[12])?,
+        compatibility_digest: digest_value(&fields[13])?,
+        limitations_digest: digest_value(&fields[14])?,
+        provenance_digest: digest_value(&fields[15])?,
+        previous_profile_digest: optional_digest(&fields[16])?,
         stable_evidence: Vec::new(),
-        profile_digest: digest_value(&fields[16])?,
+        profile_digest: digest_value(&fields[17])?,
     })
 }
 
@@ -2794,7 +2707,7 @@ mod tests {
         policy
     }
 
-    fn selected_profile_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
+    fn selected_profile_digest(profile: &ConformanceProfileV2) -> [u8; 32] {
         let mut selected = profile.clone();
         selected.lifecycle = ProfileLifecycleV1::Candidate;
         selected.stable_evidence.clear();
@@ -2802,7 +2715,7 @@ mod tests {
         selected.digest()
     }
 
-    fn profile() -> ConformanceProfileV1 {
+    fn profile() -> ConformanceProfileV2 {
         let expected_bytes = b"public expected bytes".to_vec();
         let fixture = FixtureDescriptorV1 {
             case_id: "ART-001".to_owned(),
@@ -2851,11 +2764,12 @@ mod tests {
             },
             compatibility_digest: digest(11),
         };
-        let mut profile = ConformanceProfileV1 {
-            profile_id: "pigloros.w8.knowledge-non-interference.1.0.0#matrix=0101010101010101010101010101010101010101010101010101010101010101".to_owned(),
+        let mut profile = ConformanceProfileV2 {
+            profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
             normative_spec_digest: digest(12),
+            execution_matrix_digest: digest(20),
             execution_profile_digests: vec![digest(1)],
             public_schema_digests: vec![digest(2)],
             fixtures: vec![fixture],
@@ -2897,7 +2811,7 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn profile_at_canonical_byte_limit() -> (ConformanceProfileV1, Vec<u8>) {
+    fn profile_at_canonical_byte_limit() -> (ConformanceProfileV2, Vec<u8>) {
         let mut value = profile();
         value.fixtures[0].bounds.output_bytes = MAX_MEMBER_BYTES;
         value.evaluator_protocol.hard_caps.max_member_bytes = MAX_MEMBER_BYTES;
@@ -3067,7 +2981,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn refresh_stable_report_for_profile(
         evidence: &mut StableImplementationEvidenceV1,
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
     ) {
         refresh_stable_report(evidence);
         evidence.report.profile_digest = selected_profile_digest(profile);
@@ -3208,7 +3122,7 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn malformed_profile_bytes(
-        profile: &ConformanceProfileV1,
+        profile: &ConformanceProfileV2,
         path: &[usize],
         replacement: Value,
     ) -> Result<Vec<u8>, ConformanceContractError> {
@@ -3315,7 +3229,7 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn reject_profile_change(
-        change: impl FnOnce(&mut ConformanceProfileV1),
+        change: impl FnOnce(&mut ConformanceProfileV2),
         expected: ConformanceContractError,
     ) {
         let mut value = profile();
@@ -3341,7 +3255,7 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn profile_with_hard_caps(caps: EvaluatorHardCapsV1) -> ConformanceProfileV1 {
+    fn profile_with_hard_caps(caps: EvaluatorHardCapsV1) -> ConformanceProfileV2 {
         let mut value = profile();
         let bytes = vec![1];
         value.fixtures[0].expected = ExpectedResultV1::CanonicalBytes {
@@ -3356,14 +3270,14 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn candidate() -> ConformanceProfileV1 {
+    fn candidate() -> ConformanceProfileV2 {
         profile()
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn stable_profile() -> ConformanceProfileV1 {
+    fn stable_profile() -> ConformanceProfileV2 {
         candidate()
             .transition_to(
                 ProfileLifecycleV1::Stable,
@@ -3386,14 +3300,22 @@ mod tests {
     }
 
     #[test]
-    fn cpf1_round_trips_exactly_and_uses_a_self_verifying_digest() {
+    fn cpf2_round_trips_exactly_and_uses_a_self_verifying_digest() {
         let value = profile();
+        let fields = encode_profile(&value, true)
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(fields.len(), 18);
+        assert_eq!(fields[0], text(CONFORMANCE_PROFILE_MAGIC_V2));
+        assert_eq!(fields[1], uint(2));
+        assert_eq!(fields[6], digest(&value.execution_matrix_digest));
         let bytes = value.to_canonical_cbor().unwrap_or_default();
-        assert_eq!(ConformanceProfileV1::from_canonical_cbor(&bytes), Ok(value));
+        assert_eq!(ConformanceProfileV2::from_canonical_cbor(&bytes), Ok(value));
     }
 
     #[test]
-    fn cpf1_rejects_mutated_profile_digest_and_unknown_execution_profile() {
+    fn cpf2_rejects_mutated_profile_digest_and_unknown_execution_profile() {
         let mut value = profile();
         value.profile_digest = digest(200);
         assert_eq!(
@@ -3410,6 +3332,25 @@ mod tests {
         assert_eq!(
             value.validate(),
             Err(ConformanceContractError::UnknownExecutionProfile)
+        );
+    }
+
+    #[test]
+    fn cpf2_requires_a_nonzero_explicit_execution_matrix_digest() {
+        let mut missing_matrix_digest = profile();
+        missing_matrix_digest.execution_matrix_digest = [0; 32];
+        missing_matrix_digest.profile_digest = missing_matrix_digest.digest();
+        assert_eq!(
+            missing_matrix_digest.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+
+        let mut legacy_suffix = profile();
+        legacy_suffix.profile_id.push_str("#matrix=0101");
+        legacy_suffix.profile_digest = legacy_suffix.digest();
+        assert_eq!(
+            legacy_suffix.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
 
@@ -3485,11 +3426,11 @@ mod tests {
         let bytes = encode_value(&encode_profile(&stable, true)).unwrap_or_default();
         assert!(matches!(
             encode_profile(&stable, true),
-            Value::Array(fields) if fields.len() == 17
+            Value::Array(fields) if fields.len() == 18
         ));
-        assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+            ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &bytes,
                 stable.stable_evidence.clone(),
                 &policy,
@@ -3499,11 +3440,11 @@ mod tests {
 
         let oversized = vec![0; MAX_PROFILE_BYTES + 1];
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&oversized, &policy),
+            ConformanceProfileV2::from_canonical_cbor_with_trust_policy(&oversized, &policy),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+            ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &oversized,
                 Vec::new(),
                 &policy,
@@ -3512,10 +3453,10 @@ mod tests {
         );
 
         let mut tampered = encode_profile(&candidate_profile, true);
-        replace_profile_path(&mut tampered, &[16], Value::Bytes(digest(99).to_vec()));
+        replace_profile_path(&mut tampered, &[17], Value::Bytes(digest(99).to_vec()));
         let tampered_bytes = encode_value(&tampered).unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&tampered_bytes, &policy,),
+            ConformanceProfileV2::from_canonical_cbor_with_trust_policy(&tampered_bytes, &policy,),
             Err(ConformanceContractError::FixtureDigestMismatch)
         );
 
@@ -3534,16 +3475,16 @@ mod tests {
         assert_eq!(bytes.len(), MAX_PROFILE_BYTES);
         assert_eq!(value.to_canonical_cbor(), Ok(bytes.clone()));
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            ConformanceProfileV2::from_canonical_cbor(&bytes),
             Ok(value.clone())
         );
         let policy = trusted_root_policy();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_trust_policy(&bytes, &policy),
+            ConformanceProfileV2::from_canonical_cbor_with_trust_policy(&bytes, &policy),
             Ok(value.clone())
         );
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+            ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &bytes,
                 Vec::new(),
                 &policy,
@@ -3945,7 +3886,7 @@ mod tests {
         typed_failure.profile_digest = typed_failure.digest();
         let typed_bytes = typed_failure.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&typed_bytes),
+            ConformanceProfileV2::from_canonical_cbor(&typed_bytes),
             Ok(typed_failure)
         );
 
@@ -4039,14 +3980,14 @@ mod tests {
         wide_integer.profile_digest = wide_integer.digest();
         let wide_integer_bytes = wide_integer.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&wide_integer_bytes),
+            ConformanceProfileV2::from_canonical_cbor(&wide_integer_bytes),
             Ok(wide_integer)
         );
 
         let mut trailing = profile().to_canonical_cbor().unwrap_or_default();
         trailing.push(0);
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&trailing),
+            ConformanceProfileV2::from_canonical_cbor(&trailing),
             Err(ConformanceContractError::InvalidEncoding)
         );
         for value in [
@@ -4059,12 +4000,12 @@ mod tests {
             let result = ciborium::into_writer(&value, &mut malformed);
             assert!(result.is_ok());
             assert_eq!(
-                ConformanceProfileV1::from_canonical_cbor(&malformed),
+                ConformanceProfileV2::from_canonical_cbor(&malformed),
                 Err(ConformanceContractError::InvalidEncoding)
             );
         }
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&[
+            ConformanceProfileV2::from_canonical_cbor(&[
                 0x9f, 0x64, b'C', b'P', b'F', b'1', 0x01, 0xff
             ]),
             Err(ConformanceContractError::InvalidEncoding)
@@ -4072,13 +4013,13 @@ mod tests {
         // The structural preflight accepts text by length; the canonical
         // decoder must still reject invalid UTF-8 in that text item.
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&[0x61, 0xff]),
+            ConformanceProfileV2::from_canonical_cbor(&[0x61, 0xff]),
             Err(ConformanceContractError::InvalidEncoding)
         );
         let mut too_deep = vec![0x81; usize::from(MAX_STRUCTURAL_NESTING) + 2];
         too_deep.push(0xf6);
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&too_deep),
+            ConformanceProfileV2::from_canonical_cbor(&too_deep),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
         assert_eq!(
@@ -4102,7 +4043,7 @@ mod tests {
         typed.profile_digest = typed.digest();
         let typed_bytes = typed.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&typed_bytes),
+            ConformanceProfileV2::from_canonical_cbor(&typed_bytes),
             Ok(typed)
         );
 
@@ -4141,7 +4082,7 @@ mod tests {
             .to_canonical_cbor_with_trust_policy(&trusted_root_policy())
             .unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+            ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
                 stable.stable_evidence.clone(),
                 &trusted_root_policy(),
@@ -4155,7 +4096,7 @@ mod tests {
     fn public_profile_and_request_codecs_reject_nested_malformed_records() {
         let reject_profile = |value: Value| {
             let bytes = encode_value(&value).unwrap_or_default();
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         };
         let reject_request = |value: Value| {
             let bytes = encode_value(&value).unwrap_or_default();
@@ -4165,7 +4106,7 @@ mod tests {
         if let Value::Array(fields) = encode_profile(&profile(), true) {
             for index in 0..17 {
                 let mut malformed = fields.clone();
-                if let Value::Array(fixtures) = &mut malformed[8] {
+                if let Value::Array(fixtures) = &mut malformed[9] {
                     if let Value::Array(fixture) = &mut fixtures[0] {
                         fixture[index] = Value::Map(Vec::new());
                     }
@@ -4174,21 +4115,21 @@ mod tests {
             }
             for index in 0..5 {
                 let mut malformed = fields.clone();
-                if let Value::Array(protocol) = &mut malformed[10] {
+                if let Value::Array(protocol) = &mut malformed[11] {
                     protocol[index] = Value::Map(Vec::new());
                 }
                 reject_profile(Value::Array(malformed));
             }
             for index in 0..5 {
                 let mut malformed = fields.clone();
-                if let Value::Array(requirements) = &mut malformed[11] {
+                if let Value::Array(requirements) = &mut malformed[12] {
                     requirements[index] = Value::Map(Vec::new());
                 }
                 reject_profile(Value::Array(malformed));
             }
 
             let mut oversized_fixtures = fields;
-            oversized_fixtures[8] = Value::Array(vec![Value::Null; MAX_FIXTURES + 1]);
+            oversized_fixtures[9] = Value::Array(vec![Value::Null; MAX_FIXTURES + 1]);
             reject_profile(Value::Array(oversized_fixtures));
         }
 
@@ -4216,7 +4157,7 @@ mod tests {
         typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
         typed.profile_digest = typed.digest();
         if let Value::Array(mut fields) = encode_profile(&typed, true) {
-            if let Value::Array(fixtures) = &mut fields[8] {
+            if let Value::Array(fixtures) = &mut fields[9] {
                 if let Value::Array(fixture) = &mut fixtures[0] {
                     if let Value::Array(expected) = &mut fixture[8] {
                         expected[3] = Value::Map(Vec::new());
@@ -4232,7 +4173,7 @@ mod tests {
     fn public_seams_cover_closed_helper_errors() {
         let reject_profile = |value: Value| {
             let bytes = encode_value(&value).unwrap_or_default();
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         };
 
         let fields = encode_profile(&profile(), true)
@@ -4276,7 +4217,7 @@ mod tests {
 
         let mut trailing = encode_value(&Value::Array(fields)).unwrap_or_default();
         trailing.push(0);
-        assert!(ConformanceProfileV1::from_canonical_cbor(&trailing).is_err());
+        assert!(ConformanceProfileV2::from_canonical_cbor(&trailing).is_err());
 
         let mut invalid_bounds = profile();
         invalid_bounds.fixtures[0].bounds.cpu_fuel = 0;
@@ -4320,16 +4261,16 @@ mod tests {
     fn public_profile_decoder_reaches_top_level_invalid_field_seams(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let value = profile();
-        for index in 0..17 {
+        for index in 0..18 {
             // `previous_profile_digest` is an optional field; CBOR null is
             // valid there, so use a wrong type for that one schema path.
-            let replacement = if index == 15 {
+            let replacement = if index == 16 {
                 Value::Bool(true)
             } else {
                 Value::Null
             };
             let bytes = malformed_profile_bytes(&value, &[index], replacement)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..17 {
             let replacement = if index == 10 {
@@ -4337,36 +4278,36 @@ mod tests {
             } else {
                 Value::Null
             };
-            let bytes = malformed_profile_bytes(&value, &[8, 0, index], replacement)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            let bytes = malformed_profile_bytes(&value, &[9, 0, index], replacement)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..4 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 7, 0, index], Value::Null)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            let bytes = malformed_profile_bytes(&value, &[9, 0, 7, 0, index], Value::Null)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..8 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 13, index], Value::Null)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            let bytes = malformed_profile_bytes(&value, &[9, 0, 13, index], Value::Null)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..2 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 14, index], Value::Null)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            let bytes = malformed_profile_bytes(&value, &[9, 0, 14, index], Value::Null)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..7 {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 15, index], Value::Null)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
-        }
-        for index in 0..5 {
-            let bytes = malformed_profile_bytes(&value, &[10, index], Value::Null)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
-        }
-        for index in 0..10 {
-            let bytes = malformed_profile_bytes(&value, &[10, 4, index], Value::Null)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            let bytes = malformed_profile_bytes(&value, &[9, 0, 15, index], Value::Null)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         for index in 0..5 {
             let bytes = malformed_profile_bytes(&value, &[11, index], Value::Null)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..10 {
+            let bytes = malformed_profile_bytes(&value, &[11, 4, index], Value::Null)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
+        }
+        for index in 0..5 {
+            let bytes = malformed_profile_bytes(&value, &[12, index], Value::Null)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         for expected in [
             Value::Array(vec![
@@ -4391,8 +4332,8 @@ mod tests {
                 Value::Null,
             ]),
         ] {
-            let bytes = malformed_profile_bytes(&value, &[8, 0, 8], expected)?;
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            let bytes = malformed_profile_bytes(&value, &[9, 0, 8], expected)?;
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         }
         Ok(())
     }
@@ -4407,7 +4348,7 @@ mod tests {
         typed.profile_digest = typed.digest();
         let typed_bytes = typed.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&typed_bytes),
+            ConformanceProfileV2::from_canonical_cbor(&typed_bytes),
             Ok(typed)
         );
 
@@ -4425,7 +4366,7 @@ mod tests {
         divergent.profile_digest = divergent.digest();
         let divergent_bytes = divergent.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&divergent_bytes),
+            ConformanceProfileV2::from_canonical_cbor(&divergent_bytes),
             Ok(divergent)
         );
     }
@@ -4449,7 +4390,7 @@ mod tests {
         assert!(stable_bytes_result.is_ok());
         let stable_bytes = stable_bytes_result.unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+            ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
                 stable.stable_evidence.clone(),
                 &policy,
@@ -4544,8 +4485,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cpf1_public_validation_rejects_each_retained_descriptor_invariant() {
-        let reject = |change: &dyn Fn(&mut ConformanceProfileV1), error| {
+    fn cpf2_public_validation_rejects_each_retained_descriptor_invariant() {
+        let reject = |change: &dyn Fn(&mut ConformanceProfileV2), error| {
             let mut value = profile();
             change(&mut value);
             value.profile_digest = value.digest();
@@ -4674,7 +4615,7 @@ mod tests {
         );
         let oversized = vec![0; MAX_PROFILE_BYTES + 1];
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&oversized),
+            ConformanceProfileV2::from_canonical_cbor(&oversized),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
         assert_eq!(
@@ -4685,7 +4626,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cpf1_public_seams_cover_remaining_identity_order_and_stable_result_variants() {
+    fn cpf2_public_seams_cover_remaining_identity_order_and_stable_result_variants() {
         assert_rejects_mutated_profile_digest();
 
         let candidate = profile()
@@ -4738,7 +4679,7 @@ mod tests {
         wrong_digest.profile_digest = digest(99);
         let bytes = encode_value(&encode_profile(&wrong_digest, true)).unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            ConformanceProfileV2::from_canonical_cbor(&bytes),
             Err(ConformanceContractError::FixtureDigestMismatch)
         );
     }
@@ -4816,7 +4757,17 @@ mod tests {
             fields[0] = text("CPF9");
             let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
             assert_eq!(
-                ConformanceProfileV1::from_canonical_cbor(&bytes),
+                ConformanceProfileV2::from_canonical_cbor(&bytes),
+                Err(ConformanceContractError::UnsupportedVersion)
+            );
+        }
+        if let Value::Array(mut fields) = encode_profile(&value, true) {
+            fields.remove(6);
+            fields[0] = text("CPF1");
+            fields[1] = uint(1);
+            let bytes = encode_value(&Value::Array(fields)).unwrap_or_default();
+            assert_eq!(
+                ConformanceProfileV2::from_canonical_cbor(&bytes),
                 Err(ConformanceContractError::UnsupportedVersion)
             );
         }
@@ -4836,7 +4787,7 @@ mod tests {
     fn public_profile_and_request_codecs_reject_malformed_fields() {
         let reject_profile = |value: Value| {
             let bytes = encode_value(&value).unwrap_or_default();
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
         };
         let reject_request = |value: Value| {
             let bytes = encode_value(&value).unwrap_or_default();
@@ -4873,7 +4824,7 @@ mod tests {
                 Some(SafeErrorCodeV1::ClosureIncomplete);
             fixture_profile.profile_digest = fixture_profile.digest();
             let bytes = fixture_profile.to_canonical_cbor().unwrap_or_default();
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_ok());
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_ok());
 
             fixture_profile.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
                 classification: DivergenceMismatchKindV1::TypedFailure,
@@ -4888,12 +4839,12 @@ mod tests {
             fixture_profile.fixtures[0].expected_verification_error = None;
             fixture_profile.profile_digest = fixture_profile.digest();
             let bytes = fixture_profile.to_canonical_cbor().unwrap_or_default();
-            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_ok());
+            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_ok());
         }
 
         let mut malformed = encode_profile(&profile(), true);
         if let Value::Array(fields) = &mut malformed {
-            if let Value::Array(fixtures) = &mut fields[8] {
+            if let Value::Array(fixtures) = &mut fields[9] {
                 if let Value::Array(fixture) = &mut fixtures[0] {
                     fixture[8] = Value::Array(vec![
                         Value::Integer(99_u64.into()),
@@ -4910,12 +4861,12 @@ mod tests {
         let canonical = profile().to_canonical_cbor().unwrap_or_default();
         let mut trailing = canonical.clone();
         trailing.push(0);
-        assert!(ConformanceProfileV1::from_canonical_cbor(&trailing).is_err());
+        assert!(ConformanceProfileV2::from_canonical_cbor(&trailing).is_err());
         let mut noncanonical = canonical;
         if let Some(index) = noncanonical.iter().position(|byte| *byte == 1) {
             noncanonical.splice(index..=index, [0x18, 1]);
         }
-        assert!(ConformanceProfileV1::from_canonical_cbor(&noncanonical).is_err());
+        assert!(ConformanceProfileV2::from_canonical_cbor(&noncanonical).is_err());
     }
 
     #[test]
@@ -4941,7 +4892,7 @@ mod tests {
             .to_canonical_cbor_with_trust_policy(&trusted_root_policy())
             .unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor_with_stable_evidence(
+            ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
                 stable.stable_evidence.clone(),
                 &trusted_root_policy(),
@@ -4996,7 +4947,7 @@ mod tests {
         divergent.profile_digest = divergent.digest();
         let bytes = divergent.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            ConformanceProfileV2::from_canonical_cbor(&bytes),
             Ok(divergent)
         );
     }
@@ -5013,7 +4964,7 @@ mod tests {
 
         let exact_ceiling = vec![0; 16_777_216];
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&exact_ceiling),
+            ConformanceProfileV2::from_canonical_cbor(&exact_ceiling),
             Err(ConformanceContractError::InvalidEncoding)
         );
         assert_eq!(
@@ -7028,26 +6979,26 @@ mod tests {
         value.profile_digest = value.digest();
         let encoded = value.to_canonical_cbor().unwrap_or_default();
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&encoded),
+            ConformanceProfileV2::from_canonical_cbor(&encoded),
             Ok(value)
         );
 
         assert!(
-            ConformanceProfileV1::from_canonical_cbor(&[0x9b_u8, 0, 0, 0, 0, 0, 0, 0, 1,]).is_err()
+            ConformanceProfileV2::from_canonical_cbor(&[0x9b_u8, 0, 0, 0, 0, 0, 0, 0, 1,]).is_err()
         );
-        assert!(ConformanceProfileV1::from_canonical_cbor(&[0x7f_u8, 0xff]).is_err());
+        assert!(ConformanceProfileV2::from_canonical_cbor(&[0x7f_u8, 0xff]).is_err());
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&[0x58, 0x02, 0]),
+            ConformanceProfileV2::from_canonical_cbor(&[0x58, 0x02, 0]),
             Err(ConformanceContractError::InvalidEncoding)
         );
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&[0x58]),
+            ConformanceProfileV2::from_canonical_cbor(&[0x58]),
             Err(ConformanceContractError::InvalidEncoding)
         );
         let mut overflowing_bytes = vec![0x5b_u8];
         overflowing_bytes.extend([0xff; 8]);
         assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&overflowing_bytes),
+            ConformanceProfileV2::from_canonical_cbor(&overflowing_bytes),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
 
