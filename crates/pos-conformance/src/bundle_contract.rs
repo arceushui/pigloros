@@ -33,6 +33,64 @@ const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
 const INPUT_MEMBER_PREFIX: &str = "inputs/";
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/execution-matrix.json";
+const AUTHORITY_INVENTORY_KEYS: [&str; 6] = [
+    "magic",
+    "version",
+    "lifecycle",
+    "digest_algorithm",
+    "source",
+    "entries",
+];
+const AUTHORITY_INVENTORY_ENTRY_KEYS: [&str; 8] = [
+    "fixture_id",
+    "execution_class",
+    "expected_outcome",
+    "fixture_bytes_path",
+    "fixture_bytes_digest",
+    "expected_result_path",
+    "expected_result_digest",
+    "materialization_status",
+];
+const EXECUTION_MATRIX_KEYS: [&str; 14] = [
+    "magic",
+    "version",
+    "matrix_id",
+    "lifecycle",
+    "source",
+    "row_count",
+    "variant_count",
+    "mode_count",
+    "case_count",
+    "cases",
+    "expected_result_policy",
+    "equality_predicates",
+    "executed_case_count",
+    "rows",
+];
+const EXECUTION_MATRIX_ROW_KEYS: [&str; 10] = [
+    "fixture_id",
+    "classification",
+    "channel",
+    "variants",
+    "modes",
+    "equality",
+    "observable_surfaces",
+    "sole_unauthorized_delta",
+    "case_count",
+    "executed_case_count",
+];
+const EXECUTION_MATRIX_CASE_KEYS: [&str; 9] = [
+    "case_id",
+    "fixture_id",
+    "variant",
+    "mode",
+    "executed",
+    "authority_fixture_id",
+    "authority_result_digest",
+    "expected_result",
+    "expected_result_digest",
+];
+const EXECUTION_MATRIX_PREDICATE_KEYS: [&str; 4] = ["fixture_id", "AuthEq", "PublicEq", "OpEq"];
 const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
     "LIVE-001", "ERA-001", "SEC-001",
@@ -645,6 +703,8 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let caps = independent_archive_caps(profile_bytes)?;
     validate_independent_preflight_caps(&caps, &preflight, bytes.len())?;
+    let profile_contract = ConformanceProfileV1::from_canonical_cbor(profile_bytes)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let archive: (Value, Value, Value, Vec<Value>, Value, Value) =
         ciborium::from_reader(Cursor::new(bytes))
             .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
@@ -656,6 +716,9 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
     let manifest = independent_array(&manifest_value, 6)?;
+    if archive_text(&manifest[0])? != CONFORMANCE_BUNDLE_MAGIC_V1 {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    }
     let lifecycle = archive_u64(&manifest[1])?;
     let bundle_mode = archive_u64(&manifest[2])?;
     decode_bundle_mode(bundle_mode)?;
@@ -669,11 +732,12 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     }
     let (member_records, _) = independent_member_records(&members, descriptors)?;
     let expected_results = independent_array_bounded(&manifest[5])?;
+    independent_validate_expected_result_order(expected_results)?;
     independent_verify_expected_results(expected_results, &member_records, &profile, bundle_mode)?;
     independent_verify_fixture_inputs(&member_records, &profile, bundle_mode)?;
     independent_verify_supporting_members(&member_records, &profile)?;
     independent_verify_authority_members(&member_records, &profile)?;
-    independent_verify_profile(profile_bytes, lifecycle, &manifest[3])
+    independent_verify_profile_contract(&profile_contract, lifecycle, &manifest[3])
 }
 
 fn independent_verify_signature(
@@ -753,6 +817,34 @@ fn independent_member_records<'a>(
         });
     }
     Ok((records, profile_bytes))
+}
+
+fn independent_validate_expected_result_order(
+    expected_results: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    let records = expected_results
+        .iter()
+        .map(independent_expected_result_record)
+        .collect::<Result<Vec<_>, _>>()?;
+    if crate::strictly_ordered(&records) {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::NonCanonicalOrder)
+    }
+}
+
+fn independent_expected_result_record(
+    value: &Value,
+) -> Result<BundleExpectedResultV1, BundleContractErrorV1> {
+    let fields = independent_array(value, 6)?;
+    Ok(BundleExpectedResultV1 {
+        case_id: archive_text(&fields[0])?.to_owned(),
+        claim_layer: decode_claim_layer(archive_u64(&fields[1])?)?,
+        execution_profile_digest: independent_digest::<32>(&fields[2])?,
+        mode: decode_bundle_mode(archive_u64(&fields[3])?)?,
+        member_path: archive_text(&fields[4])?.to_owned(),
+        digest: independent_digest::<32>(&fields[5])?,
+    })
 }
 
 fn independent_verify_expected_results(
@@ -1058,14 +1150,25 @@ fn independent_verify_authority_members(
     }
     let inventory_lifecycle = json_text(&inventory_json, "lifecycle")?;
     let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
-    if json_text(&inventory_json, "magic")? != "W8H1"
-        || json_u64(&inventory_json, "version")? != 1
-        || json_text(&inventory_json, "digest_algorithm")? != "BLAKE3-256"
-        || json_text(&matrix_json, "magic")? != "NIM1"
-        || json_u64(&matrix_json, "version")? != 1
-        || inventory_lifecycle != matrix_lifecycle
-        || inventory_lifecycle != "Draft"
-    {
+    if json_text(&inventory_json, "magic")? != "W8H1" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(&inventory_json, "version")? != 1 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_text(&inventory_json, "digest_algorithm")? != "BLAKE3-256" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_text(&matrix_json, "magic")? != "NIM1" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(&matrix_json, "version")? != 1 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if inventory_lifecycle != matrix_lifecycle {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if inventory_lifecycle != "Draft" {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     let entries = inventory_json
@@ -1080,30 +1183,8 @@ fn independent_verify_authority_members(
     {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    independent_validate_draft_authority_entries(entries)
-}
-
-fn independent_validate_draft_authority_entries(
-    entries: &[JsonValue],
-) -> Result<(), BundleContractErrorV1> {
-    if entries.iter().any(|entry| {
-        json_text(entry, "materialization_status") != Ok("pending")
-            || !entry
-                .get("fixture_bytes_path")
-                .is_some_and(JsonValue::is_null)
-            || !entry
-                .get("fixture_bytes_digest")
-                .is_some_and(JsonValue::is_null)
-            || !entry
-                .get("expected_result_path")
-                .is_some_and(JsonValue::is_null)
-            || !entry
-                .get("expected_result_digest")
-                .is_some_and(JsonValue::is_null)
-    }) {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    Ok(())
+    validate_authority_inventory(&inventory_json)?;
+    validate_execution_matrix(&matrix_json)
 }
 
 fn independent_unique_member<'a>(
@@ -1157,38 +1238,15 @@ fn independent_expected_member_path(
     format!("expected/{}.bin", blake3::hash(&input).to_hex())
 }
 
-fn independent_verify_profile(
-    profile_bytes: &[u8],
+fn independent_verify_profile_contract(
+    profile: &ConformanceProfileV1,
     lifecycle: u64,
     manifest_profile_digest: &Value,
 ) -> Result<(), BundleContractErrorV1> {
-    let profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    let profile_fields = independent_array(&profile, 17)?;
-    if archive_text(&profile_fields[0])? != "CPF1"
-        || archive_u64(&profile_fields[1])? != 1
-        || archive_u64(&profile_fields[4])? != lifecycle
-    {
+    if lifecycle != profile.lifecycle.wire_code() {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    let embedded_profile_digest = independent_digest::<32>(&profile_fields[16])?;
-    if embedded_profile_digest != independent_digest::<32>(manifest_profile_digest)? {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    let mut profile_identity = profile_fields.to_vec();
-    profile_identity[16] = Value::Null;
-    let stable_evidence_digest = independent_domain_digest(
-        b"PiglorOS.ConformanceProfileStableEvidence.v1",
-        &Value::Array(Vec::new()),
-    );
-    let recomputed_profile_digest = independent_domain_digest(
-        b"PiglorOS.ConformanceProfile.v1",
-        &Value::Array(vec![
-            Value::Array(profile_identity),
-            Value::Bytes(stable_evidence_digest.to_vec()),
-        ]),
-    );
-    if embedded_profile_digest != recomputed_profile_digest {
+    if profile.profile_digest != independent_digest::<32>(manifest_profile_digest)? {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     Ok(())
@@ -1212,18 +1270,6 @@ fn independent_digest<const N: usize>(value: &Value) -> Result<[u8; N], BundleCo
     archive_bytes(value)?
         .try_into()
         .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
-}
-
-fn independent_domain_digest(domain: &[u8], value: &Value) -> [u8; 32] {
-    let mut encoded = Vec::new();
-    // `Vec<u8>` has an infallible `Write` implementation. The serializer's
-    // result therefore has no reachable error state at this boundary.
-    drop(ciborium::into_writer(value, &mut encoded));
-    let mut input = Vec::with_capacity(domain.len() + encoded.len() + 1);
-    input.extend_from_slice(domain);
-    input.push(0);
-    input.extend_from_slice(&encoded);
-    *blake3::hash(&input).as_bytes()
 }
 
 fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
@@ -2268,6 +2314,12 @@ fn json_object<'a>(
         .ok_or(BundleContractErrorV1::MemberDigestMismatch)
 }
 
+fn json_has_exact_keys(value: &JsonValue, expected: &[&str]) -> bool {
+    value.as_object().is_some_and(|fields| {
+        fields.len() == expected.len() && expected.iter().all(|key| fields.contains_key(*key))
+    })
+}
+
 fn validate_provenance_authority_binding(
     provenance: &JsonValue,
 ) -> Result<(), BundleContractErrorV1> {
@@ -2317,11 +2369,19 @@ fn validate_matrix_provenance_digest(
 }
 
 fn validate_authority_inventory(inventory: &JsonValue) -> Result<(), BundleContractErrorV1> {
-    if json_text(inventory, "magic")? != "W8H1"
-        || json_u64(inventory, "version")? != 1
-        || json_text(inventory, "lifecycle")? != "Draft"
-        || json_text(inventory, "digest_algorithm")? != "BLAKE3-256"
-    {
+    if !json_has_exact_keys(inventory, &AUTHORITY_INVENTORY_KEYS) {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_text(inventory, "magic")? != "W8H1" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(inventory, "version")? != 1 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_text(inventory, "lifecycle")? != "Draft" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_text(inventory, "digest_algorithm")? != "BLAKE3-256" {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     let entries = inventory
@@ -2338,22 +2398,34 @@ fn validate_authority_inventory(inventory: &JsonValue) -> Result<(), BundleContr
     {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    let mut fixture_ids = BTreeSet::new();
-    for (entry, fixture_id) in entries.iter().zip(AUTHORITY_FIXTURE_IDS) {
-        if !fixture_ids.insert(fixture_id)
-            || json_text(entry, "materialization_status")? != "pending"
-            || !entry
-                .get("fixture_bytes_path")
-                .is_some_and(JsonValue::is_null)
-            || !entry
-                .get("fixture_bytes_digest")
-                .is_some_and(JsonValue::is_null)
-            || !entry
-                .get("expected_result_path")
-                .is_some_and(JsonValue::is_null)
-            || !entry
-                .get("expected_result_digest")
-                .is_some_and(JsonValue::is_null)
+    for entry in entries {
+        if !json_has_exact_keys(entry, &AUTHORITY_INVENTORY_ENTRY_KEYS) {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(entry, "materialization_status")? != "pending" {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if !entry
+            .get("fixture_bytes_path")
+            .is_some_and(JsonValue::is_null)
+        {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if !entry
+            .get("fixture_bytes_digest")
+            .is_some_and(JsonValue::is_null)
+        {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if !entry
+            .get("expected_result_path")
+            .is_some_and(JsonValue::is_null)
+        {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if !entry
+            .get("expected_result_digest")
+            .is_some_and(JsonValue::is_null)
         {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
@@ -2362,6 +2434,9 @@ fn validate_authority_inventory(inventory: &JsonValue) -> Result<(), BundleContr
 }
 
 fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErrorV1> {
+    if !json_has_exact_keys(matrix, &EXECUTION_MATRIX_KEYS) {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
     let rows = matrix
         .get("rows")
         .and_then(JsonValue::as_array)
@@ -2370,61 +2445,107 @@ fn validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErr
         .get("cases")
         .and_then(JsonValue::as_array)
         .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
-    if json_text(matrix, "magic")? != "NIM1"
-        || json_u64(matrix, "version")? != 1
-        || json_text(matrix, "lifecycle")? != "Draft"
-        || json_u64(matrix, "row_count")? != 12
-        || json_u64(matrix, "variant_count")? != 4
-        || json_u64(matrix, "mode_count")? != 4
-        || json_u64(matrix, "case_count")? != 192
-        || json_u64(matrix, "executed_case_count")? != 0
-        || rows.len() != 12
-        || cases.len() != 192
-        || rows.iter().enumerate().any(|(index, row)| {
-            json_text(row, "fixture_id") != Ok(NON_INTERFERENCE_ROW_IDS[index])
-                || json_string_array(row, "variants") != Ok(NON_INTERFERENCE_VARIANTS.to_vec())
-                || json_string_array(row, "modes") != Ok(NON_INTERFERENCE_MODES.to_vec())
-        })
-        || cases.iter().enumerate().any(|(index, case)| {
-            let row_index = index / 16;
-            let variant_index = (index % 16) / 4;
-            let mode_index = index % 4;
-            let expected_case_id = format!(
-                "{}-{}-{}",
-                NON_INTERFERENCE_ROW_IDS[row_index],
-                NON_INTERFERENCE_VARIANTS[variant_index],
-                NON_INTERFERENCE_MODES[mode_index]
-            );
-            json_text(case, "fixture_id") != Ok(NON_INTERFERENCE_ROW_IDS[row_index])
-                || json_text(case, "variant") != Ok(NON_INTERFERENCE_VARIANTS[variant_index])
-                || json_text(case, "mode") != Ok(NON_INTERFERENCE_MODES[mode_index])
-                || json_text(case, "case_id") != Ok(expected_case_id.as_str())
-        })
-        || rows.iter().any(|row| {
-            json_u64(row, "case_count").ok() != Some(16)
-                || json_u64(row, "executed_case_count").ok() != Some(0)
-        })
-        || !matrix_cases_are_open(cases)
-    {
-        Err(BundleContractErrorV1::MemberDigestMismatch)
-    } else {
-        let predicates = matrix
-            .get("equality_predicates")
-            .and_then(JsonValue::as_array)
-            .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
-        if predicates.len() != NON_INTERFERENCE_ROW_IDS.len()
-            || predicates.iter().enumerate().any(|(index, predicate)| {
-                json_text(predicate, "fixture_id") != Ok(NON_INTERFERENCE_ROW_IDS[index])
-                    || json_text(predicate, "AuthEq") != Ok(NON_INTERFERENCE_AUTH_EQ)
-                    || json_text(predicate, "PublicEq") != Ok(NON_INTERFERENCE_PUBLIC_EQ[index])
-                    || json_text(predicate, "OpEq") != Ok(NON_INTERFERENCE_OP_EQ[index])
-            })
-        {
-            Err(BundleContractErrorV1::MemberDigestMismatch)
-        } else {
-            Ok(())
+    if json_text(matrix, "magic")? != "NIM1" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(matrix, "version")? != 1 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_text(matrix, "lifecycle")? != "Draft" {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(matrix, "row_count")? != 12 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(matrix, "variant_count")? != 4 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(matrix, "mode_count")? != 4 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(matrix, "case_count")? != 192 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if json_u64(matrix, "executed_case_count")? != 0 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    if rows.len() != 12 || cases.len() != 192 {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    for (index, row) in rows.iter().enumerate() {
+        if !json_has_exact_keys(row, &EXECUTION_MATRIX_ROW_KEYS) {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(row, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[index] {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_string_array(row, "variants")? != NON_INTERFERENCE_VARIANTS {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_string_array(row, "modes")? != NON_INTERFERENCE_MODES {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_u64(row, "case_count")? != 16 {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_u64(row, "executed_case_count")? != 0 {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
+    for (index, case) in cases.iter().enumerate() {
+        let row_index = index / 16;
+        let variant_index = (index % 16) / 4;
+        let mode_index = index % 4;
+        let expected_case_id = format!(
+            "{}-{}-{}",
+            NON_INTERFERENCE_ROW_IDS[row_index],
+            NON_INTERFERENCE_VARIANTS[variant_index],
+            NON_INTERFERENCE_MODES[mode_index]
+        );
+        if !json_has_exact_keys(case, &EXECUTION_MATRIX_CASE_KEYS) {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(case, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[row_index] {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(case, "variant")? != NON_INTERFERENCE_VARIANTS[variant_index] {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(case, "mode")? != NON_INTERFERENCE_MODES[mode_index] {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(case, "case_id")? != expected_case_id {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+    }
+    if !matrix_cases_are_open(cases) {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    let predicates = matrix
+        .get("equality_predicates")
+        .and_then(JsonValue::as_array)
+        .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
+    if predicates.len() != NON_INTERFERENCE_ROW_IDS.len() {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
+    }
+    for (index, predicate) in predicates.iter().enumerate() {
+        if !json_has_exact_keys(predicate, &EXECUTION_MATRIX_PREDICATE_KEYS) {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(predicate, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[index] {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(predicate, "AuthEq")? != NON_INTERFERENCE_AUTH_EQ {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(predicate, "PublicEq")? != NON_INTERFERENCE_PUBLIC_EQ[index] {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+        if json_text(predicate, "OpEq")? != NON_INTERFERENCE_OP_EQ[index] {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+    }
+    Ok(())
 }
 
 fn matrix_cases_are_open(cases: &[JsonValue]) -> bool {
@@ -7325,13 +7446,13 @@ mod instrumented_public_entrypoints {
         bundle: &ConformanceBundleV1,
         inventory_bytes: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        assert!(independent_verify_profile(b"not cbor", 0, &Value::Bytes(vec![0; 32])).is_err());
-        assert!(independent_verify_profile(
-            &encode_archive_value(&Value::Array(Vec::new()))?,
-            0,
-            &Value::Bytes(vec![0; 32]),
-        )
-        .is_err());
+        assert!(ConformanceProfileV1::from_canonical_cbor(b"not cbor").is_err());
+        assert!(
+            ConformanceProfileV1::from_canonical_cbor(&encode_archive_value(&Value::Array(
+                Vec::new()
+            ),)?)
+            .is_err()
+        );
 
         let mut tied_payloads = bundle.clone();
         tied_payloads.members.push(BundleMemberV1::authority(
