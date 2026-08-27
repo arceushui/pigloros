@@ -293,7 +293,7 @@ pub mod fixtures {
     }
 }
 
-fn report_with_cases(count: usize) -> ConformanceReportV1 {
+fn report_with_cases(count: usize) -> Result<ConformanceReportV1, pos_conformance::EvidenceError> {
     let cases = (0..count)
         .map(|index| {
             let digest = [7; 32];
@@ -353,10 +353,8 @@ fn report_with_cases(count: usize) -> ConformanceReportV1 {
         provenance_digest: [17; 32],
         report_digest: [0; 32],
     };
-    report.report_digest = report
-        .digest()
-        .expect("constructed public report fixture must be encodable");
-    report
+    report.report_digest = report.digest()?;
+    Ok(report)
 }
 
 fn profile_without_matrix_binding() -> ConformanceProfileV1 {
@@ -493,13 +491,13 @@ fn request_for_caps(caps: &EvaluatorHardCapsV1) -> EvaluatorRequestV1 {
 #[test]
 fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let empty = report_with_cases(0);
+    let empty = report_with_cases(0)?;
     assert_eq!(
         empty.validate(),
         Err(pos_conformance::EvidenceError::InvalidConformanceReport)
     );
 
-    let ordinary = report_with_cases(128);
+    let ordinary = report_with_cases(128)?;
     let ordinary_bytes = ordinary.to_canonical_cbor()?;
     assert!(ordinary_bytes.len() > 17_408);
     assert_eq!(
@@ -507,11 +505,11 @@ fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
         Ok(ordinary)
     );
 
-    let large = report_with_cases(7_000);
+    let large = report_with_cases(7_000)?;
     let large_bytes = large.to_canonical_cbor()?;
     assert!(large_bytes.len() > 1_048_592);
 
-    let exact_case_cap = report_with_cases(65_536);
+    let exact_case_cap = report_with_cases(65_536)?;
     assert_eq!(exact_case_cap.validate(), Ok(()));
     Ok(())
 }
@@ -707,7 +705,8 @@ fn public_stable_evidence_decoder_rejects_oversized_profile_before_policy_use() 
 }
 
 #[test]
-fn public_profile_digest_encodes_every_closed_case_outcome_variant() {
+fn public_profile_digest_encodes_every_closed_case_outcome_variant(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut profile = profile_for_digest();
     let implementation = ImplementationIdentityV1 {
         implementation_id: "independent".to_owned(),
@@ -755,7 +754,7 @@ fn public_profile_digest_encodes_every_closed_case_outcome_variant() {
         implementation,
         independence,
         evaluator_protocol_digest: [10; 32],
-        report: report_with_cases(1),
+        report: report_with_cases(1)?,
         case_outcomes,
         attestation: StableEvidenceAttestationV1 {
             signer_public_key: [11; 32],
@@ -764,6 +763,7 @@ fn public_profile_digest_encodes_every_closed_case_outcome_variant() {
         },
     }];
     assert_ne!(profile.digest(), [0; 32]);
+    Ok(())
 }
 
 #[test]
