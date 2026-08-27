@@ -6310,12 +6310,37 @@ mod instrumented_public_entrypoints {
         )?
         .sign(&ed25519_dalek::SigningKey::from_bytes(&[42; 32]))?;
         let mut stable_authority_members = artifact_bundle.members;
+        let stable_matrix = br#"{"lifecycle":"Stable"}"#;
+        let stable_matrix_digest = blake3::hash(stable_matrix).to_hex().to_string();
+        let stable_provenance = serde_json::to_vec(&serde_json::json!({
+            "authority_inventory": {
+                "digest_algorithm": "SHA-256",
+                "path": "expected-authority/inventory.json",
+                "status": "Draft"
+            },
+            "adr_059_execution_matrix": {
+                "digest_algorithm": "BLAKE3-256",
+                "blake3_digest": stable_matrix_digest,
+                "executed_case_count": 0,
+                "path": "matrix/execution-matrix.json",
+                "status": "Draft"
+            }
+        }))?;
         for member in &mut stable_authority_members {
-            if matches!(
-                member.role,
-                BundleMemberRoleV1::AuthorityInventory | BundleMemberRoleV1::ExecutionMatrix
-            ) {
-                member.bytes = br#"{"lifecycle":"Stable"}"#.to_vec();
+            match member.role {
+                BundleMemberRoleV1::AuthorityInventory => {
+                    member.bytes = stable_matrix.to_vec();
+                    member.digest = *blake3::hash(&member.bytes).as_bytes();
+                }
+                BundleMemberRoleV1::ExecutionMatrix => {
+                    member.bytes = stable_matrix.to_vec();
+                    member.digest = *blake3::hash(&member.bytes).as_bytes();
+                }
+                BundleMemberRoleV1::Provenance => {
+                    member.bytes = stable_provenance.clone();
+                    member.digest = artifact_profile.provenance_digest;
+                }
+                _ => {}
             }
         }
         assert_eq!(
