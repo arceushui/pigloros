@@ -7497,7 +7497,7 @@ mod instrumented_public_entrypoints {
                 Value::Integer(role.into()),
             )
         };
-        assert_eq!(
+        assert!(matches!(
             independent_member_records(
                 std::slice::from_ref(&member),
                 &[descriptor(
@@ -7508,8 +7508,8 @@ mod instrumented_public_entrypoints {
                 )],
             ),
             Err(BundleContractErrorV1::UndeclaredMember)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             independent_member_records(
                 std::slice::from_ref(&member),
                 &[descriptor(
@@ -7520,8 +7520,8 @@ mod instrumented_public_entrypoints {
                 )],
             ),
             Err(BundleContractErrorV1::UndeclaredMember)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             independent_member_records(
                 std::slice::from_ref(&member),
                 &[descriptor(
@@ -7532,8 +7532,8 @@ mod instrumented_public_entrypoints {
                 )],
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             independent_member_records(
                 std::slice::from_ref(&member),
                 &[descriptor(
@@ -7544,7 +7544,7 @@ mod instrumented_public_entrypoints {
                 )],
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
-        );
+        ));
     }
 
     #[test]
