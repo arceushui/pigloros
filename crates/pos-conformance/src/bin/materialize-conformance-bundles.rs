@@ -1886,6 +1886,22 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn materialized_output_propagates_parent_metadata_errors() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = output_root("metadata-error");
+        let protected = root.join("protected");
+        std::fs::create_dir_all(&protected)?;
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o000))?;
+        let result = write_materialized_file(&root, "protected/nested/file", b"bytes");
+        std::fs::set_permissions(&protected, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::remove_dir_all(root)?;
+        assert!(result.is_err());
+        Ok(())
+    }
+
     fn assert_canonical_profiles_bind_fixture_families() -> Result<(), Box<dyn Error>> {
         for spec in &LAYER_SPECS {
             let claim_layer = spec.claim_layer;
