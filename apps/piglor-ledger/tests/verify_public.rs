@@ -9,6 +9,15 @@ use rusqlite::params;
 use std::fmt::Write;
 use std::process::Command;
 
+fn trust_anchor(identity: KeyIdentityV1, public_key_hex: &str) -> String {
+    format!(
+        "{}/{}/{}={public_key_hex}",
+        identity.owner_id.as_str(),
+        identity.role.code(),
+        identity.epoch
+    )
+}
+
 #[test]
 fn production_ledger_binary_reports_dispatch_errors() -> Result<(), Box<dyn std::error::Error>> {
     let output = Command::new(env!("CARGO_BIN_EXE_piglor-ledger"))
@@ -75,12 +84,9 @@ fn public_store_verification_fails_closed_on_a_non_timeline_signature_role(
         ],
     )?;
 
-    let anchor = "aa".repeat(32);
-    let error = match verify_source(&Source::Store(database_path), Some(&anchor), None) {
-        Ok(report) => return Err(format!("malformed identity produced a report: {report}").into()),
-        Err(error) => error,
-    };
-    assert!(error
+    let anchor = trust_anchor(identity, &"aa".repeat(32));
+    let report = verify_source(&Source::Store(database_path), Some(&anchor), None)?;
+    assert!(report
         .to_string()
         .contains("signed event must carry a TimelineIntegritySigning owner/role/epoch identity"));
     Ok(())
@@ -129,11 +135,8 @@ fn public_store_verification_rejects_an_invalid_registry_public_key(
     for byte in invalid_public_key {
         write!(&mut invalid_public_key_hex, "{byte:02x}")?;
     }
-    let error = match verify_source(
-        &Source::Store(database_path),
-        Some(&invalid_public_key_hex),
-        None,
-    ) {
+    let anchor = trust_anchor(identity, &invalid_public_key_hex);
+    let error = match verify_source(&Source::Store(database_path), Some(&anchor), None) {
         Ok(report) => {
             return Err(format!("invalid registry key produced a report: {report}").into())
         }
@@ -184,7 +187,11 @@ fn public_store_verification_accepts_a_registry_bound_signature(
 
     let secret = std::fs::read_to_string(&key_path)?;
     let pubkey = piglor_ledger::test_helpers::derive_pubkey_hex(&secret);
-    let report = verify_source(&Source::Store(database_path), Some(&pubkey), None)?;
+    let anchor = trust_anchor(
+        KeyIdentityV1::new("piglor-ledger", KeyRoleV1::TimelineIntegritySigning, 1),
+        &pubkey,
+    );
+    let report = verify_source(&Source::Store(database_path), Some(&anchor), None)?;
     assert!(report.to_string().starts_with("OK: store"));
     Ok(())
 }
@@ -267,21 +274,24 @@ fn public_store_verification_accepts_a_rotated_timeline_key(
     let report = verify_source(&Source::Store(database_path), Some(&anchors), None)?;
     assert!(report.to_string().starts_with("OK: store"));
 
-    let single_anchor = material_one
+    let single_public_key = material_one
         .public_verification_key()
         .as_bytes()
         .iter()
         .try_fold(String::with_capacity(64), |mut value, byte| {
             write!(&mut value, "{byte:02x}").map(|()| value)
         })?;
-    let report = verify_source(
+    let error = match verify_source(
         &Source::Store(database.path().to_path_buf()),
-        Some(&single_anchor),
+        Some(&single_public_key),
         None,
-    )?;
-    assert!(report
+    ) {
+        Ok(report) => return Err(format!("bare trust anchor produced a report: {report}").into()),
+        Err(error) => error,
+    };
+    assert!(error
         .to_string()
-        .contains("rotated ledger requires owner/role/epoch keyed public-key trust anchors"));
+        .contains("owner/role-code/epoch=hex format"));
     Ok(())
 }
 
