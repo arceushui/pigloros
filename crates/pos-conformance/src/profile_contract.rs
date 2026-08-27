@@ -2382,9 +2382,6 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
                 _ => Err(ConformanceContractError::InvalidEncoding),
             },
             2 | 3 => {
-                #[cfg(target_pointer_width = "64")]
-                let count = length as usize;
-                #[cfg(not(target_pointer_width = "64"))]
                 let count = usize::try_from(length)
                     .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
                 let end = index
