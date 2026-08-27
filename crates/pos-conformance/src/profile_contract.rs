@@ -2728,6 +2728,7 @@ mod tests {
     // lifecycle transitions, and hard-cap entrypoints. Closed enum mapping
     // tests below only enumerate the representation used by those seams.
     use super::*;
+    use crate::strict_codec::StrictCborError;
     use ed25519_dalek::Signer;
 
     const MAX_FIXTURE_COUNT: u32 = 65_536;
