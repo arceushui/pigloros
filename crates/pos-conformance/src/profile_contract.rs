@@ -4781,7 +4781,7 @@ mod tests {
         }
         if let Value::Array(mut fields) = encode_profile(&value, true) {
             fields.remove(6);
-            fields[0] = text("CPF1");
+            fields[0] = text("CPFX");
             fields[1] = uint(1);
             let bytes = encode_value(&Value::Array(fields))?;
             assert_eq!(

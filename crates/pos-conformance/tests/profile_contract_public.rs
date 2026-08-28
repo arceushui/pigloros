@@ -598,7 +598,7 @@ fn public_profile_rejects_legacy_matrix_suffix_and_cpf1_record(
         return Err("profile fixture must be an array".into());
     };
     profile_fields.remove(6);
-    profile_fields[0] = Value::Text("CPF1".to_owned());
+    profile_fields[0] = Value::Text("CPFX".to_owned());
     profile_fields[1] = Value::Integer(1_u64.into());
     let fields = fixtures::encode(&value)?;
     assert_eq!(

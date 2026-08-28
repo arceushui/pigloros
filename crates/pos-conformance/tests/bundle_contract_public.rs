@@ -1122,7 +1122,7 @@ fn cpf2_root_semantic_mutations() -> Vec<ArchiveMutation> {
 fn cpf2_header_and_range_mutations() -> Vec<ArchiveMutation> {
     let mut mutations: Vec<ArchiveMutation> = vec![
         Box::new(|value| {
-            mutate_profile(value, |fields| fields[0] = Value::Text("CPF1".to_owned()))
+            mutate_profile(value, |fields| fields[0] = Value::Text("CPFX".to_owned()))
         }),
         Box::new(|value| mutate_profile(value, |fields| fields[1] = Value::Integer(1_u64.into()))),
         Box::new(|value| mutate_profile(value, |fields| fields[4] = Value::Integer(1_u64.into()))),

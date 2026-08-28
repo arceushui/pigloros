@@ -4278,7 +4278,7 @@ mod tests {
                 )
             })
             .ok_or("missing profile member")?;
-        let replacement = "profile/not-cpf1.cbor".to_owned();
+        let replacement = "profile/not-cpf2.cbor".to_owned();
         let Value::Array(member) = &mut members[index] else {
             return Err("member must be an array".into());
         };
