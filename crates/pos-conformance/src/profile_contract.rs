@@ -4190,7 +4190,7 @@ mod tests {
         let fields = encode_profile(&profile(), true)
             .as_array()
             .cloned()
-            .unwrap_or_default();
+            .ok_or(ConformanceContractError::InvalidEncoding)?;
         let mut wrong_array = fields.clone();
         wrong_array[8] = Value::Bool(true);
         reject_profile(Value::Array(wrong_array));
@@ -4241,16 +4241,14 @@ mod tests {
         let mut fields = encode_request(&request(), true)
             .as_array()
             .cloned()
-            .unwrap_or_default();
+            .ok_or(ConformanceContractError::InvalidEncoding)?;
         if let Some(identity) = fields[7].as_array_mut() {
             identity[5] = Value::Null;
         }
         let bytes = encode_value(&Value::Array(fields))?;
         assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
 
-        let candidate = profile()
-            .transition_to(ProfileLifecycleV1::Candidate, vec![])
-            .unwrap_or_else(|_| profile());
+        let candidate = profile().transition_to(ProfileLifecycleV1::Candidate, vec![])?;
         let fixture_digest = fixture_digest(&candidate.fixtures[0]);
         let mut first = stable_evidence("alpha", 30);
         let mut second = stable_evidence("beta", 40);
