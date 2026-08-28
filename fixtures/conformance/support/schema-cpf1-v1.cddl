@@ -1,8 +1,8 @@
-# CPF2 public conformance schema (canonical CBOR array)
+# CPF1 public conformance schema (canonical CBOR array)
 
-cpf2 = [
-  magic: "CPF2",
-  version: 2,
+cpf1 = [
+  magic: "CPF1",
+  version: 1,
   profile-id: tstr,
   semantic-version: tstr,
   lifecycle: 0..3,

@@ -5,7 +5,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     expected_result_member_path, fixture_input_member_path, BundleExpectedResultV1,
     BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
-    ClaimLayerV1, ConformanceBundleV1, ConformanceProfileV2, EvaluatorHardCapsV1,
+    ClaimLayerV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
     EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
     FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
@@ -27,7 +27,7 @@ type ArchiveMutation = Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::err
 type JsonMutation = Box<dyn FnOnce(&mut JsonValue)>;
 type CapMutation = Box<dyn Fn(&mut EvaluatorHardCapsV1)>;
 type PublicBundleInputs = (
-    ConformanceProfileV2,
+    ConformanceProfileV1,
     Vec<BundleMemberV1>,
     Vec<BundleExpectedResultV1>,
 );
@@ -125,7 +125,7 @@ fn replace_profile_bytes(
     value: &mut Value,
     bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    archive_member(value, "profile/CPF2.cbor")?[1] = Value::Bytes(bytes.to_vec());
+    archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(bytes.to_vec());
     Ok(())
 }
 
@@ -198,7 +198,7 @@ fn mutate_profile(
     value: &mut Value,
     mutate: impl FnOnce(&mut Vec<Value>),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let profile_bytes = match archive_member(value, "profile/CPF2.cbor")?.get(1) {
+    let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
         Some(Value::Bytes(bytes)) => bytes.clone(),
         _ => return Err("profile bytes are missing".into()),
     };
@@ -209,8 +209,8 @@ fn mutate_profile(
     mutate(profile_fields);
     let profile_bytes = encode_archive(&profile)?;
     let digest = *blake3::hash(&profile_bytes).as_bytes();
-    archive_member(value, "profile/CPF2.cbor")?[1] = Value::Bytes(profile_bytes.clone());
-    let descriptor = archive_descriptor(value, "profile/CPF2.cbor")?;
+    archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(profile_bytes.clone());
+    let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
     descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
     descriptor[2] = Value::Bytes(digest.to_vec());
     Ok(())
@@ -235,17 +235,17 @@ fn mutate_archive_matrix(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let matrix_digest = mutate_archive_json_member(value, EXECUTION_MATRIX_MEMBER_PATH, mutate)?;
 
-    let profile_member = archive_member(value, "profile/CPF2.cbor")?;
+    let profile_member = archive_member(value, "profile/CPF1.cbor")?;
     let profile_bytes = match profile_member.get(1) {
         Some(Value::Bytes(bytes)) => bytes.clone(),
         _ => return Err("profile bytes are missing".into()),
     };
-    let mut profile = ConformanceProfileV2::from_canonical_cbor(&profile_bytes)?;
+    let mut profile = ConformanceProfileV1::from_canonical_cbor(&profile_bytes)?;
     profile.execution_matrix_digest = matrix_digest;
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
     profile_member[1] = Value::Bytes(profile_bytes.clone());
-    let descriptor = archive_descriptor(value, "profile/CPF2.cbor")?;
+    let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
     descriptor[1] = Value::Integer(u64::try_from(profile_bytes.len())?.into());
     descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
     archive_array(value, 2)?[3] = Value::Bytes(profile.profile_digest.to_vec());
@@ -376,14 +376,14 @@ pub mod fixtures {
         }
     }
 
-    fn profile(provenance_digest: [u8; 32]) -> ConformanceProfileV2 {
+    fn profile(provenance_digest: [u8; 32]) -> ConformanceProfileV1 {
         let input = b"public draft input";
         let expected = b"public draft expected".to_vec();
         let schema_digest = digest(include_bytes!(
-            "../../../fixtures/conformance/support/schema-cpf2-v2.cddl"
+            "../../../fixtures/conformance/support/schema-cpf1-v1.cddl"
         ));
         let fixture = fixture(provenance_digest, input, expected, schema_digest);
-        let mut profile = ConformanceProfileV2 {
+        let mut profile = ConformanceProfileV1 {
             profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
             semantic_version: "1.0.0".to_owned(),
             lifecycle: ProfileLifecycleV1::Draft,
@@ -442,7 +442,7 @@ pub mod fixtures {
     }
 
     fn draft_members(
-        profile: &ConformanceProfileV2,
+        profile: &ConformanceProfileV1,
         provenance_bytes: Vec<u8>,
         mut authority_members: Vec<BundleMemberV1>,
     ) -> (Vec<BundleMemberV1>, BundleExpectedResultV1) {
@@ -464,8 +464,8 @@ pub mod fixtures {
                 BundleMemberRoleV1::NormativeSpecification,
             ),
             BundleMemberV1::supporting(
-                "support/schema-cpf2-v2.cddl",
-                include_bytes!("../../../fixtures/conformance/support/schema-cpf2-v2.cddl")
+                "support/schema-cpf1-v1.cddl",
+                include_bytes!("../../../fixtures/conformance/support/schema-cpf1-v1.cddl")
                     .to_vec(),
                 BundleMemberRoleV1::Schema,
             ),
@@ -657,7 +657,7 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
                 .ok_or("materialized bundle profile is missing")?
                 .bytes
                 .as_slice();
-            let profile = ConformanceProfileV2::from_canonical_cbor(profile_bytes)?;
+            let profile = ConformanceProfileV1::from_canonical_cbor(profile_bytes)?;
             assert_eq!(profile.lifecycle, ProfileLifecycleV1::Draft);
             assert_eq!(profile.execution_profile_digests.len(), 2);
             assert_eq!(profile.fixtures.len(), 14);
@@ -1022,7 +1022,7 @@ fn public_draft_archive_round_trip_and_independent_verification(
 }
 
 #[test]
-fn public_independent_verifier_rejects_a_cpf2_semantic_invariant(
+fn public_independent_verifier_rejects_a_cpf1_semantic_invariant(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
@@ -1037,18 +1037,18 @@ fn public_independent_verifier_rejects_a_cpf2_semantic_invariant(
 }
 
 #[test]
-fn public_independent_verifier_rejects_cpf2_semantic_variants(
+fn public_independent_verifier_rejects_cpf1_semantic_variants(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
-    let mutations: Vec<ArchiveMutation> = cpf2_root_semantic_mutations()
+    let mutations: Vec<ArchiveMutation> = cpf1_root_semantic_mutations()
         .into_iter()
-        .chain(cpf2_header_and_range_mutations())
-        .chain(cpf2_fixture_semantic_mutations())
-        .chain(cpf2_ordering_and_cap_mutations())
-        .chain(cpf2_fixture_detail_mutations())
-        .chain(cpf2_fixture_branch_mutations())
-        .chain(cpf2_fixture_result_mutations())
+        .chain(cpf1_header_and_range_mutations())
+        .chain(cpf1_fixture_semantic_mutations())
+        .chain(cpf1_ordering_and_cap_mutations())
+        .chain(cpf1_fixture_detail_mutations())
+        .chain(cpf1_fixture_branch_mutations())
+        .chain(cpf1_fixture_result_mutations())
         .collect();
     for mutate in mutations {
         let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
@@ -1057,7 +1057,7 @@ fn public_independent_verifier_rejects_cpf2_semantic_variants(
     Ok(())
 }
 
-fn cpf2_root_semantic_mutations() -> Vec<ArchiveMutation> {
+fn cpf1_root_semantic_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
             mutate_profile(value, |fields| {
@@ -1119,7 +1119,7 @@ fn cpf2_root_semantic_mutations() -> Vec<ArchiveMutation> {
     ]
 }
 
-fn cpf2_header_and_range_mutations() -> Vec<ArchiveMutation> {
+fn cpf1_header_and_range_mutations() -> Vec<ArchiveMutation> {
     let mut mutations: Vec<ArchiveMutation> = vec![
         Box::new(|value| {
             mutate_profile(value, |fields| fields[0] = Value::Text("CPFX".to_owned()))
@@ -1179,7 +1179,7 @@ fn cpf2_header_and_range_mutations() -> Vec<ArchiveMutation> {
     mutations
 }
 
-fn cpf2_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
+fn cpf1_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
             mutate_profile(value, |fields| {
@@ -1266,7 +1266,7 @@ fn cpf2_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
     ]
 }
 
-fn cpf2_ordering_and_cap_mutations() -> Vec<ArchiveMutation> {
+fn cpf1_ordering_and_cap_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
             mutate_profile(value, |fields| {
@@ -1332,7 +1332,7 @@ fn cpf2_ordering_and_cap_mutations() -> Vec<ArchiveMutation> {
     ]
 }
 
-fn cpf2_fixture_detail_mutations() -> Vec<ArchiveMutation> {
+fn cpf1_fixture_detail_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
             mutate_first_profile_fixture(value, |fixture| {
@@ -1394,7 +1394,7 @@ fn cpf2_fixture_detail_mutations() -> Vec<ArchiveMutation> {
     ]
 }
 
-fn cpf2_fixture_branch_mutations() -> Vec<ArchiveMutation> {
+fn cpf1_fixture_branch_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
             mutate_first_profile_fixture(value, |fixture| {
@@ -1457,7 +1457,7 @@ fn cpf2_fixture_branch_mutations() -> Vec<ArchiveMutation> {
     ]
 }
 
-fn cpf2_fixture_result_mutations() -> Vec<ArchiveMutation> {
+fn cpf1_fixture_result_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
             mutate_first_profile_fixture(value, |fixture| {
@@ -2229,7 +2229,7 @@ fn rebind_profile_to_provenance(
         .position(|member| member.role == BundleMemberRoleV1::Profile)
         .ok_or("profile member is missing")?;
     let mut profile =
-        ConformanceProfileV2::from_canonical_cbor(&bundle.members[profile_index].bytes)?;
+        ConformanceProfileV1::from_canonical_cbor(&bundle.members[profile_index].bytes)?;
     let provenance_digest = bundle.members[provenance_index].digest;
     profile.provenance_digest = provenance_digest;
     for fixture in &mut profile.fixtures {
@@ -2254,7 +2254,7 @@ fn rebind_profile_to_execution_matrix(
         .position(|member| member.role == BundleMemberRoleV1::Profile)
         .ok_or("profile member is missing")?;
     let mut profile =
-        ConformanceProfileV2::from_canonical_cbor(&bundle.members[profile_index].bytes)?;
+        ConformanceProfileV1::from_canonical_cbor(&bundle.members[profile_index].bytes)?;
     profile.execution_matrix_digest = bundle.members[matrix_index].digest;
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
@@ -2271,7 +2271,7 @@ fn public_bundle_inputs(
         .iter()
         .find(|member| member.role == BundleMemberRoleV1::Profile)
         .ok_or("profile member is missing")?;
-    let profile = ConformanceProfileV2::from_canonical_cbor(&profile_member.bytes)?;
+    let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)?;
     let members = bundle
         .members
         .iter()
@@ -2369,8 +2369,8 @@ fn assert_archive_member_rejections(
     signing_key: &SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_archive_rejected(bundle, signing_key, |value| {
-        archive_member(value, "profile/CPF2.cbor")?[2] = Value::Integer(0_u64.into());
-        archive_descriptor(value, "profile/CPF2.cbor")?[3] = Value::Integer(0_u64.into());
+        archive_member(value, "profile/CPF1.cbor")?[2] = Value::Integer(0_u64.into());
+        archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Integer(0_u64.into());
         Ok(())
     })?;
     assert_archive_rejected(bundle, signing_key, |value| {
@@ -2398,27 +2398,27 @@ fn assert_archive_member_rejections(
     })?;
     for mutate in [
         Box::new(|value: &mut Value| {
-            archive_member(value, "profile/CPF2.cbor")?[1] = Value::Null;
+            archive_member(value, "profile/CPF1.cbor")?[1] = Value::Null;
             Ok(())
         }) as Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>,
         Box::new(|value: &mut Value| {
-            archive_member(value, "profile/CPF2.cbor")?[2] = Value::Null;
+            archive_member(value, "profile/CPF1.cbor")?[2] = Value::Null;
             Ok(())
         }),
         Box::new(|value: &mut Value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[0] = Value::Null;
+            archive_descriptor(value, "profile/CPF1.cbor")?[0] = Value::Null;
             Ok(())
         }),
         Box::new(|value: &mut Value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[1] = Value::Null;
+            archive_descriptor(value, "profile/CPF1.cbor")?[1] = Value::Null;
             Ok(())
         }),
         Box::new(|value: &mut Value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[2] = Value::Null;
+            archive_descriptor(value, "profile/CPF1.cbor")?[2] = Value::Null;
             Ok(())
         }),
         Box::new(|value: &mut Value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[3] = Value::Null;
+            archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Null;
             Ok(())
         }),
     ] {
@@ -2483,14 +2483,14 @@ fn assert_archive_profile_rejections(
         Ok(())
     })?;
     assert_archive_rejected(bundle, signing_key, |value| {
-        let profile_member = archive_member(value, "profile/CPF2.cbor")?;
+        let profile_member = archive_member(value, "profile/CPF1.cbor")?;
         let Some(Value::Bytes(profile_bytes)) = profile_member.get(1) else {
             return Err("profile bytes are missing".into());
         };
         let mut profile_bytes = profile_bytes.clone();
         replace_first_byte(&mut profile_bytes, 0x02, &[0x18, 0x02])?;
         profile_member[1] = Value::Bytes(profile_bytes.clone());
-        let descriptor = archive_descriptor(value, "profile/CPF2.cbor")?;
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
         descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
         descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
         Ok(())
@@ -2521,7 +2521,7 @@ fn assert_archive_profile_rejections(
         Ok(())
     })?;
     assert_archive_rejected(bundle, signing_key, |value| {
-        let mut noncanonical = match archive_member(value, "profile/CPF2.cbor")?.get(1) {
+        let mut noncanonical = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
             Some(Value::Bytes(profile_bytes)) => profile_bytes.clone(),
             _ => return Err("profile bytes are missing".into()),
         };
@@ -2563,8 +2563,8 @@ fn assert_independent_profile_shape_rejections(
     })?;
     let invalid_text_profile = signed_archive_variant(bundle, signing_key, |value| {
         let invalid_profile = vec![0x61, 0xff];
-        archive_member(value, "profile/CPF2.cbor")?[1] = Value::Bytes(invalid_profile.clone());
-        let descriptor = archive_descriptor(value, "profile/CPF2.cbor")?;
+        archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(invalid_profile.clone());
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
         descriptor[1] = Value::Integer((invalid_profile.len() as u64).into());
         descriptor[2] = Value::Bytes(blake3::hash(&invalid_profile).as_bytes().to_vec());
         Ok(())
@@ -2637,7 +2637,7 @@ fn assert_independent_profile_archive_rejections(
     signing_key: &SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let malformed_fixtures = signed_archive_variant(bundle, signing_key, |value| {
-        let profile_bytes = match archive_member(value, "profile/CPF2.cbor")?.get(1) {
+        let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err("profile bytes are missing".into()),
         };
@@ -2647,8 +2647,8 @@ fn assert_independent_profile_archive_rejections(
         };
         fields[9] = Value::Null;
         let profile_bytes = encode_archive(&profile)?;
-        archive_member(value, "profile/CPF2.cbor")?[1] = Value::Bytes(profile_bytes.clone());
-        let descriptor = archive_descriptor(value, "profile/CPF2.cbor")?;
+        archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(profile_bytes.clone());
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
         descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
         descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
         Ok(())
@@ -2659,11 +2659,11 @@ fn assert_independent_profile_archive_rejections(
     );
 
     let cap_limited_archive = signed_archive_variant(bundle, signing_key, |value| {
-        let profile_bytes = match archive_member(value, "profile/CPF2.cbor")?.get(1) {
+        let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err("profile bytes are missing".into()),
         };
-        let mut profile = ConformanceProfileV2::from_canonical_cbor(&profile_bytes)?;
+        let mut profile = ConformanceProfileV1::from_canonical_cbor(&profile_bytes)?;
         let total_cap = u64::try_from(profile_bytes.len())?;
         profile.evaluator_protocol.hard_caps.max_total_bundle_bytes = total_cap;
         let profile_digest = profile.digest();
@@ -2680,8 +2680,8 @@ fn assert_independent_profile_archive_rejections(
         caps[5] = Value::Integer(total_cap.into());
         fields[17] = Value::Bytes(profile_digest.to_vec());
         let profile_bytes = encode_archive(&profile_value)?;
-        archive_member(value, "profile/CPF2.cbor")?[1] = Value::Bytes(profile_bytes.clone());
-        let descriptor = archive_descriptor(value, "profile/CPF2.cbor")?;
+        archive_member(value, "profile/CPF1.cbor")?[1] = Value::Bytes(profile_bytes.clone());
+        let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
         descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
         descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
         archive_array(value, 2)?[3] = Value::Bytes(profile_digest.to_vec());
@@ -2960,19 +2960,19 @@ fn public_archive_decoder_rejects_each_member_and_expected_field_shape(
             Ok(())
         }),
         Box::new(|value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[0] = Value::Null;
+            archive_descriptor(value, "profile/CPF1.cbor")?[0] = Value::Null;
             Ok(())
         }),
         Box::new(|value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[1] = Value::Null;
+            archive_descriptor(value, "profile/CPF1.cbor")?[1] = Value::Null;
             Ok(())
         }),
         Box::new(|value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[2] = Value::Bytes(vec![0]);
+            archive_descriptor(value, "profile/CPF1.cbor")?[2] = Value::Bytes(vec![0]);
             Ok(())
         }),
         Box::new(|value| {
-            archive_descriptor(value, "profile/CPF2.cbor")?[3] = Value::Integer(99_u64.into());
+            archive_descriptor(value, "profile/CPF1.cbor")?[3] = Value::Integer(99_u64.into());
             Ok(())
         }),
         Box::new(|value| {

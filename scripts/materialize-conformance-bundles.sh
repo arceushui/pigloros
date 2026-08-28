@@ -43,7 +43,7 @@ diff -rq "${first_output}" "${clean_output}"
 
 mapfile -t materialized_files < <(find "${first_output}" -type f -print | sort)
 mapfile -t profile_files < <(
-  find "${first_output}" -type f -name 'CPF2-*.cbor' -print | sort
+  find "${first_output}" -type f -name 'CPF1-*.cbor' -print | sort
 )
 mapfile -t manifest_files < <(
   find "${first_output}" -type f -name 'manifest-*.cbor' -print | sort

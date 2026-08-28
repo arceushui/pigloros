@@ -4,7 +4,7 @@ use ed25519_dalek::SigningKey;
 use pos_conformance::{
     expected_result_member_path, fixture_input_member_path, verify_archive_release_filename,
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, ClaimLayerV1,
-    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV2, EvaluatorHardCapsV1,
+    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, EvaluatorHardCapsV1,
     EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
     FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1, VerificationOutcomeV1,
@@ -365,7 +365,7 @@ fn materialize_profile_with_inventory(
 
 fn materialize_profile_from_profile(
     context: &MaterializationContext<'_>,
-    mut profile: ConformanceProfileV2,
+    mut profile: ConformanceProfileV1,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
     layer_name: &str,
@@ -379,7 +379,7 @@ fn materialize_profile_from_profile(
     let prefix = format!("{layer_name}/{lifecycle_name}");
     let mut outputs = vec![MaterializedFile {
         relative_path: format!(
-            "{prefix}/CPF2-{}.cbor",
+            "{prefix}/CPF1-{}.cbor",
             pos_conformance::hex_digest(&profile.profile_digest)
         ),
         bytes: profile_bytes,
@@ -519,10 +519,10 @@ fn validate_profile_record_bindings(
 
 fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> FixtureContext {
     let profile_record_digest =
-        labeled_digest("PiglorOS.CPF2ProfileRecord.v2", profile_record_bytes);
+        labeled_digest("PiglorOS.CPF1ProfileRecord.v1", profile_record_bytes);
     let normative =
         include_bytes!("../../../../fixtures/conformance/support/normative-requirements.md");
-    let schema = include_bytes!("../../../../fixtures/conformance/support/schema-cpf2-v2.cddl");
+    let schema = include_bytes!("../../../../fixtures/conformance/support/schema-cpf1-v1.cddl");
     let notice = include_bytes!("../../../../fixtures/conformance/support/NOTICE");
     let sbom = include_bytes!("../../../../fixtures/conformance/support/sbom.json");
     let provenance = include_bytes!("../../../../fixtures/conformance/support/provenance.json");
@@ -592,7 +592,7 @@ fn fixtures_from_profile_record(
 
 fn profile_for_claim_layer(
     claim_layer: ClaimLayerV1,
-) -> Result<ConformanceProfileV2, Box<dyn Error>> {
+) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     validated_profile_record(claim_layer).and_then(|(profile_record_bytes, profile_record)| {
         profile_from_record(claim_layer, profile_record_bytes, &profile_record)
     })
@@ -602,7 +602,7 @@ fn profile_from_record(
     claim_layer: ClaimLayerV1,
     profile_record_bytes: &[u8],
     profile_record: &JsonValue,
-) -> Result<ConformanceProfileV2, Box<dyn Error>> {
+) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let context = fixture_context(profile_record_bytes, claim_layer);
     let fixtures = fixtures_from_profile_record(profile_record, &context)?;
     let mut execution_profile_digests = vec![
@@ -614,7 +614,7 @@ fn profile_from_record(
         "../../../../fixtures/conformance/matrix/execution-matrix.json"
     ))
     .as_bytes();
-    let mut profile = ConformanceProfileV2 {
+    let mut profile = ConformanceProfileV1 {
         profile_id: profile_id(claim_layer).to_owned(),
         semantic_version: "1.0.0".to_owned(),
         lifecycle: ProfileLifecycleV1::Draft,
@@ -684,7 +684,7 @@ fn fixture_descriptor_from_record(
         claim_layer_name(context.claim_layer),
     )?;
     let fixture_record_digest = labeled_digest(
-        "PiglorOS.CPF2FixtureRecord.v2",
+        "PiglorOS.CPF1FixtureRecord.v1",
         &serde_json::to_vec(record)?,
     );
     let draft_provenance_material = [
@@ -925,7 +925,7 @@ fn evaluator_protocol(profile_record_digest: [u8; 32]) -> EvaluatorProtocolV1 {
 
 #[cfg(test)]
 fn bundle_inputs(
-    profile: &ConformanceProfileV2,
+    profile: &ConformanceProfileV1,
     mode: BundleModeV1,
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
     bundle_inputs_from_profile(
@@ -936,7 +936,7 @@ fn bundle_inputs(
 }
 
 fn bundle_inputs_from_profile(
-    profile: &ConformanceProfileV2,
+    profile: &ConformanceProfileV1,
     mode: BundleModeV1,
     inventory_bytes: &[u8],
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
@@ -1006,8 +1006,8 @@ fn append_supporting_members(
             BundleMemberRoleV1::NormativeSpecification,
         ),
         (
-            "support/schema-cpf2-v2.cddl",
-            include_bytes!("../../../../fixtures/conformance/support/schema-cpf2-v2.cddl")
+            "support/schema-cpf1-v1.cddl",
+            include_bytes!("../../../../fixtures/conformance/support/schema-cpf1-v1.cddl")
                 .as_slice(),
             BundleMemberRoleV1::Schema,
         ),
@@ -1388,7 +1388,7 @@ mod tests {
     use pos_conformance::{ExecutionModeV1, SafeErrorCodeV1};
 
     fn local_bundle_artifacts(
-        profile: &ConformanceProfileV2,
+        profile: &ConformanceProfileV1,
         signing_key: &SigningKey,
     ) -> Result<LocalBundleArtifacts, Box<dyn Error>> {
         let (members, expected_results) = bundle_inputs(profile, BundleModeV1::Local)?;
@@ -1407,7 +1407,7 @@ mod tests {
 
     type LocalBundleArtifacts = (Vec<u8>, [u8; 32], Vec<u8>, String);
 
-    fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV2, Box<dyn Error>> {
+    fn test_profile(claim_layer: ClaimLayerV1) -> Result<ConformanceProfileV1, Box<dyn Error>> {
         profile_for_claim_layer(claim_layer)
     }
 
