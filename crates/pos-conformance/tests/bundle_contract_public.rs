@@ -1015,6 +1015,171 @@ fn public_independent_verifier_rejects_a_cpf2_semantic_invariant(
 }
 
 #[test]
+fn public_independent_verifier_rejects_cpf2_semantic_variants(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let mutations: Vec<ArchiveMutation> = cpf2_root_semantic_mutations()
+        .into_iter()
+        .chain(cpf2_fixture_semantic_mutations())
+        .collect();
+    for mutate in mutations {
+        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
+        assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+    }
+    Ok(())
+}
+
+fn cpf2_root_semantic_mutations() -> Vec<ArchiveMutation> {
+    vec![
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                fields[2] = Value::Text("profile#matrix=old".to_owned())
+            })
+        }),
+        Box::new(|value| mutate_profile(value, |fields| fields[5] = Value::Bytes(vec![0; 32]))),
+        Box::new(|value| mutate_profile(value, |fields| fields[6] = Value::Bytes(vec![0; 32]))),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(digests) = &mut fields[7] {
+                    digests.clear();
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(digests) = &mut fields[7] {
+                    digests[0] = Value::Bytes(vec![0; 32]);
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(digests) = &mut fields[8] {
+                    digests[0] = Value::Bytes(vec![0; 32]);
+                }
+            })
+        }),
+        Box::new(|value| mutate_profile(value, |fields| fields[16] = Value::Bytes(vec![0; 32]))),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    protocol[0] = Value::Text(String::new());
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    protocol[1] = Value::Bytes(vec![0; 32]);
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(requirements) = &mut fields[12] {
+                    requirements[0] = Value::Null;
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(requirements) = &mut fields[12] {
+                    requirements[3] = Value::Bytes(vec![0; 32]);
+                }
+            })
+        }),
+    ]
+}
+
+fn cpf2_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
+    vec![
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                fields[10] = Value::Array(vec![Value::Array(vec![
+                    Value::Integer(9_u64.into()),
+                    Value::Bytes(Vec::new()),
+                ])]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[0] = Value::Text(String::new());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[1] = Value::Null;
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[2] = Value::Integer(7_u64.into());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[4] = Value::Bytes(vec![0; 32]);
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[5] = Value::Array(Vec::new());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[6] = Value::Integer(3_u64.into());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[11] = Value::Integer(3_u64.into());
+                        fixture[12] = Value::Integer(0_u64.into());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[13] = Value::Array(vec![Value::Integer(0_u64.into()); 8]);
+                    }
+                }
+            })
+        }),
+        Box::new(|value| mutate_profile(value, |fields| fields[15] = Value::Bytes(vec![0; 32]))),
+    ]
+}
+
+#[test]
 fn public_independent_verifier_rejects_each_matrix_invariant(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
