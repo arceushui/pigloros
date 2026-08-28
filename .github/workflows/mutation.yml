@@ -45,12 +45,12 @@ jobs:
     needs: mutation-baseline
     runs-on: ubuntu-latest
     # The shell watchdog below exits with diagnostics before this outer limit.
-    timeout-minutes: 40
+    timeout-minutes: 70
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 8
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -71,18 +71,21 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
-      # changing the mutant set or weakening the gate. Build and test
-      # timeouts expose a single pathological mutant promptly.
+      # The baseline proves the whole workspace first. Each mutant then runs
+      # its owning package's unit, integration, and binary tests, avoiding four
+      # concurrent copies of unrelated workspace tests without reducing the
+      # generated mutant set or weakening the aggregate gate.
       - name: Run mutants in changed lines
         run: |
           set -euo pipefail
           set +e
-          timeout --foreground 30m cargo mutants \
+          timeout --foreground 60m cargo mutants \
             --workspace \
             --all-features \
+            --test-workspace false \
             --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
-            --shard "${{ matrix.shard }}/4" \
+            --shard "${{ matrix.shard }}/8" \
             --baseline skip \
             --jobs 4 \
             --timeout 120 \
@@ -92,7 +95,7 @@ jobs:
           mutation_status=$?
           set -e
           if [[ "$mutation_status" -eq 124 ]]; then
-            echo "Mutation shard watchdog timed out after 30 minutes."
+            echo "Mutation shard watchdog timed out after 60 minutes."
             latest_log=""
             if [[ -d mutants.out ]]; then
               latest_log="$(find mutants.out -type f -name '*.log' -printf '%T@ %p\n' \

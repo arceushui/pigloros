@@ -1,6 +1,6 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use pos_conformance::{verify_archive_independently, MAX_CONFORMANCE_BUNDLE_BYTES_V1};
+use pos_conformance::{verify_archive_release_filename, MAX_CONFORMANCE_BUNDLE_BYTES_V1};
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-const INITIAL_READ_CAPACITY: u64 = 64 * 1024;
+const INITIAL_READ_CAPACITY: u64 = 65_536;
 
 fn main() -> Result<(), Box<dyn Error>> {
     run(env::args_os())
@@ -29,36 +29,43 @@ fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Erro
 fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
     let (file, declared_len) = open_regular_file(path)?;
     let bytes = read_bounded(file, declared_len, MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
-    verify_archive_independently(&bytes).map_err(Into::into)
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("conformance archive filename is not canonical UTF-8")?;
+    verify_archive_release_filename(&bytes, filename).map_err(Into::into)
 }
 
-#[cfg(unix)]
 fn open_regular_file(path: &Path) -> Result<(File, u64), Box<dyn Error>> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
 
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "conformance bundle path is not a regular file",
-        )
-        .into());
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK.saturating_add(libc::O_NOFOLLOW))
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "conformance bundle path is not a regular file",
+            )
+            .into());
+        }
+        Ok((file, metadata.len()))
     }
-    Ok((file, metadata.len()))
-}
 
-#[cfg(not(unix))]
-fn open_regular_file(_path: &Path) -> Result<(File, u64), Box<dyn Error>> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "regular-file conformance verification is unsupported on this platform",
-    )
-    .into())
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "regular-file conformance verification is unsupported on this platform",
+        )
+        .into())
+    }
 }
 
 fn read_bounded(
@@ -146,13 +153,15 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         assert!(run([OsString::from("verify-conformance-bundle")].into_iter()).is_err());
 
-        let path = std::env::temp_dir().join(format!(
+        let directory = std::env::temp_dir().join(format!(
             "pigloros-invalid-cfb1-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos()
         ));
+        fs::create_dir(&directory)?;
+        let path = directory.join(format!("{}.cfb1", "0".repeat(64)));
         fs::write(&path, b"invalid conformance archive")?;
         let result = run([
             OsString::from("verify-conformance-bundle"),
@@ -160,6 +169,7 @@ mod tests {
         ]
         .into_iter());
         fs::remove_file(path)?;
+        fs::remove_dir(directory)?;
         assert!(result.is_err());
         Ok(())
     }

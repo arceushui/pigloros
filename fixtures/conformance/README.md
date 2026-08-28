@@ -83,6 +83,10 @@ the Local/Air-Gapped pair before writing either archive, and independently
 performs a structural cross-check of the resulting public archives. It does
 not execute the matrix or claim that descriptive metadata is conformance
 evidence; the independently produced execution evidence belongs to #193.
+The publication script compares canonical in-memory tree fingerprints across
+repeated and clean-checkout construction, then asks the Rust materializer to
+publish the signed tree exactly once. It does not create temporary signed
+bundle trees outside the descriptor-relative ADR-067 publication transaction.
 
 CI also independently regenerates the 49 input/result records from the public
 input identities and fixture-family contract, reconstructs the Draft authority

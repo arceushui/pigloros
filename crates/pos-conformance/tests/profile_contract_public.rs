@@ -802,10 +802,16 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
 }
 
 #[test]
-fn public_profile_rejects_obsolete_profile_format_without_a_compatibility_reader() {
+fn public_profile_decoder_rejects_unsupported_and_oversized_encodings() {
     assert_eq!(
         ConformanceProfileV1::from_canonical_cbor(&[0x82, 0x64, b'C', b'P', b'F', b'2', 0x02]),
         Err(ConformanceContractError::UnsupportedVersion)
+    );
+    assert_eq!(
+        ConformanceProfileV1::from_canonical_cbor(&[
+            0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]),
+        Err(ConformanceContractError::FieldOutOfBounds)
     );
 }
 
@@ -917,6 +923,43 @@ fn profile_with_fixture_field(
     fixtures::encode(&value)
 }
 
+fn profile_with_nested_field(
+    path: &[usize],
+    replacement: Value,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut value: Value =
+        ciborium::from_reader(fixtures::cpf1_profile_rejection_fixture(0, false)?.as_slice())?;
+    let (field, parents) = path.split_last().ok_or("profile path must not be empty")?;
+    let mut selected = &mut value;
+    for index in parents {
+        let Value::Array(fields) = selected else {
+            return Err("profile path must select arrays".into());
+        };
+        selected = fields
+            .get_mut(*index)
+            .ok_or("profile path is out of bounds")?;
+    }
+    let Value::Array(fields) = selected else {
+        return Err("profile path parent must be an array".into());
+    };
+    fields[*field] = replacement;
+    fixtures::encode(&value)
+}
+
+fn assert_public_profile_paths_rejected(
+    paths: impl IntoIterator<Item = Vec<usize>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for path in paths {
+        let bytes = profile_with_nested_field(&path, Value::Null)?;
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&bytes),
+            Err(ConformanceContractError::InvalidEncoding),
+            "nested field {path:?} unexpectedly decoded"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let uint = |value: u64| Value::Integer(value.into());
@@ -935,7 +978,9 @@ fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn s
     };
 
     let malformed_profiles = [
+        fixtures::encode(&Value::Null)?,
         profile_with_field(9, Value::Array(vec![Value::Null]))?,
+        profile_with_fixture_field(5, Value::Array(vec![Value::Null]))?,
         profile_with_fixture_field(5, Value::Array(vec![uint(99)]))?,
         profile_with_fixture_field(8, Value::Array(vec![Value::Null; 5]))?,
         profile_with_fixture_field(8, expected_canonical(uint(0), Value::Null, bytes(5)))?,
@@ -950,6 +995,39 @@ fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn s
             ConformanceProfileV1::from_canonical_cbor(&bytes),
             Err(ConformanceContractError::InvalidEncoding)
         );
+    }
+
+    let mut malformed_request: Value = ciborium::from_reader(fixtures::request()?.as_slice())?;
+    let Value::Array(request_fields) = &mut malformed_request else {
+        return Err("public request fixture is not an array".into());
+    };
+    let Some(Value::Array(identity)) = request_fields.get_mut(7) else {
+        return Err("public request identity is not an array".into());
+    };
+    identity[5] = uint(1);
+    assert_eq!(
+        EvaluatorRequestV1::from_canonical_cbor(&fixtures::encode(&malformed_request)?),
+        Err(ConformanceContractError::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_profile_decoder_rejects_each_nested_record_field(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut paths = Vec::new();
+    paths.extend((0..4).map(|index| vec![9, 0, 7, 0, index]));
+    paths.extend((0..8).map(|index| vec![9, 0, 13, index]));
+    paths.extend((0..2).map(|index| vec![9, 0, 14, index]));
+    paths.extend((0..7).map(|index| vec![9, 0, 15, index]));
+    paths.extend((0..5).map(|index| vec![11, index]));
+    paths.extend((0..10).map(|index| vec![11, 4, index]));
+    paths.extend((0..5).map(|index| vec![12, index]));
+    assert_public_profile_paths_rejected(paths)?;
+
+    for index in 0..18 {
+        let bytes = profile_with_nested_field(&[index], Value::Bool(true))?;
+        assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
     }
     Ok(())
 }

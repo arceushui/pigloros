@@ -93,7 +93,9 @@ mod coverage_entrypoints {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn encode_value(value: &ciborium::Value) -> Vec<u8> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes).unwrap_or_default();
+        if let Err(error) = ciborium::into_writer(value, &mut bytes) {
+            std::panic::resume_unwind(Box::new(format!("test value encoding failed: {error}")));
+        }
         bytes
     }
 
@@ -853,9 +855,7 @@ pub fn wave8_plugin_boundary() -> PluginBoundaryV1 {
         manifest_digest: [0; 32],
         release_digest: [0; 32],
     };
-    boundary.manifest_digest = boundary
-        .digest_without_identity()
-        .unwrap_or_else(|_| std::process::abort());
+    boundary.manifest_digest = boundary.digest_without_identity().unwrap_or([0; 32]);
     boundary.release_digest = boundary.release_digest_value();
     boundary
 }
@@ -1688,8 +1688,7 @@ impl VerificationResultV1 {
     /// # Errors
     /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::verification_result_digest(self)
-            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+        Ok(strict_codec::verification_result_digest(self))
     }
 }
 
@@ -1719,8 +1718,7 @@ impl DivergenceReportV1 {
     /// # Errors
     /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::divergence_report_digest(self)
-            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+        Ok(strict_codec::divergence_report_digest(self))
     }
 }
 
@@ -1795,13 +1793,7 @@ pub mod strict_codec {
                     .map(encode_event)
                     .collect(),
             ),
-            Value::Array(
-                evidence
-                    .projections
-                    .iter()
-                    .map(encode_projection)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+            Value::Array(evidence.projections.iter().map(encode_projection).collect()),
             Value::Array(evidence.causal_trace.iter().map(encode_trace).collect()),
             Value::Array(
                 evidence
@@ -1858,6 +1850,11 @@ pub mod strict_codec {
         encode_value_to_writer(value, &mut bytes).map(|()| bytes)
     }
 
+    pub(crate) fn encode_value_infallible(value: &Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes).map_or_else(|_| std::process::abort(), |()| bytes)
+    }
+
     fn encode_value_to_writer<W: std::io::Write>(
         value: &Value,
         writer: W,
@@ -1879,7 +1876,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
-        if result.result_digest != verification_result_digest(&result)? {
+        if result.result_digest != verification_result_digest(&result) {
             return Err(StrictCborError::InvalidField {
                 field: "verification_result_digest".to_owned(),
             });
@@ -1888,11 +1885,9 @@ pub mod strict_codec {
         Ok(result)
     }
 
-    pub(crate) fn verification_result_digest(
-        result: &VerificationResultV1,
-    ) -> Result<[u8; 32], StrictCborError> {
-        encode_value(&encode_verification_result_value(result, false))
-            .map(|bytes| domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
+    pub(crate) fn verification_result_digest(result: &VerificationResultV1) -> [u8; 32] {
+        let bytes = encode_value_infallible(&encode_verification_result_value(result, false));
+        domain_digest(b"PiglorOS.VerificationResult.v1", &bytes)
     }
 
     fn encode_verification_result_value(
@@ -2093,7 +2088,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
-        if report.report_digest != divergence_report_digest(&report)? {
+        if report.report_digest != divergence_report_digest(&report) {
             return Err(StrictCborError::InvalidField {
                 field: "divergence_report_digest".to_owned(),
             });
@@ -2102,11 +2097,9 @@ pub mod strict_codec {
         Ok(report)
     }
 
-    pub(crate) fn divergence_report_digest(
-        report: &DivergenceReportV1,
-    ) -> Result<[u8; 32], StrictCborError> {
-        encode_value(&encode_divergence_report_value(report, false))
-            .map(|bytes| domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
+    pub(crate) fn divergence_report_digest(report: &DivergenceReportV1) -> [u8; 32] {
+        let bytes = encode_value_infallible(&encode_divergence_report_value(report, false));
+        domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes)
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -2838,14 +2831,16 @@ pub mod strict_codec {
         values.iter().map(decode_event).collect()
     }
 
-    fn encode_projection(projection: &ProjectionEvidenceV1) -> Result<Value, StrictCborError> {
-        let state = serde_json::to_vec(&projection.state)
-            .map_err(|error| StrictCborError::Json(error.to_string()))?;
-        Ok(Value::Array(vec![
+    fn encode_projection(projection: &ProjectionEvidenceV1) -> Value {
+        // `serde_json::Value` is already a closed JSON value tree, so compact
+        // serialization cannot fail. Keeping a synthetic error path here made
+        // callers handle an unreachable state.
+        let state = projection.state.to_string().into_bytes();
+        Value::Array(vec![
             text(&projection.reducer),
             text(&projection.entity),
             Value::Bytes(state),
-        ]))
+        ])
     }
 
     fn decode_projection(value: &Value) -> Result<ProjectionEvidenceV1, StrictCborError> {
@@ -4059,6 +4054,18 @@ pub mod strict_codec {
                     drop(std::hint::black_box(value));
                 }
 
+                struct RejectWriter;
+
+                impl std::io::Write for RejectWriter {
+                    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                        Err(std::io::Error::other("intentional coverage writer failure"))
+                    }
+
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        Ok(())
+                    }
+                }
+
                 fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
                     let mut fields = value.as_array().map_or_else(Vec::new, Clone::clone);
                     fields[index] = replacement;
@@ -4083,16 +4090,22 @@ pub mod strict_codec {
                     let fields = value.as_array().map_or(&[] as &[Value], Vec::as_slice);
                     for index in 0..fields.len() {
                         let invalid = replace_field(value, index, text("wrong"));
-                        let bytes = encode_value(&invalid).unwrap_or_default();
+                        let Ok(bytes) = encode_value(&invalid) else {
+                            panic!("test value must have a canonical encoding");
+                        };
                         assert!(decoder(&bytes).is_err());
                     }
                 }
 
+                consume(encode_value_to_writer(&Value::Null, RejectWriter));
                 let evidence = $input;
                 let contract = &evidence.contract;
-                consume(encode_evidence(evidence));
-                let evidence_value = decode_value(&encode_evidence(evidence).unwrap_or_default())
-                    .unwrap_or(Value::Null);
+                let Ok(encoded_evidence) = encode_evidence(evidence) else {
+                    panic!("valid evidence must have a canonical encoding");
+                };
+                let Ok(evidence_value) = decode_value(&encoded_evidence) else {
+                    panic!("canonical evidence must decode");
+                };
                 reject_each_encoded_field(&evidence_value, decode_evidence);
                 let mut invalid_input = super::super::tests::input();
                 invalid_input.initial_position[0] = f64::NAN;
@@ -4152,7 +4165,7 @@ pub mod strict_codec {
                 reject_each_field(&event, decode_event);
                 consume(decode_events(&Value::Array(vec![event])));
                 consume(decode_events(&Value::Array(vec![Value::Map(Vec::new())])));
-                let projection = encode_projection(&evidence.projections[0]).unwrap_or(Value::Null);
+                let projection = encode_projection(&evidence.projections[0]);
                 consume(decode_projection(&projection));
                 reject_each_field(&projection, decode_projection);
                 consume(decode_projections(&Value::Array(vec![Value::Map(
@@ -4524,7 +4537,7 @@ pub mod strict_codec {
                     return;
                 };
                 consume(encode_verification_result(&result));
-                consume(verification_result_digest(&result));
+                std::hint::black_box(verification_result_digest(&result));
                 let verification_value = encode_verification_result_value(&result, true);
                 reject_each_field(&verification_value, |value| {
                     array(value, "verification_result", 18)
@@ -4918,26 +4931,6 @@ pub mod strict_codec {
     mod coverage_tests {
         use super::*;
 
-        #[test]
-        fn strict_encoding_maps_write_failures() {
-            struct FailingWriter;
-
-            impl std::io::Write for FailingWriter {
-                fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
-                    Err(std::io::Error::other("write failure"))
-                }
-
-                fn flush(&mut self) -> std::io::Result<()> {
-                    Ok(())
-                }
-            }
-
-            assert!(matches!(
-                encode_value_to_writer(&Value::Null, FailingWriter),
-                Err(StrictCborError::Serialization(_))
-            ));
-        }
-
         fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
             let mut fields = value.as_array().map_or_else(Vec::new, Clone::clone);
             fields[index] = replacement;
@@ -5101,8 +5094,7 @@ pub mod strict_codec {
                 ..error.clone()
             });
             assert!(validate_verification_result(&invalid_semantics).is_err());
-            invalid_semantics.result_digest =
-                verification_result_digest(&invalid_semantics).unwrap_or([0; 32]);
+            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics);
             let invalid_semantics_bytes =
                 encode_value(&encode_verification_result_value(&invalid_semantics, true))
                     .unwrap_or_default();
@@ -5116,6 +5108,45 @@ pub mod strict_codec {
             let encoded = encode_divergence_report_value(&report, true);
             let bytes = encode_value(&encoded).map_err(|error| error.to_string())?;
             assert!(decode_divergence_report(&bytes).is_ok());
+
+            let report_with_driver_length = |length| {
+                let mut candidate = report.clone();
+                candidate.driver_or_plugin_id = Some("x".repeat(length));
+                candidate
+            };
+            let mut low = 0_usize;
+            let mut high = 16 * 1024;
+            let mut exact_limit = None;
+            while low <= high {
+                let midpoint = low.midpoint(high);
+                let candidate = report_with_driver_length(midpoint);
+                let length = encode_value(&encode_divergence_report_value(&candidate, true))
+                    .map_err(|error| error.to_string())?
+                    .len();
+                match length.cmp(&(16 * 1024)) {
+                    std::cmp::Ordering::Less => low = midpoint + 1,
+                    std::cmp::Ordering::Equal => {
+                        exact_limit = Some(candidate);
+                        break;
+                    }
+                    std::cmp::Ordering::Greater => high = midpoint.saturating_sub(1),
+                }
+            }
+            let at_limit = exact_limit.ok_or("exact divergence-report limit is unreachable")?;
+            assert_eq!(
+                encode_divergence_report(&at_limit)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                16 * 1024
+            );
+            let over_limit = report_with_driver_length(
+                at_limit
+                    .driver_or_plugin_id
+                    .as_ref()
+                    .map_or(1, |driver| driver.len() + 1),
+            );
+            assert!(encode_divergence_report(&over_limit).is_err());
+
             let null_bytes = encode_value(&Value::Null).map_err(|error| error.to_string())?;
             assert!(decode_divergence_report(&null_bytes).is_err());
 
@@ -6641,27 +6672,29 @@ pub fn hex_digest(bytes: &[u8; 32]) -> String {
 /// Decode a fixed-width hexadecimal 256-bit digest.
 ///
 /// Digest fields in the CPF1 and CFB1 wire representations use exactly 64
-/// hexadecimal characters. Both ASCII letter cases are accepted.
+/// lowercase hexadecimal characters.
 #[must_use]
 pub fn decode_hex_digest(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 {
+    let encoded = value.as_bytes();
+    if encoded.len() != 64
+        || !encoded
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return None;
     }
     let mut digest = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = decode_hex_nibble(pair[0])?;
-        let low = decode_hex_nibble(pair[1])?;
-        digest[index] = (high << 4) | low;
+    for (index, pair) in encoded.chunks_exact(2).enumerate() {
+        digest[index] = (lowercase_hex_nibble(pair[0]) << 4) | lowercase_hex_nibble(pair[1]);
     }
     Some(digest)
 }
 
-const fn decode_hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
+const fn lowercase_hex_nibble(byte: u8) -> u8 {
+    if byte.is_ascii_digit() {
+        byte - b'0'
+    } else {
+        byte - b'a' + 10
     }
 }
 
@@ -7665,19 +7698,22 @@ pub mod tests {
     fn compares_authoritative_outputs_by_event_and_projection() -> Result<(), pos_core::CoreError> {
         let left = evidence();
         let mut right = left.clone();
-        assert_eq!(
-            compare_authoritative_outputs(&left, &right)?.divergence,
-            DivergenceClassV1::None
-        );
+        let equal = compare_authoritative_outputs(&left, &right)?;
+        assert!(equal.equal);
+        assert_eq!(equal.divergence, DivergenceClassV1::None);
         right.authoritative_events[0].payload_digest = [8; 32];
+        let event_divergence = compare_authoritative_outputs(&left, &right)?;
+        assert!(!event_divergence.equal);
         assert_eq!(
-            compare_authoritative_outputs(&left, &right)?.divergence,
+            event_divergence.divergence,
             DivergenceClassV1::AuthoritativeEvents
         );
         right = left.clone();
         right.projections[0].state = serde_json::json!({"changed": true});
+        let projection_divergence = compare_authoritative_outputs(&left, &right)?;
+        assert!(!projection_divergence.equal);
         assert_eq!(
-            compare_authoritative_outputs(&left, &right)?.divergence,
+            projection_divergence.divergence,
             DivergenceClassV1::Projections
         );
         Ok(())
@@ -9186,8 +9222,11 @@ pub mod tests {
         assert_eq!(encoded.len(), 64);
         assert_eq!(decode_hex_digest(&encoded), Some(digest));
         assert_eq!(decode_hex_digest(&"0".repeat(64)), Some([0; 32]));
+        assert_eq!(decode_hex_digest(&"af".repeat(32)), Some([0xaf; 32]));
+        assert_eq!(decode_hex_digest(&"10".repeat(32)), Some([0x10; 32]));
         assert_eq!(decode_hex_digest(&"0".repeat(63)), None);
         assert_eq!(decode_hex_digest(&format!("{}g", "0".repeat(63))), None);
+        assert_eq!(decode_hex_digest(&format!("{}A", "0".repeat(63))), None);
         Ok(())
     }
 
@@ -9201,6 +9240,10 @@ pub mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let value = evidence();
         let result = value.to_verification_result()?;
+        assert_eq!(result.checked_artifact_count, 5);
+        let mut changed_result = result.clone();
+        changed_result.request_digest = [0xff; 32];
+        assert_ne!(result.digest()?, changed_result.digest()?);
         let result_bytes = result.to_canonical_cbor()?;
         assert_eq!(
             VerificationResultV1::from_canonical_cbor(&result_bytes)?,

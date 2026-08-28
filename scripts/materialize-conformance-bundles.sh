@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if (($# > 1)); then
-  echo "usage: $0 [published-output-root]" >&2
+  echo "usage: $0 [publication-parent]" >&2
   exit 2
 fi
 
@@ -15,43 +15,56 @@ source_inventory="fixtures/conformance/SHA256SUMS"
 
 : "${PIGLOROS_CONFORMANCE_SIGNING_KEY:?materialization requires a non-repository signing key}"
 source_digest="$(sha256sum "${source_inventory}" | awk '{print $1}')"
-publication_id="${PIGLOROS_CONFORMANCE_PUBLICATION_ID:-${source_digest}}"
-output_root="${1:-fixtures/conformance/published/${publication_id}}"
-publication_parent="$(dirname "${output_root}")"
-mkdir -p "${publication_parent}"
-temporary_root="$(mktemp -d "${publication_parent}/.pigloros-conformance.XXXXXX")"
-first_output="${temporary_root}/first"
-second_output="${temporary_root}/second"
-trap 'rm -rf "${temporary_root}"' EXIT
+publication_parent="${1:-fixtures/conformance/published}"
+output_root="${publication_parent}/${source_digest}"
+temporary_root="$(mktemp -d)"
+trap 'rm -rf -- "${temporary_root}"' EXIT
 
-PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
-  cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${first_output}"
-PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
-  cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${second_output}"
+# Atomic publication deliberately requires an existing trusted parent. The
+# orchestrator owns creation of that parent; the binary opens and retains it
+# before producing any bundle bytes.
+mkdir -p -- "${publication_parent}"
 
-diff -rq "${first_output}" "${second_output}"
+first_fingerprint="$(
+  cargo run --quiet -p pos-conformance --bin materialize-conformance-bundles \
+    --locked -- --fingerprint
+)"
+second_fingerprint="$(
+  cargo run --quiet -p pos-conformance --bin materialize-conformance-bundles \
+    --locked -- --fingerprint
+)"
+[[ "${first_fingerprint}" == "${second_fingerprint}" ]] || {
+  echo "repeated conformance materialization produced different bytes" >&2
+  exit 1
+}
 
 clean_checkout="${temporary_root}/clean-checkout"
-clean_output="${temporary_root}/clean-output"
 mkdir -p "${clean_checkout}"
 git archive --format=tar HEAD | tar -xf - -C "${clean_checkout}"
-(cd "${clean_checkout}" && \
+clean_fingerprint="$(cd "${clean_checkout}" && \
   CARGO_TARGET_DIR="${temporary_root}/clean-target" \
   PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
-  cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${clean_output}")
-diff -rq "${first_output}" "${clean_output}"
+  cargo run --quiet -p pos-conformance --bin materialize-conformance-bundles \
+    --locked -- --fingerprint)"
+[[ "${first_fingerprint}" == "${clean_fingerprint}" ]] || {
+  echo "clean-checkout conformance materialization produced different bytes" >&2
+  exit 1
+}
 
-mapfile -t materialized_files < <(find "${first_output}" -type f -print | sort)
+cargo run -p pos-conformance --bin materialize-conformance-bundles \
+  --locked -- "${output_root}"
+
+mapfile -t materialized_files < <(find "${output_root}" -type f -print | sort)
 mapfile -t profile_files < <(
-  find "${first_output}" -type f -name 'CPF1-*.cbor' -print | sort
+  find "${output_root}" -type f -name 'CPF1-*.cbor' -print | sort
 )
 mapfile -t manifest_files < <(
-  find "${first_output}" -type f -name 'manifest-*.cbor' -print | sort
+  find "${output_root}" -type f -name 'manifest-*.cbor' -print | sort
 )
 mapfile -t archive_files < <(
-  find "${first_output}" -type f -name '*.cfb1' -print | sort
+  find "${output_root}" -type f -name '*.cfb1' -print | sort
 )
-metadata_file="${first_output}/MATERIALIZATION-METADATA.json"
+metadata_file="${output_root}/MATERIALIZATION-METADATA.json"
 jq -e '
   .format == 1 and
   (.lifecycles | type == "array" and length > 0) and
@@ -80,9 +93,4 @@ if ((${#archive_files[@]} == 0)); then
 fi
 cargo run -p pos-conformance --bin verify-conformance-bundle --locked -- "${archive_files[@]}"
 
-diff -rq "${first_output}" "${second_output}"
-diff -rq "${first_output}" "${clean_output}"
-PIGLOROS_CONFORMANCE_SIGNING_KEY="${PIGLOROS_CONFORMANCE_SIGNING_KEY}" \
-  cargo run -p pos-conformance --bin materialize-conformance-bundles --locked -- "${output_root}"
-diff -rq "${first_output}" "${output_root}"
 echo "atomically materialized ${#materialized_files[@]} signed Draft conformance files under ${output_root}"

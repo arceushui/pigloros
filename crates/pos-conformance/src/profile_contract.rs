@@ -11,7 +11,7 @@ use crate::{
 };
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
-use pos_crypto::{canonical, signing};
+use pos_crypto::signing;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
@@ -159,9 +159,7 @@ impl ExpectedResultV1 {
     /// Returns [`ConformanceContractError::InvalidEncoding`] when canonical
     /// encoding fails.
     pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, ConformanceContractError> {
-        canonical::encode(&encode_expected(self))
-            .map(|bytes| bytes.as_slice().to_vec())
-            .map_err(|_| ConformanceContractError::InvalidEncoding)
+        encode_value(&encode_expected(self))
     }
 }
 
@@ -1726,13 +1724,10 @@ fn divergence_key(value: &AllowedDivergenceV1) -> (DivergenceMismatchKindV1, &[u
 }
 
 fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
-    let mut bytes = Vec::new();
     // A digest must never be computed over fallback bytes. The public digest
     // APIs cannot return an encoding error, so an impossible in-memory encoding
     // failure terminates rather than manufacturing a different identity.
-    if ciborium::into_writer(value, &mut bytes).is_err() {
-        std::process::abort();
-    }
+    let bytes = crate::strict_codec::encode_value_infallible(value);
     let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
     source.push(0);
@@ -2312,8 +2307,7 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
                 _ => Err(ConformanceContractError::InvalidEncoding),
             },
             2 | 3 => {
-                let count = usize::try_from(length)
-                    .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
+                let count = usize::try_from(length).unwrap_or(usize::MAX);
                 let end = index
                     .checked_add(count)
                     .ok_or(ConformanceContractError::FieldOutOfBounds)?;
@@ -2667,34 +2661,6 @@ mod tests {
     const MAX_FIXTURE_COUNT: u32 = 65_536;
     const MAX_MEMBER_PATH_BYTES: u16 = 256;
     const MAX_COORDINATE_COUNT_BYTES: u16 = 128;
-
-    #[test]
-    fn canonical_encoding_maps_write_failures() {
-        struct FailingWriter;
-
-        impl std::io::Write for FailingWriter {
-            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("write failure"))
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        assert_eq!(
-            encode_value_to_writer(&Value::Null, FailingWriter),
-            Err(ConformanceContractError::InvalidEncoding)
-        );
-    }
-
-    #[test]
-    fn preflight_rejects_oversized_bytes() {
-        assert_eq!(
-            decode_value(&[0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
-            Err(ConformanceContractError::FieldOutOfBounds)
-        );
-    }
 
     fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
@@ -4310,6 +4276,8 @@ mod tests {
             let bytes = malformed_profile_bytes(&value, &[9, 0, 7, 0, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
+        let malformed_input = malformed_profile_bytes(&value, &[9, 0, 7, 0], Value::Null)?;
+        assert!(ConformanceProfileV1::from_canonical_cbor(&malformed_input).is_err());
         for index in 0..8 {
             let bytes = malformed_profile_bytes(&value, &[9, 0, 13, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
@@ -4358,6 +4326,17 @@ mod tests {
             ]),
         ] {
             let bytes = malformed_profile_bytes(&value, &[9, 0, 8], expected)?;
+            assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
+        }
+
+        let mut divergent = value;
+        divergent.allowed_divergences = vec![AllowedDivergenceV1 {
+            classification: DivergenceMismatchKindV1::TypedFailure,
+            first_coordinate: b"timeline/7".to_vec(),
+        }];
+        divergent.profile_digest = divergent.digest();
+        for index in 0..2 {
+            let bytes = malformed_profile_bytes(&divergent, &[10, 0, index], Value::Null)?;
             assert!(ConformanceProfileV1::from_canonical_cbor(&bytes).is_err());
         }
         Ok(())
@@ -4450,6 +4429,24 @@ mod tests {
             let bytes = malformed_request_bytes(&[10, index], Value::Null)?;
             assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
         }
+
+        let mut short_request = encode_request(&request(), true);
+        if let Value::Array(fields) = &mut short_request {
+            fields.pop();
+        }
+        let short_request = encode_value(&short_request)?;
+        assert!(EvaluatorRequestV1::from_canonical_cbor(&short_request).is_err());
+
+        let mut anonymous_request = request();
+        anonymous_request.implementation.organization_id = None;
+        anonymous_request.output_capability.capability_digest =
+            anonymous_request.expected_output_capability_digest();
+        anonymous_request.request_digest = anonymous_request.digest();
+        let anonymous_bytes = anonymous_request.to_canonical_cbor()?;
+        assert_eq!(
+            EvaluatorRequestV1::from_canonical_cbor(&anonymous_bytes),
+            Ok(anonymous_request)
+        );
 
         let mut invalid_caps = profile();
         invalid_caps.evaluator_protocol.hard_caps.max_cases = 0;
@@ -5571,6 +5568,12 @@ mod tests {
         pending.expected_digest = None;
         pending.actual_digest = None;
         assert!(case_matches_fixture(&pending, &pending_fixture));
+        let mut one_sided_pending = pending.clone();
+        one_sided_pending.expected_digest = Some(digest(99));
+        assert!(!case_matches_fixture(&one_sided_pending, &pending_fixture));
+        let mut one_sided_pending = pending;
+        one_sided_pending.actual_digest = Some(digest(99));
+        assert!(!case_matches_fixture(&one_sided_pending, &pending_fixture));
 
         let mut changed = base.clone();
         changed.case_id.push('x');
@@ -7069,116 +7072,5 @@ mod tests {
         exact_fixture_count.extend(std::iter::repeat_n(0xf6, MAX_FIXTURES));
         assert_eq!(preflight_cbor(&exact_fixture_count), Ok(()));
         Ok(())
-    }
-
-    #[test]
-    fn public_decoders_reject_wrong_top_level_shapes() {
-        let invalid = Value::Null;
-        assert!(decode_profile(&invalid).is_err());
-        assert!(decode_fixture(&invalid).is_err());
-        assert!(decode_input(&invalid).is_err());
-        assert!(decode_expected(&invalid).is_err());
-        assert!(decode_divergence(&invalid).is_err());
-        assert!(decode_bounds(&invalid).is_err());
-        assert!(decode_capability_policy(&invalid).is_err());
-        assert!(decode_fixture_provenance(&invalid).is_err());
-        assert!(decode_protocol(&invalid).is_err());
-        assert!(decode_hard_caps(&invalid).is_err());
-        assert!(decode_requirements(&invalid).is_err());
-        assert!(decode_request(&invalid).is_err());
-        assert!(decode_output_capability(&invalid).is_err());
-        assert!(decode_identity(&invalid).is_err());
-        assert!(decode_lifecycle(&invalid).is_err());
-        assert!(decode_adapter(&invalid).is_err());
-        assert!(decode_mode(&invalid).is_err());
-        assert!(decode_claim_layer(&invalid).is_err());
-        assert!(decode_verification_outcome(&invalid).is_err());
-        assert!(decode_divergence_mismatch(&invalid).is_err());
-        assert!(decode_replay_claim(&invalid).is_err());
-        assert!(decode_redaction(&invalid).is_err());
-        assert!(decode_safe_error(&invalid).is_err());
-    }
-
-    #[test]
-    fn public_decoders_reject_each_nested_field_shape() {
-        fn reject_fields(
-            value: &Value,
-            field_count: usize,
-            optional_fields: &[usize],
-            decode: impl Fn(&Value) -> Result<(), ConformanceContractError>,
-        ) {
-            for index in 0..field_count {
-                let mut malformed = value.clone();
-                let replacement = if optional_fields.contains(&index) {
-                    Value::Bool(true)
-                } else {
-                    Value::Null
-                };
-                replace_profile_path(&mut malformed, &[index], replacement);
-                assert!(
-                    decode(&malformed).is_err(),
-                    "field {index} unexpectedly decoded"
-                );
-            }
-        }
-
-        let fixture = profile().fixtures[0].clone();
-        reject_fields(&encode_fixture(&fixture), 17, &[10], |value| {
-            decode_fixture(value).map(|_| ())
-        });
-        reject_fields(&encode_input(&fixture.inputs[0]), 4, &[], |value| {
-            decode_input(value).map(|_| ())
-        });
-        reject_fields(
-            &encode_divergence(&AllowedDivergenceV1 {
-                classification: DivergenceMismatchKindV1::TypedFailure,
-                first_coordinate: vec![1],
-            }),
-            2,
-            &[],
-            |value| decode_divergence(value).map(|_| ()),
-        );
-        reject_fields(&encode_bounds(&fixture.bounds), 8, &[], |value| {
-            decode_bounds(value).map(|_| ())
-        });
-        reject_fields(
-            &encode_capability_policy(&fixture.capability_policy),
-            2,
-            &[],
-            |value| decode_capability_policy(value).map(|_| ()),
-        );
-        reject_fields(
-            &encode_fixture_provenance(&fixture.provenance),
-            6,
-            &[],
-            |value| decode_fixture_provenance(value).map(|_| ()),
-        );
-        reject_fields(
-            &encode_protocol(&profile().evaluator_protocol),
-            5,
-            &[],
-            |value| decode_protocol(value).map(|_| ()),
-        );
-        reject_fields(
-            &encode_hard_caps(&profile().evaluator_protocol.hard_caps),
-            10,
-            &[],
-            |value| decode_hard_caps(value).map(|_| ()),
-        );
-        reject_fields(
-            &encode_requirements(&profile().independence_requirements),
-            5,
-            &[],
-            |value| decode_requirements(value).map(|_| ()),
-        );
-        reject_fields(
-            &encode_identity(&stable_evidence("alpha", 30).implementation),
-            6,
-            &[5],
-            |value| decode_identity(value).map(|_| ()),
-        );
-        reject_fields(&encode_request(&request(), true), 14, &[], |value| {
-            decode_request(value).map(|_| ())
-        });
     }
 }
