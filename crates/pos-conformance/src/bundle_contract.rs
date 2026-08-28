@@ -1389,7 +1389,7 @@ fn independent_verify_cpf1(profile: &Value) -> Result<(), BundleContractErrorV1>
 
 fn independent_verify_cpf1_header(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
     if independent_profile_text(&fields[0], 4)? != "CPF1"
-        || independent_profile_u64(&fields[1])? != 2
+        || independent_profile_u64(&fields[1])? != 1
         || independent_profile_u64(&fields[4])? != 0
     {
         return Err(BundleContractErrorV1::ProfileInvalid);
