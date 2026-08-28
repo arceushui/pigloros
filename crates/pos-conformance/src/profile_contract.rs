@@ -2811,15 +2811,15 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn profile_at_canonical_byte_limit() -> (ConformanceProfileV2, Vec<u8>) {
+    fn profile_at_canonical_byte_limit(
+    ) -> Result<(ConformanceProfileV2, Vec<u8>), ConformanceContractError> {
         let mut value = profile();
         value.fixtures[0].bounds.output_bytes = MAX_MEMBER_BYTES;
         value.evaluator_protocol.hard_caps.max_member_bytes = MAX_MEMBER_BYTES;
         for _ in 0..4 {
-            let encoded = encode_value(&encode_profile(&value, true))
-                .expect("canonical profile-limit fixture must encode");
+            let encoded = encode_value(&encode_profile(&value, true))?;
             if encoded.len() == MAX_PROFILE_BYTES {
-                return (value, encoded);
+                return Ok((value, encoded));
             }
             let current_len = match &value.fixtures[0].expected {
                 ExpectedResultV1::CanonicalBytes { bytes, .. } => bytes.len(),
@@ -2837,10 +2837,9 @@ mod tests {
             };
             value.profile_digest = value.digest();
         }
-        let encoded = encode_value(&encode_profile(&value, true))
-            .expect("canonical profile-limit fixture must encode");
+        let encoded = encode_value(&encode_profile(&value, true))?;
         assert_eq!(encoded.len(), MAX_PROFILE_BYTES);
-        (value, encoded)
+        Ok((value, encoded))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2977,7 +2976,7 @@ mod tests {
             .collect();
         refresh_report_counts(&mut evidence.report);
         evidence.report.report_digest = evidence.report.digest().unwrap_or([0; 32]);
-        refresh_stable_attestation(evidence);
+        assert_eq!(refresh_stable_attestation(evidence), Ok(()));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2992,7 +2991,7 @@ mod tests {
         evidence.report.provenance_digest = profile.provenance_digest;
         evidence.report.fixture_bundle_digest = fixture_bundle_digest(profile);
         evidence.report.report_digest = evidence.report.digest().unwrap_or([0; 32]);
-        refresh_stable_attestation(evidence);
+        assert_eq!(refresh_stable_attestation(evidence), Ok(()));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3042,18 +3041,20 @@ mod tests {
             },
         };
         refresh_stable_report(&mut evidence);
-        refresh_stable_attestation(&mut evidence);
+        assert_eq!(refresh_stable_attestation(&mut evidence), Ok(()));
         evidence
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn refresh_stable_attestation(evidence: &mut StableImplementationEvidenceV1) {
+    fn refresh_stable_attestation(
+        evidence: &mut StableImplementationEvidenceV1,
+    ) -> Result<(), ConformanceContractError> {
         let signing_key = trusted_root_signing_key();
         evidence.attestation.signer_public_key = signing_key.verifying_key().to_bytes();
         evidence.attestation.trust_root_digest = trusted_root_digest();
-        let payload = encode_value(&stable_attestation_payload(evidence))
-            .expect("stable-attestation fixture payload must encode");
+        let payload = encode_value(&stable_attestation_payload(evidence))?;
         evidence.attestation.signature = signing_key.sign(&payload).to_bytes();
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3072,7 +3073,7 @@ mod tests {
             case.verification_outcome = VerificationOutcomeV1::InvalidManifest;
         }
         refresh_stable_report(&mut evidence);
-        refresh_stable_attestation(&mut evidence);
+        assert_eq!(refresh_stable_attestation(&mut evidence), Ok(()));
         evidence
     }
 
@@ -3362,7 +3363,8 @@ mod tests {
     }
 
     #[test]
-    fn stable_validation_requires_external_root_membership_and_policy_identity() {
+    fn stable_validation_requires_external_root_membership_and_policy_identity(
+    ) -> Result<(), ConformanceContractError> {
         let candidate_profile = candidate();
         let stable = candidate_profile
             .transition_to(
@@ -3392,8 +3394,7 @@ mod tests {
             stable.validate_with_trust_policy(&untrusted),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
-        let bytes = encode_value(&encode_profile(&stable, true))
-            .expect("stable profile fixture must encode");
+        let bytes = encode_value(&encode_profile(&stable, true))?;
         assert!(matches!(
             encode_profile(&stable, true),
             Value::Array(fields) if fields.len() == 18
@@ -3424,7 +3425,7 @@ mod tests {
 
         let mut tampered = encode_profile(&candidate_profile, true);
         replace_profile_path(&mut tampered, &[17], Value::Bytes(digest(99).to_vec()));
-        let tampered_bytes = encode_value(&tampered).expect("tampered profile fixture must encode");
+        let tampered_bytes = encode_value(&tampered)?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor_with_trust_policy(&tampered_bytes, &policy,),
             Err(ConformanceContractError::FixtureDigestMismatch)
@@ -3436,6 +3437,7 @@ mod tests {
             invalid_candidate.validate_with_trust_policy(&policy),
             Err(ConformanceContractError::FixtureDigestMismatch)
         );
+        Ok(())
     }
 
     #[test]
@@ -3519,7 +3521,10 @@ mod tests {
         refresh_report_counts(&mut value.stable_evidence[0].report);
         value.stable_evidence[0].report.report_digest =
             value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
-        refresh_stable_attestation(&mut value.stable_evidence[0]);
+        assert_eq!(
+            refresh_stable_attestation(&mut value.stable_evidence[0]),
+            Ok(())
+        );
         assert_eq!(
             value.validate_with_trust_policy(&trusted_root_policy()),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
@@ -3530,7 +3535,10 @@ mod tests {
         refresh_report_counts(&mut value.stable_evidence[0].report);
         value.stable_evidence[0].report.report_digest =
             value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
-        refresh_stable_attestation(&mut value.stable_evidence[0]);
+        assert_eq!(
+            refresh_stable_attestation(&mut value.stable_evidence[0]),
+            Ok(())
+        );
         assert_eq!(
             value.validate_with_trust_policy(&trusted_root_policy()),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
@@ -3555,7 +3563,10 @@ mod tests {
         value.stable_evidence[0].report.replay_claim = ReplayClaimV1::StructuralOnly;
         value.stable_evidence[0].report.report_digest =
             value.stable_evidence[0].report.digest().unwrap_or([0; 32]);
-        refresh_stable_attestation(&mut value.stable_evidence[0]);
+        assert_eq!(
+            refresh_stable_attestation(&mut value.stable_evidence[0]),
+            Ok(())
+        );
         assert_eq!(
             value.validate_with_trust_policy(&trusted_root_policy()),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
@@ -3599,12 +3610,12 @@ mod tests {
     }
 
     #[test]
-    fn evaluator_request_round_trips_with_all_identity_bindings() {
+    fn evaluator_request_round_trips_with_all_identity_bindings(
+    ) -> Result<(), ConformanceContractError> {
         let request = request();
-        let bytes = request
-            .to_canonical_cbor()
-            .expect("evaluator request fixture must encode");
+        let bytes = request.to_canonical_cbor()?;
         assert_eq!(EvaluatorRequestV1::from_canonical_cbor(&bytes), Ok(request));
+        Ok(())
     }
 
     #[test]
@@ -3847,7 +3858,8 @@ mod tests {
     }
 
     #[test]
-    fn expected_typed_failure_and_classified_divergence_are_profile_data() {
+    fn expected_typed_failure_and_classified_divergence_are_profile_data(
+    ) -> Result<(), ConformanceContractError> {
         let mut typed_failure = profile();
         typed_failure.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
@@ -3856,9 +3868,7 @@ mod tests {
         typed_failure.fixtures[0].expected_verification_error =
             Some(SafeErrorCodeV1::ClosureIncomplete);
         typed_failure.profile_digest = typed_failure.digest();
-        let typed_bytes = typed_failure
-            .to_canonical_cbor()
-            .expect("typed-failure profile fixture must encode");
+        let typed_bytes = typed_failure.to_canonical_cbor()?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&typed_bytes),
             Ok(typed_failure)
@@ -3885,6 +3895,7 @@ mod tests {
             divergence.validate(),
             Err(ConformanceContractError::DivergenceClassificationMismatch)
         );
+        Ok(())
     }
 
     #[test]
@@ -3894,7 +3905,7 @@ mod tests {
         mismatched_report.report.cases[0].actual_digest = Some([99; 32]);
         mismatched_report.report.cases[0].first_coordinate = Some(vec![1]);
         refresh_report_counts(&mut mismatched_report.report);
-        refresh_stable_attestation(&mut mismatched_report);
+        assert_eq!(refresh_stable_attestation(&mut mismatched_report), Ok(()));
         assert_eq!(
             candidate().transition_to(
                 ProfileLifecycleV1::Stable,
@@ -3906,7 +3917,7 @@ mod tests {
         let mut missing_report_case = stable_evidence("alpha", 30);
         missing_report_case.report.cases.pop();
         refresh_report_counts(&mut missing_report_case.report);
-        refresh_stable_attestation(&mut missing_report_case);
+        assert_eq!(refresh_stable_attestation(&mut missing_report_case), Ok(()));
         assert_eq!(
             candidate().transition_to(
                 ProfileLifecycleV1::Stable,
@@ -3948,21 +3959,18 @@ mod tests {
     }
 
     #[test]
-    fn strict_decoder_rejects_trailing_unknown_and_forbidden_cbor_forms() {
+    fn strict_decoder_rejects_trailing_unknown_and_forbidden_cbor_forms(
+    ) -> Result<(), ConformanceContractError> {
         let mut wide_integer = profile();
         wide_integer.fixtures[0].bounds.cpu_fuel = u64::from(u32::MAX) + 1;
         wide_integer.profile_digest = wide_integer.digest();
-        let wide_integer_bytes = wide_integer
-            .to_canonical_cbor()
-            .expect("wide-integer profile fixture must encode");
+        let wide_integer_bytes = wide_integer.to_canonical_cbor()?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&wide_integer_bytes),
             Ok(wide_integer)
         );
 
-        let mut trailing = profile()
-            .to_canonical_cbor()
-            .expect("profile fixture must encode before trailing-byte mutation");
+        let mut trailing = profile().to_canonical_cbor()?;
         trailing.push(0);
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&trailing),
@@ -4009,19 +4017,19 @@ mod tests {
             encode_bounded(&oversized_value),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
+        Ok(())
     }
 
     #[test]
-    fn public_profile_codec_round_trips_nested_stable_report_variants() {
+    fn public_profile_codec_round_trips_nested_stable_report_variants(
+    ) -> Result<(), ConformanceContractError> {
         let mut typed = profile();
         typed.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
         typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
         typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
         typed.profile_digest = typed.digest();
-        let typed_bytes = typed
-            .to_canonical_cbor()
-            .expect("typed profile fixture must encode");
+        let typed_bytes = typed.to_canonical_cbor()?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&typed_bytes),
             Ok(typed)
@@ -4058,9 +4066,7 @@ mod tests {
         let stable = candidate
             .transition_to(ProfileLifecycleV1::Stable, vec![first, second])
             .unwrap_or_else(|_| profile());
-        let stable_bytes = stable
-            .to_canonical_cbor_with_trust_policy(&trusted_root_policy())
-            .expect("stable profile fixture must encode with its trust policy");
+        let stable_bytes = stable.to_canonical_cbor_with_trust_policy(&trusted_root_policy())?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
@@ -4069,18 +4075,25 @@ mod tests {
             ),
             Ok(stable)
         );
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn public_profile_and_request_codecs_reject_nested_malformed_records() {
         let reject_profile = |value: Value| {
-            let bytes = encode_value(&value).expect("malformed profile fixture must encode");
-            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
+            assert_eq!(
+                encode_value(&value)
+                    .map(|bytes| ConformanceProfileV2::from_canonical_cbor(&bytes).is_err()),
+                Ok(true)
+            );
         };
         let reject_request = |value: Value| {
-            let bytes = encode_value(&value).expect("malformed request fixture must encode");
-            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+            assert_eq!(
+                encode_value(&value)
+                    .map(|bytes| EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err()),
+                Ok(true)
+            );
         };
 
         if let Value::Array(fields) = encode_profile(&profile(), true) {
@@ -4150,10 +4163,13 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_seams_cover_closed_helper_errors() {
+    fn public_seams_cover_closed_helper_errors() -> Result<(), ConformanceContractError> {
         let reject_profile = |value: Value| {
-            let bytes = encode_value(&value).expect("malformed profile fixture must encode");
-            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
+            assert_eq!(
+                encode_value(&value)
+                    .map(|bytes| ConformanceProfileV2::from_canonical_cbor(&bytes).is_err()),
+                Ok(true)
+            );
         };
 
         let fields = encode_profile(&profile(), true)
@@ -4195,8 +4211,7 @@ mod tests {
         }
         reject_profile(Value::Array(wrong_typed_error));
 
-        let mut trailing =
-            encode_value(&Value::Array(fields)).expect("trailing-byte profile fixture must encode");
+        let mut trailing = encode_value(&Value::Array(fields))?;
         trailing.push(0);
         assert!(ConformanceProfileV2::from_canonical_cbor(&trailing).is_err());
 
@@ -4215,8 +4230,7 @@ mod tests {
         if let Some(identity) = fields[7].as_array_mut() {
             identity[5] = Value::Null;
         }
-        let bytes =
-            encode_value(&Value::Array(fields)).expect("malformed request fixture must encode");
+        let bytes = encode_value(&Value::Array(fields))?;
         assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
 
         let candidate = profile()
@@ -4237,6 +4251,7 @@ mod tests {
             candidate.transition_to(ProfileLifecycleV1::Stable, vec![first, second]),
             Err(ConformanceContractError::IndependenceEvidenceMissing)
         );
+        Ok(())
     }
 
     #[test]
@@ -4321,16 +4336,15 @@ mod tests {
     }
 
     #[test]
-    fn public_profile_decoder_round_trips_expected_variants() {
+    fn public_profile_decoder_round_trips_expected_variants() -> Result<(), ConformanceContractError>
+    {
         let mut typed = profile();
         typed.fixtures[0].expected =
             ExpectedResultV1::TypedFailure(SafeErrorCodeV1::ClosureIncomplete);
         typed.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::InvalidManifest;
         typed.fixtures[0].expected_verification_error = Some(SafeErrorCodeV1::ClosureIncomplete);
         typed.profile_digest = typed.digest();
-        let typed_bytes = typed
-            .to_canonical_cbor()
-            .expect("typed profile fixture must encode");
+        let typed_bytes = typed.to_canonical_cbor()?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&typed_bytes),
             Ok(typed)
@@ -4348,17 +4362,17 @@ mod tests {
         };
         divergent.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
         divergent.profile_digest = divergent.digest();
-        let divergent_bytes = divergent
-            .to_canonical_cbor()
-            .expect("divergent profile fixture must encode");
+        let divergent_bytes = divergent.to_canonical_cbor()?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&divergent_bytes),
             Ok(divergent)
         );
+        Ok(())
     }
 
     #[test]
-    fn public_stable_profile_decoder_round_trips_sidecar_evidence() {
+    fn public_stable_profile_decoder_round_trips_sidecar_evidence(
+    ) -> Result<(), ConformanceContractError> {
         let policy = trusted_root_policy();
         let value = profile();
         let candidate_result = value.transition_to(ProfileLifecycleV1::Candidate, vec![]);
@@ -4374,8 +4388,7 @@ mod tests {
         let stable = stable_result.unwrap_or_else(|_| value.clone());
         let stable_bytes_result = stable.to_canonical_cbor_with_trust_policy(&policy);
         assert!(stable_bytes_result.is_ok());
-        let stable_bytes =
-            stable_bytes_result.expect("stable profile fixture must encode with its trust policy");
+        let stable_bytes = stable_bytes_result?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
@@ -4384,6 +4397,7 @@ mod tests {
             ),
             Ok(stable)
         );
+        Ok(())
     }
 
     #[test]
@@ -4613,8 +4627,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn cpf2_public_seams_cover_remaining_identity_order_and_stable_result_variants() {
-        assert_rejects_mutated_profile_digest();
+    fn cpf2_public_seams_cover_remaining_identity_order_and_stable_result_variants(
+    ) -> Result<(), ConformanceContractError> {
+        assert_rejects_mutated_profile_digest()?;
 
         let candidate = profile()
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
@@ -4658,18 +4673,19 @@ mod tests {
         );
 
         assert_stable_typed_and_divergent_result_variants();
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn assert_rejects_mutated_profile_digest() {
+    fn assert_rejects_mutated_profile_digest() -> Result<(), ConformanceContractError> {
         let mut wrong_digest = profile();
         wrong_digest.profile_digest = digest(99);
-        let bytes = encode_value(&encode_profile(&wrong_digest, true))
-            .expect("wrong-digest profile fixture must encode");
+        let bytes = encode_value(&encode_profile(&wrong_digest, true))?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&bytes),
             Err(ConformanceContractError::FixtureDigestMismatch)
         );
+        Ok(())
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -4739,12 +4755,12 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_decoders_reject_wrong_closed_record_identities() {
+    fn public_decoders_reject_wrong_closed_record_identities(
+    ) -> Result<(), ConformanceContractError> {
         let value = profile();
         if let Value::Array(mut fields) = encode_profile(&value, true) {
             fields[0] = text("CPF9");
-            let bytes = encode_value(&Value::Array(fields))
-                .expect("unsupported-profile fixture must encode");
+            let bytes = encode_value(&Value::Array(fields))?;
             assert_eq!(
                 ConformanceProfileV2::from_canonical_cbor(&bytes),
                 Err(ConformanceContractError::UnsupportedVersion)
@@ -4754,8 +4770,7 @@ mod tests {
             fields.remove(6);
             fields[0] = text("CPF1");
             fields[1] = uint(1);
-            let bytes =
-                encode_value(&Value::Array(fields)).expect("legacy-profile fixture must encode");
+            let bytes = encode_value(&Value::Array(fields))?;
             assert_eq!(
                 ConformanceProfileV2::from_canonical_cbor(&bytes),
                 Err(ConformanceContractError::UnsupportedVersion)
@@ -4764,25 +4779,32 @@ mod tests {
         let request = request();
         if let Value::Array(mut fields) = encode_request(&request, true) {
             fields[0] = text("EVR9");
-            let bytes = encode_value(&Value::Array(fields))
-                .expect("unsupported-request fixture must encode");
+            let bytes = encode_value(&Value::Array(fields))?;
             assert_eq!(
                 EvaluatorRequestV1::from_canonical_cbor(&bytes),
                 Err(ConformanceContractError::UnsupportedVersion)
             );
         }
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_profile_and_request_codecs_reject_malformed_fields() {
+    fn public_profile_and_request_codecs_reject_malformed_fields(
+    ) -> Result<(), ConformanceContractError> {
         let reject_profile = |value: Value| {
-            let bytes = encode_value(&value).expect("malformed profile fixture must encode");
-            assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_err());
+            assert_eq!(
+                encode_value(&value)
+                    .map(|bytes| ConformanceProfileV2::from_canonical_cbor(&bytes).is_err()),
+                Ok(true)
+            );
         };
         let reject_request = |value: Value| {
-            let bytes = encode_value(&value).expect("malformed request fixture must encode");
-            assert!(EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err());
+            assert_eq!(
+                encode_value(&value)
+                    .map(|bytes| EvaluatorRequestV1::from_canonical_cbor(&bytes).is_err()),
+                Ok(true)
+            );
         };
 
         let profile_value = encode_profile(&profile(), true);
@@ -4814,9 +4836,7 @@ mod tests {
             fixture_profile.fixtures[0].expected_verification_error =
                 Some(SafeErrorCodeV1::ClosureIncomplete);
             fixture_profile.profile_digest = fixture_profile.digest();
-            let bytes = fixture_profile
-                .to_canonical_cbor()
-                .expect("typed-failure fixture profile must encode");
+            let bytes = fixture_profile.to_canonical_cbor()?;
             assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_ok());
 
             fixture_profile.fixtures[0].expected = ExpectedResultV1::AllowedDivergence {
@@ -4831,9 +4851,7 @@ mod tests {
                 VerificationOutcomeV1::Diverged;
             fixture_profile.fixtures[0].expected_verification_error = None;
             fixture_profile.profile_digest = fixture_profile.digest();
-            let bytes = fixture_profile
-                .to_canonical_cbor()
-                .expect("divergence fixture profile must encode");
+            let bytes = fixture_profile.to_canonical_cbor()?;
             assert!(ConformanceProfileV2::from_canonical_cbor(&bytes).is_ok());
         }
 
@@ -4853,9 +4871,7 @@ mod tests {
         }
         reject_profile(malformed);
 
-        let canonical = profile()
-            .to_canonical_cbor()
-            .expect("canonical profile fixture must encode");
+        let canonical = profile().to_canonical_cbor()?;
         let mut trailing = canonical.clone();
         trailing.push(0);
         assert!(ConformanceProfileV2::from_canonical_cbor(&trailing).is_err());
@@ -4864,11 +4880,13 @@ mod tests {
             noncanonical.splice(index..=index, [0x18, 1]);
         }
         assert!(ConformanceProfileV2::from_canonical_cbor(&noncanonical).is_err());
+        Ok(())
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_lifecycle_and_divergence_seams_reject_remaining_closed_cases() {
+    fn public_lifecycle_and_divergence_seams_reject_remaining_closed_cases(
+    ) -> Result<(), ConformanceContractError> {
         let candidate = profile()
             .transition_to(ProfileLifecycleV1::Candidate, vec![])
             .unwrap_or_else(|_| profile());
@@ -4885,9 +4903,7 @@ mod tests {
                 vec![stable_evidence("alpha", 30), stable_evidence("beta", 40)],
             )
             .unwrap_or_else(|_| profile());
-        let stable_bytes = stable
-            .to_canonical_cbor_with_trust_policy(&trusted_root_policy())
-            .expect("stable profile fixture must encode with its trust policy");
+        let stable_bytes = stable.to_canonical_cbor_with_trust_policy(&trusted_root_policy())?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor_with_stable_evidence(
                 &stable_bytes,
@@ -4942,13 +4958,12 @@ mod tests {
         };
         divergent.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
         divergent.profile_digest = divergent.digest();
-        let bytes = divergent
-            .to_canonical_cbor()
-            .expect("divergent profile fixture must encode");
+        let bytes = divergent.to_canonical_cbor()?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&bytes),
             Ok(divergent)
         );
+        Ok(())
     }
 
     #[test]
@@ -5209,7 +5224,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_profile_and_encoding_boundaries_are_inclusive() {
+    fn public_profile_and_encoding_boundaries_are_inclusive() -> Result<(), ConformanceContractError>
+    {
         let caps = original_hard_caps();
         assert_eq!(caps.validate_compression_expansion(7, 700), Ok(()));
         assert_eq!(
@@ -5219,18 +5235,14 @@ mod tests {
 
         let mut at_profile_limit = profile();
         for _ in 0..8 {
-            let encoded_len = encode_value(&encode_profile(&at_profile_limit, true))
-                .expect("profile-limit fixture must encode")
-                .len();
+            let encoded_len = encode_value(&encode_profile(&at_profile_limit, true))?.len();
             at_profile_limit
                 .evaluator_protocol
                 .hard_caps
                 .max_profile_bytes = u64::try_from(encoded_len).unwrap_or(u64::MAX);
             at_profile_limit.profile_digest = at_profile_limit.digest();
         }
-        let encoded_len = encode_value(&encode_profile(&at_profile_limit, true))
-            .expect("profile-limit fixture must encode")
-            .len();
+        let encoded_len = encode_value(&encode_profile(&at_profile_limit, true))?.len();
         at_profile_limit
             .evaluator_protocol
             .hard_caps
@@ -5260,6 +5272,7 @@ mod tests {
             encode_bounded(&over_bytes),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
+        Ok(())
     }
 
     #[test]
@@ -5300,7 +5313,7 @@ mod tests {
         let mut wrong_subject = first.clone();
         wrong_subject.report.subject_artifact_digest = [99; 32];
         wrong_subject.report.report_digest = wrong_subject.report.digest().unwrap_or([0; 32]);
-        refresh_stable_attestation(&mut wrong_subject);
+        assert_eq!(refresh_stable_attestation(&mut wrong_subject), Ok(()));
         let mut pair_profile = profile_value.clone();
         pair_profile.stable_evidence = vec![wrong_subject.clone(), second.clone()];
         assert_eq!(
@@ -5818,7 +5831,7 @@ mod tests {
         for case in &mut evidence.case_outcomes {
             case.first_coordinate = Some(vec![b'x'; 128]);
         }
-        refresh_stable_attestation(&mut evidence);
+        assert_eq!(refresh_stable_attestation(&mut evidence), Ok(()));
         assert_eq!(
             validate_stable_implementation(&evidence, &constrained, None),
             Err(ConformanceContractError::FieldOutOfBounds)
@@ -6965,7 +6978,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_profile_decoder_reaches_cbor_length_and_depth_guards() {
+    fn public_profile_decoder_reaches_cbor_length_and_depth_guards(
+    ) -> Result<(), ConformanceContractError> {
         // A valid, multi-byte CBOR length exercises the byte-folding path.
         let mut value = profile();
         let bytes = vec![b'x'; 256];
@@ -6976,9 +6990,7 @@ mod tests {
         value.fixtures[0].bounds.output_bytes = 256;
         value.fixtures[0].inputs[0].size_bytes = 256;
         value.profile_digest = value.digest();
-        let encoded = value
-            .to_canonical_cbor()
-            .expect("profile decoder fixture must encode");
+        let encoded = value.to_canonical_cbor()?;
         assert_eq!(
             ConformanceProfileV2::from_canonical_cbor(&encoded),
             Ok(value)
@@ -7010,6 +7022,7 @@ mod tests {
         let mut exact_fixture_count = vec![0x9a, 0, 1, 0, 0];
         exact_fixture_count.extend(std::iter::repeat_n(0xf6, MAX_FIXTURES));
         assert_eq!(preflight_cbor(&exact_fixture_count), Ok(()));
+        Ok(())
     }
 
     #[test]
