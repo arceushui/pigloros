@@ -2136,11 +2136,63 @@ mod tests {
         );
 
         let replacement = AtomicPublication::prepare(&destination)?;
-        assert_eq!(
+        assert!(matches!(
             replacement.publish(),
             Err(MaterializationError::DestinationExists)
-        );
+        ));
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_publication_rejects_untrusted_paths_and_maps_kernel_errors(
+    ) -> Result<(), Box<dyn Error>> {
+        assert!(output_parent_and_name(Path::new("")).is_err());
+        assert!(relative_components(Path::new("")).is_err());
+        assert!(relative_components(Path::new("../escape")).is_err());
+        assert!(relative_components(Path::new("/absolute")).is_err());
+        assert!(relative_components(Path::new("./current")).is_err());
+
+        let components = relative_components(Path::new("nested/value.txt"))?;
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0].to_str()?, "nested");
+        assert_eq!(components[1].to_str()?, "value.txt");
+        let (_, output_name) = output_parent_and_name(Path::new("output"))?;
+        assert_eq!(output_name.to_str()?, "output");
+
+        let staging_name = random_staging_name()?;
+        let staging_name = staging_name.to_str()?;
+        assert!(staging_name.starts_with(".pigloros-conformance-staging-"));
+        assert_eq!(
+            staging_name.len(),
+            ".pigloros-conformance-staging-".len() + 32
+        );
+
+        assert_eq!(
+            map_open_error(Errno::LOOP).to_string(),
+            "symbolic link detected in output path"
+        );
+        assert_eq!(
+            map_open_error(Errno::NOSYS).to_string(),
+            "atomic publication is unsupported"
+        );
+        assert_eq!(
+            map_open_error(Errno::NOTDIR).to_string(),
+            "untrusted output directory"
+        );
+        assert_eq!(
+            map_publish_error(Errno::EXIST).to_string(),
+            "destination already exists"
+        );
+        assert_eq!(
+            map_publish_error(Errno::INVAL).to_string(),
+            "atomic publication is unsupported"
+        );
+        assert_eq!(
+            map_publish_error(Errno::NOTDIR).to_string(),
+            "untrusted output directory"
+        );
         Ok(())
     }
 }
