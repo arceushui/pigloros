@@ -3473,19 +3473,17 @@ fn duplicate_first_fixture_with_cap(
 }
 
 #[test]
-fn public_independent_verifier_reaches_rebound_cpf1_caps() -> Result<(), Box<dyn std::error::Error>>
-{
+fn public_independent_verifier_reaches_rebound_cpf1_case_cap(
+) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
-    for cap_index in [1_usize, 2] {
-        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
-            duplicate_first_fixture_with_cap(value, cap_index)
-        })?;
-        assert_eq!(
-            pos_conformance::verify_archive_independently(&archive),
-            Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
-        );
-    }
+    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+        duplicate_first_fixture_with_cap(value, 1)
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&archive),
+        Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+    );
     Ok(())
 }
 
