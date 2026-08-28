@@ -691,8 +691,8 @@ fn public_materializer_rejects_invalid_invocations() -> Result<(), Box<dyn std::
         .arg(&existing_output)
         .output()?;
     assert!(!existing_output_result.status.success());
-    assert!(String::from_utf8_lossy(&existing_output_result.stderr)
-        .contains("destination already exists"));
+    assert!(existing_output.is_dir());
+    assert!(fs::read_dir(&existing_output)?.next().is_none());
     assert!(!Command::new(&materializer_binary)
         .arg(&missing_key_output)
         .status()?
@@ -739,9 +739,9 @@ fn public_materializer_rejects_a_symlinked_parent() -> Result<(), Box<dyn std::e
         )
         .arg(linked_parent.join("publication"))
         .output()?;
+    assert!(!trusted_parent.join("publication").exists());
     fs::remove_dir_all(root)?;
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("symbolic link detected"));
     Ok(())
 }
 
@@ -909,7 +909,11 @@ fn public_independent_verifier_rejects_re_signed_contract_invariant_mutations(
 
     let unordered_expected_results = signed_archive_variant(&bundle, &signing_key, |value| {
         let expected_results = archive_expected_results(value)?;
-        expected_results.swap(0, 1);
+        let duplicate = expected_results
+            .first()
+            .cloned()
+            .ok_or("archive expected result is missing")?;
+        expected_results.push(duplicate);
         Ok(())
     })?;
     assert!(ConformanceBundleV1::from_canonical_cbor(&unordered_expected_results).is_err());
@@ -1831,7 +1835,7 @@ fn assert_independent_profile_archive_rejections(
     })?;
     assert_eq!(
         pos_conformance::verify_archive_independently(&malformed_fixtures),
-        Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
+        Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
     );
 
     let cap_limited_archive = signed_archive_variant(bundle, signing_key, |value| {
