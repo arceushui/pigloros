@@ -2195,4 +2195,36 @@ mod tests {
         );
         Ok(())
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn materialized_tree_is_published_once() -> Result<(), Box<dyn Error>> {
+        let unique = format!(
+            "pigloros-materialized-tree-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root)?;
+        let destination = root.join("published");
+        let files = [MaterializedFile {
+            relative_path: "evidence/result.bin".to_owned(),
+            bytes: b"published once".to_vec(),
+            archive: None,
+        }];
+
+        publish_materialized_tree(&destination, &files)?;
+        assert_eq!(
+            std::fs::read(destination.join("evidence/result.bin"))?,
+            b"published once"
+        );
+        assert!(matches!(
+            publish_materialized_tree(&destination, &files),
+            Err(MaterializationError::DestinationExists)
+        ));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
