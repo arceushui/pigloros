@@ -1711,19 +1711,26 @@ fn independent_verify_cpf1_expected_bounds(
     bounds: &Value,
     caps: &IndependentCpf1Caps,
 ) -> Result<(), BundleContractErrorV1> {
-    let expected = independent_profile_array(expected, 5)?;
-    if independent_profile_u64(&expected[0])? != 0 {
-        return Ok(());
-    }
-    let bytes = independent_profile_bytes(&expected[1])?;
-    let bounds = independent_profile_array(bounds, 8)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > independent_profile_u64(&bounds[3])?
-        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > caps.member_bytes
-    {
-        Err(BundleContractErrorV1::ProfileInvalid)
-    } else {
-        Ok(())
-    }
+    independent_profile_array(expected, 5).and_then(|expected| {
+        independent_profile_u64(&expected[0]).and_then(|kind| {
+            if kind == 0 {
+                independent_profile_bytes(&expected[1]).and_then(|bytes| {
+                    independent_profile_array(bounds, 8).and_then(|bounds| {
+                        independent_profile_u64(&bounds[3]).and_then(|maximum| {
+                            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                            if length > maximum || length > caps.member_bytes {
+                                Err(BundleContractErrorV1::ProfileInvalid)
+                            } else {
+                                Ok(())
+                            }
+                        })
+                    })
+                })
+            } else {
+                Ok(())
+            }
+        })
+    })
 }
 
 fn independent_verify_cpf1_bounds(value: &Value) -> Result<(), BundleContractErrorV1> {
