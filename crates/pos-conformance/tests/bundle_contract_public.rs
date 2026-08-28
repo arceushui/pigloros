@@ -1124,7 +1124,7 @@ fn cpf1_header_and_range_mutations() -> Vec<ArchiveMutation> {
         Box::new(|value| {
             mutate_profile(value, |fields| fields[0] = Value::Text("CPFX".to_owned()))
         }),
-        Box::new(|value| mutate_profile(value, |fields| fields[1] = Value::Integer(1_u64.into()))),
+        Box::new(|value| mutate_profile(value, |fields| fields[1] = Value::Integer(2_u64.into()))),
         Box::new(|value| mutate_profile(value, |fields| fields[4] = Value::Integer(1_u64.into()))),
         Box::new(|value| mutate_profile(value, |fields| fields[13] = Value::Bytes(vec![0; 32]))),
         Box::new(|value| mutate_profile(value, |fields| fields[14] = Value::Bytes(vec![0; 32]))),
@@ -2469,7 +2469,7 @@ fn assert_archive_profile_rejections(
             mutate_profile(value, |fields| fields[0] = Value::Text("wrong".to_owned()))
         }) as Box<dyn FnOnce(&mut Value) -> Result<(), Box<dyn std::error::Error>>>,
         Box::new(|value: &mut Value| {
-            mutate_profile(value, |fields| fields[1] = Value::Integer(1_u64.into()))
+            mutate_profile(value, |fields| fields[1] = Value::Integer(2_u64.into()))
         }),
         Box::new(|value: &mut Value| {
             mutate_profile(value, |fields| fields[4] = Value::Integer(1_u64.into()))
