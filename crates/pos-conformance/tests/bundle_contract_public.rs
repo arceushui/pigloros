@@ -1565,6 +1565,7 @@ fn cpf1_fixture_result_mutations() -> Vec<ArchiveMutation> {
     ]
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn cpf1_malformed_fixture_value_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
