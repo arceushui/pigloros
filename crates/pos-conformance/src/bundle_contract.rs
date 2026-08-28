@@ -1670,26 +1670,47 @@ fn independent_verify_cpf1_fixture_outcome(
     outcome: &Value,
     error: &Value,
 ) -> Result<(), BundleContractErrorV1> {
-    let expected_fields = independent_profile_array(expected, 5)?;
-    let expected_kind = independent_profile_u64(&expected_fields[0])?;
-    let outcome = independent_profile_outcome(outcome)?;
-    let error = independent_profile_optional_safe_error(error)?;
-    let valid = match expected_kind {
-        0 => (outcome == 0 && error.is_none()) || (outcome == 3 && error == Some(12)),
+    independent_profile_array(expected, 5).and_then(|expected_fields| {
+        independent_profile_u64(&expected_fields[0]).and_then(|expected_kind| {
+            independent_profile_outcome(outcome).and_then(|outcome| {
+                independent_profile_optional_safe_error(error).and_then(|error| {
+                    independent_outcome_matches_expected(
+                        expected_fields,
+                        expected_kind,
+                        outcome,
+                        error,
+                    )
+                    .and_then(|valid| {
+                        if valid {
+                            Ok(())
+                        } else {
+                            Err(BundleContractErrorV1::ProfileInvalid)
+                        }
+                    })
+                })
+            })
+        })
+    })
+}
+
+fn independent_outcome_matches_expected(
+    expected_fields: &[Value],
+    expected_kind: u64,
+    outcome: u64,
+    error: Option<u64>,
+) -> Result<bool, BundleContractErrorV1> {
+    match expected_kind {
+        0 => Ok((outcome == 0 && error.is_none()) || (outcome == 3 && error == Some(12))),
         1 => match (outcome, error) {
-            (2 | 4 | 5, Some(error)) => {
-                error == independent_profile_safe_error(&expected_fields[3])?
+            (2 | 4 | 5, Some(error)) => independent_profile_safe_error(&expected_fields[3])
+                .map(|expected| error == expected),
+            (3, Some(12)) => {
+                independent_profile_safe_error(&expected_fields[3]).map(|expected| expected == 12)
             }
-            (3, Some(12)) => independent_profile_safe_error(&expected_fields[3])? == 12,
-            _ => false,
+            _ => Ok(false),
         },
-        2 => outcome == 1 && error.is_none(),
-        _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(BundleContractErrorV1::ProfileInvalid)
+        2 => Ok(outcome == 1 && error.is_none()),
+        _ => Ok(false),
     }
 }
 
