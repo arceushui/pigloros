@@ -1256,7 +1256,7 @@ fn independent_validate_execution_matrix(matrix: &JsonValue) -> Result<(), Bundl
     // verification has an independent authority for the accepted Draft matrix.
     // JSON-value equality retains the complete contract while accepting harmless
     // JSON whitespace and member-order differences.
-    let expected = serde_json::from_slice(include_bytes!(
+    let expected: JsonValue = serde_json::from_slice(include_bytes!(
         "../../../fixtures/conformance/matrix/execution-matrix.json"
     ))
     .map_err(|_| BundleContractErrorV1::MemberDigestMismatch)?;
