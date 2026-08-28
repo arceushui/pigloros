@@ -109,22 +109,26 @@ if (( ${#inputs[@]} != 49 || ${#expected[@]} != 49 )); then
 fi
 
 profile_root="${fixture_root}/profiles"
-profile_layers=(
-  artifact-integrity
-  replay-conformance
-  knowledge-non-interference
-  gateway-client-conformance
-  plugin-conformance
-  metric-conformance
-  empirical-evaluation
+mapfile -t profile_layers < <(
+  find "${profile_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort
 )
-for index in "${!profile_layers[@]}"; do
-  layer="${profile_layers[${index}]}"
+if (( ${#profile_layers[@]} != 7 )); then
+  echo "expected exactly seven public profile manifests" >&2
+  exit 1
+fi
+declare -A profile_wire_codes=()
+for layer in "${profile_layers[@]}"; do
   profile="${profile_root}/${layer}/profile.json"
   [[ -s "${profile}" ]] || {
     echo "missing public profile manifest for ${layer}" >&2
     exit 1
   }
+  wire_code="$(jq -r '.wire_code' "${profile}")"
+  [[ "${wire_code}" =~ ^[0-6]$ ]] && [[ -z "${profile_wire_codes[${wire_code}]:-}" ]] || {
+    echo "invalid or duplicate public profile wire code for ${layer}" >&2
+    exit 1
+  }
+  profile_wire_codes["${wire_code}"]=1
   jq -e \
     --arg layer "${layer}" \
     --arg authority "expected-authority/inventory.json" \
@@ -132,7 +136,7 @@ for index in "${!profile_layers[@]}"; do
     --arg matrix "matrix/execution-matrix.json" \
     --arg matrix_lifecycle "${matrix_lifecycle}" \
     --arg matrix_blake3 "${matrix_blake3_digest}" \
-    --argjson wire_code "${index}" \
+    --argjson wire_code "${wire_code}" \
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
     '.claim_layer == $layer and
       .wire_code == $wire_code and .fixture_root == $layer and
@@ -200,6 +204,12 @@ for index in "${!profile_layers[@]}"; do
       exit 1
     }
   done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .input, .expected] | @tsv' "${profile}")
+done
+for wire_code in {0..6}; do
+  [[ -n "${profile_wire_codes[${wire_code}]:-}" ]] || {
+    echo "missing public profile wire code ${wire_code}" >&2
+    exit 1
+  }
 done
 
 mapfile -t declared_inputs < <(
