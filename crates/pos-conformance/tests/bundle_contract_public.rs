@@ -233,19 +233,7 @@ fn mutate_archive_matrix(
     value: &mut Value,
     mutate: impl FnOnce(&mut JsonValue),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let member = archive_member(value, EXECUTION_MATRIX_MEMBER_PATH)?;
-    let matrix_bytes = match member.get(1) {
-        Some(Value::Bytes(bytes)) => bytes.clone(),
-        _ => return Err("execution matrix bytes are missing".into()),
-    };
-    let mut matrix: JsonValue = serde_json::from_slice(&matrix_bytes)?;
-    mutate(&mut matrix);
-    let matrix_bytes = serde_json::to_vec(&matrix)?;
-    let matrix_digest = *blake3::hash(&matrix_bytes).as_bytes();
-    member[1] = Value::Bytes(matrix_bytes.clone());
-    let descriptor = archive_descriptor(value, EXECUTION_MATRIX_MEMBER_PATH)?;
-    descriptor[1] = Value::Integer(u64::try_from(matrix_bytes.len())?.into());
-    descriptor[2] = Value::Bytes(matrix_digest.to_vec());
+    let matrix_digest = mutate_archive_json_member(value, EXECUTION_MATRIX_MEMBER_PATH, mutate)?;
 
     let profile_member = archive_member(value, "profile/CPF2.cbor")?;
     let profile_bytes = match profile_member.get(1) {
@@ -262,6 +250,27 @@ fn mutate_archive_matrix(
     descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
     archive_array(value, 2)?[3] = Value::Bytes(profile.profile_digest.to_vec());
     Ok(())
+}
+
+fn mutate_archive_json_member(
+    value: &mut Value,
+    path: &str,
+    mutate: impl FnOnce(&mut JsonValue),
+) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let member = archive_member(value, path)?;
+    let matrix_bytes = match member.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("JSON authority bytes are missing".into()),
+    };
+    let mut matrix: JsonValue = serde_json::from_slice(&matrix_bytes)?;
+    mutate(&mut matrix);
+    let matrix_bytes = serde_json::to_vec(&matrix)?;
+    let matrix_digest = *blake3::hash(&matrix_bytes).as_bytes();
+    member[1] = Value::Bytes(matrix_bytes.clone());
+    let descriptor = archive_descriptor(value, path)?;
+    descriptor[1] = Value::Integer(u64::try_from(matrix_bytes.len())?.into());
+    descriptor[2] = Value::Bytes(matrix_digest.to_vec());
+    Ok(matrix_digest)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1567,6 +1576,34 @@ fn public_independent_verifier_rejects_each_matrix_invariant(
     for mutate in matrix_cases {
         let archive = signed_archive_variant(&bundle, &signing_key, |value| {
             mutate_archive_matrix(value, mutate)
+        })?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_authority_inventory_variants(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let mutations: Vec<JsonMutation> = vec![
+        Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
+        Box::new(|value| value["digest_algorithm"] = JsonValue::String("SHA-256".to_owned())),
+        Box::new(|value| value["lifecycle"] = JsonValue::String("Candidate".to_owned())),
+        Box::new(|value| value["entries"] = JsonValue::Array(Vec::new())),
+        Box::new(|value| {
+            value["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned());
+        }),
+    ];
+    for mutate in mutations {
+        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+            let _ = mutate_archive_json_member(value, AUTHORITY_INVENTORY_MEMBER_PATH, mutate)?;
+            Ok(())
         })?;
         assert_eq!(
             pos_conformance::verify_archive_independently(&archive),
