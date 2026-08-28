@@ -2811,15 +2811,6 @@ pub mod strict_codec {
         })
     }
 
-    fn plugin_len(value: &Value) -> Result<usize, StrictCborError> {
-        match value {
-            Value::Array(values) => Ok(values.len()),
-            _ => Err(StrictCborError::InvalidField {
-                field: "plugin_versions".to_owned(),
-            }),
-        }
-    }
-
     fn encode_event(event: &AuthoritativeEventV1) -> Value {
         Value::Array(vec![
             uint(event.seq),
@@ -4154,7 +4145,6 @@ pub mod strict_codec {
                     Value::Array(vec![Value::Array(vec![Value::Map(Vec::new()), text("1")])]),
                 );
                 consume(decode_manifest(&invalid_plugin_name));
-                consume(plugin_len(&Value::Null));
                 let bad_manifest = replace_field(&manifest, 0, uint(u64::MAX));
                 consume(decode_manifest(&bad_manifest));
 
