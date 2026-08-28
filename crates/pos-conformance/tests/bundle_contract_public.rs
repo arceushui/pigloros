@@ -1070,7 +1070,7 @@ fn public_independent_verifier_rejects_cpf1_semantic_variants(
 }
 
 fn cpf1_root_semantic_mutations() -> Vec<ArchiveMutation> {
-    vec![
+    let mut mutations: Vec<ArchiveMutation> = vec![
         Box::new(|value| {
             mutate_profile(value, |fields| {
                 fields[2] = Value::Text("profile#matrix=old".to_owned());
@@ -1128,7 +1128,19 @@ fn cpf1_root_semantic_mutations() -> Vec<ArchiveMutation> {
                 }
             })
         }),
-    ]
+    ];
+    for version in [
+        "1.2.3+",
+        "1.2.3-",
+        "1.2.3-01",
+        "1.2.3-alpha..1",
+        "1.2.3-alpha_1",
+    ] {
+        mutations.push(Box::new(move |value| {
+            mutate_profile(value, |fields| fields[3] = Value::Text(version.to_owned()))
+        }));
+    }
+    mutations
 }
 
 fn cpf1_header_and_range_mutations() -> Vec<ArchiveMutation> {
@@ -1781,6 +1793,7 @@ fn public_independent_verifier_rejects_secret_markers_and_invalid_caps(
         b"github_pat_0123456789abcdefghij".as_slice(),
         b"glpat-0123456789abcdefghij".as_slice(),
         b"xoxb-0123456789abcdefghij".as_slice(),
+        b"xoxp-0123456789abcdefghij".as_slice(),
         b"sk_live_0123456789abcdef".as_slice(),
         b"sk_test_0123456789abcdef".as_slice(),
         b"AIza0123456789abcdefghijklmnopqrst".as_slice(),
@@ -1824,10 +1837,12 @@ fn archive_with_changed_expected(
     signing_key: &SigningKey,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     signed_archive_variant(bundle, signing_key, |value| {
-        let expected = archive_expected(value)?;
-        let path = match &expected[4] {
-            Value::Text(path) => path.clone(),
-            _ => return Err("expected path is not text".into()),
+        let path = {
+            let expected = archive_expected(value)?;
+            match &expected[4] {
+                Value::Text(path) => path.clone(),
+                _ => return Err("expected path is not text".into()),
+            }
         };
         let member = archive_member(value, &path)?;
         let (changed_len, changed_digest) = {
@@ -1839,7 +1854,8 @@ fn archive_with_changed_expected(
         };
         let descriptor = archive_descriptor(value, &path)?;
         descriptor[1] = Value::Integer((changed_len as u64).into());
-        descriptor[2] = Value::Bytes(changed_digest);
+        descriptor[2] = Value::Bytes(changed_digest.clone());
+        archive_expected(value)?[5] = Value::Bytes(changed_digest);
         Ok(())
     })
 }
@@ -3374,11 +3390,45 @@ fn reject_malformed_matrix_records(
         Box::new(|value| value["rows"][0]["variants"] = JsonValue::Array(Vec::new())),
         Box::new(|value| value["rows"][0]["modes"] = JsonValue::Array(Vec::new())),
         Box::new(|value| value["rows"][0]["executed_case_count"] = JsonValue::Number(1_u64.into())),
+        Box::new(|value| {
+            let _ = value["rows"].as_array_mut().map(Vec::pop);
+        }),
         Box::new(|value| value["cases"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["cases"][0]["variant"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["cases"][0]["mode"] = JsonValue::String("wrong".to_owned())),
         Box::new(|value| value["cases"][0]["case_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| {
+            let _ = value["cases"].as_array_mut().map(Vec::pop);
+        }),
+        Box::new(|value| value["cases"][0]["executed"] = JsonValue::Bool(true)),
+        Box::new(|value| {
+            value["cases"][0]["expected_result_digest"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["cases"][0]["authority_fixture_id"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["cases"][0]["authority_result_digest"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["cases"][0]["expected_result"] = JsonValue::String("wrong".to_owned());
+        }),
         Box::new(|value| value["equality_predicates"] = JsonValue::Null),
+        Box::new(|value| {
+            let _ = value["equality_predicates"].as_array_mut().map(Vec::pop);
+        }),
+        Box::new(|value| {
+            value["equality_predicates"][0]["fixture_id"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["equality_predicates"][0]["AuthEq"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["equality_predicates"][0]["PublicEq"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["equality_predicates"][0]["OpEq"] = JsonValue::String("wrong".to_owned());
+        }),
     ];
     for (index, mutate) in matrix_cases.into_iter().enumerate() {
         assert_json_member_rejected(
