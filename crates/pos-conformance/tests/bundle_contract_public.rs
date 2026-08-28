@@ -260,27 +260,6 @@ fn mutate_first_profile_fixture(
     })
 }
 
-fn mutate_semantic_profile(
-    value: &mut Value,
-    mutate: impl FnOnce(&mut ConformanceProfileV1),
-) -> Result<(), Box<dyn std::error::Error>> {
-    let profile_member = archive_member(value, "profile/CPF1.cbor")?;
-    let profile_bytes = match profile_member.get(1) {
-        Some(Value::Bytes(bytes)) => bytes.clone(),
-        _ => return Err("profile bytes are missing".into()),
-    };
-    let mut profile = ConformanceProfileV1::from_canonical_cbor(&profile_bytes)?;
-    mutate(&mut profile);
-    profile.profile_digest = profile.digest();
-    let profile_bytes = profile.to_canonical_cbor()?;
-    profile_member[1] = Value::Bytes(profile_bytes.clone());
-    let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
-    descriptor[1] = Value::Integer(u64::try_from(profile_bytes.len())?.into());
-    descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
-    archive_array(value, 2)?[3] = Value::Bytes(profile.profile_digest.to_vec());
-    Ok(())
-}
-
 fn mutate_archive_matrix(
     value: &mut Value,
     mutate: impl FnOnce(&mut JsonValue),
@@ -2290,9 +2269,8 @@ fn signed_draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Erro
             let bundle = fixtures::draft_bundle().map_err(|error| error.to_string())?;
             bundle.sign(&signing_key).map_err(|error| error.to_string())
         })
-        .as_ref()
-        .map(Clone::clone)
-        .map_err(|error| std::io::Error::other(error.clone()).into())
+        .clone()
+        .map_err(|error| std::io::Error::other(error).into())
 }
 
 fn assert_archive_decoder_rejected(
@@ -3499,28 +3477,9 @@ fn public_independent_verifier_reaches_rebound_cpf1_caps() -> Result<(), Box<dyn
 {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
-    for cap in [ReboundCap::Cases, ReboundCap::Members] {
+    for cap_index in [1_usize, 2] {
         let archive = signed_archive_variant(&bundle, &signing_key, |value| {
-            mutate_semantic_profile(value, |profile| match cap {
-                ReboundCap::Cases | ReboundCap::Members => {
-                    let mut duplicate = profile.fixtures[0].clone();
-                    duplicate.case_id = "ART-002".to_owned();
-                    duplicate.mandatory = false;
-                    profile.fixtures.push(duplicate);
-                    profile.fixtures.sort_by_key(|fixture| {
-                        (
-                            fixture.case_id.clone(),
-                            fixture.claim_layer,
-                            fixture.execution_profile_digest,
-                        )
-                    });
-                    if cap == ReboundCap::Cases {
-                        profile.evaluator_protocol.hard_caps.max_cases = 1;
-                    } else {
-                        profile.evaluator_protocol.hard_caps.max_bundle_members = 1;
-                    }
-                }
-            })
+            duplicate_first_fixture_with_cap(value, cap_index)
         })?;
         assert_eq!(
             pos_conformance::verify_archive_independently(&archive),
@@ -3528,12 +3487,6 @@ fn public_independent_verifier_reaches_rebound_cpf1_caps() -> Result<(), Box<dyn
         );
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ReboundCap {
-    Cases,
-    Members,
 }
 
 #[test]
