@@ -1080,6 +1080,7 @@ fn public_independent_verifier_rejects_cpf1_semantic_variants(
         .chain(cpf1_fixture_branch_mutations())
         .chain(cpf1_fixture_result_mutations())
         .chain(cpf1_malformed_fixture_value_mutations())
+        .chain(cpf1_divergent_fixture_mutations())
         .collect();
     for mutate in mutations {
         let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
@@ -1626,6 +1627,30 @@ fn cpf1_malformed_fixture_value_mutations() -> Vec<ArchiveMutation> {
             })
         }),
     ]
+}
+
+fn cpf1_divergent_fixture_mutations() -> Vec<ArchiveMutation> {
+    vec![Box::new(|value| {
+        mutate_profile(value, |fields| {
+            fields[10] = Value::Array(vec![Value::Array(vec![
+                Value::Integer(0_u64.into()),
+                Value::Bytes(vec![1]),
+            ])]);
+            if let Value::Array(fixtures) = &mut fields[9] {
+                if let Value::Array(fixture) = &mut fixtures[0] {
+                    fixture[8] = Value::Array(vec![
+                        Value::Integer(2_u64.into()),
+                        Value::Bytes(Vec::new()),
+                        Value::Bytes(Vec::new()),
+                        Value::Null,
+                        Value::Array(vec![Value::Integer(0_u64.into()), Value::Bytes(vec![1])]),
+                    ]);
+                    fixture[9] = Value::Integer(1_u64.into());
+                    fixture[10] = Value::Null;
+                }
+            }
+        })
+    })]
 }
 
 #[test]
