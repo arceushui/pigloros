@@ -1146,7 +1146,7 @@ fn independent_support_digests(
         }
         BundleMemberRoleV1::Licence => {
             for fixture_value in fixtures {
-                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                let provenance = independent_fixture_provenance(fixture_value)?;
                 let licence_id = archive_text(&provenance[0])?;
                 let mut bytes = licence_id.as_bytes().to_vec();
                 bytes.push(b'\n');
@@ -1155,20 +1155,20 @@ fn independent_support_digests(
         }
         BundleMemberRoleV1::Notice => {
             for fixture_value in fixtures {
-                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                let provenance = independent_fixture_provenance(fixture_value)?;
                 digests.insert(independent_digest::<32>(&provenance[1])?);
             }
         }
         BundleMemberRoleV1::Sbom => {
             for fixture_value in fixtures {
-                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                let provenance = independent_fixture_provenance(fixture_value)?;
                 digests.insert(independent_digest::<32>(&provenance[2])?);
             }
         }
         BundleMemberRoleV1::Provenance => {
             digests.insert(independent_digest::<32>(&profile_fields[15])?);
             for fixture_value in fixtures {
-                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                let provenance = independent_fixture_provenance(fixture_value)?;
                 for index in [3, 4, 5] {
                     digests.insert(independent_digest::<32>(&provenance[index])?);
                 }
@@ -1177,13 +1177,17 @@ fn independent_support_digests(
         BundleMemberRoleV1::Limitations => {
             digests.insert(independent_digest::<32>(&profile_fields[14])?);
             for fixture_value in fixtures {
-                let provenance = independent_array(&independent_array(fixture_value, 17)?[15], 7)?;
+                let provenance = independent_fixture_provenance(fixture_value)?;
                 digests.insert(independent_digest::<32>(&provenance[6])?);
             }
         }
         _ => {}
     }
     Ok(digests)
+}
+
+fn independent_fixture_provenance(fixture: &Value) -> Result<&[Value], BundleContractErrorV1> {
+    independent_array(fixture, 17).and_then(|fields| independent_array(&fields[15], 7))
 }
 
 fn independent_verify_authority_members(
@@ -1422,8 +1426,13 @@ fn independent_verify_cpf1_root(
     }
     match &fields[16] {
         Value::Null => Ok(()),
-        value if independent_profile_digest(value)? != [0; 32] => Ok(()),
-        _ => Err(BundleContractErrorV1::ProfileInvalid),
+        value => independent_profile_digest(value).and_then(|digest| {
+            if digest != [0; 32] {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        }),
     }
 }
 
