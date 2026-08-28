@@ -1018,7 +1018,6 @@ fn public_verifier_rejects_unsafe_or_oversized_archive_paths(
 #[test]
 fn public_draft_archive_round_trip_and_independent_verification(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
     let manifest = bundle.manifest_bytes()?;
     assert_eq!(manifest, bundle.manifest_bytes()?);
@@ -2114,7 +2113,6 @@ fn archive_with_stale_matrix_binding(
 
 #[test]
 fn public_bundle_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
 
     let mut invalid_magic = bundle.clone();
