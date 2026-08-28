@@ -1712,10 +1712,12 @@ fn divergence_key(value: &AllowedDivergenceV1) -> (DivergenceMismatchKindV1, &[u
 
 fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
     let mut bytes = Vec::new();
-    // A digest must never be computed over fallback bytes. Writing CBOR to a
-    // Vec is infallible; if that invariant changes, fail closed rather than
-    // manufacturing a different identity.
-    ciborium::into_writer(value, &mut bytes).expect("writing CBOR to Vec must succeed");
+    // A digest must never be computed over fallback bytes. The public digest
+    // APIs cannot return an encoding error, so an impossible in-memory encoding
+    // failure terminates rather than manufacturing a different identity.
+    if ciborium::into_writer(value, &mut bytes).is_err() {
+        std::process::abort();
+    }
     let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
     source.push(0);
