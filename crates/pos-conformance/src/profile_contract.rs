@@ -992,7 +992,7 @@ fn validate_selected_caps_encoded(
     encoded_len: usize,
 ) -> Result<(), ConformanceContractError> {
     if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.max_profile_bytes
-        || value_depth(&encoded_value) > usize::from(caps.max_structural_nesting)
+        || value_depth(encoded_value) > usize::from(caps.max_structural_nesting)
     {
         return Err(ConformanceContractError::FieldOutOfBounds);
     }
@@ -2312,10 +2312,8 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
                 _ => Err(ConformanceContractError::InvalidEncoding),
             },
             2 | 3 => {
-                if length > MAX_PROFILE_BYTES as u64 {
-                    return Err(ConformanceContractError::FieldOutOfBounds);
-                }
-                let count = length as usize;
+                let count = usize::try_from(length)
+                    .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
                 let end = index
                     .checked_add(count)
                     .ok_or(ConformanceContractError::FieldOutOfBounds)?;
