@@ -15,6 +15,8 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -764,6 +766,67 @@ fn public_materializer_rejects_a_symlinked_parent() -> Result<(), Box<dyn std::e
     assert!(!trusted_parent.join("publication").exists());
     fs::remove_dir_all(root)?;
     assert!(!output.status.success());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_materializer_preserves_atomic_publication_boundaries(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!(
+        "pigloros-conformance-atomic-publication-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let _temporary_output = TemporaryOutput(root.clone());
+    let relative_parent = root.join("relative-parent");
+    let protected_parent = root.join("protected-parent");
+    let protected_target = root.join("protected-target");
+    fs::create_dir_all(&relative_parent)?;
+    fs::create_dir_all(&protected_parent)?;
+    fs::create_dir_all(&protected_target)?;
+    let materializer_binary = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    let signing_key = "0707070707070707070707070707070707070707070707070707070707070707";
+
+    let relative_status = Command::new(&materializer_binary)
+        .current_dir(&relative_parent)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg("publication")
+        .status()?;
+    assert!(relative_status.success());
+    assert!(relative_parent.join("publication").is_dir());
+    assert!(fs::read_dir(&relative_parent)?.all(|entry| {
+        entry.is_ok_and(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pigloros-")
+        })
+    }));
+
+    let symlink_destination = root.join("publication-link");
+    std::os::unix::fs::symlink(&protected_target, &symlink_destination)?;
+    let symlink_status = Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(&symlink_destination)
+        .status()?;
+    assert!(!symlink_status.success());
+    assert!(fs::symlink_metadata(&symlink_destination)?
+        .file_type()
+        .is_symlink());
+    assert!(fs::read_dir(&protected_target)?.next().is_none());
+
+    fs::set_permissions(&protected_parent, fs::Permissions::from_mode(0o500))?;
+    let protected_status = Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(protected_parent.join("publication"))
+        .status();
+    fs::set_permissions(&protected_parent, fs::Permissions::from_mode(0o700))?;
+    assert!(!protected_status?.success());
+    assert!(fs::read_dir(&protected_parent)?.next().is_none());
     Ok(())
 }
 
