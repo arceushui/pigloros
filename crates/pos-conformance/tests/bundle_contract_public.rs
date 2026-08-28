@@ -543,6 +543,18 @@ impl Drop for TemporaryOutput {
     }
 }
 
+fn is_release_archive_filename(archive: &Path) -> bool {
+    archive.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        let bytes = name.as_bytes();
+        bytes.len() == 69
+            && bytes[64..] == b".cfb1"[..]
+            && bytes[..64].iter().copied().all(|byte| {
+                byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+            })
+    })
+}
+
 #[test]
 fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -571,18 +583,9 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
     for layer in materialized_layers(&output_root)? {
         let layer_archives = archive_paths(&output_root.join(layer).join("draft"))?;
         assert_eq!(layer_archives.len(), 2);
-        assert!(layer_archives.iter().all(|archive| {
-            archive.file_name().is_some_and(|name| {
-                let name = name.to_string_lossy();
-                let bytes = name.as_bytes();
-                bytes.len() == 69
-                    && bytes[64..] == b".cfb1"[..]
-                    && bytes[..64].iter().copied().all(|byte| {
-                        byte.is_ascii_digit()
-                            || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
-                    })
-            })
-        }));
+        assert!(layer_archives
+            .iter()
+            .all(|archive| is_release_archive_filename(archive)));
         let mut modes = Vec::new();
         for archive_path in layer_archives {
             let bundle = ConformanceBundleV1::from_canonical_cbor(&fs::read(archive_path)?)?;

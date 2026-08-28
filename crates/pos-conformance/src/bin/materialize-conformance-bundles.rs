@@ -34,6 +34,8 @@ use thiserror::Error as ThisError;
 
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
+#[cfg(target_os = "linux")]
+const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 
 #[derive(Clone, Copy)]
 struct FixtureContext {
@@ -1287,11 +1289,10 @@ fn random_staging_name() -> Result<CString, MaterializationError> {
     File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut random))
         .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut suffix = String::with_capacity(random.len() * 2);
     for byte in random {
-        suffix.push(char::from(HEX[usize::from(byte >> 4)]));
-        suffix.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        suffix.push(char::from(LOWER_HEX[usize::from(byte >> 4)]));
+        suffix.push(char::from(LOWER_HEX[usize::from(byte & 0x0f)]));
     }
     CString::new(format!(".pigloros-conformance-staging-{suffix}"))
         .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
@@ -1945,21 +1946,20 @@ mod tests {
 
     #[test]
     fn materializer_rejects_each_public_fixture_boundary() -> Result<(), Box<dyn Error>> {
-        materializer_rejects_non_draft_lifecycle()?;
+        materializer_rejects_non_draft_lifecycle();
         materializer_rejects_matrix_binding_changes()?;
         materializer_rejects_invalid_fixture_records()?;
         materializer_recognizes_every_fixture_family();
         Ok(())
     }
 
-    fn materializer_rejects_non_draft_lifecycle() -> Result<(), Box<dyn Error>> {
+    fn materializer_rejects_non_draft_lifecycle() {
         let draft = br#"{"lifecycle":"Draft"}"#;
         let candidate = br#"{"lifecycle":"Candidate"}"#;
         assert!(publication_lifecycles_from_bytes(candidate).is_err());
         let mut members = Vec::new();
         assert!(append_supporting_members(&mut members, candidate).is_err());
         assert!(append_supporting_members(&mut members, draft).is_ok());
-        Ok(())
     }
 
     fn materializer_rejects_matrix_binding_changes() -> Result<(), Box<dyn Error>> {
