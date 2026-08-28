@@ -216,6 +216,41 @@ fn mutate_profile(
     Ok(())
 }
 
+fn mutate_archive_matrix(
+    value: &mut Value,
+    mutate: impl FnOnce(&mut JsonValue),
+) -> Result<(), Box<dyn std::error::Error>> {
+    let member = archive_member(value, EXECUTION_MATRIX_MEMBER_PATH)?;
+    let matrix_bytes = match member.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("execution matrix bytes are missing".into()),
+    };
+    let mut matrix: JsonValue = serde_json::from_slice(&matrix_bytes)?;
+    mutate(&mut matrix);
+    let matrix_bytes = serde_json::to_vec(&matrix)?;
+    let matrix_digest = *blake3::hash(&matrix_bytes).as_bytes();
+    member[1] = Value::Bytes(matrix_bytes.clone());
+    let descriptor = archive_descriptor(value, EXECUTION_MATRIX_MEMBER_PATH)?;
+    descriptor[1] = Value::Integer(u64::try_from(matrix_bytes.len())?.into());
+    descriptor[2] = Value::Bytes(matrix_digest.to_vec());
+
+    let profile_member = archive_member(value, "profile/CPF2.cbor")?;
+    let profile_bytes = match profile_member.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("profile bytes are missing".into()),
+    };
+    let mut profile = ConformanceProfileV2::from_canonical_cbor(&profile_bytes)?;
+    profile.execution_matrix_digest = matrix_digest;
+    profile.profile_digest = profile.digest();
+    let profile_bytes = profile.to_canonical_cbor()?;
+    profile_member[1] = Value::Bytes(profile_bytes.clone());
+    let descriptor = archive_descriptor(value, "profile/CPF2.cbor")?;
+    descriptor[1] = Value::Integer(u64::try_from(profile_bytes.len())?.into());
+    descriptor[2] = Value::Bytes(blake3::hash(&profile_bytes).as_bytes().to_vec());
+    archive_array(value, 2)?[3] = Value::Bytes(profile.profile_digest.to_vec());
+    Ok(())
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod fixtures {
     use super::*;
@@ -976,6 +1011,69 @@ fn public_independent_verifier_rejects_a_cpf2_semantic_invariant(
         pos_conformance::verify_archive_independently(&invalid_profile),
         Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
     );
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_each_matrix_invariant(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let matrix_cases: Vec<JsonMutation> = vec![
+        Box::new(|value| value["magic"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["version"] = JsonValue::Number(2_u64.into())),
+        Box::new(|value| value["lifecycle"] = JsonValue::String("Candidate".to_owned())),
+        Box::new(|value| value["row_count"] = JsonValue::Number(11_u64.into())),
+        Box::new(|value| value["variant_count"] = JsonValue::Number(3_u64.into())),
+        Box::new(|value| value["mode_count"] = JsonValue::Number(3_u64.into())),
+        Box::new(|value| value["case_count"] = JsonValue::Number(191_u64.into())),
+        Box::new(|value| value["executed_case_count"] = JsonValue::Number(1_u64.into())),
+        Box::new(|value| value["rows"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["rows"][0]["variants"] = JsonValue::Array(Vec::new())),
+        Box::new(|value| value["rows"][0]["modes"] = JsonValue::Array(Vec::new())),
+        Box::new(|value| value["rows"][0]["case_count"] = JsonValue::Number(15_u64.into())),
+        Box::new(|value| {
+            value["rows"][0]["executed_case_count"] = JsonValue::Number(1_u64.into());
+        }),
+        Box::new(|value| value["cases"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["cases"][0]["variant"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["cases"][0]["mode"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| value["cases"][0]["case_id"] = JsonValue::String("wrong".to_owned())),
+        Box::new(|value| {
+            value["equality_predicates"][0]["fixture_id"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["equality_predicates"][0]["AuthEq"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["equality_predicates"][0]["PublicEq"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["equality_predicates"][0]["OpEq"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| value["cases"][0]["executed"] = JsonValue::Bool(true)),
+        Box::new(|value| {
+            value["cases"][0]["expected_result_digest"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["cases"][0]["authority_fixture_id"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["cases"][0]["authority_result_digest"] = JsonValue::String("wrong".to_owned());
+        }),
+        Box::new(|value| {
+            value["cases"][0]["expected_result"] = JsonValue::String("wrong".to_owned());
+        }),
+    ];
+    for mutate in matrix_cases {
+        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+            mutate_archive_matrix(value, mutate)
+        })?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        );
+    }
     Ok(())
 }
 
