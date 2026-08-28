@@ -216,6 +216,19 @@ fn mutate_profile(
     Ok(())
 }
 
+fn mutate_first_profile_fixture(
+    value: &mut Value,
+    mutate: impl FnOnce(&mut Vec<Value>),
+) -> Result<(), Box<dyn std::error::Error>> {
+    mutate_profile(value, |fields| {
+        if let Value::Array(fixtures) = &mut fields[9] {
+            if let Value::Array(fixture) = &mut fixtures[0] {
+                mutate(fixture);
+            }
+        }
+    })
+}
+
 fn mutate_archive_matrix(
     value: &mut Value,
     mutate: impl FnOnce(&mut JsonValue),
@@ -1022,6 +1035,8 @@ fn public_independent_verifier_rejects_cpf2_semantic_variants(
     let mutations: Vec<ArchiveMutation> = cpf2_root_semantic_mutations()
         .into_iter()
         .chain(cpf2_fixture_semantic_mutations())
+        .chain(cpf2_ordering_and_cap_mutations())
+        .chain(cpf2_fixture_detail_mutations())
         .collect();
     for mutate in mutations {
         let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
@@ -1176,6 +1191,134 @@ fn cpf2_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
             })
         }),
         Box::new(|value| mutate_profile(value, |fields| fields[15] = Value::Bytes(vec![0; 32]))),
+    ]
+}
+
+fn cpf2_ordering_and_cap_mutations() -> Vec<ArchiveMutation> {
+    vec![
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(digests) = &mut fields[7] {
+                    digests.push(digests[0].clone());
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(digests) = &mut fields[8] {
+                    digests.push(digests[0].clone());
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    if let Value::Array(caps) = &mut protocol[4] {
+                        caps[0] = Value::Integer(u64::MAX.into());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    if let Value::Array(caps) = &mut protocol[4] {
+                        caps[8] = Value::Integer(129_u64.into());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(requirements) = &mut fields[12] {
+                    requirements[1] = Value::Integer(1_u64.into());
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(requirements) = &mut fields[12] {
+                    requirements[2] = Value::Integer(1_u64.into());
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(requirements) = &mut fields[12] {
+                    requirements[4] = Value::Bytes(vec![0; 32]);
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                fields[10] = Value::Array(vec![
+                    Value::Array(vec![Value::Integer(1_u64.into()), Value::Bytes(vec![2])]),
+                    Value::Array(vec![Value::Integer(1_u64.into()), Value::Bytes(vec![1])]),
+                ]);
+            })
+        }),
+    ]
+}
+
+fn cpf2_fixture_detail_mutations() -> Vec<ArchiveMutation> {
+    vec![
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[3] = Value::Bytes(vec![0; 32]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[7] = Value::Array(vec![Value::Array(vec![
+                    Value::Text("input".to_owned()),
+                    Value::Integer(0_u64.into()),
+                    Value::Bytes(vec![1; 32]),
+                    Value::Bytes(vec![1; 32]),
+                ])]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[8] = Value::Array(vec![Value::Integer(3_u64.into()); 5]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[9] = Value::Integer(6_u64.into());
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[10] = Value::Integer(14_u64.into());
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[11] = Value::Integer(1_u64.into());
+                fixture[12] = Value::Integer(0_u64.into());
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[13] = Value::Array(vec![Value::Integer(1_u64.into()); 7]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[14] =
+                    Value::Array(vec![Value::Integer(1_u64.into()), Value::Array(Vec::new())]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[15] = Value::Array(vec![Value::Text(String::new()); 7]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[16] = Value::Bytes(vec![0; 32]);
+            })
+        }),
     ]
 }
 
