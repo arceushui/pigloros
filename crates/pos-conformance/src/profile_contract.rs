@@ -4393,17 +4393,16 @@ mod tests {
         divergent.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
         divergent.profile_digest = divergent.digest();
         let divergent_bytes = divergent.to_canonical_cbor()?;
-        assert_eq!(
-            ConformanceProfileV1::from_canonical_cbor(&divergent_bytes),
-            Ok(divergent)
-        );
-
         let mut malformed = encode_profile(&divergent, true);
         replace_profile_path(&mut malformed, &[10, 0], Value::Null);
         let malformed_bytes = encode_value(&malformed)?;
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor(&malformed_bytes),
             Err(ConformanceContractError::InvalidEncoding)
+        );
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&divergent_bytes),
+            Ok(divergent)
         );
         Ok(())
     }
