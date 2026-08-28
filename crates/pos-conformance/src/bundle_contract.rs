@@ -1320,16 +1320,21 @@ fn independent_verify_profile_contract(
     lifecycle: u64,
     manifest_profile_digest: &Value,
 ) -> Result<(), BundleContractErrorV1> {
-    let fields = independent_profile_array(profile, 18)?;
-    if lifecycle != independent_profile_u64(&fields[4])? {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    if independent_profile_digest(&fields[17])?
-        != independent_digest::<32>(manifest_profile_digest)?
-    {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    Ok(())
+    independent_profile_array(profile, 18).and_then(|fields| {
+        independent_profile_u64(&fields[4]).and_then(|profile_lifecycle| {
+            independent_profile_digest(&fields[17]).and_then(|profile_digest| {
+                independent_digest::<32>(manifest_profile_digest).and_then(|manifest_digest| {
+                    if lifecycle != profile_lifecycle {
+                        Err(BundleContractErrorV1::ProfileInvalid)
+                    } else if profile_digest != manifest_digest {
+                        Err(BundleContractErrorV1::MemberDigestMismatch)
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
+        })
+    })
 }
 
 struct IndependentCpf1Caps {
@@ -1784,40 +1789,48 @@ fn independent_verify_cpf1_digest(
     profile: &Value,
     fields: &[Value],
 ) -> Result<(), BundleContractErrorV1> {
-    let expected = independent_profile_digest(&fields[17])?;
-    let stable_evidence = independent_cpf1_digest(
-        b"PiglorOS.ConformanceProfileStableEvidence.v1",
-        &Value::Array(Vec::new()),
-    )?;
-    let mut identity = fields.to_vec();
-    identity[17] = Value::Null;
-    let actual = independent_cpf1_digest(
-        b"PiglorOS.ConformanceProfile.v1",
-        &Value::Array(vec![
-            Value::Array(identity),
-            Value::Bytes(stable_evidence.to_vec()),
-        ]),
-    )?;
-    if expected == actual && matches!(profile, Value::Array(_)) {
-        Ok(())
-    } else {
-        Err(BundleContractErrorV1::ProfileInvalid)
-    }
+    independent_profile_digest(&fields[17]).and_then(|expected| {
+        independent_cpf1_digest(
+            b"PiglorOS.ConformanceProfileStableEvidence.v1",
+            &Value::Array(Vec::new()),
+        )
+        .and_then(|stable_evidence| {
+            let mut identity = fields.to_vec();
+            identity[17] = Value::Null;
+            independent_cpf1_digest(
+                b"PiglorOS.ConformanceProfile.v1",
+                &Value::Array(vec![
+                    Value::Array(identity),
+                    Value::Bytes(stable_evidence.to_vec()),
+                ]),
+            )
+        })
+        .and_then(|actual| {
+            if expected == actual && matches!(profile, Value::Array(_)) {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        })
+    })
 }
 
 fn independent_profile_allowed_divergences(
     value: &Value,
 ) -> Result<Vec<(u64, Vec<u8>)>, BundleContractErrorV1> {
-    independent_profile_array_bounded(value)?
-        .iter()
-        .map(|value| {
-            let fields = independent_profile_array(value, 2)?;
-            Ok((
-                independent_profile_divergence(&fields[0])?,
-                independent_profile_bytes(&fields[1])?.to_vec(),
-            ))
-        })
-        .collect()
+    independent_profile_array_bounded(value).and_then(|values| {
+        values
+            .iter()
+            .map(|value| {
+                independent_profile_array(value, 2).and_then(|fields| {
+                    independent_profile_divergence(&fields[0]).and_then(|classification| {
+                        independent_profile_bytes(&fields[1])
+                            .map(|coordinate| (classification, coordinate.to_vec()))
+                    })
+                })
+            })
+            .collect()
+    })
 }
 
 fn independent_profile_array(
@@ -2011,12 +2024,13 @@ fn independent_cpf1_digest(
     domain: &[u8],
     value: &Value,
 ) -> Result<[u8; 32], BundleContractErrorV1> {
-    let bytes = encode_archive_value(value)?;
-    let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
-    source.extend_from_slice(domain);
-    source.push(0);
-    source.extend_from_slice(&bytes);
-    Ok(*blake3::hash(&source).as_bytes())
+    encode_archive_value(value).map(|bytes| {
+        let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
+        source.extend_from_slice(domain);
+        source.push(0);
+        source.extend_from_slice(&bytes);
+        *blake3::hash(&source).as_bytes()
+    })
 }
 
 fn independent_array(value: &Value, length: usize) -> Result<&[Value], BundleContractErrorV1> {
@@ -2064,8 +2078,7 @@ fn bundle_value(bundle: &ConformanceBundleV1) -> Value {
 
 fn encode_archive_value<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, BundleContractErrorV1> {
     let mut bytes = Vec::new();
-    encode_archive_value_to_writer(value, &mut bytes)?;
-    Ok(bytes)
+    encode_archive_value_to_writer(value, &mut bytes).map(|()| bytes)
 }
 
 fn encode_archive_value_to_writer<T: serde::Serialize, W: std::io::Write>(
