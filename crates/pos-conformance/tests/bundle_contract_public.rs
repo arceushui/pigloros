@@ -1039,6 +1039,7 @@ fn public_independent_verifier_rejects_cpf2_semantic_variants(
         .chain(cpf2_ordering_and_cap_mutations())
         .chain(cpf2_fixture_detail_mutations())
         .chain(cpf2_fixture_branch_mutations())
+        .chain(cpf2_fixture_result_mutations())
         .collect();
     for mutate in mutations {
         let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
@@ -1444,6 +1445,11 @@ fn cpf2_fixture_branch_mutations() -> Vec<ArchiveMutation> {
                 }
             })
         }),
+    ]
+}
+
+fn cpf2_fixture_result_mutations() -> Vec<ArchiveMutation> {
+    vec![
         Box::new(|value| {
             mutate_first_profile_fixture(value, |fixture| {
                 if let Value::Array(expected) = &mut fixture[8] {
