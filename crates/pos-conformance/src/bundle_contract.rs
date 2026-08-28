@@ -1341,7 +1341,6 @@ struct IndependentCpf1Caps {
     bundle_members: u64,
     member_path_bytes: u64,
     member_bytes: u64,
-    total_bundle_bytes: u64,
     structural_nesting: u64,
     coordinate_bytes: u64,
 }
@@ -1480,7 +1479,6 @@ fn independent_verify_cpf1_hard_caps(
         bundle_members: values[2],
         member_path_bytes: values[3],
         member_bytes: values[4],
-        total_bundle_bytes: values[5],
         structural_nesting: values[7],
         coordinate_bytes: values[8],
     })
@@ -1597,7 +1595,6 @@ fn independent_verify_cpf1_fixture_inputs(
 ) -> Result<(), BundleContractErrorV1> {
     let inputs = independent_profile_array_bounded(value)?;
     let mut previous = None;
-    let mut total = 0_u64;
     for input in inputs {
         let fields = independent_profile_array(input, 4)?;
         let member_id = independent_profile_ascii(&fields[0], 256)?.to_owned();
@@ -1615,13 +1612,8 @@ fn independent_verify_cpf1_fixture_inputs(
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
         previous = Some(member_id);
-        total = total.saturating_add(size);
     }
-    if total > caps.total_bundle_bytes {
-        Err(BundleContractErrorV1::ProfileInvalid)
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 fn independent_verify_cpf1_expected(
