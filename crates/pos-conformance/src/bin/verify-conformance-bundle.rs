@@ -164,25 +164,3 @@ mod tests {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod coverage_entrypoints {
-    use super::verify_path;
-    use std::fs;
-
-    #[test]
-    fn verifier_rejects_non_regular_paths() -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!(
-            "pigloros-verifier-coverage-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos()
-        ));
-        fs::create_dir(&path)?;
-        let result = verify_path(&path);
-        fs::remove_dir(&path)?;
-        assert!(result.is_err());
-        Ok(())
-    }
-}

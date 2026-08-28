@@ -1326,10 +1326,10 @@ fn independent_verify_profile_contract(
     independent_profile_array(profile, 18).and_then(|fields| {
         independent_profile_digest(&fields[17]).and_then(|profile_digest| {
             independent_digest::<32>(manifest_profile_digest).and_then(|manifest_digest| {
-                if profile_digest != manifest_digest {
-                    Err(BundleContractErrorV1::MemberDigestMismatch)
-                } else {
+                if profile_digest == manifest_digest {
                     Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
                 }
             })
         })
