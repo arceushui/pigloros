@@ -195,6 +195,24 @@ fn signed_archive_variant(
     encode_archive(&value)
 }
 
+fn independently_signed_changed_bundle(
+    original: &ConformanceBundleV1,
+    changed: &ConformanceBundleV1,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut value: Value = ciborium::from_reader(Cursor::new(original.to_canonical_cbor()?))?;
+    for member in &changed.members {
+        archive_member(&mut value, &member.path)?[1] = Value::Bytes(member.bytes.clone());
+    }
+    let manifest: Value = ciborium::from_reader(Cursor::new(changed.manifest_bytes()?))?;
+    let fields = top_fields(&mut value)?;
+    fields[2] = manifest;
+    let manifest_bytes = encode_archive(&fields[2])?;
+    fields[4] = Value::Bytes(signing_key.verifying_key().to_bytes().to_vec());
+    fields[5] = Value::Bytes(signing_key.sign(&manifest_bytes).to_bytes().to_vec());
+    encode_archive(&value)
+}
+
 fn post_signed_archive_variant(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
@@ -1625,10 +1643,8 @@ fn public_independent_verifier_rejects_authority_inventory_variants(
         }),
     ];
     for mutate in mutations {
-        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
-            let _ = mutate_archive_json_member(value, AUTHORITY_INVENTORY_MEMBER_PATH, mutate)?;
-            Ok(())
-        })?;
+        let changed = mutate_bound_json_member(&bundle, AUTHORITY_INVENTORY_MEMBER_PATH, mutate)?;
+        let archive = independently_signed_changed_bundle(&bundle, &changed, &signing_key)?;
         assert_eq!(
             pos_conformance::verify_archive_independently(&archive),
             Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
