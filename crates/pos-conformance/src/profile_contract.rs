@@ -980,8 +980,18 @@ fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), Conforma
     let caps = &profile.evaluator_protocol.hard_caps;
     caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))?;
     let encoded_value = encode_profile(profile, true);
-    let encoded = encode_value(&encoded_value)?;
-    if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > caps.max_profile_bytes
+    encode_value(&encoded_value).and_then(|encoded| {
+        validate_selected_caps_encoded(profile, caps, &encoded_value, encoded.len())
+    })
+}
+
+fn validate_selected_caps_encoded(
+    profile: &ConformanceProfileV1,
+    caps: &EvaluatorHardCapsV1,
+    encoded_value: &Value,
+    encoded_len: usize,
+) -> Result<(), ConformanceContractError> {
+    if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.max_profile_bytes
         || value_depth(&encoded_value) > usize::from(caps.max_structural_nesting)
     {
         return Err(ConformanceContractError::FieldOutOfBounds);
@@ -1214,15 +1224,20 @@ fn validate_stable_attestation(
     policy: Option<&TrustedRootPolicyV1>,
 ) -> Result<(), ConformanceContractError> {
     let attestation = &evidence.attestation;
-    validate_stable_attestation_fields(attestation, requirements, policy)?;
-    let key = signing::verifying_key_from_public_key(&PublicKey::from_bytes(
-        attestation.signer_public_key,
-    ))
-    .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)?;
-    let signature = Signature::from_bytes(attestation.signature);
-    let payload = encode_value(&stable_attestation_payload(evidence))?;
-    signing::verify(&key, &CanonicalBytes::from_vec(payload), &signature)
-        .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
+    validate_stable_attestation_fields(attestation, requirements, policy)
+        .and_then(|()| {
+            signing::verifying_key_from_public_key(&PublicKey::from_bytes(
+                attestation.signer_public_key,
+            ))
+            .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
+        })
+        .and_then(|key| {
+            let signature = Signature::from_bytes(attestation.signature);
+            encode_value(&stable_attestation_payload(evidence)).and_then(|payload| {
+                signing::verify(&key, &CanonicalBytes::from_vec(payload), &signature)
+                    .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
+            })
+        })
 }
 
 fn validate_stable_attestation_fields(
@@ -1715,9 +1730,8 @@ fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
     // A digest must never be computed over fallback bytes. The public digest
     // APIs cannot return an encoding error, so an impossible in-memory encoding
     // failure terminates rather than manufacturing a different identity.
-    if ciborium::into_writer(value, &mut bytes).is_err() {
-        std::process::abort();
-    }
+    ciborium::into_writer(value, &mut bytes)
+        .expect("a ciborium value is always canonically serializable");
     let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
     source.push(0);
@@ -2224,8 +2238,7 @@ fn encode_case(value: &CaseOutcomeV1) -> Value {
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
     let mut bytes = Vec::new();
-    encode_value_to_writer(value, &mut bytes)?;
-    Ok(bytes)
+    encode_value_to_writer(value, &mut bytes).map(|()| bytes)
 }
 
 fn encode_value_to_writer<W: std::io::Write>(
@@ -2236,12 +2249,13 @@ fn encode_value_to_writer<W: std::io::Write>(
 }
 
 fn encode_bounded(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
-    let bytes = encode_value(value)?;
-    if bytes.len() > MAX_PROFILE_BYTES {
-        Err(ConformanceContractError::FieldOutOfBounds)
-    } else {
-        Ok(bytes)
-    }
+    encode_value(value).and_then(|bytes| {
+        if bytes.len() > MAX_PROFILE_BYTES {
+            Err(ConformanceContractError::FieldOutOfBounds)
+        } else {
+            Ok(bytes)
+        }
+    })
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
@@ -2297,8 +2311,10 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
                 _ => Err(ConformanceContractError::InvalidEncoding),
             },
             2 | 3 => {
-                let count = usize::try_from(length)
-                    .map_err(|_| ConformanceContractError::FieldOutOfBounds)?;
+                if length > MAX_PROFILE_BYTES as u64 {
+                    return Err(ConformanceContractError::FieldOutOfBounds);
+                }
+                let count = length as usize;
                 let end = index
                     .checked_add(count)
                     .ok_or(ConformanceContractError::FieldOutOfBounds)?;
@@ -4380,6 +4396,14 @@ mod tests {
             ConformanceProfileV1::from_canonical_cbor(&divergent_bytes),
             Ok(divergent)
         );
+
+        let mut malformed = encode_profile(&divergent, true);
+        replace_profile_path(&mut malformed, &[10, 0], Value::Null);
+        let malformed_bytes = encode_value(&malformed)?;
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&malformed_bytes),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
         Ok(())
     }
 
@@ -5899,6 +5923,17 @@ mod tests {
                 Err(ConformanceContractError::IndependenceEvidenceMissing)
             );
         }
+
+        let mut invalid_key_evidence = stable_evidence("alpha", 30);
+        invalid_key_evidence.attestation.signer_public_key = [0xff; 32];
+        invalid_key_evidence.attestation.trust_root_digest = digest_bytes(
+            b"PiglorOS.ConformanceTrustRoot.v1",
+            &Value::Bytes(invalid_key_evidence.attestation.signer_public_key.to_vec()),
+        );
+        assert_eq!(
+            validate_stable_attestation(&invalid_key_evidence, &requirements, None,),
+            Err(ConformanceContractError::IndependenceEvidenceMissing)
+        );
 
         let valid = stable_evidence("alpha", 30).attestation;
         let mut zero_signer = valid.clone();

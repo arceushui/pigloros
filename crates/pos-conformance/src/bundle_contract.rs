@@ -9453,6 +9453,591 @@ mod instrumented_public_entrypoints {
         Ok(())
     }
 
+    fn array_field(
+        value: &Value,
+        index: usize,
+        replacement: Value,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let Value::Array(mut fields) = value.clone() else {
+            return Err("value must be an array".into());
+        };
+        fields[index] = replacement;
+        Ok(Value::Array(fields))
+    }
+
+    fn integer(value: u64) -> Value {
+        Value::Integer(value.into())
+    }
+
+    #[test]
+    fn remaining_independent_cpf1_regions_are_exercised() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let profile = profile_value(&tests::profile())?;
+        let fields = independent_profile_array(&profile, 18)?.to_vec();
+        let caps = independent_verify_cpf1_protocol(&fields[11])?;
+
+        assert_eq!(independent_verify_cpf1(&profile), Ok(()));
+        let null = Value::Null;
+        assert!(independent_verify_cpf1(&null).is_err());
+        assert!(independent_verify_cpf1_protocol(&null).is_err());
+        assert!(independent_verify_cpf1_requirements(&null).is_err());
+        assert!(independent_verify_cpf1_allowed_divergences(&null, 128).is_err());
+        assert!(independent_verify_cpf1_fixture_inputs(&null, &caps).is_err());
+        assert!(independent_verify_cpf1_expected(&null, &[], 128).is_err());
+        assert!(independent_verify_cpf1_bounds(&null).is_err());
+        assert!(independent_verify_cpf1_capabilities(&null).is_err());
+        assert!(independent_verify_cpf1_provenance(&null).is_err());
+        assert!(independent_profile_allowed_divergences(&null).is_err());
+
+        let empty = Value::Array(Vec::new());
+        assert!(independent_verify_cpf1(&empty).is_err());
+        assert!(independent_verify_cpf1_protocol(&empty).is_err());
+        assert!(independent_verify_cpf1_requirements(&empty).is_err());
+        assert!(independent_verify_cpf1_expected(&empty, &[], 128).is_err());
+        assert!(independent_verify_cpf1_bounds(&empty).is_err());
+        assert!(independent_verify_cpf1_capabilities(&empty).is_err());
+        assert!(independent_verify_cpf1_provenance(&empty).is_err());
+
+        for version in [
+            "1.2.3+",
+            "1.2.3-",
+            "1.2",
+            "01.2.3",
+            "1.2.3-01",
+            "1.2.3-a!",
+            "1.2.3+☃",
+        ] {
+            assert!(!independent_semantic_version(version));
+        }
+        for version in ["0.0.0", "1.2.3-alpha.1+build-7"] {
+            assert!(independent_semantic_version(version));
+        }
+
+        for value in [
+            Value::Null,
+            Value::Text(String::new()),
+            Value::Text("☃".to_owned()),
+        ] {
+            assert!(independent_profile_ascii(&value, 8).is_err());
+            assert!(independent_profile_u64(&value).is_err());
+            assert!(independent_profile_digest(&value).is_err());
+            assert!(independent_profile_claim_layer(&value).is_err());
+            assert!(independent_profile_adapter(&value).is_err());
+            assert!(independent_profile_divergence(&value).is_err());
+            assert!(independent_profile_safe_error(&value).is_err());
+            assert!(independent_profile_outcome(&value).is_err());
+            assert!(independent_profile_replay_claim(&value).is_err());
+            assert!(independent_profile_redaction(&value).is_err());
+        }
+        assert!(independent_profile_claim_layer(&integer(7)).is_err());
+        assert!(independent_profile_divergence(&integer(9)).is_err());
+        assert!(independent_profile_safe_error(&integer(14)).is_err());
+        assert!(independent_profile_outcome(&integer(6)).is_err());
+        assert!(independent_profile_replay_claim(&integer(5)).is_err());
+        assert!(independent_profile_redaction(&integer(4)).is_err());
+        assert!(independent_profile_adapter(&integer(3)).is_err());
+        assert_eq!(
+            independent_profile_bool(
+                &Value::Array(vec![Value::Bool(true), Value::Bool(false)]),
+                0
+            ),
+            Ok(true)
+        );
+        assert!(independent_profile_bool(&Value::Null, 0).is_err());
+        assert!(
+            independent_profile_bool(&Value::Array(vec![Value::Null, Value::Null]), 0).is_err()
+        );
+        assert!(independent_profile_modes(&Value::Null).is_err());
+        for modes in [
+            vec![],
+            vec![integer(4)],
+            vec![integer(1), integer(1)],
+            vec![Value::Null],
+        ] {
+            assert!(independent_profile_modes(&Value::Array(modes)).is_err());
+        }
+        assert!(independent_profile_digests(&Value::Array(vec![Value::Null])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_cpf1_root_protocol_and_divergence_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_value(&tests::profile())?;
+        let fields = independent_profile_array(&profile, 18)?.to_vec();
+        let execution_profiles = independent_profile_digests(&fields[7])?;
+        let public_schemas = independent_profile_digests(&fields[8])?;
+        for (index, replacement) in [
+            (2, Value::Null),
+            (3, Value::Null),
+            (3, Value::Text("1.0.0+".to_owned())),
+            (16, Value::Bytes(vec![0; 32])),
+        ] {
+            let invalid = array_field(&profile, index, replacement)?;
+            let invalid_fields = independent_profile_array(&invalid, 18)?;
+            assert!(independent_verify_cpf1_root(
+                invalid_fields,
+                &execution_profiles,
+                &public_schemas,
+            )
+            .is_err());
+        }
+        assert!(independent_verify_cpf1_root(&fields, &[], &public_schemas).is_err());
+        assert!(independent_verify_cpf1_root(&fields, &execution_profiles, &[[0; 32]]).is_err());
+
+        let protocol = independent_profile_array(&fields[11], 5)?;
+        assert!(independent_verify_cpf1_hard_caps(&Value::Null).is_err());
+        for index in 0..10 {
+            let invalid_caps = array_field(&protocol[4], index, Value::Null)?;
+            assert!(independent_verify_cpf1_hard_caps(&invalid_caps).is_err());
+        }
+        for index in [3, 4] {
+            let invalid = array_field(&fields[12], index, Value::Null)?;
+            assert!(independent_verify_cpf1_requirements(&invalid).is_err());
+        }
+
+        let malformed_divergences = [
+            Value::Array(vec![Value::Null]),
+            Value::Array(vec![Value::Array(vec![integer(0), Value::Null])]),
+            Value::Array(vec![Value::Array(vec![
+                integer(0),
+                Value::Bytes(Vec::new()),
+            ])]),
+            Value::Array(vec![
+                Value::Array(vec![integer(0), Value::Bytes(vec![2])]),
+                Value::Array(vec![integer(0), Value::Bytes(vec![1])]),
+            ]),
+        ];
+        for invalid in malformed_divergences {
+            assert!(independent_verify_cpf1_allowed_divergences(&invalid, 1).is_err());
+        }
+        assert!(independent_profile_allowed_divergences(&Value::Array(vec![Value::Null])).is_err());
+        assert!(
+            independent_profile_allowed_divergences(&Value::Array(vec![Value::Array(vec![
+                integer(0),
+                Value::Null,
+            ])]))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_cpf1_fixture_and_input_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_value(&tests::profile())?;
+        let fields = independent_profile_array(&profile, 18)?.to_vec();
+        let execution_profiles = independent_profile_digests(&fields[7])?;
+        let public_schemas = independent_profile_digests(&fields[8])?;
+        let caps = independent_verify_cpf1_protocol(&fields[11])?;
+        let fixtures = independent_profile_array_bounded(&fields[9])?;
+        let fixture = fixtures.first().ok_or("profile fixture is missing")?;
+        let fixture_fields = independent_profile_array(fixture, 17)?.to_vec();
+        assert!(independent_verify_cpf1_fixtures(
+            &Value::Null,
+            &fields[10],
+            &execution_profiles,
+            &public_schemas,
+            &caps,
+        )
+        .is_err());
+        assert!(independent_verify_cpf1_fixtures(
+            &fields[9],
+            &Value::Null,
+            &execution_profiles,
+            &public_schemas,
+            &caps,
+        )
+        .is_err());
+        let duplicate_fixtures = Value::Array(vec![fixture.clone(), fixture.clone()]);
+        assert!(independent_verify_cpf1_fixtures(
+            &duplicate_fixtures,
+            &fields[10],
+            &execution_profiles,
+            &public_schemas,
+            &caps,
+        )
+        .is_err());
+        for index in (0..17).filter(|index| *index != 10) {
+            let invalid_fixture = array_field(fixture, index, Value::Null)?;
+            assert!(independent_verify_cpf1_fixture(
+                &invalid_fixture,
+                &independent_profile_allowed_divergences(&fields[10])?,
+                &execution_profiles,
+                &public_schemas,
+                &caps,
+            )
+            .is_err());
+        }
+        let invalid_fixture_error = array_field(fixture, 10, integer(99))?;
+        assert!(independent_verify_cpf1_fixture(
+            &invalid_fixture_error,
+            &independent_profile_allowed_divergences(&fields[10])?,
+            &execution_profiles,
+            &public_schemas,
+            &caps,
+        )
+        .is_err());
+
+        let inputs = &fixture_fields[7];
+        let input = independent_profile_array_bounded(inputs)?
+            .first()
+            .ok_or("fixture input is missing")?;
+        for index in 0..4 {
+            let invalid_input = array_field(input, index, Value::Null)?;
+            assert!(independent_verify_cpf1_fixture_inputs(
+                &Value::Array(vec![invalid_input]),
+                &caps,
+            )
+            .is_err());
+        }
+        assert!(independent_verify_cpf1_fixture_inputs(
+            &Value::Array(vec![input.clone(), input.clone()]),
+            &caps,
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_cpf1_expected_outcome_and_claim_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_value(&tests::profile())?;
+        let fields = independent_profile_array(&profile, 18)?;
+        let caps = independent_verify_cpf1_protocol(&fields[11])?;
+        let fixtures = independent_profile_array_bounded(&fields[9])?;
+        let fixture = fixtures.first().ok_or("profile fixture is missing")?;
+        let fixture_fields = independent_profile_array(fixture, 17)?.to_vec();
+        let expected = &fixture_fields[8];
+        for index in 0..3 {
+            let invalid_expected = array_field(expected, index, Value::Null)?;
+            assert!(independent_verify_cpf1_expected(&invalid_expected, &[], 1).is_err());
+        }
+        let safe_error = Value::Array(vec![
+            integer(1),
+            Value::Null,
+            Value::Null,
+            integer(1),
+            Value::Null,
+        ]);
+        assert_eq!(
+            independent_verify_cpf1_expected(&safe_error, &[], 1),
+            Ok(())
+        );
+        assert!(independent_verify_cpf1_expected(
+            &array_field(&safe_error, 3, Value::Null)?,
+            &[],
+            1,
+        )
+        .is_err());
+        let divergence = Value::Array(vec![
+            integer(2),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Array(vec![integer(0), Value::Bytes(vec![1])]),
+        ]);
+        assert_eq!(
+            independent_verify_cpf1_expected(&divergence, &[(0, vec![1])], 1),
+            Ok(())
+        );
+        assert!(independent_verify_cpf1_expected(&divergence, &[], 1).is_err());
+        assert!(independent_verify_cpf1_expected(
+            &array_field(&divergence, 4, Value::Null)?,
+            &[(0, vec![1])],
+            1,
+        )
+        .is_err());
+
+        assert_eq!(
+            independent_verify_cpf1_fixture_outcome(&safe_error, &integer(2), &integer(1)),
+            Ok(())
+        );
+        let safe_error_twelve = array_field(&safe_error, 3, integer(12))?;
+        assert_eq!(
+            independent_verify_cpf1_fixture_outcome(&safe_error_twelve, &integer(3), &integer(12),),
+            Ok(())
+        );
+        assert!(
+            independent_verify_cpf1_fixture_outcome(&safe_error, &integer(0), &Value::Null)
+                .is_err()
+        );
+        assert_eq!(
+            independent_verify_cpf1_fixture_outcome(&divergence, &integer(1), &Value::Null),
+            Ok(())
+        );
+        assert!(
+            independent_verify_cpf1_fixture_outcome(&Value::Null, &integer(0), &Value::Null)
+                .is_err()
+        );
+        assert!(
+            independent_verify_cpf1_fixture_outcome(&safe_error, &Value::Null, &Value::Null)
+                .is_err()
+        );
+        for (claim, redaction) in [(0, 0), (1, 1), (2, 2), (3, 3), (4, 0)] {
+            assert_eq!(
+                independent_verify_cpf1_fixture_claim(&integer(claim), &integer(redaction)),
+                Ok(())
+            );
+        }
+        assert!(independent_verify_cpf1_fixture_claim(&Value::Null, &integer(0)).is_err());
+        assert!(independent_verify_cpf1_fixture_claim(&integer(0), &Value::Null).is_err());
+        assert!(independent_verify_cpf1_fixture_claim(&integer(0), &integer(1)).is_err());
+        assert!(
+            independent_verify_cpf1_expected_bounds(&Value::Null, &fixture_fields[13], &caps,)
+                .is_err()
+        );
+        assert!(independent_verify_cpf1_expected_bounds(expected, &Value::Null, &caps).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_cpf1_bounds_capability_and_digest_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = profile_value(&tests::profile())?;
+        let fields = independent_profile_array(&profile, 18)?.to_vec();
+        let fixtures = independent_profile_array_bounded(&fields[9])?;
+        let fixture = fixtures.first().ok_or("profile fixture is missing")?;
+        let fixture_fields = independent_profile_array(fixture, 17)?.to_vec();
+        for index in 0..8 {
+            let invalid_bounds = array_field(&fixture_fields[13], index, Value::Null)?;
+            assert!(independent_verify_cpf1_bounds(&invalid_bounds).is_err());
+        }
+        let invalid_capabilities = Value::Array(vec![Value::Null, Value::Array(Vec::new())]);
+        assert!(independent_verify_cpf1_capabilities(&invalid_capabilities).is_err());
+        let invalid_capability_id =
+            Value::Array(vec![Value::Bool(false), Value::Array(vec![Value::Null])]);
+        assert!(independent_verify_cpf1_capabilities(&invalid_capability_id).is_err());
+        let unsorted_capabilities = Value::Array(vec![
+            Value::Bool(false),
+            Value::Array(vec![
+                Value::Text("b".to_owned()),
+                Value::Text("a".to_owned()),
+            ]),
+        ]);
+        assert!(independent_verify_cpf1_capabilities(&unsorted_capabilities).is_err());
+        for index in 0..7 {
+            let invalid_provenance = array_field(&fixture_fields[15], index, Value::Null)?;
+            assert!(independent_verify_cpf1_provenance(&invalid_provenance).is_err());
+        }
+
+        let restrictive_caps = IndependentCpf1Caps {
+            cases: 0,
+            bundle_members: 0,
+            member_path_bytes: 0,
+            member_bytes: 0,
+            total_bundle_bytes: 0,
+            structural_nesting: 0,
+            coordinate_bytes: 0,
+        };
+        assert!(independent_verify_cpf1_selected_caps(
+            &profile,
+            &fields[9],
+            &fields[10],
+            &restrictive_caps,
+        )
+        .is_err());
+        assert!(independent_verify_cpf1_digest(&Value::Null, &fields).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_archive_authority_and_expected_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let profile_value = profile_value(&profile)?;
+        let bundle = signed_draft_bundle()?;
+        let archive = bundle_value(&bundle);
+        let records = independent_records(&archive)?;
+        let archive_fields = independent_array(&archive, 6)?;
+        let manifest = independent_array(&archive_fields[2], 6)?;
+        let expected_results = independent_array_bounded(&manifest[5])?;
+        assert_eq!(
+            independent_verify_expected_results(
+                expected_results,
+                &records,
+                &profile_value,
+                BundleModeV1::Local.code(),
+            ),
+            Ok(())
+        );
+        let expected = expected_results
+            .first()
+            .ok_or("expected result is missing")?;
+        for index in 0..6 {
+            let invalid_expected = array_field(expected, index, Value::Null)?;
+            assert!(independent_verify_expected_results(
+                &[invalid_expected],
+                &records,
+                &profile_value,
+                BundleModeV1::Local.code(),
+            )
+            .is_err());
+        }
+        assert!(independent_verify_expected_results(
+            &[expected.clone(), expected.clone()],
+            &records,
+            &profile_value,
+            BundleModeV1::Local.code(),
+        )
+        .is_err());
+        let wrong_path = array_field(expected, 4, Value::Text("expected/wrong.bin".to_owned()))?;
+        assert!(independent_verify_expected_results(
+            &[wrong_path],
+            &records,
+            &profile_value,
+            BundleModeV1::Local.code(),
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_archive_preflight_cap_regions_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CPF1_HEADER: &[u8] = b"\x92\x64CPF1\x01";
+        let profile = tests::profile();
+        let restrictive_caps = IndependentArchiveCaps {
+            profile_bytes: 0,
+            bundle_members: 0,
+            member_path_bytes: 0,
+            member_bytes: 0,
+            total_bundle_bytes: 0,
+            structural_nesting: 0,
+        };
+        let profile_byte = [0_u8];
+        for preflight in [
+            ArchivePreflight {
+                profile_bytes: Some(&profile_byte),
+                member_count: 0,
+                total_member_bytes: 0,
+                largest_member_bytes: 0,
+                largest_member_path_bytes: 0,
+                maximum_depth: 0,
+            },
+            ArchivePreflight {
+                profile_bytes: None,
+                member_count: 1,
+                total_member_bytes: 0,
+                largest_member_bytes: 0,
+                largest_member_path_bytes: 0,
+                maximum_depth: 0,
+            },
+            ArchivePreflight {
+                profile_bytes: None,
+                member_count: 0,
+                total_member_bytes: 0,
+                largest_member_bytes: 0,
+                largest_member_path_bytes: 0,
+                maximum_depth: 1,
+            },
+            ArchivePreflight {
+                profile_bytes: None,
+                member_count: 0,
+                total_member_bytes: 0,
+                largest_member_bytes: 0,
+                largest_member_path_bytes: 1,
+                maximum_depth: 0,
+            },
+            ArchivePreflight {
+                profile_bytes: None,
+                member_count: 0,
+                total_member_bytes: 0,
+                largest_member_bytes: 1,
+                largest_member_path_bytes: 0,
+                maximum_depth: 0,
+            },
+            ArchivePreflight {
+                profile_bytes: None,
+                member_count: 0,
+                total_member_bytes: 1,
+                largest_member_bytes: 0,
+                largest_member_path_bytes: 0,
+                maximum_depth: 0,
+            },
+        ] {
+            assert_eq!(
+                validate_independent_preflight_caps(&restrictive_caps, &preflight, 0),
+                Err(BundleContractErrorV1::MemberOutOfBounds)
+            );
+        }
+
+        let mut noncanonical_profile = profile.to_canonical_cbor()?;
+        assert!(noncanonical_profile.starts_with(CPF1_HEADER));
+        noncanonical_profile.splice(CPF1_HEADER.len() - 1..CPF1_HEADER.len(), [0x18, 0x01]);
+        assert!(matches!(
+            independent_archive_caps(&noncanonical_profile),
+            Err(BundleContractErrorV1::ProfileInvalid)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_authority_matrix_regions_are_exercised() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut inventory: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/expected-authority/inventory.json"
+        ))?;
+        let mut matrix: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
+        ))?;
+        inventory["lifecycle"] = JsonValue::String("Accepted".to_owned());
+        assert!(validate_authority_inventory(&inventory).is_err());
+        inventory["lifecycle"] = JsonValue::String("Draft".to_owned());
+        for field in [
+            "fixture_bytes_digest",
+            "expected_result_path",
+            "expected_result_digest",
+        ] {
+            let mut invalid = inventory.clone();
+            invalid["entries"][0][field] = JsonValue::String("unexpected".to_owned());
+            assert!(validate_authority_inventory(&invalid).is_err());
+        }
+
+        let rows = matrix["rows"]
+            .as_array()
+            .ok_or("matrix rows are missing")?
+            .clone();
+        for (field, value) in [
+            ("fixture_id", JsonValue::String("wrong".to_owned())),
+            ("modes", JsonValue::Array(Vec::new())),
+            ("case_count", JsonValue::Number(0.into())),
+            ("executed_case_count", JsonValue::Number(1.into())),
+        ] {
+            let mut invalid = rows.clone();
+            invalid[0][field] = value;
+            assert!(validate_execution_matrix_rows(&invalid).is_err());
+        }
+        let cases = matrix["cases"]
+            .as_array()
+            .ok_or("matrix cases are missing")?
+            .clone();
+        for field in ["fixture_id", "variant", "mode", "case_id"] {
+            let mut invalid = cases.clone();
+            invalid[0][field] = JsonValue::String("wrong".to_owned());
+            assert!(validate_execution_matrix_cases(&invalid).is_err());
+        }
+        let predicates = matrix["equality_predicates"]
+            .as_array()
+            .ok_or("matrix predicates are missing")?
+            .clone();
+        assert!(validate_execution_matrix_predicates(&predicates[..1]).is_err());
+        for field in ["fixture_id", "AuthEq", "PublicEq", "OpEq"] {
+            let mut invalid = predicates.clone();
+            invalid[0][field] = JsonValue::String("wrong".to_owned());
+            assert!(validate_execution_matrix_predicates(&invalid).is_err());
+        }
+        matrix["rows"] = JsonValue::Array(Vec::new());
+        assert!(validate_execution_matrix(&matrix).is_err());
+        let mut closed_matrix: JsonValue = serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
+        ))?;
+        closed_matrix["cases"][0]["executed"] = JsonValue::Bool(true);
+        assert!(validate_execution_matrix(&closed_matrix).is_err());
+        assert!(contains_secret_marker(b"xoxp-12345678901234567890"));
+        Ok(())
+    }
+
     #[test]
     fn remaining_archive_and_authority_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {

@@ -365,11 +365,32 @@ fn materialize_profile_with_inventory(
 
 fn materialize_profile_from_profile(
     context: &MaterializationContext<'_>,
-    mut profile: ConformanceProfileV1,
+    profile: ConformanceProfileV1,
     lifecycle: ProfileLifecycleV1,
     lifecycle_name: &str,
     layer_name: &str,
 ) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
+    materialize_profile_from_profile_with_archive_verifier(
+        context,
+        profile,
+        lifecycle,
+        lifecycle_name,
+        layer_name,
+        verify_public_archive,
+    )
+}
+
+fn materialize_profile_from_profile_with_archive_verifier<ArchiveVerifier>(
+    context: &MaterializationContext<'_>,
+    mut profile: ConformanceProfileV1,
+    lifecycle: ProfileLifecycleV1,
+    lifecycle_name: &str,
+    layer_name: &str,
+    verify_archive: ArchiveVerifier,
+) -> Result<Vec<MaterializedFile>, Box<dyn Error>>
+where
+    ArchiveVerifier: Fn(&[u8], &[u8; 32], &[u8], &str) -> Result<(), Box<dyn Error>>,
+{
     if lifecycle != ProfileLifecycleV1::Draft {
         return Err("the #190 materializer emits Draft bundles only".into());
     }
@@ -412,7 +433,7 @@ fn materialize_profile_from_profile(
         let release_filename = bundle.release_filename()?;
         let manifest_bytes = bundle.manifest_bytes()?;
         let bundle_bytes = bundle.to_canonical_cbor()?;
-        verify_public_archive(
+        verify_archive(
             &bundle_bytes,
             &archive_digest,
             &manifest_bytes,
@@ -1268,15 +1289,25 @@ fn open_trusted_parent(parent: &Path) -> Result<OwnedFd, MaterializationError> {
 
 #[cfg(target_os = "linux")]
 fn create_private_staging(parent: &OwnedFd) -> Result<(CString, OwnedFd), MaterializationError> {
+    create_private_staging_with_name_generator(parent, random_staging_name)
+}
+
+#[cfg(target_os = "linux")]
+fn create_private_staging_with_name_generator<NameGenerator>(
+    parent: &OwnedFd,
+    mut next_name: NameGenerator,
+) -> Result<(CString, OwnedFd), MaterializationError>
+where
+    NameGenerator: FnMut() -> Result<CString, MaterializationError>,
+{
     for _ in 0..16 {
-        let name = random_staging_name()?;
+        let name = next_name()?;
         match fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
             Ok(()) => {
                 let staging = open_directory(parent, &name)?;
                 return Ok((name, staging));
             }
             Err(Errno::EXIST) => {}
-            Err(Errno::LOOP) => return Err(MaterializationError::SymlinkDetected),
             Err(_) => return Err(MaterializationError::UntrustedOutputDirectory),
         }
     }
@@ -1323,7 +1354,6 @@ fn open_or_create_directory(
 ) -> Result<OwnedFd, MaterializationError> {
     match fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
         Ok(()) | Err(Errno::EXIST) => {}
-        Err(Errno::LOOP) => return Err(MaterializationError::SymlinkDetected),
         Err(_) => return Err(MaterializationError::UntrustedOutputDirectory),
     }
     sync_fd(parent)?;
@@ -1375,7 +1405,6 @@ const fn map_open_error(error: Errno) -> MaterializationError {
 const fn map_publish_error(error: Errno) -> MaterializationError {
     match error {
         Errno::EXIST => MaterializationError::DestinationExists,
-        Errno::LOOP => MaterializationError::SymlinkDetected,
         Errno::NOSYS | Errno::INVAL => MaterializationError::AtomicPublicationUnsupported,
         _ => MaterializationError::UntrustedOutputDirectory,
     }
@@ -1953,6 +1982,72 @@ mod tests {
     }
 
     #[test]
+    fn materialization_command_and_error_seams_are_exercised() -> Result<(), Box<dyn Error>> {
+        let signing_key = SigningKey::from_bytes(&[9; 32]);
+        let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
+        let context = MaterializationContext {
+            signing_key: &signing_key,
+            inventory_bytes: include_bytes!(
+                "../../../../fixtures/conformance/expected-authority/inventory.json"
+            ),
+        };
+        assert!(materialize_profile_from_profile(
+            &context,
+            profile.clone(),
+            ProfileLifecycleV1::Candidate,
+            "candidate",
+            "artifact-integrity",
+        )
+        .is_err());
+        assert!(materialize_profile_from_profile_with_archive_verifier(
+            &context,
+            profile.clone(),
+            ProfileLifecycleV1::Draft,
+            "draft",
+            "artifact-integrity",
+            |_, _, _, _| Err::<(), Box<dyn Error>>("forced archive failure".into()),
+        )
+        .is_err());
+
+        let invalid_inventory_context = MaterializationContext {
+            signing_key: &signing_key,
+            inventory_bytes: b"{",
+        };
+        assert!(materialize_profile_from_profile(
+            &invalid_inventory_context,
+            profile,
+            ProfileLifecycleV1::Draft,
+            "draft",
+            "artifact-integrity",
+        )
+        .is_err());
+
+        #[cfg(target_os = "linux")]
+        {
+            let root = std::env::temp_dir().join(format!(
+                "pigloros-materializer-command-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root)?;
+            let destination = root.join("published");
+            run(
+                [
+                    OsString::from("materialize-conformance-bundles"),
+                    destination.clone().into_os_string(),
+                ]
+                .into_iter(),
+                Ok("09".repeat(32)),
+            )?;
+            assert!(destination.join(MATERIALIZATION_METADATA_PATH).is_file());
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn materializer_rejects_each_public_fixture_boundary() -> Result<(), Box<dyn Error>> {
         materializer_rejects_non_draft_lifecycle();
         materializer_rejects_matrix_binding_changes()?;
@@ -2128,6 +2223,15 @@ mod tests {
         };
         publication.write_file(&file.relative_path, &file.bytes)?;
         assert_eq!(publication.read_file(&file.relative_path)?, file.bytes);
+        let different_file = MaterializedFile {
+            relative_path: file.relative_path.clone(),
+            bytes: b"different bytes".to_vec(),
+            archive: None,
+        };
+        assert!(matches!(
+            publication.verify_and_sync(&[different_file]),
+            Err(MaterializationError::ArchiveDigestMismatch)
+        ));
         publication.verify_and_sync(&[file])?;
         publication.publish()?;
         assert_eq!(
@@ -2193,6 +2297,52 @@ mod tests {
             map_publish_error(Errno::NOTDIR).to_string(),
             "untrusted output directory"
         );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_staging_retries_collisions_and_rejects_non_directory_parents(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "pigloros-staging-errors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let parent = open_trusted_parent(&root)?;
+        let collision_name = CString::new(".existing-staging-name")?;
+        fs::mkdirat(
+            &parent,
+            collision_name.as_c_str(),
+            Mode::from_raw_mode(0o700),
+        )?;
+        let mut attempts = 0;
+        assert!(matches!(
+            create_private_staging_with_name_generator(&parent, || {
+                attempts += 1;
+                Ok(collision_name.clone())
+            }),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
+        assert_eq!(attempts, 16);
+
+        let regular_file = std::fs::File::create(root.join("not-a-directory"))?;
+        let non_directory_parent: OwnedFd = regular_file.into();
+        let valid_name = CString::new("child")?;
+        assert!(matches!(
+            create_private_staging_with_name_generator(&non_directory_parent, || {
+                Ok(valid_name.clone())
+            }),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
+        assert!(matches!(
+            open_or_create_directory(&non_directory_parent, &valid_name),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

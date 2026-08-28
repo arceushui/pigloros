@@ -771,7 +771,7 @@ impl PluginBoundaryV1 {
         {
             return Err(PluginBoundaryError::InvalidDescriptor);
         }
-        if self.manifest_digest != self.digest_without_identity()? {
+        if self.manifest_digest != self.digest_without_identity() {
             return Err(PluginBoundaryError::ManifestDigestMismatch);
         }
         if self.release_digest != self.release_digest_value() {
@@ -780,12 +780,12 @@ impl PluginBoundaryV1 {
         Ok(())
     }
 
-    fn digest_without_identity(&self) -> Result<[u8; 32], PluginBoundaryError> {
+    fn digest_without_identity(&self) -> [u8; 32] {
         let mut value = self.clone();
         value.manifest_digest = [0; 32];
         value.release_digest = [0; 32];
         typed_digest(b"PiglorOS.Plugin.Manifest.Wave8.v1", &value)
-            .map_err(|_| PluginBoundaryError::DigestEncoding)
+            .expect("plugin descriptors contain only canonically encodable fields")
     }
 
     fn release_digest_value(&self) -> [u8; 32] {
@@ -813,8 +813,6 @@ pub enum PluginBoundaryError {
     ManifestDigestMismatch,
     #[error("plugin boundary release digest does not match its closure")]
     ReleaseDigestMismatch,
-    #[error("plugin boundary descriptor cannot be canonically encoded")]
-    DigestEncoding,
 }
 
 /// Exact Component world admitted by the Wave 8 seam.
@@ -853,7 +851,7 @@ pub fn wave8_plugin_boundary() -> PluginBoundaryV1 {
         manifest_digest: [0; 32],
         release_digest: [0; 32],
     };
-    boundary.manifest_digest = boundary.digest_without_identity().unwrap_or([0; 32]);
+    boundary.manifest_digest = boundary.digest_without_identity();
     boundary.release_digest = boundary.release_digest_value();
     boundary
 }
@@ -1683,11 +1681,9 @@ impl VerificationResultV1 {
 
     /// Compute the result digest over fields `0..16`.
     ///
-    /// # Errors
-    /// Returns a serialization error when the result cannot be encoded.
+    /// The closed record contains only canonically encodable fields.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::verification_result_digest(self)
-            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+        Ok(strict_codec::verification_result_digest(self))
     }
 }
 
@@ -1714,11 +1710,9 @@ impl DivergenceReportV1 {
 
     /// Compute the divergence digest over fields `0..20`.
     ///
-    /// # Errors
-    /// Returns a serialization error when the report cannot be encoded.
+    /// The closed record contains only canonically encodable fields.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::divergence_report_digest(self)
-            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+        Ok(strict_codec::divergence_report_digest(self))
     }
 }
 
@@ -1793,13 +1787,7 @@ pub mod strict_codec {
                     .map(encode_event)
                     .collect(),
             ),
-            Value::Array(
-                evidence
-                    .projections
-                    .iter()
-                    .map(encode_projection)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+            Value::Array(evidence.projections.iter().map(encode_projection).collect()),
             Value::Array(evidence.causal_trace.iter().map(encode_trace).collect()),
             Value::Array(
                 evidence
@@ -1853,8 +1841,7 @@ pub mod strict_codec {
     fn encode_value(value: &Value) -> Result<Vec<u8>, StrictCborError> {
         validate_value(value)?;
         let mut bytes = Vec::new();
-        encode_value_to_writer(value, &mut bytes)?;
-        Ok(bytes)
+        encode_value_to_writer(value, &mut bytes).map(|()| bytes)
     }
 
     fn encode_value_to_writer<W: std::io::Write>(
@@ -1878,7 +1865,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
-        if result.result_digest != verification_result_digest(&result)? {
+        if result.result_digest != verification_result_digest(&result) {
             return Err(StrictCborError::InvalidField {
                 field: "verification_result_digest".to_owned(),
             });
@@ -1887,11 +1874,10 @@ pub mod strict_codec {
         Ok(result)
     }
 
-    pub(crate) fn verification_result_digest(
-        result: &VerificationResultV1,
-    ) -> Result<[u8; 32], StrictCborError> {
+    pub(crate) fn verification_result_digest(result: &VerificationResultV1) -> [u8; 32] {
         encode_value(&encode_verification_result_value(result, false))
             .map(|bytes| domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
+            .expect("verification results contain only canonically encodable fields")
     }
 
     fn encode_verification_result_value(
@@ -2075,13 +2061,15 @@ pub mod strict_codec {
     pub(crate) fn encode_divergence_report(
         report: &DivergenceReportV1,
     ) -> Result<Vec<u8>, StrictCborError> {
-        let bytes = encode_value(&encode_divergence_report_value(report, true))?;
-        if bytes.len() > 16 * 1024 {
-            return Err(StrictCborError::InvalidField {
-                field: "divergence_report_size".to_owned(),
-            });
-        }
-        Ok(bytes)
+        encode_value(&encode_divergence_report_value(report, true)).and_then(|bytes| {
+            if bytes.len() > 16 * 1024 {
+                Err(StrictCborError::InvalidField {
+                    field: "divergence_report_size".to_owned(),
+                })
+            } else {
+                Ok(bytes)
+            }
+        })
     }
 
     pub(crate) fn decode_divergence_report(
@@ -2090,7 +2078,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
-        if report.report_digest != divergence_report_digest(&report)? {
+        if report.report_digest != divergence_report_digest(&report) {
             return Err(StrictCborError::InvalidField {
                 field: "divergence_report_digest".to_owned(),
             });
@@ -2099,11 +2087,10 @@ pub mod strict_codec {
         Ok(report)
     }
 
-    pub(crate) fn divergence_report_digest(
-        report: &DivergenceReportV1,
-    ) -> Result<[u8; 32], StrictCborError> {
+    pub(crate) fn divergence_report_digest(report: &DivergenceReportV1) -> [u8; 32] {
         encode_value(&encode_divergence_report_value(report, false))
             .map(|bytes| domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
+            .expect("divergence reports contain only canonically encodable fields")
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -2765,7 +2752,11 @@ pub mod strict_codec {
 
     fn decode_manifest(value: &Value) -> Result<ReproManifestV1, StrictCborError> {
         let fields = array(value, "manifest", 18)?;
-        let versions = array(&fields[14], "plugin_versions", plugin_len(&fields[14])?)?;
+        let Value::Array(versions) = &fields[14] else {
+            return Err(StrictCborError::InvalidField {
+                field: "plugin_versions".to_owned(),
+            });
+        };
         let mut plugin_versions = BTreeMap::new();
         for pair in versions {
             let pair = array(pair, "plugin_version", 2)?;
@@ -2840,14 +2831,14 @@ pub mod strict_codec {
         values.iter().map(decode_event).collect()
     }
 
-    fn encode_projection(projection: &ProjectionEvidenceV1) -> Result<Value, StrictCborError> {
+    fn encode_projection(projection: &ProjectionEvidenceV1) -> Value {
         let state = serde_json::to_vec(&projection.state)
-            .map_err(|error| StrictCborError::Json(error.to_string()))?;
-        Ok(Value::Array(vec![
+            .expect("a serde_json::Value is always JSON serializable");
+        Value::Array(vec![
             text(&projection.reducer),
             text(&projection.entity),
             Value::Bytes(state),
-        ]))
+        ])
     }
 
     fn decode_projection(value: &Value) -> Result<ProjectionEvidenceV1, StrictCborError> {
@@ -4155,7 +4146,7 @@ pub mod strict_codec {
                 reject_each_field(&event, decode_event);
                 consume(decode_events(&Value::Array(vec![event])));
                 consume(decode_events(&Value::Array(vec![Value::Map(Vec::new())])));
-                let projection = encode_projection(&evidence.projections[0]).unwrap_or(Value::Null);
+                let projection = encode_projection(&evidence.projections[0]);
                 consume(decode_projection(&projection));
                 reject_each_field(&projection, decode_projection);
                 consume(decode_projections(&Value::Array(vec![Value::Map(
@@ -4994,6 +4985,12 @@ pub mod strict_codec {
             let decoded = decode_value(&bytes);
             assert!(decoded.is_ok());
             let mut root = decoded.unwrap_or(Value::Null);
+            let wrong_version = replace_field(&root, 1, uint(2));
+            let wrong_version = encode_value(&wrong_version).unwrap_or_default();
+            assert_eq!(
+                decode_evidence(&wrong_version),
+                Err(StrictCborError::UnsupportedVersion)
+            );
             if let Value::Array(fields) = &mut root {
                 fields[0] = text("wrong");
             }
@@ -5098,8 +5095,7 @@ pub mod strict_codec {
                 ..error.clone()
             });
             assert!(validate_verification_result(&invalid_semantics).is_err());
-            invalid_semantics.result_digest =
-                verification_result_digest(&invalid_semantics).unwrap_or([0; 32]);
+            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics);
             let invalid_semantics_bytes =
                 encode_value(&encode_verification_result_value(&invalid_semantics, true))
                     .unwrap_or_default();
@@ -8397,7 +8393,7 @@ pub mod tests {
                 assert!(verify_wave8_contract(&invalid).is_err());
             }
 
-            let (_, mut with_intervention) = fork_pair();
+            let (fork_baseline, mut with_intervention) = fork_pair();
             with_intervention.authoritative_events[1].tick = 2;
             let action_event = with_intervention.authoritative_events[1].clone();
             let society_event = with_intervention.authoritative_events[2].clone();
@@ -8478,6 +8474,10 @@ pub mod tests {
             ];
             counterfactual.recomputed_event_seqs = vec![society_event.seq];
             assert_eq!(verify_wave8_contract(&with_intervention), Ok(()));
+            assert_eq!(
+                verify_counterfactual_fork(&fork_baseline, &with_intervention, "world.action.v1"),
+                Ok(())
+            );
 
             let mut missing_intervention = with_intervention.clone();
             if let Some(intervention) = missing_intervention

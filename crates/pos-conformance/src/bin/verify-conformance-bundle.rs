@@ -92,7 +92,8 @@ fn read_bounded(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{read_bounded, verify_path};
+    use super::{read_bounded, run, verify_path};
+    use std::ffi::OsString;
     use std::fs;
     use std::io::{self, Cursor, Read};
     #[cfg(unix)]
@@ -138,5 +139,28 @@ mod tests {
         assert!(read_bounded(Cursor::new([]), 5, 5).is_ok());
         assert!(read_bounded(Cursor::new([0_u8; 5]), 5, 5).is_ok());
         assert!(read_bounded(FailingReader, 0, 5).is_err());
+    }
+
+    #[test]
+    fn command_rejects_missing_and_invalid_archive_arguments(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert!(run([OsString::from("verify-conformance-bundle")].into_iter()).is_err());
+
+        let path = std::env::temp_dir().join(format!(
+            "pigloros-invalid-cfb1-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        fs::write(&path, b"invalid conformance archive")?;
+        let result = run([
+            OsString::from("verify-conformance-bundle"),
+            path.clone().into_os_string(),
+        ]
+        .into_iter());
+        fs::remove_file(path)?;
+        assert!(result.is_err());
+        Ok(())
     }
 }
