@@ -4195,7 +4195,7 @@ mod tests {
         reject_profile(Value::Array(wrong_bytes));
 
         let mut wrong_bool = fields.clone();
-        if let Some(fixtures) = wrong_bool[8].as_array_mut() {
+        if let Some(fixtures) = wrong_bool[9].as_array_mut() {
             if let Some(fixture) = fixtures[0].as_array_mut() {
                 fixture[1] = Value::Null;
             }
@@ -4203,7 +4203,7 @@ mod tests {
         reject_profile(Value::Array(wrong_bool));
 
         let mut wrong_typed_error = fields.clone();
-        if let Some(fixtures) = wrong_typed_error[8].as_array_mut() {
+        if let Some(fixtures) = wrong_typed_error[9].as_array_mut() {
             if let Some(fixture) = fixtures[0].as_array_mut() {
                 if let Some(expected) = fixture[8].as_array_mut() {
                     expected[0] = uint(1);

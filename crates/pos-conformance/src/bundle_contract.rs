@@ -7261,15 +7261,19 @@ mod instrumented_public_entrypoints {
     fn independent_authority_json_error_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile_value = profile_value(&tests::profile())?;
-        let no_matrix_digest = profile_without_matrix_digest(&profile_value)?;
         let bad_metadata_inventory =
             br#"{"lifecycle":"Draft","magic":"BAD","version":1,"digest_algorithm":"BLAKE3-256"}"#;
         let valid_metadata_matrix = br#"{"lifecycle":"Draft","magic":"NIM1","version":1}"#;
+        let matching_matrix_digest = profile_with_field(
+            &profile_value,
+            6,
+            Value::Bytes(blake3::hash(valid_metadata_matrix).as_bytes().to_vec()),
+        )?;
         let provenance = b"{}";
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(bad_metadata_inventory, valid_metadata_matrix, provenance,),
-                &no_matrix_digest,
+                &matching_matrix_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
@@ -7285,7 +7289,7 @@ mod instrumented_public_entrypoints {
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(&wrong_entries_bytes, valid_metadata_matrix, provenance,),
-                &no_matrix_digest,
+                &matching_matrix_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
@@ -7316,7 +7320,7 @@ mod instrumented_public_entrypoints {
         assert_eq!(
             independent_verify_authority_members(
                 &raw_authority_members(&pending_inventory_bytes, valid_metadata_matrix, provenance,),
-                &no_matrix_digest,
+                &matching_matrix_digest,
             ),
             Err(BundleContractErrorV1::MemberDigestMismatch)
         );
@@ -7444,6 +7448,7 @@ mod instrumented_public_entrypoints {
         let mut stable_authority_members = artifact_bundle.members;
         let stable_matrix = br#"{"lifecycle":"Stable"}"#;
         let stable_matrix_digest = blake3::hash(stable_matrix).to_hex().to_string();
+        artifact_profile.execution_matrix_digest = *blake3::hash(stable_matrix).as_bytes();
         let stable_provenance = serde_json::to_vec(&serde_json::json!({
             "authority_inventory": {
                 "digest_algorithm": "SHA-256",
