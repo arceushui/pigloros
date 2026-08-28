@@ -169,6 +169,18 @@ fn replace_first_byte(
     Ok(())
 }
 
+fn make_cfb1_version_noncanonical(bytes: &mut Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    const CANONICAL_HEADER: &[u8] = b"\x86\x64CFB1\x01";
+    if !bytes.starts_with(CANONICAL_HEADER) {
+        return Err("canonical CFB1 header is missing".into());
+    }
+    bytes.splice(
+        CANONICAL_HEADER.len() - 1..CANONICAL_HEADER.len(),
+        [0x18, 0x01],
+    );
+    Ok(())
+}
+
 fn signed_archive_variant(
     bundle: &ConformanceBundleV1,
     signing_key: &SigningKey,
@@ -2844,7 +2856,7 @@ fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dy
     assert_independent_profile_shape_rejections(&bundle, &signing_key)?;
 
     let mut noncanonical_archive = signed_archive_variant(&bundle, &signing_key, |_| Ok(()))?;
-    replace_first_byte(&mut noncanonical_archive, 0x01, &[0x18, 0x01])?;
+    make_cfb1_version_noncanonical(&mut noncanonical_archive)?;
     assert_eq!(
         pos_conformance::verify_archive_independently(&noncanonical_archive),
         Err(pos_conformance::BundleContractErrorV1::ArchiveEncodingInvalid)
