@@ -802,7 +802,7 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
 }
 
 #[test]
-fn public_profile_rejects_cpf2_without_a_compatibility_reader() {
+fn public_profile_rejects_obsolete_profile_format_without_a_compatibility_reader() {
     assert_eq!(
         ConformanceProfileV1::from_canonical_cbor(&[0x82, 0x64, b'C', b'P', b'F', b'2', 0x02]),
         Err(ConformanceContractError::UnsupportedVersion)

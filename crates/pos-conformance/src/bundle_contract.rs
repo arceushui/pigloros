@@ -1333,7 +1333,7 @@ fn independent_verify_profile_contract(
     Ok(())
 }
 
-struct IndependentCpf2Caps {
+struct IndependentCpf1Caps {
     cases: u64,
     bundle_members: u64,
     member_path_bytes: u64,
@@ -1425,7 +1425,7 @@ fn independent_verify_cpf1_root(
 
 fn independent_verify_cpf1_protocol(
     value: &Value,
-) -> Result<IndependentCpf2Caps, BundleContractErrorV1> {
+) -> Result<IndependentCpf1Caps, BundleContractErrorV1> {
     let fields = independent_profile_array(value, 5)?;
     if [1_usize, 2, 3]
         .iter()
@@ -1439,7 +1439,7 @@ fn independent_verify_cpf1_protocol(
 
 fn independent_verify_cpf1_hard_caps(
     value: &Value,
-) -> Result<IndependentCpf2Caps, BundleContractErrorV1> {
+) -> Result<IndependentCpf1Caps, BundleContractErrorV1> {
     let fields = independent_profile_array(value, 10)?;
     let values = fields
         .iter()
@@ -1467,7 +1467,7 @@ fn independent_verify_cpf1_hard_caps(
     {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    Ok(IndependentCpf2Caps {
+    Ok(IndependentCpf1Caps {
         cases: values[1],
         bundle_members: values[2],
         member_path_bytes: values[3],
@@ -1523,7 +1523,7 @@ fn independent_verify_cpf1_fixtures(
     allowed_divergences: &Value,
     execution_profiles: &[[u8; 32]],
     public_schemas: &[[u8; 32]],
-    caps: &IndependentCpf2Caps,
+    caps: &IndependentCpf1Caps,
 ) -> Result<(), BundleContractErrorV1> {
     let fixtures = independent_profile_array_bounded(value)?;
     let allowed = independent_profile_allowed_divergences(allowed_divergences)?;
@@ -1549,7 +1549,7 @@ fn independent_verify_cpf1_fixture(
     allowed: &[(u64, Vec<u8>)],
     execution_profiles: &[[u8; 32]],
     public_schemas: &[[u8; 32]],
-    caps: &IndependentCpf2Caps,
+    caps: &IndependentCpf1Caps,
 ) -> Result<(String, u64, [u8; 32]), BundleContractErrorV1> {
     let fields = independent_profile_array(value, 17)?;
     let case_id = independent_profile_text(&fields[0], 128)?.to_owned();
@@ -1585,7 +1585,7 @@ fn independent_verify_cpf1_fixture(
 
 fn independent_verify_cpf1_fixture_inputs(
     value: &Value,
-    caps: &IndependentCpf2Caps,
+    caps: &IndependentCpf1Caps,
 ) -> Result<(), BundleContractErrorV1> {
     let inputs = independent_profile_array_bounded(value)?;
     let mut previous = None;
@@ -1696,7 +1696,7 @@ fn independent_verify_cpf1_fixture_claim(
 fn independent_verify_cpf1_expected_bounds(
     expected: &Value,
     bounds: &Value,
-    caps: &IndependentCpf2Caps,
+    caps: &IndependentCpf1Caps,
 ) -> Result<(), BundleContractErrorV1> {
     let expected = independent_profile_array(expected, 5)?;
     if independent_profile_u64(&expected[0])? != 0 {
@@ -1759,7 +1759,7 @@ fn independent_verify_cpf1_selected_caps(
     profile: &Value,
     fixtures: &Value,
     divergences: &Value,
-    caps: &IndependentCpf2Caps,
+    caps: &IndependentCpf1Caps,
 ) -> Result<(), BundleContractErrorV1> {
     if u64::try_from(value_depth(profile)).unwrap_or(u64::MAX) > caps.structural_nesting {
         return Err(BundleContractErrorV1::ProfileInvalid);
