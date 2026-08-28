@@ -1417,7 +1417,7 @@ mod tests {
         let canonical_bytes = profile_record_bytes(ClaimLayerV1::ArtifactIntegrity);
         let canonical_record: JsonValue = serde_json::from_slice(canonical_bytes)?;
         let context = fixture_context(canonical_bytes, ClaimLayerV1::ArtifactIntegrity);
-        helper_validation_seams_reject_profile_binding_changes(&canonical_record);
+        helper_validation_seams_reject_profile_binding_changes(&canonical_record)?;
         helper_validation_seams_cover_fixture_variants(&canonical_record, &context)?;
         helper_validation_seams_cover_protocol_caps();
         Ok(())
@@ -1450,7 +1450,9 @@ mod tests {
         assert!(json_string_array(&serde_json::json!({"values": ["ok", 7]}), "values").is_err());
     }
 
-    fn helper_validation_seams_reject_profile_binding_changes(canonical_record: &JsonValue) {
+    fn helper_validation_seams_reject_profile_binding_changes(
+        canonical_record: &JsonValue,
+    ) -> Result<(), Box<dyn Error>> {
         assert!(validate_profile_record_bindings(
             ClaimLayerV1::ArtifactIntegrity,
             canonical_record
@@ -1462,8 +1464,6 @@ mod tests {
             "fixture_root",
             "wire_code",
             "authority_inventory",
-            "adr_059_execution_matrix",
-            "adr_059_execution_matrix_status",
         ] {
             let mut invalid_metadata = canonical_record.clone();
             invalid_metadata[field] = JsonValue::String("invalid".to_owned());
@@ -1488,14 +1488,22 @@ mod tests {
             validate_profile_record_bindings(ClaimLayerV1::ArtifactIntegrity, &invalid_digest)
                 .is_err()
         );
-        let mut invalid_matrix_digest = canonical_record.clone();
-        invalid_matrix_digest["adr_059_execution_matrix_blake3_digest"] =
-            JsonValue::String("00".repeat(32));
-        assert!(validate_profile_record_bindings(
-            ClaimLayerV1::ArtifactIntegrity,
-            &invalid_matrix_digest
-        )
-        .is_err());
+        let knowledge_record: JsonValue =
+            serde_json::from_slice(profile_record_bytes(ClaimLayerV1::KnowledgeNonInterference))?;
+        for field in [
+            "adr_059_execution_matrix",
+            "adr_059_execution_matrix_status",
+            "adr_059_execution_matrix_blake3_digest",
+        ] {
+            let mut invalid_matrix_metadata = knowledge_record.clone();
+            invalid_matrix_metadata[field] = JsonValue::String("invalid".to_owned());
+            assert!(validate_profile_record_bindings(
+                ClaimLayerV1::KnowledgeNonInterference,
+                &invalid_matrix_metadata
+            )
+            .is_err());
+        }
+        Ok(())
     }
 
     fn helper_validation_seams_cover_fixture_variants(
