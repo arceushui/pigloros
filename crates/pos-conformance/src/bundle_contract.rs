@@ -6400,6 +6400,56 @@ mod instrumented_public_entrypoints {
         Ok(())
     }
 
+    fn mutate_public_json_member(
+        archive: &mut Value,
+        path: &str,
+        mutation: impl FnOnce(&mut JsonValue),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Value::Array(archive_fields) = archive else {
+            return Err("archive must be an array".into());
+        };
+        let Value::Array(members) = &mut archive_fields[3] else {
+            return Err("archive members must be an array".into());
+        };
+        let member = members
+            .iter_mut()
+            .find(|member| {
+                matches!(member, Value::Array(fields) if fields.first()
+                    == Some(&Value::Text(path.to_owned())))
+            })
+            .ok_or("archive must contain JSON member")?;
+        let Value::Array(member_fields) = member else {
+            return Err("JSON member must be an array".into());
+        };
+        let Value::Bytes(bytes) = &member_fields[1] else {
+            return Err("JSON member bytes must be bytes".into());
+        };
+        let mut json: JsonValue = serde_json::from_slice(bytes)?;
+        mutation(&mut json);
+        let encoded = serde_json::to_vec(&json)?;
+        member_fields[1] = Value::Bytes(encoded.clone());
+
+        let Value::Array(manifest) = &mut archive_fields[2] else {
+            return Err("archive manifest must be an array".into());
+        };
+        let Value::Array(descriptors) = &mut manifest[4] else {
+            return Err("member descriptors must be an array".into());
+        };
+        let descriptor = descriptors
+            .iter_mut()
+            .find(|descriptor| {
+                matches!(descriptor, Value::Array(fields) if fields.first()
+                    == Some(&Value::Text(path.to_owned())))
+            })
+            .ok_or("manifest must describe JSON member")?;
+        let Value::Array(descriptor_fields) = descriptor else {
+            return Err("JSON member descriptor must be an array".into());
+        };
+        descriptor_fields[1] = Value::Integer(u64::try_from(encoded.len())?.into());
+        descriptor_fields[2] = Value::Bytes(blake3::hash(&encoded).as_bytes().to_vec());
+        Ok(())
+    }
+
     fn assert_public_independent_error(
         archive: &Value,
         expected: BundleContractErrorV1,
@@ -6691,6 +6741,88 @@ mod instrumented_public_entrypoints {
         assert_public_independent_error(
             &short_signer_key,
             BundleContractErrorV1::ArchiveEncodingInvalid,
+        )
+    }
+
+    #[test]
+    fn public_independent_verifier_rejects_authority_inventory_schema_variants(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_draft_bundle()?;
+        for (field, replacement) in [
+            ("magic", JsonValue::String("W8H0".to_owned())),
+            ("version", JsonValue::Number(2_u64.into())),
+            ("lifecycle", JsonValue::String("Final".to_owned())),
+            ("digest_algorithm", JsonValue::String("SHA-256".to_owned())),
+        ] {
+            let mut archive = archive_value(&bundle)?;
+            mutate_public_json_member(
+                &mut archive,
+                AUTHORITY_INVENTORY_MEMBER_PATH,
+                |inventory| inventory[field] = replacement,
+            )?;
+            resign_public_archive(&mut archive)?;
+            assert_public_independent_error(&archive, BundleContractErrorV1::MemberDigestMismatch)?;
+        }
+
+        let mut missing_entries = archive_value(&bundle)?;
+        mutate_public_json_member(
+            &mut missing_entries,
+            AUTHORITY_INVENTORY_MEMBER_PATH,
+            |inventory| inventory["entries"] = JsonValue::Null,
+        )?;
+        resign_public_archive(&mut missing_entries)?;
+        assert_public_independent_error(
+            &missing_entries,
+            BundleContractErrorV1::MemberDigestMismatch,
+        )?;
+
+        let mut wrong_fixture = archive_value(&bundle)?;
+        mutate_public_json_member(
+            &mut wrong_fixture,
+            AUTHORITY_INVENTORY_MEMBER_PATH,
+            |inventory| {
+                inventory["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())
+            },
+        )?;
+        resign_public_archive(&mut wrong_fixture)?;
+        assert_public_independent_error(
+            &wrong_fixture,
+            BundleContractErrorV1::MemberDigestMismatch,
+        )?;
+
+        for field in [
+            "materialization_status",
+            "fixture_bytes_path",
+            "fixture_bytes_digest",
+            "expected_result_path",
+            "expected_result_digest",
+        ] {
+            let mut archive = archive_value(&bundle)?;
+            mutate_public_json_member(
+                &mut archive,
+                AUTHORITY_INVENTORY_MEMBER_PATH,
+                |inventory| {
+                    inventory["entries"][0][field] = if field == "materialization_status" {
+                        JsonValue::String("materialized".to_owned())
+                    } else {
+                        JsonValue::String("undeclared-evidence".to_owned())
+                    };
+                },
+            )?;
+            resign_public_archive(&mut archive)?;
+            assert_public_independent_error(&archive, BundleContractErrorV1::MemberDigestMismatch)?;
+        }
+
+        let mut undeclared_entry_field = archive_value(&bundle)?;
+        mutate_public_json_member(
+            &mut undeclared_entry_field,
+            AUTHORITY_INVENTORY_MEMBER_PATH,
+            |inventory| inventory["entries"][0]["candidate_evidence"] = JsonValue::Null,
+        )?;
+        resign_public_archive(&mut undeclared_entry_field)?;
+        assert_public_independent_error(
+            &undeclared_entry_field,
+            BundleContractErrorV1::MemberDigestMismatch,
         )
     }
 
