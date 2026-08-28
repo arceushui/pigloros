@@ -1081,6 +1081,7 @@ fn public_independent_verifier_rejects_cpf1_semantic_variants(
         .chain(cpf1_fixture_result_mutations())
         .chain(cpf1_malformed_fixture_value_mutations())
         .chain(cpf1_divergent_fixture_mutations())
+        .chain(cpf1_selected_cap_mutations())
         .collect();
     for mutate in mutations {
         let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
@@ -1651,6 +1652,38 @@ fn cpf1_divergent_fixture_mutations() -> Vec<ArchiveMutation> {
             }
         })
     })]
+}
+
+fn cpf1_selected_cap_mutations() -> Vec<ArchiveMutation> {
+    vec![
+        Box::new(|value| mutate_profile(value, |fields| fields[16] = Value::Bytes(vec![9; 32]))),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[5] = Value::Array(vec![Value::Integer(1_u64.into())]);
+                if let Value::Array(capabilities) = &mut fixture[14] {
+                    capabilities[0] = Value::Bool(true);
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    if let Value::Array(caps) = &mut protocol[4] {
+                        caps[1] = Value::Integer(1_u64.into());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    if let Value::Array(caps) = &mut protocol[4] {
+                        caps[2] = Value::Integer(1_u64.into());
+                    }
+                }
+            })
+        }),
+    ]
 }
 
 #[test]
