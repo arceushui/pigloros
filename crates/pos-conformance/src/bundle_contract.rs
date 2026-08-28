@@ -1212,27 +1212,26 @@ fn independent_verify_authority_members(
     if matrix_digest == [0; 32] || matrix_digest != *blake3::hash(matrix.bytes).as_bytes() {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    let inventory_lifecycle = json_text(&inventory_json, "lifecycle")?;
-    let matrix_lifecycle = json_text(&matrix_json, "lifecycle")?;
-    if json_text(&inventory_json, "magic")? != "W8H1" {
+    if !json_text(&inventory_json, "magic").is_ok_and(|value| value == "W8H1") {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    if json_u64(&inventory_json, "version")? != 1 {
+    if !json_u64(&inventory_json, "version").is_ok_and(|value| value == 1) {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    if json_text(&inventory_json, "digest_algorithm")? != "BLAKE3-256" {
+    if !json_text(&inventory_json, "digest_algorithm").is_ok_and(|value| value == "BLAKE3-256") {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    if json_text(&matrix_json, "magic")? != "NIM1" {
+    if !json_text(&matrix_json, "magic").is_ok_and(|value| value == "NIM1") {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    if json_u64(&matrix_json, "version")? != 1 {
+    if !json_u64(&matrix_json, "version").is_ok_and(|value| value == 1) {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    if inventory_lifecycle != matrix_lifecycle {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    if inventory_lifecycle != "Draft" {
+    if !json_text(&inventory_json, "lifecycle").is_ok_and(|inventory_lifecycle| {
+        json_text(&matrix_json, "lifecycle").is_ok_and(|matrix_lifecycle| {
+            inventory_lifecycle == matrix_lifecycle && inventory_lifecycle == "Draft"
+        })
+    }) {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     let entries = inventory_json
@@ -3300,19 +3299,21 @@ fn validate_execution_matrix_rows(rows: &[JsonValue]) -> Result<(), BundleContra
         if !json_has_exact_keys(row, &EXECUTION_MATRIX_ROW_KEYS) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(row, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[index] {
+        if !json_text(row, "fixture_id").is_ok_and(|value| value == NON_INTERFERENCE_ROW_IDS[index])
+        {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_string_array(row, "variants")? != NON_INTERFERENCE_VARIANTS {
+        if !json_string_array(row, "variants").is_ok_and(|value| value == NON_INTERFERENCE_VARIANTS)
+        {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_string_array(row, "modes")? != NON_INTERFERENCE_MODES {
+        if !json_string_array(row, "modes").is_ok_and(|value| value == NON_INTERFERENCE_MODES) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_u64(row, "case_count")? != 16 {
+        if !json_u64(row, "case_count").is_ok_and(|value| value == 16) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_u64(row, "executed_case_count")? != 0 {
+        if !json_u64(row, "executed_case_count").is_ok_and(|value| value == 0) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
@@ -3333,16 +3334,20 @@ fn validate_execution_matrix_cases(cases: &[JsonValue]) -> Result<(), BundleCont
         if !json_has_exact_keys(case, &EXECUTION_MATRIX_CASE_KEYS) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(case, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[row_index] {
+        if !json_text(case, "fixture_id")
+            .is_ok_and(|value| value == NON_INTERFERENCE_ROW_IDS[row_index])
+        {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(case, "variant")? != NON_INTERFERENCE_VARIANTS[variant_index] {
+        if !json_text(case, "variant")
+            .is_ok_and(|value| value == NON_INTERFERENCE_VARIANTS[variant_index])
+        {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(case, "mode")? != NON_INTERFERENCE_MODES[mode_index] {
+        if !json_text(case, "mode").is_ok_and(|value| value == NON_INTERFERENCE_MODES[mode_index]) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(case, "case_id")? != expected_case_id {
+        if !json_text(case, "case_id").is_ok_and(|value| value == expected_case_id) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
@@ -3359,16 +3364,20 @@ fn validate_execution_matrix_predicates(
         if !json_has_exact_keys(predicate, &EXECUTION_MATRIX_PREDICATE_KEYS) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(predicate, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[index] {
+        if !json_text(predicate, "fixture_id")
+            .is_ok_and(|value| value == NON_INTERFERENCE_ROW_IDS[index])
+        {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(predicate, "AuthEq")? != NON_INTERFERENCE_AUTH_EQ {
+        if !json_text(predicate, "AuthEq").is_ok_and(|value| value == NON_INTERFERENCE_AUTH_EQ) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(predicate, "PublicEq")? != NON_INTERFERENCE_PUBLIC_EQ[index] {
+        if !json_text(predicate, "PublicEq")
+            .is_ok_and(|value| value == NON_INTERFERENCE_PUBLIC_EQ[index])
+        {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
-        if json_text(predicate, "OpEq")? != NON_INTERFERENCE_OP_EQ[index] {
+        if !json_text(predicate, "OpEq").is_ok_and(|value| value == NON_INTERFERENCE_OP_EQ[index]) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
