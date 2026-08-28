@@ -6781,7 +6781,7 @@ mod instrumented_public_entrypoints {
             &mut wrong_fixture,
             AUTHORITY_INVENTORY_MEMBER_PATH,
             |inventory| {
-                inventory["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned())
+                inventory["entries"][0]["fixture_id"] = JsonValue::String("wrong".to_owned());
             },
         )?;
         resign_public_archive(&mut wrong_fixture)?;
