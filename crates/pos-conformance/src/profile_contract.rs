@@ -1728,7 +1728,7 @@ fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
 fn encode_profile(profile: &ConformanceProfileV1, include_digest: bool) -> Value {
     Value::Array(vec![
         text(CONFORMANCE_PROFILE_MAGIC_V1),
-        uint(2),
+        uint(1),
         text(&profile.profile_id),
         text(&profile.semantic_version),
         lifecycle(profile.lifecycle),
