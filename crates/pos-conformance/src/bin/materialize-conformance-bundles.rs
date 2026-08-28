@@ -330,6 +330,7 @@ fn run(
 ) -> Result<(), Box<dyn Error>> {
     let output_root = output_root_from_arguments(arguments)?;
     let signing_key = signing_key_from_encoded(encoded_signing_key)?;
+    preflight_materialization_destination(&output_root)?;
     let inventory_bytes =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
     let lifecycles = publication_lifecycles_from_bytes(inventory_bytes)?;
@@ -1172,6 +1173,18 @@ fn verify_public_archive(
                         })
                 })
         })
+}
+
+#[cfg(target_os = "linux")]
+fn preflight_materialization_destination(destination: &Path) -> Result<(), MaterializationError> {
+    let (parent_path, destination_name) = output_parent_and_name(destination)?;
+    let parent = open_trusted_parent(parent_path)?;
+    reject_existing_destination(&parent, &destination_name)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn preflight_materialization_destination(_destination: &Path) -> Result<(), MaterializationError> {
+    Err(MaterializationError::AtomicPublicationUnsupported)
 }
 
 #[cfg(target_os = "linux")]
