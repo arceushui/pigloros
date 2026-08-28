@@ -1615,6 +1615,66 @@ fn public_independent_verifier_binds_expected_bytes_and_fixture_inputs(
 }
 
 #[test]
+fn public_independent_verifier_rejects_expected_result_envelope_variants(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let mutations: Vec<ArchiveMutation> = vec![
+        Box::new(|value| {
+            let expected = archive_expected(value)?;
+            expected[4] = Value::Text("expected/missing.bin".to_owned());
+            Ok(())
+        }),
+        Box::new(|value| {
+            let expected = archive_expected(value)?;
+            expected[5] = Value::Bytes(vec![0; 32]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            let expected = archive_expected(value)?;
+            expected[1] = Value::Integer(7_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            let expected = archive_expected(value)?;
+            expected[2] = Value::Bytes(vec![2; 32]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            let expected = archive_expected(value)?;
+            expected[3] = Value::Integer(2_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected_results(value)?.clear();
+            Ok(())
+        }),
+        Box::new(|value| {
+            let manifest = archive_array(value, 2)?;
+            manifest[1] = Value::Integer(1_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            let manifest = archive_array(value, 2)?;
+            manifest[2] = Value::Integer(2_u64.into());
+            Ok(())
+        }),
+        Box::new(|value| {
+            let descriptors = archive_array(value, 2)?;
+            if let Value::Array(members) = &mut descriptors[4] {
+                members.pop();
+            }
+            Ok(())
+        }),
+    ];
+    for mutate in mutations {
+        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
+        assert!(pos_conformance::verify_archive_independently(&archive).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn public_independent_verifier_rejects_re_signed_contract_invariant_mutations(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
