@@ -1712,12 +1712,10 @@ fn divergence_key(value: &AllowedDivergenceV1) -> (DivergenceMismatchKindV1, &[u
 
 fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
     let mut bytes = Vec::new();
-    // A digest must never be computed over fallback bytes. The public digest
-    // APIs cannot return an encoding error, so an impossible in-memory encoding
-    // failure terminates rather than manufacturing a different identity.
-    if ciborium::into_writer(value, &mut bytes).is_err() {
-        std::process::abort();
-    }
+    // A digest must never be computed over fallback bytes. Writing CBOR to a
+    // Vec is infallible; if that invariant changes, fail closed rather than
+    // manufacturing a different identity.
+    ciborium::into_writer(value, &mut bytes).expect("writing CBOR to Vec must succeed");
     let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
     source.push(0);
@@ -3996,6 +3994,19 @@ mod tests {
             ConformanceProfileV2::from_canonical_cbor(&[
                 0x9f, 0x64, b'C', b'P', b'F', b'1', 0x01, 0xff
             ]),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+        assert_eq!(
+            ConformanceProfileV2::from_canonical_cbor(&[0x81, 0x64, b'C', b'P', b'F', b'2']),
+            Err(ConformanceContractError::InvalidEncoding)
+        );
+
+        let canonical = profile().to_canonical_cbor()?;
+        assert_eq!(canonical.first(), Some(&0x92));
+        let mut noncanonical = vec![0x98, 18];
+        noncanonical.extend_from_slice(&canonical[1..]);
+        assert_eq!(
+            ConformanceProfileV2::from_canonical_cbor(&noncanonical),
             Err(ConformanceContractError::InvalidEncoding)
         );
         // The structural preflight accepts text by length; the canonical
