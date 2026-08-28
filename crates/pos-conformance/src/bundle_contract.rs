@@ -1330,7 +1330,7 @@ fn independent_verify_profile_contract(
                     Err(BundleContractErrorV1::MemberDigestMismatch)
                 } else {
                     Ok(())
-                })
+                }
             })
         })
     })
