@@ -1034,6 +1034,7 @@ fn public_independent_verifier_rejects_cpf2_semantic_variants(
     let bundle = signed_draft_bundle()?;
     let mutations: Vec<ArchiveMutation> = cpf2_root_semantic_mutations()
         .into_iter()
+        .chain(cpf2_header_and_range_mutations())
         .chain(cpf2_fixture_semantic_mutations())
         .chain(cpf2_ordering_and_cap_mutations())
         .chain(cpf2_fixture_detail_mutations())
@@ -1105,6 +1106,66 @@ fn cpf2_root_semantic_mutations() -> Vec<ArchiveMutation> {
             })
         }),
     ]
+}
+
+fn cpf2_header_and_range_mutations() -> Vec<ArchiveMutation> {
+    let mut mutations: Vec<ArchiveMutation> = vec![
+        Box::new(|value| {
+            mutate_profile(value, |fields| fields[0] = Value::Text("CPF1".to_owned()))
+        }),
+        Box::new(|value| mutate_profile(value, |fields| fields[1] = Value::Integer(1_u64.into()))),
+        Box::new(|value| mutate_profile(value, |fields| fields[4] = Value::Integer(1_u64.into()))),
+        Box::new(|value| mutate_profile(value, |fields| fields[13] = Value::Bytes(vec![0; 32]))),
+        Box::new(|value| mutate_profile(value, |fields| fields[14] = Value::Bytes(vec![0; 32]))),
+        Box::new(|value| mutate_profile(value, |fields| fields[15] = Value::Bytes(vec![0; 32]))),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                fields[7] =
+                    Value::Array(vec![Value::Bytes(vec![2; 32]), Value::Bytes(vec![1; 32])]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                fields[8] =
+                    Value::Array(vec![Value::Bytes(vec![2; 32]), Value::Bytes(vec![1; 32])]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    protocol[2] = Value::Bytes(vec![0; 32]);
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    protocol[3] = Value::Bytes(vec![0; 32]);
+                }
+            })
+        }),
+    ];
+    for cap_index in 1_usize..=7 {
+        mutations.push(Box::new(move |value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    if let Value::Array(caps) = &mut protocol[4] {
+                        caps[cap_index] = Value::Integer(0_u64.into());
+                    }
+                }
+            })
+        }));
+    }
+    mutations.push(Box::new(|value| {
+        mutate_profile(value, |fields| {
+            if let Value::Array(protocol) = &mut fields[11] {
+                if let Value::Array(caps) = &mut protocol[4] {
+                    caps[9] = Value::Integer((1024_u64 * 1024 + 1).into());
+                }
+            }
+        })
+    }));
+    mutations
 }
 
 fn cpf2_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
