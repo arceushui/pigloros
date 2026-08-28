@@ -1427,10 +1427,10 @@ fn independent_verify_cpf1_root(
     match &fields[16] {
         Value::Null => Ok(()),
         value => independent_profile_digest(value).and_then(|digest| {
-            if digest != [0; 32] {
-                Ok(())
-            } else {
+            if digest == [0; 32] {
                 Err(BundleContractErrorV1::ProfileInvalid)
+            } else {
+                Ok(())
             }
         }),
     }
