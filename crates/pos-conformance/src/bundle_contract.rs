@@ -6304,6 +6304,113 @@ mod instrumented_public_entrypoints {
         Ok(bundle.sign(&signing_key)?)
     }
 
+    fn archive_value(bundle: &ConformanceBundleV1) -> Result<Value, Box<dyn std::error::Error>> {
+        Ok(ciborium::from_reader(Cursor::new(
+            bundle.to_canonical_cbor()?,
+        ))?)
+    }
+
+    fn encode_public_archive(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn mutate_embedded_profile(
+        archive: &mut Value,
+        mutation: impl FnOnce(&mut Vec<Value>) -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Value::Array(archive_fields) = archive else {
+            return Err("archive must be an array".into());
+        };
+        let profile_bytes = {
+            let Value::Array(members) = &archive_fields[3] else {
+                return Err("archive members must be an array".into());
+            };
+            let profile_member = members
+                .iter()
+                .find(|member| {
+                    matches!(member, Value::Array(fields) if fields.first()
+                        == Some(&Value::Text(PROFILE_MEMBER_PATH.to_owned())))
+                })
+                .ok_or("archive must contain a profile member")?;
+            let Value::Array(member_fields) = profile_member else {
+                return Err("profile member must be an array".into());
+            };
+            let Value::Bytes(bytes) = &member_fields[1] else {
+                return Err("profile bytes must be bytes".into());
+            };
+            bytes.clone()
+        };
+        let mut profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))?;
+        let Value::Array(profile_fields) = &mut profile else {
+            return Err("profile must be an array".into());
+        };
+        mutation(profile_fields)?;
+        let mut encoded_profile = Vec::new();
+        ciborium::into_writer(&profile, &mut encoded_profile)?;
+
+        {
+            let Value::Array(members) = &mut archive_fields[3] else {
+                return Err("archive members must be an array".into());
+            };
+            let profile_member = members
+                .iter_mut()
+                .find(|member| {
+                    matches!(member, Value::Array(fields) if fields.first()
+                        == Some(&Value::Text(PROFILE_MEMBER_PATH.to_owned())))
+                })
+                .ok_or("archive must contain a profile member")?;
+            let Value::Array(member_fields) = profile_member else {
+                return Err("profile member must be an array".into());
+            };
+            member_fields[1] = Value::Bytes(encoded_profile.clone());
+        }
+
+        let Value::Array(manifest) = &mut archive_fields[2] else {
+            return Err("archive manifest must be an array".into());
+        };
+        let Value::Array(descriptors) = &mut manifest[4] else {
+            return Err("member descriptors must be an array".into());
+        };
+        let descriptor = descriptors
+            .iter_mut()
+            .find(|descriptor| {
+                matches!(descriptor, Value::Array(fields) if fields.first()
+                    == Some(&Value::Text(PROFILE_MEMBER_PATH.to_owned())))
+            })
+            .ok_or("manifest must describe the profile member")?;
+        let Value::Array(descriptor_fields) = descriptor else {
+            return Err("profile descriptor must be an array".into());
+        };
+        descriptor_fields[1] = Value::Integer(u64::try_from(encoded_profile.len())?.into());
+        descriptor_fields[2] = Value::Bytes(blake3::hash(&encoded_profile).as_bytes().to_vec());
+        Ok(())
+    }
+
+    fn resign_public_archive(value: &mut Value) -> Result<(), Box<dyn std::error::Error>> {
+        let Value::Array(fields) = value else {
+            return Err("archive must be an array".into());
+        };
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut manifest_bytes = Vec::new();
+        ciborium::into_writer(&fields[2], &mut manifest_bytes)?;
+        fields[4] = Value::Bytes(signing_key.verifying_key().to_bytes().to_vec());
+        fields[5] = Value::Bytes(signing_key.sign(&manifest_bytes).to_bytes().to_vec());
+        Ok(())
+    }
+
+    fn assert_public_independent_error(
+        archive: &Value,
+        expected: BundleContractErrorV1,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            verify_archive_independently(&encode_public_archive(archive)?),
+            Err(expected)
+        );
+        Ok(())
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn valid_draft_bundle_reaches_public_validation() -> Result<(), Box<dyn std::error::Error>> {
@@ -6431,6 +6538,160 @@ mod instrumented_public_entrypoints {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn public_independent_verifier_rejects_cpf2_profile_error_paths(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_draft_bundle()?;
+
+        let mut invalid_semantic_version = archive_value(&bundle)?;
+        mutate_embedded_profile(&mut invalid_semantic_version, |fields| {
+            fields[3] = Value::Text("01.0.0".to_owned());
+            Ok(())
+        })?;
+        assert_public_independent_error(
+            &invalid_semantic_version,
+            BundleContractErrorV1::ProfileInvalid,
+        )?;
+
+        let mut unsorted_execution_profiles = archive_value(&bundle)?;
+        mutate_embedded_profile(&mut unsorted_execution_profiles, |fields| {
+            fields[7] = Value::Array(vec![Value::Bytes(vec![2; 32]), Value::Bytes(vec![1; 32])]);
+            Ok(())
+        })?;
+        assert_public_independent_error(
+            &unsorted_execution_profiles,
+            BundleContractErrorV1::ProfileInvalid,
+        )?;
+
+        let mut non_boolean_requirement = archive_value(&bundle)?;
+        mutate_embedded_profile(&mut non_boolean_requirement, |fields| {
+            let Value::Array(requirements) = &mut fields[12] else {
+                return Err("profile requirements must be an array".into());
+            };
+            requirements[0] = Value::Null;
+            Ok(())
+        })?;
+        assert_public_independent_error(
+            &non_boolean_requirement,
+            BundleContractErrorV1::ProfileInvalid,
+        )?;
+
+        let mut empty_fixture_modes = archive_value(&bundle)?;
+        mutate_embedded_profile(&mut empty_fixture_modes, |fields| {
+            let Value::Array(fixtures) = &mut fields[9] else {
+                return Err("profile fixtures must be an array".into());
+            };
+            let Value::Array(fixture) = &mut fixtures[0] else {
+                return Err("profile fixture must be an array".into());
+            };
+            fixture[5] = Value::Array(Vec::new());
+            Ok(())
+        })?;
+        assert_public_independent_error(
+            &empty_fixture_modes,
+            BundleContractErrorV1::ProfileInvalid,
+        )?;
+
+        let mut mismatched_claim_and_redaction = archive_value(&bundle)?;
+        mutate_embedded_profile(&mut mismatched_claim_and_redaction, |fields| {
+            let Value::Array(fixtures) = &mut fields[9] else {
+                return Err("profile fixtures must be an array".into());
+            };
+            let Value::Array(fixture) = &mut fixtures[0] else {
+                return Err("profile fixture must be an array".into());
+            };
+            fixture[11] = Value::Integer(0_u64.into());
+            fixture[12] = Value::Integer(1_u64.into());
+            Ok(())
+        })?;
+        assert_public_independent_error(
+            &mismatched_claim_and_redaction,
+            BundleContractErrorV1::ProfileInvalid,
+        )
+    }
+
+    #[test]
+    fn public_independent_verifier_rejects_signed_archive_binding_errors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_draft_bundle()?;
+
+        let mut unordered_expected_results = archive_value(&bundle)?;
+        {
+            let Value::Array(fields) = &mut unordered_expected_results else {
+                return Err("archive must be an array".into());
+            };
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("archive manifest must be an array".into());
+            };
+            let Value::Array(expected_results) = &mut manifest[5] else {
+                return Err("expected results must be an array".into());
+            };
+            expected_results.swap(0, 1);
+        }
+        resign_public_archive(&mut unordered_expected_results)?;
+        assert_public_independent_error(
+            &unordered_expected_results,
+            BundleContractErrorV1::NonCanonicalOrder,
+        )?;
+
+        let mut unordered_members = archive_value(&bundle)?;
+        {
+            let Value::Array(fields) = &mut unordered_members else {
+                return Err("archive must be an array".into());
+            };
+            let Value::Array(members) = &mut fields[3] else {
+                return Err("archive members must be an array".into());
+            };
+            members.swap(0, 1);
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("archive manifest must be an array".into());
+            };
+            let Value::Array(descriptors) = &mut manifest[4] else {
+                return Err("member descriptors must be an array".into());
+            };
+            descriptors.swap(0, 1);
+        }
+        resign_public_archive(&mut unordered_members)?;
+        assert_public_independent_error(
+            &unordered_members,
+            BundleContractErrorV1::NonCanonicalOrder,
+        )?;
+
+        let mut mismatched_descriptor = archive_value(&bundle)?;
+        {
+            let Value::Array(fields) = &mut mismatched_descriptor else {
+                return Err("archive must be an array".into());
+            };
+            let Value::Array(manifest) = &mut fields[2] else {
+                return Err("archive manifest must be an array".into());
+            };
+            let Value::Array(descriptors) = &mut manifest[4] else {
+                return Err("member descriptors must be an array".into());
+            };
+            let Value::Array(descriptor) = &mut descriptors[0] else {
+                return Err("member descriptor must be an array".into());
+            };
+            descriptor[0] = Value::Text("wrong/member/path".to_owned());
+        }
+        resign_public_archive(&mut mismatched_descriptor)?;
+        assert_public_independent_error(
+            &mismatched_descriptor,
+            BundleContractErrorV1::UndeclaredMember,
+        )?;
+
+        let mut short_signer_key = archive_value(&bundle)?;
+        {
+            let Value::Array(fields) = &mut short_signer_key else {
+                return Err("archive must be an array".into());
+            };
+            fields[4] = Value::Bytes(vec![0; 31]);
+        }
+        assert_public_independent_error(
+            &short_signer_key,
+            BundleContractErrorV1::ArchiveEncodingInvalid,
+        )
     }
 
     fn public_archive_decode_boundaries(archive: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
