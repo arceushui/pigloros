@@ -1561,6 +1561,64 @@ fn cpf1_fixture_result_mutations() -> Vec<ArchiveMutation> {
                 }
             })
         }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                if let Value::Array(expected) = &mut fixture[8] {
+                    expected[0] = Value::Null;
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[8] = Value::Array(vec![
+                    Value::Integer(2_u64.into()),
+                    Value::Bytes(Vec::new()),
+                    Value::Bytes(Vec::new()),
+                    Value::Null,
+                    Value::Array(vec![Value::Null, Value::Bytes(vec![1])]),
+                ]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[8] = Value::Array(vec![
+                    Value::Integer(2_u64.into()),
+                    Value::Bytes(Vec::new()),
+                    Value::Bytes(Vec::new()),
+                    Value::Null,
+                    Value::Array(vec![Value::Integer(0_u64.into()), Value::Null]),
+                ]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                if let Value::Array(expected) = &mut fixture[8] {
+                    expected[0] = Value::Integer(1_u64.into());
+                    expected[3] = Value::Integer(12_u64.into());
+                }
+                fixture[9] = Value::Integer(3_u64.into());
+                fixture[10] = Value::Integer(12_u64.into());
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                if let Value::Array(bounds) = &mut fixture[13] {
+                    bounds[3] = Value::Integer(1_u64.into());
+                }
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[14] = Value::Array(vec![Value::Bool(false), Value::Null]);
+            })
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                if let Value::Array(inputs) = &mut fixture[7] {
+                    inputs[0] = Value::Null;
+                }
+            })
+        }),
     ]
 }
 
