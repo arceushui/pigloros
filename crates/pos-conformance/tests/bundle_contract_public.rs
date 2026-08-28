@@ -1034,7 +1034,7 @@ fn cpf2_root_semantic_mutations() -> Vec<ArchiveMutation> {
     vec![
         Box::new(|value| {
             mutate_profile(value, |fields| {
-                fields[2] = Value::Text("profile#matrix=old".to_owned())
+                fields[2] = Value::Text("profile#matrix=old".to_owned());
             })
         }),
         Box::new(|value| mutate_profile(value, |fields| fields[5] = Value::Bytes(vec![0; 32]))),
