@@ -2488,7 +2488,7 @@ fn assert_archive_profile_rejections(
             return Err("profile bytes are missing".into());
         };
         let mut profile_bytes = profile_bytes.clone();
-        replace_first_byte(&mut profile_bytes, 0x02, &[0x18, 0x02])?;
+        replace_first_byte(&mut profile_bytes, 0x01, &[0x18, 0x01])?;
         profile_member[1] = Value::Bytes(profile_bytes.clone());
         let descriptor = archive_descriptor(value, "profile/CPF1.cbor")?;
         descriptor[1] = Value::Integer((profile_bytes.len() as u64).into());
