@@ -853,7 +853,10 @@ pub fn wave8_plugin_boundary() -> PluginBoundaryV1 {
         manifest_digest: [0; 32],
         release_digest: [0; 32],
     };
-    boundary.manifest_digest = boundary.digest_without_identity();
+    boundary.manifest_digest = match boundary.digest_without_identity() {
+        Ok(digest) => digest,
+        Err(_) => std::process::abort(),
+    };
     boundary.release_digest = boundary.release_digest_value();
     boundary
 }
