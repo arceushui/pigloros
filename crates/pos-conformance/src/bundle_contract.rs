@@ -1789,16 +1789,20 @@ fn independent_verify_cpf1_selected_caps(
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     let member_count = fixtures.iter().try_fold(0_u64, |count, fixture| {
-        let fields = independent_profile_array(fixture, 17)?;
-        let inputs = independent_profile_array_bounded(&fields[7])?;
-        Ok::<_, BundleContractErrorV1>(
-            count.saturating_add(u64::try_from(inputs.len()).unwrap_or(u64::MAX)),
-        )
+        independent_fixture_input_count(fixture)
+            .map(|input_count| count.saturating_add(input_count))
     })?;
     if member_count > caps.bundle_members {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     independent_verify_cpf1_allowed_divergences(divergences, caps.coordinate_bytes)
+}
+
+fn independent_fixture_input_count(fixture: &Value) -> Result<u64, BundleContractErrorV1> {
+    independent_profile_array(fixture, 17).and_then(|fields| {
+        independent_profile_array_bounded(&fields[7])
+            .map(|inputs| u64::try_from(inputs.len()).unwrap_or(u64::MAX))
+    })
 }
 
 fn independent_verify_cpf1_digest(
