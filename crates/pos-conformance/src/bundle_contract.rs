@@ -9845,6 +9845,59 @@ mod instrumented_public_entrypoints {
     }
 
     #[test]
+    fn archive_identity_and_valid_cpf1_helper_paths_are_exercised(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bundle = signed_draft_bundle()?;
+        let archive = bundle.to_canonical_cbor()?;
+        let archive_digest = *blake3::hash(&archive).as_bytes();
+        assert_eq!(bundle.archive_digest()?, archive_digest);
+        let filename = bundle.release_filename()?;
+        assert_eq!(verify_archive_release_filename(&archive, &filename), Ok(()));
+        assert_eq!(
+            verify_archive_release_filename(&archive, "not-a-cfb1-filename"),
+            Err(BundleContractErrorV1::ReleaseFilenameInvalid)
+        );
+        assert_eq!(
+            verify_archive_release_filename(b"different archive", &filename),
+            Err(BundleContractErrorV1::ArchiveDigestMismatch)
+        );
+
+        let supporting =
+            BundleMemberV1::supporting("support/schema.cddl", vec![1], BundleMemberRoleV1::Schema);
+        assert_eq!(supporting.role, BundleMemberRoleV1::Schema);
+        let authority = BundleMemberV1::authority(
+            "authority/example.json",
+            vec![2],
+            BundleMemberRoleV1::AuthorityInventory,
+        );
+        assert_eq!(authority.role, BundleMemberRoleV1::AuthorityInventory);
+
+        let profile = profile_value(&tests::profile())?;
+        let fields = independent_profile_array(&profile, 18)?;
+        let fixture = independent_profile_array_bounded(&fields[9])?
+            .first()
+            .ok_or("profile fixture is missing")?;
+        let fixture_fields = independent_profile_array(fixture, 17)?;
+        let allowed = independent_profile_allowed_divergences(&fields[10])?;
+        let caps = independent_verify_cpf1_protocol(&fields[11])?;
+        assert_eq!(
+            independent_verify_cpf1_expected(&fixture_fields[8], &allowed, caps.coordinate_bytes),
+            Ok(())
+        );
+        assert!(independent_strictly_ordered(&["a", "b"]));
+        assert!(!independent_strictly_ordered(&["b", "a"]));
+        assert_eq!(
+            value_depth(&Value::Array(vec![Value::Tag(
+                1,
+                Box::new(Value::Map(vec![(Value::Null, Value::Null)])),
+            )])),
+            4
+        );
+        assert!(!bundle_pair_payloads(&bundle).is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn remaining_archive_authority_and_expected_regions_are_exercised(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let profile = tests::profile();
