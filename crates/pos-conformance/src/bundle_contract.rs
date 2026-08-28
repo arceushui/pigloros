@@ -1252,118 +1252,19 @@ fn independent_verify_authority_members(
 }
 
 fn independent_validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErrorV1> {
-    if !json_has_exact_keys(matrix, &EXECUTION_MATRIX_KEYS)
-        || json_text(matrix, "magic")? != "NIM1"
-        || json_u64(matrix, "version")? != 1
-        || json_text(matrix, "lifecycle")? != "Draft"
-        || json_u64(matrix, "row_count")? != 12
-        || json_u64(matrix, "variant_count")? != 4
-        || json_u64(matrix, "mode_count")? != 4
-        || json_u64(matrix, "case_count")? != 192
-        || json_u64(matrix, "executed_case_count")? != 0
-    {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    let rows = matrix
-        .get("rows")
-        .and_then(JsonValue::as_array)
-        .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
-    let cases = matrix
-        .get("cases")
-        .and_then(JsonValue::as_array)
-        .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
-    let predicates = matrix
-        .get("equality_predicates")
-        .and_then(JsonValue::as_array)
-        .ok_or(BundleContractErrorV1::MemberDigestMismatch)?;
-    if rows.len() != NON_INTERFERENCE_ROW_IDS.len()
-        || cases.len() != 192
-        || predicates.len() != NON_INTERFERENCE_ROW_IDS.len()
-    {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    independent_validate_execution_matrix_rows(rows)?;
-    independent_validate_execution_matrix_cases(cases)?;
-    independent_validate_execution_matrix_predicates(predicates)?;
-    if independent_matrix_cases_are_open(cases) {
+    // This deliberately does not call `validate_execution_matrix`: archive
+    // verification has an independent authority for the accepted Draft matrix.
+    // JSON-value equality retains the complete contract while accepting harmless
+    // JSON whitespace and member-order differences.
+    let expected = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/conformance/matrix/execution-matrix.json"
+    ))
+    .map_err(|_| BundleContractErrorV1::MemberDigestMismatch)?;
+    if matrix == &expected {
         Ok(())
     } else {
         Err(BundleContractErrorV1::MemberDigestMismatch)
     }
-}
-
-fn independent_validate_execution_matrix_rows(
-    rows: &[JsonValue],
-) -> Result<(), BundleContractErrorV1> {
-    for (index, row) in rows.iter().enumerate() {
-        if !json_has_exact_keys(row, &EXECUTION_MATRIX_ROW_KEYS)
-            || json_text(row, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[index]
-            || json_string_array(row, "variants")? != NON_INTERFERENCE_VARIANTS
-            || json_string_array(row, "modes")? != NON_INTERFERENCE_MODES
-            || json_u64(row, "case_count")? != 16
-            || json_u64(row, "executed_case_count")? != 0
-        {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
-    }
-    Ok(())
-}
-
-fn independent_validate_execution_matrix_cases(
-    cases: &[JsonValue],
-) -> Result<(), BundleContractErrorV1> {
-    for (index, case) in cases.iter().enumerate() {
-        let row_index = index / 16;
-        let variant_index = (index % 16) / 4;
-        let mode_index = index % 4;
-        let expected_case_id = format!(
-            "{}-{}-{}",
-            NON_INTERFERENCE_ROW_IDS[row_index],
-            NON_INTERFERENCE_VARIANTS[variant_index],
-            NON_INTERFERENCE_MODES[mode_index]
-        );
-        if !json_has_exact_keys(case, &EXECUTION_MATRIX_CASE_KEYS)
-            || json_text(case, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[row_index]
-            || json_text(case, "variant")? != NON_INTERFERENCE_VARIANTS[variant_index]
-            || json_text(case, "mode")? != NON_INTERFERENCE_MODES[mode_index]
-            || json_text(case, "case_id")? != expected_case_id
-        {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
-    }
-    Ok(())
-}
-
-fn independent_validate_execution_matrix_predicates(
-    predicates: &[JsonValue],
-) -> Result<(), BundleContractErrorV1> {
-    for (index, predicate) in predicates.iter().enumerate() {
-        if !json_has_exact_keys(predicate, &EXECUTION_MATRIX_PREDICATE_KEYS)
-            || json_text(predicate, "fixture_id")? != NON_INTERFERENCE_ROW_IDS[index]
-            || json_text(predicate, "AuthEq")? != NON_INTERFERENCE_AUTH_EQ
-            || json_text(predicate, "PublicEq")? != NON_INTERFERENCE_PUBLIC_EQ[index]
-            || json_text(predicate, "OpEq")? != NON_INTERFERENCE_OP_EQ[index]
-        {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
-    }
-    Ok(())
-}
-
-fn independent_matrix_cases_are_open(cases: &[JsonValue]) -> bool {
-    cases.iter().all(|case| {
-        case.get("executed").and_then(JsonValue::as_bool) == Some(false)
-            && case
-                .get("expected_result_digest")
-                .is_some_and(JsonValue::is_null)
-            && [
-                "authority_fixture_id",
-                "authority_result_digest",
-                "expected_result",
-            ]
-            .iter()
-            .all(|field| case.get(*field).is_none_or(JsonValue::is_null))
-    })
 }
 
 fn independent_unique_member<'a>(
