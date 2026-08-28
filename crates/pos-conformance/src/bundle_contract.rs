@@ -9816,8 +9816,11 @@ mod instrumented_public_entrypoints {
             ]),
         ]);
         assert!(independent_verify_cpf1_capabilities(&unsorted_capabilities).is_err());
-        for index in 0..7 {
-            let invalid_provenance = array_field(&fixture_fields[15], index, Value::Null)?;
+        let invalid_provenance = array_field(&fixture_fields[15], 0, Value::Text(String::new()))?;
+        assert!(independent_verify_cpf1_provenance(&invalid_provenance).is_err());
+        for index in 1..7 {
+            let invalid_provenance =
+                array_field(&fixture_fields[15], index, Value::Bytes(vec![0; 32]))?;
             assert!(independent_verify_cpf1_provenance(&invalid_provenance).is_err());
         }
 
