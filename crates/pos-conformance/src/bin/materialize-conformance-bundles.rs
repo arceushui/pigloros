@@ -10,7 +10,7 @@ use pos_conformance::{
     RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 #[cfg(target_os = "linux")]
-use rustix::fs::{self, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
+use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
 #[cfg(target_os = "linux")]
 use rustix::io::Errno;
 use serde_json::Value as JsonValue;
@@ -49,6 +49,36 @@ struct FixtureContext {
     sbom_digest: [u8; 32],
     limitations_digest: [u8; 32],
     normative_spec_digest: [u8; 32],
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod coverage_entrypoint_test {
+    use super::*;
+
+    #[test]
+    fn materializes_every_published_profile_from_the_command_boundary() -> Result<(), Box<dyn Error>>
+    {
+        let root = std::env::temp_dir().join(format!(
+            "pigloros-materializer-coverage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let destination = root.join("published");
+        run(
+            [
+                OsString::from("materialize-conformance-bundles"),
+                destination.clone().into_os_string(),
+            ]
+            .into_iter(),
+            Ok("09".repeat(32)),
+        )?;
+        assert!(destination.join(MATERIALIZATION_METADATA_PATH).is_file());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
 
 struct MaterializationContext<'a> {
@@ -1157,6 +1187,7 @@ impl AtomicPublication {
     fn prepare(destination: &Path) -> Result<Self, MaterializationError> {
         let (parent_path, destination_name) = output_parent_and_name(destination)?;
         let parent = open_trusted_parent(parent_path)?;
+        reject_existing_destination(&parent, &destination_name)?;
         let (staging_name, staging) = create_private_staging(&parent)?;
         Ok(Self {
             parent,
@@ -1242,6 +1273,22 @@ impl AtomicPublication {
         )
         .map_err(map_publish_error)?;
         sync_fd(&self.parent)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reject_existing_destination(
+    parent: &OwnedFd,
+    destination_name: &CString,
+) -> Result<(), MaterializationError> {
+    match fs::statat(
+        parent,
+        destination_name.as_c_str(),
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(_) => Err(MaterializationError::DestinationExists),
+        Err(Errno::NOENT) => Ok(()),
+        Err(_) => Err(MaterializationError::UntrustedOutputDirectory),
     }
 }
 
@@ -2278,9 +2325,8 @@ mod tests {
             b"atomic publication"
         );
 
-        let replacement = AtomicPublication::prepare(&destination)?;
         assert!(matches!(
-            replacement.publish(),
+            AtomicPublication::prepare(&destination),
             Err(MaterializationError::DestinationExists)
         ));
         std::fs::remove_dir_all(root)?;
