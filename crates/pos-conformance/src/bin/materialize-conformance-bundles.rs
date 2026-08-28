@@ -295,17 +295,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run(
-    mut arguments: impl Iterator<Item = OsString>,
+    arguments: impl Iterator<Item = OsString>,
     encoded_signing_key: Result<String, std::env::VarError>,
 ) -> Result<(), Box<dyn Error>> {
-    let _program = arguments.next();
-    let output_root = arguments
-        .next()
-        .map(PathBuf::from)
-        .ok_or("materialization output directory is required")?;
-    if arguments.next().is_some() {
-        return Err("materialization accepts exactly one output directory".into());
-    }
+    let output_root = output_root_from_arguments(arguments)?;
     let signing_key = signing_key_from_encoded(encoded_signing_key)?;
     let inventory_bytes =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
@@ -327,6 +320,20 @@ fn run(
     }
     outputs.push(materialization_metadata(&lifecycles)?);
     publish_materialized_tree(&output_root, &outputs).map_err(Into::into)
+}
+
+fn output_root_from_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let _program = arguments.next();
+    let output_root = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or("materialization output directory is required")?;
+    if arguments.next().is_some() {
+        return Err("materialization accepts exactly one output directory".into());
+    }
+    Ok(output_root)
 }
 
 fn signing_key_from_encoded(
@@ -1983,6 +1990,30 @@ mod tests {
 
     #[test]
     fn materialization_command_and_error_seams_are_exercised() -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            output_root_from_arguments(
+                [
+                    OsString::from("materialize-conformance-bundles"),
+                    OsString::from("output")
+                ]
+                .into_iter(),
+            )?,
+            PathBuf::from("output")
+        );
+        assert!(output_root_from_arguments(
+            [OsString::from("materialize-conformance-bundles")].into_iter()
+        )
+        .is_err());
+        assert!(output_root_from_arguments(
+            [
+                OsString::from("materialize-conformance-bundles"),
+                OsString::from("first"),
+                OsString::from("second"),
+            ]
+            .into_iter(),
+        )
+        .is_err());
+
         let signing_key = SigningKey::from_bytes(&[9; 32]);
         let profile = test_profile(ClaimLayerV1::ArtifactIntegrity)?;
         let context = MaterializationContext {

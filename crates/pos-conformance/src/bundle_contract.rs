@@ -9879,7 +9879,6 @@ mod instrumented_public_entrypoints {
             bundle_members: 0,
             member_path_bytes: 0,
             member_bytes: 0,
-            total_bundle_bytes: 0,
             structural_nesting: 0,
             coordinate_bytes: 0,
         };

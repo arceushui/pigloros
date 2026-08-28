@@ -19,6 +19,7 @@ use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 const AUTHORITY_INVENTORY_MEMBER_PATH: &str = "authority/expected-authority-inventory.json";
 const EXECUTION_MATRIX_MEMBER_PATH: &str = "authority/execution-matrix.json";
@@ -1018,7 +1019,7 @@ fn public_verifier_rejects_unsafe_or_oversized_archive_paths(
 fn public_draft_archive_round_trip_and_independent_verification(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    let bundle = signed_draft_bundle()?;
     let manifest = bundle.manifest_bytes()?;
     assert_eq!(manifest, bundle.manifest_bytes()?);
     let manifest_digest = bundle.manifest_digest()?;
@@ -2114,7 +2115,7 @@ fn archive_with_stale_matrix_binding(
 #[test]
 fn public_bundle_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    let bundle = signed_draft_bundle()?;
 
     let mut invalid_magic = bundle.clone();
     invalid_magic.manifest.magic = "invalid".to_owned();
@@ -2284,8 +2285,16 @@ fn public_unsigned_bundle_member_edges_fail_closed() -> Result<(), Box<dyn std::
 }
 
 fn signed_draft_bundle() -> Result<ConformanceBundleV1, Box<dyn std::error::Error>> {
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
-    Ok(fixtures::draft_bundle()?.sign(&signing_key)?)
+    static BUNDLE: OnceLock<Result<ConformanceBundleV1, String>> = OnceLock::new();
+    BUNDLE
+        .get_or_init(|| {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+            let bundle = fixtures::draft_bundle().map_err(|error| error.to_string())?;
+            bundle.sign(&signing_key).map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map(Clone::clone)
+        .map_err(|error| std::io::Error::other(error.clone()).into())
 }
 
 fn assert_archive_decoder_rejected(
@@ -2932,7 +2941,7 @@ fn exact_member_array() -> Vec<u8> {
 fn public_independent_verifier_rejects_unknown_matching_member_role(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    let bundle = signed_draft_bundle()?;
     let archive = signed_archive_variant(&bundle, &signing_key, |value| {
         archive_member(value, "support/normative-requirements.md")?[2] =
             Value::Integer(14_u64.into());
@@ -2951,7 +2960,7 @@ fn public_independent_verifier_rejects_unknown_matching_member_role(
 fn public_independent_verifier_classifies_role_mismatch_as_undeclared(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    let bundle = signed_draft_bundle()?;
     let archive = signed_archive_variant(&bundle, &signing_key, |value| {
         archive_member(value, "support/normative-requirements.md")?[2] =
             Value::Integer(0_u64.into());
@@ -3022,7 +3031,7 @@ fn assert_raw_independent_archive_rejections() {
 fn public_independent_archive_rejection_paths_fail_closed() -> Result<(), Box<dyn std::error::Error>>
 {
     let signing_key = SigningKey::from_bytes(&[42; 32]);
-    let bundle = fixtures::draft_bundle()?.sign(&signing_key)?;
+    let bundle = signed_draft_bundle()?;
     assert_raw_independent_archive_rejections();
     assert_archive_shape_rejections(&bundle, &signing_key)?;
     assert_archive_member_rejections(&bundle, &signing_key)?;

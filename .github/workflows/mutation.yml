@@ -48,12 +48,9 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
-      # #190 changes a large contract surface. Eight evenly sized shards keep
-      # the required aggregate gate intact while preventing the per-shard
-      # watchdog from masking mutation results as infrastructure timeouts.
-      max-parallel: 8
+      max-parallel: 4
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -85,7 +82,7 @@ jobs:
             --all-features \
             --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
-            --shard "${{ matrix.shard }}/8" \
+            --shard "${{ matrix.shard }}/4" \
             --baseline skip \
             --jobs 4 \
             --timeout 120 \
