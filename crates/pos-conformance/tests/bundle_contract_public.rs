@@ -9,6 +9,7 @@ use pos_conformance::{
     EvaluatorProtocolV1, ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1,
     FixtureInputMemberV1, FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
     RedactionStateV1, ReplayClaimV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    MAX_CONFORMANCE_BUNDLE_BYTES_V1,
 };
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
@@ -673,8 +674,11 @@ fn public_materializer_rejects_invalid_invocations() -> Result<(), Box<dyn std::
     let missing_key_output = std::env::temp_dir().join(format!("{unique}-missing-key"));
     let invalid_key_output = std::env::temp_dir().join(format!("{unique}-invalid-key"));
     let existing_output = std::env::temp_dir().join(format!("{unique}-existing"));
+    let existing_file = std::env::temp_dir().join(format!("{unique}-existing-file"));
+    let missing_parent = std::env::temp_dir().join(format!("{unique}-missing-parent/output"));
     let blocked_root = std::env::temp_dir().join(format!("{unique}-blocked"));
     fs::create_dir_all(&existing_output)?;
+    fs::write(&existing_file, b"must not be overwritten")?;
     fs::write(&blocked_root, b"not a directory")?;
 
     assert!(!Command::new(&materializer_binary)
@@ -707,11 +711,29 @@ fn public_materializer_rejects_invalid_invocations() -> Result<(), Box<dyn std::
         .arg(blocked_root.join("child"))
         .status()?
         .success());
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(&existing_file)
+        .status()?
+        .success());
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(&missing_parent)
+        .status()?
+        .success());
+    assert!(!Command::new(&materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg("/")
+        .status()?
+        .success());
 
     fs::remove_dir_all(existing_output)?;
+    assert_eq!(fs::read(&existing_file)?, b"must not be overwritten");
+    fs::remove_file(existing_file)?;
     fs::remove_file(blocked_root)?;
     assert!(!missing_key_output.exists());
     assert!(!invalid_key_output.exists());
+    assert!(!missing_parent.exists());
     Ok(())
 }
 
@@ -777,6 +799,47 @@ fn public_verifier_rejects_missing_or_invalid_archive() -> Result<(), Box<dyn st
     let status = Command::new(&verifier_binary).arg(&path).status()?;
     fs::remove_file(path)?;
     assert!(!status.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn public_verifier_rejects_unsafe_or_oversized_archive_paths(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!(
+        "pigloros-public-verifier-boundaries-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let _temporary_output = TemporaryOutput(root.clone());
+    fs::create_dir_all(&root)?;
+    let verifier_binary = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
+        .ok_or("verifier binary path is unavailable")?;
+    let missing = root.join("missing.cfb1");
+    assert!(!Command::new(&verifier_binary)
+        .arg(&missing)
+        .status()?
+        .success());
+
+    let oversized = root.join("oversized.cfb1");
+    fs::File::create(&oversized)?.set_len(MAX_CONFORMANCE_BUNDLE_BYTES_V1 + 1)?;
+    assert!(!Command::new(&verifier_binary)
+        .arg(&oversized)
+        .status()?
+        .success());
+
+    let symlink = root.join("archive-link.cfb1");
+    std::os::unix::fs::symlink(&oversized, &symlink)?;
+    assert!(!Command::new(&verifier_binary)
+        .arg(&symlink)
+        .status()?
+        .success());
+
+    let fifo = root.join("archive.fifo");
+    assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
+    assert!(!Command::new(&verifier_binary).arg(fifo).status()?.success());
     Ok(())
 }
 
