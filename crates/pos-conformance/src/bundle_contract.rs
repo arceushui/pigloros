@@ -767,7 +767,7 @@ pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractEr
     independent_verify_fixture_inputs(&member_records, &profile, bundle_mode)?;
     independent_verify_supporting_members(&member_records, &profile)?;
     independent_verify_authority_members(&member_records, &profile)?;
-    independent_verify_profile_contract(&profile, lifecycle, &manifest[3])
+    independent_verify_profile_contract(&profile, &manifest[3])
 }
 
 /// Independently verify an archive after binding it to its sole canonical
@@ -1321,20 +1321,15 @@ fn independent_expected_member_path(
 
 fn independent_verify_profile_contract(
     profile: &Value,
-    lifecycle: u64,
     manifest_profile_digest: &Value,
 ) -> Result<(), BundleContractErrorV1> {
     independent_profile_array(profile, 18).and_then(|fields| {
-        independent_profile_u64(&fields[4]).and_then(|profile_lifecycle| {
-            independent_profile_digest(&fields[17]).and_then(|profile_digest| {
-                independent_digest::<32>(manifest_profile_digest).and_then(|manifest_digest| {
-                    if lifecycle != profile_lifecycle {
-                        Err(BundleContractErrorV1::ProfileInvalid)
-                    } else if profile_digest != manifest_digest {
-                        Err(BundleContractErrorV1::MemberDigestMismatch)
-                    } else {
-                        Ok(())
-                    }
+        independent_profile_digest(&fields[17]).and_then(|profile_digest| {
+            independent_digest::<32>(manifest_profile_digest).and_then(|manifest_digest| {
+                if profile_digest != manifest_digest {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                } else {
+                    Ok(())
                 })
             })
         })

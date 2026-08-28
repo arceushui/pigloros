@@ -2386,3 +2386,33 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod coverage_entrypoints {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn materializer_command_path_is_covered() -> Result<(), Box<dyn Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "pigloros-materializer-coverage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let destination = root.join("published");
+        run(
+            [
+                OsString::from("materialize-conformance-bundles"),
+                destination.clone().into_os_string(),
+            ]
+            .into_iter(),
+            Ok("09".repeat(32)),
+        )?;
+        assert!(destination.join(MATERIALIZATION_METADATA_PATH).is_file());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
