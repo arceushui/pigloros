@@ -2106,4 +2106,41 @@ mod tests {
             assert_eq!(family_for_path(input_path, expected_path), None);
         }
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn atomic_publication_writes_verifies_and_refuses_replacement() -> Result<(), Box<dyn Error>> {
+        let unique = format!(
+            "pigloros-atomic-publication-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&root)?;
+        let destination = root.join("publication");
+        let publication = AtomicPublication::prepare(&destination)?;
+        let file = MaterializedFile {
+            relative_path: "nested/value.txt".to_owned(),
+            bytes: b"atomic publication".to_vec(),
+            archive: None,
+        };
+        publication.write_file(&file.relative_path, &file.bytes)?;
+        assert_eq!(publication.read_file(&file.relative_path)?, file.bytes);
+        publication.verify_and_sync(&[file])?;
+        publication.publish()?;
+        assert_eq!(
+            std::fs::read(destination.join("nested/value.txt"))?,
+            b"atomic publication"
+        );
+
+        let replacement = AtomicPublication::prepare(&destination)?;
+        assert_eq!(
+            replacement.publish(),
+            Err(MaterializationError::DestinationExists)
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
