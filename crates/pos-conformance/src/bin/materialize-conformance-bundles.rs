@@ -2223,6 +2223,14 @@ mod tests {
         };
         publication.write_file(&file.relative_path, &file.bytes)?;
         assert_eq!(publication.read_file(&file.relative_path)?, file.bytes);
+        assert!(matches!(
+            publication.write_file(&file.relative_path, b"duplicate"),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
+        assert!(matches!(
+            publication.read_file("nested/missing.txt"),
+            Err(MaterializationError::UntrustedOutputDirectory)
+        ));
         let different_file = MaterializedFile {
             relative_path: file.relative_path.clone(),
             bytes: b"different bytes".to_vec(),

@@ -3408,6 +3408,68 @@ fn public_independent_verifier_rejects_each_zero_archive_cap(
 }
 
 #[test]
+fn public_independent_verifier_rejects_cross_field_cpf1_bound_violations(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let mutations: Vec<ArchiveMutation> = vec![
+        Box::new(|value| {
+            archive_array(value, 2)?[3] = Value::Bytes(vec![0; 32]);
+            Ok(())
+        }),
+        Box::new(|value| {
+            archive_expected(value)?[0] = Value::Text("missing-fixture".to_owned());
+            Ok(())
+        }),
+        Box::new(|value| {
+            mutate_first_profile_fixture(value, |fixture| {
+                fixture[9] = Value::Integer(99_u64.into());
+                fixture[10] = Value::Null;
+            })
+        }),
+        Box::new(|value| {
+            mutate_profile(value, |fields| {
+                if let Value::Array(protocol) = &mut fields[11] {
+                    if let Value::Array(caps) = &mut protocol[4] {
+                        caps[5] = Value::Integer(1_u64.into());
+                    }
+                }
+            })
+        }),
+        Box::new(|value| duplicate_first_fixture_with_cap(value, 1)),
+        Box::new(|value| duplicate_first_fixture_with_cap(value, 2)),
+    ];
+    for mutate in mutations {
+        let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
+        );
+    }
+    Ok(())
+}
+
+fn duplicate_first_fixture_with_cap(
+    value: &mut Value,
+    cap_index: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    mutate_profile(value, |fields| {
+        if let Value::Array(fixtures) = &mut fields[9] {
+            let mut duplicate = fixtures[0].clone();
+            if let Value::Array(fixture) = &mut duplicate {
+                fixture[0] = Value::Text("ART-002".to_owned());
+            }
+            fixtures.push(duplicate);
+        }
+        if let Value::Array(protocol) = &mut fields[11] {
+            if let Value::Array(caps) = &mut protocol[4] {
+                caps[cap_index] = Value::Integer(1_u64.into());
+            }
+        }
+    })
+}
+
+#[test]
 fn public_draft_authority_records_reject_each_malformed_shape(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bundle = signed_draft_bundle()?;
