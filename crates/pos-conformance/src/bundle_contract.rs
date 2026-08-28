@@ -1425,23 +1425,47 @@ struct IndependentCpf2Caps {
 }
 
 fn independent_verify_cpf2(profile: &Value) -> Result<(), BundleContractErrorV1> {
-    let fields = independent_profile_array(profile, 18)?;
-    independent_verify_cpf2_header(fields)?;
-    let execution_profiles = independent_profile_digests(&fields[7])?;
-    let public_schemas = independent_profile_digests(&fields[8])?;
-    let caps = independent_verify_cpf2_protocol(&fields[11])?;
-    independent_verify_cpf2_root(fields, &execution_profiles, &public_schemas)?;
-    independent_verify_cpf2_requirements(&fields[12])?;
-    independent_verify_cpf2_allowed_divergences(&fields[10], caps.coordinate_bytes)?;
-    independent_verify_cpf2_fixtures(
-        &fields[9],
-        &fields[10],
-        &execution_profiles,
-        &public_schemas,
-        &caps,
-    )?;
-    independent_verify_cpf2_selected_caps(profile, &fields[9], &fields[10], &caps)?;
-    independent_verify_cpf2_digest(profile, fields)
+    independent_profile_array(profile, 18).and_then(|fields| {
+        independent_verify_cpf2_header(fields)
+            .and_then(|()| {
+                independent_profile_digests(&fields[7]).and_then(|execution_profiles| {
+                    independent_profile_digests(&fields[8])
+                        .map(|public_schemas| (execution_profiles, public_schemas))
+                })
+            })
+            .and_then(|(execution_profiles, public_schemas)| {
+                independent_verify_cpf2_protocol(&fields[11])
+                    .map(|caps| (execution_profiles, public_schemas, caps))
+            })
+            .and_then(|(execution_profiles, public_schemas, caps)| {
+                independent_verify_cpf2_root(fields, &execution_profiles, &public_schemas)
+                    .and_then(|()| independent_verify_cpf2_requirements(&fields[12]))
+                    .and_then(|()| {
+                        independent_verify_cpf2_allowed_divergences(
+                            &fields[10],
+                            caps.coordinate_bytes,
+                        )
+                    })
+                    .and_then(|()| {
+                        independent_verify_cpf2_fixtures(
+                            &fields[9],
+                            &fields[10],
+                            &execution_profiles,
+                            &public_schemas,
+                            &caps,
+                        )
+                    })
+                    .and_then(|()| {
+                        independent_verify_cpf2_selected_caps(
+                            profile,
+                            &fields[9],
+                            &fields[10],
+                            &caps,
+                        )
+                    })
+                    .and_then(|()| independent_verify_cpf2_digest(profile, fields))
+            })
+    })
 }
 
 fn independent_verify_cpf2_header(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
