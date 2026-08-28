@@ -1730,8 +1730,9 @@ fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
     // A digest must never be computed over fallback bytes. The public digest
     // APIs cannot return an encoding error, so an impossible in-memory encoding
     // failure terminates rather than manufacturing a different identity.
-    ciborium::into_writer(value, &mut bytes)
-        .expect("a ciborium value is always canonically serializable");
+    if ciborium::into_writer(value, &mut bytes).is_err() {
+        std::process::abort();
+    }
     let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
     source.push(0);

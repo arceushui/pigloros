@@ -771,7 +771,7 @@ impl PluginBoundaryV1 {
         {
             return Err(PluginBoundaryError::InvalidDescriptor);
         }
-        if self.manifest_digest != self.digest_without_identity() {
+        if self.manifest_digest != self.digest_without_identity()? {
             return Err(PluginBoundaryError::ManifestDigestMismatch);
         }
         if self.release_digest != self.release_digest_value() {
@@ -780,12 +780,12 @@ impl PluginBoundaryV1 {
         Ok(())
     }
 
-    fn digest_without_identity(&self) -> [u8; 32] {
+    fn digest_without_identity(&self) -> Result<[u8; 32], PluginBoundaryError> {
         let mut value = self.clone();
         value.manifest_digest = [0; 32];
         value.release_digest = [0; 32];
         typed_digest(b"PiglorOS.Plugin.Manifest.Wave8.v1", &value)
-            .expect("plugin descriptors contain only canonically encodable fields")
+            .map_err(|_| PluginBoundaryError::DigestEncoding)
     }
 
     fn release_digest_value(&self) -> [u8; 32] {
@@ -813,6 +813,8 @@ pub enum PluginBoundaryError {
     ManifestDigestMismatch,
     #[error("plugin boundary release digest does not match its closure")]
     ReleaseDigestMismatch,
+    #[error("plugin boundary descriptor cannot be canonically encoded")]
+    DigestEncoding,
 }
 
 /// Exact Component world admitted by the Wave 8 seam.
@@ -1681,9 +1683,11 @@ impl VerificationResultV1 {
 
     /// Compute the result digest over fields `0..16`.
     ///
-    /// The closed record contains only canonically encodable fields.
+    /// # Errors
+    /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::verification_result_digest(self))
+        strict_codec::verification_result_digest(self)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 }
 
@@ -1710,9 +1714,11 @@ impl DivergenceReportV1 {
 
     /// Compute the divergence digest over fields `0..20`.
     ///
-    /// The closed record contains only canonically encodable fields.
+    /// # Errors
+    /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::divergence_report_digest(self))
+        strict_codec::divergence_report_digest(self)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 }
 
@@ -1787,7 +1793,13 @@ pub mod strict_codec {
                     .map(encode_event)
                     .collect(),
             ),
-            Value::Array(evidence.projections.iter().map(encode_projection).collect()),
+            Value::Array(
+                evidence
+                    .projections
+                    .iter()
+                    .map(encode_projection)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             Value::Array(evidence.causal_trace.iter().map(encode_trace).collect()),
             Value::Array(
                 evidence
@@ -1865,7 +1877,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
-        if result.result_digest != verification_result_digest(&result) {
+        if result.result_digest != verification_result_digest(&result)? {
             return Err(StrictCborError::InvalidField {
                 field: "verification_result_digest".to_owned(),
             });
@@ -1874,10 +1886,11 @@ pub mod strict_codec {
         Ok(result)
     }
 
-    pub(crate) fn verification_result_digest(result: &VerificationResultV1) -> [u8; 32] {
+    pub(crate) fn verification_result_digest(
+        result: &VerificationResultV1,
+    ) -> Result<[u8; 32], StrictCborError> {
         encode_value(&encode_verification_result_value(result, false))
             .map(|bytes| domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
-            .expect("verification results contain only canonically encodable fields")
     }
 
     fn encode_verification_result_value(
@@ -2078,7 +2091,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
-        if report.report_digest != divergence_report_digest(&report) {
+        if report.report_digest != divergence_report_digest(&report)? {
             return Err(StrictCborError::InvalidField {
                 field: "divergence_report_digest".to_owned(),
             });
@@ -2087,10 +2100,11 @@ pub mod strict_codec {
         Ok(report)
     }
 
-    pub(crate) fn divergence_report_digest(report: &DivergenceReportV1) -> [u8; 32] {
+    pub(crate) fn divergence_report_digest(
+        report: &DivergenceReportV1,
+    ) -> Result<[u8; 32], StrictCborError> {
         encode_value(&encode_divergence_report_value(report, false))
             .map(|bytes| domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
-            .expect("divergence reports contain only canonically encodable fields")
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -2831,14 +2845,14 @@ pub mod strict_codec {
         values.iter().map(decode_event).collect()
     }
 
-    fn encode_projection(projection: &ProjectionEvidenceV1) -> Value {
+    fn encode_projection(projection: &ProjectionEvidenceV1) -> Result<Value, StrictCborError> {
         let state = serde_json::to_vec(&projection.state)
-            .expect("a serde_json::Value is always JSON serializable");
-        Value::Array(vec![
+            .map_err(|error| StrictCborError::Json(error.to_string()))?;
+        Ok(Value::Array(vec![
             text(&projection.reducer),
             text(&projection.entity),
             Value::Bytes(state),
-        ])
+        ]))
     }
 
     fn decode_projection(value: &Value) -> Result<ProjectionEvidenceV1, StrictCborError> {
@@ -4146,7 +4160,7 @@ pub mod strict_codec {
                 reject_each_field(&event, decode_event);
                 consume(decode_events(&Value::Array(vec![event])));
                 consume(decode_events(&Value::Array(vec![Value::Map(Vec::new())])));
-                let projection = encode_projection(&evidence.projections[0]);
+                let projection = encode_projection(&evidence.projections[0]).unwrap_or(Value::Null);
                 consume(decode_projection(&projection));
                 reject_each_field(&projection, decode_projection);
                 consume(decode_projections(&Value::Array(vec![Value::Map(
@@ -5095,7 +5109,8 @@ pub mod strict_codec {
                 ..error.clone()
             });
             assert!(validate_verification_result(&invalid_semantics).is_err());
-            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics);
+            invalid_semantics.result_digest =
+                verification_result_digest(&invalid_semantics).unwrap_or([0; 32]);
             let invalid_semantics_bytes =
                 encode_value(&encode_verification_result_value(&invalid_semantics, true))
                     .unwrap_or_default();
