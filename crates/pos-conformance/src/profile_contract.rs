@@ -3442,8 +3442,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn public_profile_decoders_accept_the_inclusive_wire_ceiling() {
-        let (value, bytes) = profile_at_canonical_byte_limit();
+    fn public_profile_decoders_accept_the_inclusive_wire_ceiling(
+    ) -> Result<(), ConformanceContractError> {
+        let (value, bytes) = profile_at_canonical_byte_limit()?;
         assert_eq!(bytes.len(), MAX_PROFILE_BYTES);
         assert_eq!(value.to_canonical_cbor(), Ok(bytes.clone()));
         assert_eq!(
@@ -3463,6 +3464,7 @@ mod tests {
             ),
             Ok(value)
         );
+        Ok(())
     }
 
     #[test]
