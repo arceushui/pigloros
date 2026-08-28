@@ -1247,8 +1247,26 @@ fn independent_verify_authority_members(
     {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    validate_authority_inventory(&inventory_json)?;
-    independent_validate_execution_matrix(&matrix_json)
+    independent_validate_authority_inventory(&inventory_json)
+        .and_then(|()| independent_validate_execution_matrix(&matrix_json))
+}
+
+fn independent_validate_authority_inventory(
+    inventory: &JsonValue,
+) -> Result<(), BundleContractErrorV1> {
+    // This deliberately does not call `validate_authority_inventory`: archive
+    // verification has an independent authority for the accepted Draft
+    // inventory. JSON-value equality retains the complete contract while
+    // accepting harmless JSON whitespace and member-order differences.
+    let expected: JsonValue = serde_json::from_slice(include_bytes!(
+        "../../../fixtures/conformance/expected-authority/inventory.json"
+    ))
+    .map_err(|_| BundleContractErrorV1::MemberDigestMismatch)?;
+    if inventory == &expected {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::MemberDigestMismatch)
+    }
 }
 
 fn independent_validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErrorV1> {
