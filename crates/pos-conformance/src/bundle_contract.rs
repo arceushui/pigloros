@@ -9446,4 +9446,29 @@ mod instrumented_public_entrypoints {
         )?;
         Ok(())
     }
+
+    #[test]
+    fn independent_cpf2_verifier_accepts_the_canonical_profile(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let profile = tests::profile();
+        let encoded = profile_value(&profile)?;
+        assert!(independent_verify_cpf2(&encoded).is_ok());
+
+        let fields = independent_profile_array(&encoded, 18)?;
+        assert!(independent_verify_profile_contract(&encoded, 0, &fields[17]).is_ok());
+        assert!(independent_verify_cpf2_header(fields).is_ok());
+        let execution_profiles = independent_profile_digests(&fields[7])?;
+        let public_schemas = independent_profile_digests(&fields[8])?;
+        let caps = independent_verify_cpf2_protocol(&fields[11])?;
+        assert!(independent_verify_cpf2_root(fields, &execution_profiles, &public_schemas).is_ok());
+        assert!(independent_verify_cpf2_requirements(&fields[12]).is_ok());
+        assert!(
+            independent_verify_cpf2_allowed_divergences(&fields[10], caps.coordinate_bytes).is_ok()
+        );
+        assert!(
+            independent_verify_cpf2_selected_caps(&encoded, &fields[9], &fields[10], &caps).is_ok()
+        );
+        assert!(independent_verify_cpf2_digest(&encoded, fields).is_ok());
+        Ok(())
+    }
 }
