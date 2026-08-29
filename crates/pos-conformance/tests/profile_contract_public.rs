@@ -2,17 +2,17 @@
 
 use ciborium::value::Value;
 use pos_conformance::{
-    CapabilityPolicyV1, CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1, ConformanceContractError,
-    ConformanceProfileV1, ConformanceReportV1, ErasureDispositionV1, EvaluatorHardCapsV1,
-    EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1, ExecutionModeV1,
-    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
-    FixtureProvenanceV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    IndependenceRequirementsV1, ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1,
-    StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
-    TrustedRootPolicyV1, VerificationOutcomeV1,
+    ArtifactDescriptorV1, CapabilityPolicyV1, CaseOutcomeStatusV1, CaseOutcomeV1, ClaimLayerV1,
+    ConformanceContractError, ConformanceProfileV1, ConformanceReportV1, DeterministicBudgetV1,
+    ErasureDispositionV1, EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1,
+    EvaluatorRequestV1, ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1,
+    FixtureProviderKeyV1, FixtureProviderRegistryBindingV1, ImplementationIdentityV1,
+    IndependenceEvidenceV1, IndependenceRequirementsV1, OperationalSafetyV1, ProfileCaseOutcomeV1,
+    RedactionStateV1, ReplayClaimV1, StableEvidenceAttestationV1, StableImplementationEvidenceV1,
+    StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, TrustedRootPolicyV1,
+    VerificationOutcomeV1,
 };
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod fixtures {
     use super::*;
 
@@ -56,7 +56,7 @@ pub mod fixtures {
 
     fn strict_case(seed: u8) -> Value {
         Value::Array(vec![
-            text("ART-001"),
+            text("art-001"),
             bytes(seed),
             bytes(1),
             uint(0),
@@ -104,7 +104,7 @@ pub mod fixtures {
 
     fn case(seed: u8) -> Value {
         Value::Array(vec![
-            text("ART-001"),
+            text("art-001"),
             bytes(seed),
             bytes(1),
             uint(0),
@@ -125,23 +125,40 @@ pub mod fixtures {
 
     fn encoded_fixture_descriptor_value() -> Value {
         Value::Array(vec![
-            text("ART-001"),
+            text("art-001"),
             Value::Bool(true),
             uint(0),
-            bytes(1),
-            bytes(2),
-            Value::Array(vec![uint(0), uint(1)]),
             uint(0),
-            Value::Array(vec![Value::Array(vec![
-                text("fixture.json"),
+            Value::Array(vec![
+                text("pigloros.fixture.artifact-integrity"),
+                text("1.0.0"),
+                uint(1),
+                uint(0),
+            ]),
+            uint(0),
+            bytes(1),
+            Value::Array(vec![uint(0), uint(1)]),
+            Value::Array(vec![
+                text("support/schemas/positive.schema.json"),
+                text("application/schema+json"),
+                uint(1),
+                bytes(2),
+            ]),
+            Value::Array(vec![
+                text("inputs/artifact-integrity/positive.json"),
+                text("application/json"),
                 uint(1),
                 bytes(3),
-                bytes(4),
-            ])]),
+            ]),
+            Value::Array(vec![]),
             Value::Array(vec![
                 uint(0),
-                Value::Bytes(vec![1]),
-                bytes(5),
+                Value::Array(vec![
+                    text("expected/artifact-integrity/positive.cbor"),
+                    text("application/cbor"),
+                    uint(1),
+                    bytes(4),
+                ]),
                 Value::Null,
                 Value::Null,
             ]),
@@ -159,10 +176,13 @@ pub mod fixtures {
                 uint(1),
                 uint(1),
             ]),
+            Value::Array(vec![uint(1)]),
             Value::Array(vec![
                 Value::Bool(false),
                 Value::Array(vec![text("read-public-bundle")]),
             ]),
+            Value::Null,
+            Value::Null,
             Value::Array(vec![
                 text("MIT"),
                 bytes(6),
@@ -172,6 +192,7 @@ pub mod fixtures {
                 bytes(10),
                 bytes(11),
             ]),
+            Value::Null,
             bytes(12),
         ])
     }
@@ -249,7 +270,20 @@ pub mod fixtures {
             bytes(12),
             bytes(20),
             Value::Array(vec![bytes(1)]),
-            Value::Array(vec![bytes(2)]),
+            Value::Array(vec![
+                Value::Array(vec![
+                    text("authority/fixture-provider-registry.cbor"),
+                    text("application/cbor"),
+                    uint(1),
+                    bytes(2),
+                ]),
+                Value::Array(vec![Value::Array(vec![
+                    text("pigloros.fixture.artifact-integrity"),
+                    text("1.0.0"),
+                    uint(1),
+                    uint(0),
+                ])]),
+            ]),
             Value::Array(vec![encoded_fixture_descriptor_value()]),
             Value::Array(vec![Value::Array(vec![uint(0), bytes(99)])]),
             protocol(),
@@ -360,38 +394,60 @@ fn report_with_cases(count: usize) -> Result<ConformanceReportV1, pos_conformanc
 
 fn knowledge_non_interference_profile() -> ConformanceProfileV1 {
     let expected = b"expected".to_vec();
-    let fixture = FixtureDescriptorV1 {
-        case_id: "ART-001".to_owned(),
+    let provider_key = FixtureProviderKeyV1 {
+        provider_id: "pigloros.fixture.artifact-integrity".to_owned(),
+        contract_version: "1.0.0".to_owned(),
+        abi_major: 1,
+        abi_minor: 0,
+    };
+    let mut fixture = FixtureDescriptorV1 {
+        case_id: "art-001".to_owned(),
         mandatory: true,
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
-        execution_profile_digest: [1; 32],
-        public_schema_digest: [2; 32],
-        modes: vec![ExecutionModeV1::Local],
+        family: FixtureFamilyV1::Positive,
+        provider_key: provider_key.clone(),
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        inputs: vec![FixtureInputMemberV1 {
-            member_id: "fixture.json".to_owned(),
-            size_bytes: expected.len() as u64,
-            digest: [3; 32],
-            provenance_digest: [4; 32],
-        }],
-        expected: ExpectedResultV1::CanonicalBytes {
-            digest: *blake3::hash(&expected).as_bytes(),
-            bytes: expected,
+        execution_profile_digest: [1; 32],
+        modes: vec![ExecutionModeV1::Local],
+        schema: ArtifactDescriptorV1 {
+            member_path: "support/schemas/positive.schema.json".to_owned(),
+            media_type: "application/schema+json".to_owned(),
+            byte_length: 1,
+            blake3_digest: [2; 32],
         },
-        expected_verification_outcome: pos_conformance::VerificationOutcomeV1::VerifiedExact,
+        payload: ArtifactDescriptorV1 {
+            member_path: "inputs/artifact-integrity/positive.json".to_owned(),
+            media_type: "application/json".to_owned(),
+            byte_length: 1,
+            blake3_digest: [3; 32],
+        },
+        auxiliary: Vec::new(),
+        strict_oracle: StrictOracleV1 {
+            kind: StrictOracleKindV1::Output,
+            output: Some(ArtifactDescriptorV1 {
+                member_path: "expected/artifact-integrity/positive.cbor".to_owned(),
+                media_type: "application/cbor".to_owned(),
+                byte_length: expected.len() as u64,
+                blake3_digest: *blake3::hash(&expected).as_bytes(),
+            }),
+            failure: None,
+            divergence: None,
+        },
+        expected_verification_outcome: VerificationOutcomeV1::VerifiedExact,
         expected_verification_error: None,
         replay_claim: ReplayClaimV1::Exact,
         redaction_state: RedactionStateV1::None,
-        bounds: FixtureBoundsV1 {
-            cpu_fuel: 1,
+        deterministic_budget: DeterministicBudgetV1 {
             memory_bytes: 1,
+            cpu_fuel: 1,
+            host_calls: 1,
             event_count: 1,
             output_bytes: 1024,
             storage_bytes: 1,
             execution_steps: 1,
             simulation_time_ns: 1,
-            watchdog_ms: 1,
         },
+        operational_safety: OperationalSafetyV1 { watchdog_ms: 1 },
         capability_policy: CapabilityPolicyV1 {
             network_allowed: false,
             capability_ids: vec!["read-public-bundle".to_owned()],
@@ -405,8 +461,12 @@ fn knowledge_non_interference_profile() -> ConformanceProfileV1 {
             publication_review_digest: [9; 32],
             limitations_digest: [10; 32],
         },
-        compatibility_digest: [11; 32],
+        trust_policy_snapshot_digest: None,
+        release_admission_digest: None,
+        transition: None,
+        fixture_digest: [0; 32],
     };
+    fixture.fixture_digest = fixture.digest();
     let mut profile = ConformanceProfileV1 {
         profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
         semantic_version: "1.0.0".to_owned(),
@@ -414,7 +474,15 @@ fn knowledge_non_interference_profile() -> ConformanceProfileV1 {
         normative_spec_digest: [12; 32],
         execution_matrix_digest: [21; 32],
         execution_profile_digests: vec![[1; 32]],
-        public_schema_digests: vec![[2; 32]],
+        fixture_provider_registry: FixtureProviderRegistryBindingV1 {
+            registry_artifact: ArtifactDescriptorV1 {
+                member_path: "authority/fixture-provider-registry.cbor".to_owned(),
+                media_type: "application/cbor".to_owned(),
+                byte_length: 1,
+                blake3_digest: [11; 32],
+            },
+            required_provider_keys: vec![provider_key],
+        },
         fixtures: vec![fixture],
         allowed_divergences: vec![],
         evaluator_protocol: EvaluatorProtocolV1 {
@@ -442,7 +510,7 @@ fn knowledge_non_interference_profile() -> ConformanceProfileV1 {
             trust_policy_snapshot_digest: [16; 32],
             requirements_digest: [17; 32],
         },
-        compatibility_digest: [18; 32],
+        fixture_contract_policy_digest: [18; 32],
         limitations_digest: [19; 32],
         provenance_digest: [20; 32],
         previous_profile_digest: None,
@@ -533,14 +601,14 @@ fn public_trusted_root_policy_accepts_exact_root_cap_and_rejects_one_more() {
 }
 
 #[test]
-fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
+fn public_profile_digest_commits_the_exact_lifecycle() {
     let mut candidate = profile_for_digest();
     candidate.lifecycle = pos_conformance::ProfileLifecycleV1::Candidate;
     candidate.profile_digest = candidate.digest();
     let mut stable = candidate.clone();
     stable.lifecycle = pos_conformance::ProfileLifecycleV1::Stable;
     stable.profile_digest = stable.digest();
-    assert_eq!(stable.digest(), candidate.digest());
+    assert_ne!(stable.digest(), candidate.digest());
 }
 
 #[test]
@@ -701,7 +769,7 @@ fn public_profile_digest_encodes_every_closed_case_outcome_variant(
 #[test]
 fn public_stable_case_outcome_type_can_be_constructed_externally() {
     let outcome = ProfileCaseOutcomeV1 {
-        case_id: "ART-001".to_owned(),
+        case_id: "art-001".to_owned(),
         fixture_digest: [1; 32],
         execution_profile_digest: [2; 32],
         mode: ExecutionModeV1::Local,
@@ -718,7 +786,7 @@ fn public_stable_case_outcome_type_can_be_constructed_externally() {
         redaction_state: RedactionStateV1::None,
         provenance_digest: [4; 32],
     };
-    assert_eq!(outcome.case_id, "ART-001");
+    assert_eq!(outcome.case_id, "art-001");
 }
 
 #[test]
@@ -793,10 +861,29 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
     );
 
     let mut exact_path = profile_for_digest();
+    let longest_path = exact_path
+        .fixtures
+        .iter()
+        .flat_map(|fixture| {
+            [&fixture.schema, &fixture.payload]
+                .into_iter()
+                .chain(fixture.auxiliary.iter())
+                .chain(fixture.strict_oracle.output.iter())
+        })
+        .map(|artifact| artifact.member_path.len())
+        .chain(std::iter::once(
+            exact_path
+                .fixture_provider_registry
+                .registry_artifact
+                .member_path
+                .len(),
+        ))
+        .max()
+        .expect("profile contains public artifacts");
     exact_path
         .evaluator_protocol
         .hard_caps
-        .max_member_path_bytes = 12;
+        .max_member_path_bytes = u16::try_from(longest_path).expect("fixture path fits u16");
     exact_path.profile_digest = exact_path.digest();
     assert_eq!(exact_path.validate(), Ok(()));
 
@@ -804,7 +891,7 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
     short_path
         .evaluator_protocol
         .hard_caps
-        .max_member_path_bytes = 11;
+        .max_member_path_bytes = u16::try_from(longest_path - 1).expect("fixture path fits u16");
     short_path.profile_digest = short_path.digest();
     assert_eq!(
         short_path.validate(),
@@ -815,7 +902,7 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
 #[test]
 fn public_profile_decoder_rejects_unsupported_and_oversized_encodings() {
     assert_eq!(
-        ConformanceProfileV1::from_canonical_cbor(&[0x82, 0x64, b'C', b'P', b'F', b'2', 0x02]),
+        ConformanceProfileV1::from_canonical_cbor(&[0x82, 0x64, b'B', b'A', b'D', b'1', 0x01]),
         Err(ConformanceContractError::UnsupportedVersion)
     );
     assert_eq!(
@@ -830,13 +917,13 @@ fn public_profile_decoder_rejects_unsupported_and_oversized_encodings() {
 fn exported_decoders_reject_terminal_digest_after_nested_decode(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let canonical = profile_for_digest().to_canonical_cbor()?;
-    let Value::Array(mut superseded_cpf1) = ciborium::from_reader(canonical.as_slice())? else {
+    let Value::Array(mut malformed_cpf1) = ciborium::from_reader(canonical.as_slice())? else {
         return Err("canonical CPF1 profile encoding must be an array".into());
     };
-    superseded_cpf1.truncate(14);
+    malformed_cpf1.truncate(14);
     assert_eq!(
         ConformanceProfileV1::from_canonical_cbor(&fixtures::encode(&Value::Array(
-            superseded_cpf1,
+            malformed_cpf1,
         ))?),
         Err(ConformanceContractError::InvalidEncoding)
     );
@@ -975,13 +1062,14 @@ fn assert_public_profile_paths_rejected(
 fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let uint = |value: u64| Value::Integer(value.into());
     let bytes = |seed: u8| Value::Bytes(vec![seed; 32]);
-    let expected_canonical = |first: Value, second: Value, digest: Value| {
-        Value::Array(vec![first, second, digest, Value::Null, Value::Null])
+    let artifact = |path: Value, media_type: Value, length: Value, digest: Value| {
+        Value::Array(vec![path, media_type, length, digest])
     };
-    let expected_divergence = |classification: Value, coordinate: Value| {
+    let output_oracle =
+        |output: Value, failure: Value| Value::Array(vec![uint(0), output, failure, Value::Null]);
+    let divergence_oracle = |classification: Value, coordinate: Value| {
         Value::Array(vec![
             uint(2),
-            Value::Null,
             Value::Null,
             Value::Null,
             Value::Array(vec![classification, coordinate]),
@@ -991,14 +1079,28 @@ fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn s
     let malformed_profiles = [
         fixtures::encode(&Value::Null)?,
         profile_with_field(9, Value::Array(vec![Value::Null]))?,
-        profile_with_fixture_field(5, Value::Array(vec![Value::Null]))?,
-        profile_with_fixture_field(5, Value::Array(vec![uint(99)]))?,
-        profile_with_fixture_field(8, Value::Array(vec![Value::Null; 5]))?,
-        profile_with_fixture_field(8, expected_canonical(uint(0), Value::Null, bytes(5)))?,
-        profile_with_fixture_field(8, expected_canonical(uint(0), bytes(5), Value::Null))?,
-        profile_with_fixture_field(8, expected_divergence(Value::Null, Value::Bytes(vec![1])))?,
-        profile_with_fixture_field(8, expected_divergence(uint(0), Value::Null))?,
-        profile_with_field(16, Value::Null)?,
+        profile_with_fixture_field(7, Value::Array(vec![Value::Null]))?,
+        profile_with_fixture_field(7, Value::Array(vec![uint(99)]))?,
+        profile_with_fixture_field(8, Value::Array(vec![Value::Null; 4]))?,
+        profile_with_fixture_field(
+            8,
+            artifact(Value::Null, text("application/json"), uint(1), bytes(5)),
+        )?,
+        profile_with_fixture_field(11, output_oracle(Value::Null, Value::Null))?,
+        profile_with_fixture_field(
+            11,
+            output_oracle(
+                artifact(
+                    text("expected/result.cbor"),
+                    text("application/cbor"),
+                    uint(1),
+                    bytes(5),
+                ),
+                Value::Array(vec![text("pigloros.core"), text("1.0.0"), text("failure")]),
+            ),
+        )?,
+        profile_with_fixture_field(11, divergence_oracle(Value::Null, Value::Bytes(vec![1])))?,
+        profile_with_fixture_field(11, divergence_oracle(uint(0), Value::Null))?,
     ];
 
     for bytes in malformed_profiles {
@@ -1027,10 +1129,17 @@ fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn s
 fn public_profile_decoder_rejects_each_nested_record_field(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut paths = Vec::new();
-    paths.extend((0..4).map(|index| vec![9, 0, 7, 0, index]));
-    paths.extend((0..8).map(|index| vec![9, 0, 13, index]));
-    paths.extend((0..2).map(|index| vec![9, 0, 14, index]));
-    paths.extend((0..7).map(|index| vec![9, 0, 15, index]));
+    paths.extend((0..4).map(|index| vec![8, 0, index]));
+    paths.extend((0..4).map(|index| vec![8, 1, 0, index]));
+    paths.extend((0..4).map(|index| vec![9, 0, 4, index]));
+    paths.extend((0..4).map(|index| vec![9, 0, 8, index]));
+    paths.extend((0..4).map(|index| vec![9, 0, 9, index]));
+    paths.extend((0..4).map(|index| vec![9, 0, 11, index]));
+    paths.extend((0..4).map(|index| vec![9, 0, 11, 1, index]));
+    paths.extend((0..8).map(|index| vec![9, 0, 16, index]));
+    paths.extend((0..1).map(|index| vec![9, 0, 17, index]));
+    paths.extend((0..2).map(|index| vec![9, 0, 18, index]));
+    paths.extend((0..7).map(|index| vec![9, 0, 21, index]));
     paths.extend((0..5).map(|index| vec![11, index]));
     paths.extend((0..10).map(|index| vec![11, 4, index]));
     paths.extend((0..5).map(|index| vec![12, index]));

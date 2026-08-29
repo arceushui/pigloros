@@ -1,0 +1,14 @@
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-resource-exhaustion",
+  "family": "resource-exhaustion",
+  "input_blake3_digest": "a57def26c0d8324788706a2d887b1729d5f9085703fca349c84e66086de92c00",
+  "result": "resource-limit",
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
+  }
+}

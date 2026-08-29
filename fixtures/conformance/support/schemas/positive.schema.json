@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["claim_layer","case_id","family","subject","assertion"],"properties":{"claim_layer":{"type":"string"},"case_id":{"type":"string"},"family":{"const":"positive"},"subject":{"type":"string"},"assertion":{"type":"string"}},"additionalProperties":false}

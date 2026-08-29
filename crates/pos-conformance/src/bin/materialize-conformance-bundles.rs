@@ -11,6 +11,7 @@ use pos_conformance::{
     FixtureProviderRegistryV1, IndependenceRequirementsV1, NamespacedFailureV1,
     OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1, RedactionStateV1,
     ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 #[cfg(target_os = "linux")]
 use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
@@ -347,7 +348,7 @@ fn artifact_descriptor(path: &str, media_type: &str, bytes: &[u8]) -> ArtifactDe
     ArtifactDescriptorV1 {
         member_path: path.to_owned(),
         media_type: media_type.to_owned(),
-        byte_length: bytes.len() as u64,
+        byte_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
         blake3_digest: *blake3::hash(bytes).as_bytes(),
     }
 }
@@ -457,13 +458,13 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
         .providers
         .iter()
         .zip(&packages)
-        .try_for_each(|(entry, package)| {
-            FixtureProviderPackageV1::from_canonical_cbor(&package.artifact.bytes).and_then(
-                |package| package.validate_registry_binding(entry, &package.artifact.bytes),
+        .try_for_each(|(entry, catalog_package)| {
+            FixtureProviderPackageV1::from_canonical_cbor(&catalog_package.artifact.bytes).and_then(
+                |decoded| decoded.validate_registry_binding(entry, &catalog_package.artifact.bytes),
             )
         })?;
     let registry = public_artifact(
-        "authority/fixture-provider-registry.cbor",
+        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
         "application/cbor",
         &registry.to_canonical_cbor()?,
     );
@@ -552,11 +553,12 @@ fn provider_schema_artifacts(
 }
 
 fn valid_provider_record(provider: &FixtureProviderRecord, layer: ClaimLayerV1) -> bool {
-    provider.provider_id == format!("pigloros.fixture.{}", layer.catalog_name())
+    let layer_name = layer.catalog_name();
+    provider.provider_id == format!("pigloros.fixture.{layer_name}")
         && provider.contract_version == "1.0.0"
         && provider.abi_major == 1
         && provider.abi_minor == 0
-        && provider.package_path == format!("authority/providers/{}.cbor", layer.catalog_name())
+        && provider.package_path == format!("authority/providers/{layer_name}.cbor")
 }
 
 fn valid_fixture_schema(schema: &FixtureSchema, family: CatalogFixtureFamily) -> bool {
@@ -1119,6 +1121,11 @@ fn fixture_descriptor_from_record(
 ) -> FixtureDescriptorV1 {
     let payload_path =
         fixture_payload_member_path(&fixture.record.case_id, &execution_profile_digest);
+    let expected_path = expected_result_member_path(
+        &fixture.record.case_id,
+        context.claim_layer,
+        &execution_profile_digest,
+    );
     let fixture_record = serde_json::json!({
         "case_id": &fixture.record.case_id,
         "claim_layer": &fixture.record.claim_layer,
@@ -1151,7 +1158,11 @@ fn fixture_descriptor_from_record(
             fixture.schema,
         ),
         payload: artifact_descriptor(&payload_path, "application/json", fixture.input),
-        auxiliary: Vec::new(),
+        auxiliary: vec![artifact_descriptor(
+            &expected_path,
+            "application/json",
+            fixture.expected,
+        )],
         strict_oracle: StrictOracleV1 {
             kind: StrictOracleKindV1::Failure,
             output: None,
@@ -1163,14 +1174,14 @@ fn fixture_descriptor_from_record(
         replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
         redaction_state: RedactionStateV1::EvidenceMissing,
         deterministic_budget: DeterministicBudgetV1 {
-            event_count: 1,
-            cpu_fuel: 1,
-            host_calls: 1,
-            memory_bytes: 1,
-            output_bytes: 1024,
-            storage_bytes: 1,
-            execution_steps: 1,
-            simulation_time_ns: 1,
+            memory_bytes: 64 * 1024 * 1024,
+            cpu_fuel: 10_000_000,
+            host_calls: 10_000,
+            event_count: 100_000,
+            output_bytes: 16 * 1024 * 1024,
+            storage_bytes: 64 * 1024 * 1024,
+            execution_steps: 10_000_000,
+            simulation_time_ns: 60_000_000_000,
         },
         operational_safety: OperationalSafetyV1 {
             watchdog_ms: 120_000,
@@ -1310,6 +1321,17 @@ fn bundle_inputs_from_profile(
             fixture.claim_layer,
             &fixture.execution_profile_digest,
         );
+        if fixture.auxiliary.as_slice()
+            != [artifact_descriptor(
+                &path,
+                "application/json",
+                source.expected,
+            )]
+        {
+            return Err(
+                "profile expected-result descriptor disagrees with public catalog asset".into(),
+            );
+        }
         let member = BundleMemberV1::expected_result(path.clone(), source.expected.to_vec());
         expected_results.push(BundleExpectedResultV1 {
             case_id: fixture.case_id.clone(),
@@ -1321,6 +1343,7 @@ fn bundle_inputs_from_profile(
         });
         members.push(member);
     }
+    expected_results.sort();
     append_supporting_members(&mut members, inventory_bytes, providers);
     Ok((members, expected_results))
 }

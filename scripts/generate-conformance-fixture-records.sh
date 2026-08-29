@@ -23,13 +23,17 @@ trap 'rm -rf "${generated_root}"' EXIT
 
 generated_count=0
 declare -A seen_expected_paths=()
-while IFS=$'\t' read -r case_id claim_layer family input_path expected_path; do
+while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
   }
   [[ "${input_path}" == inputs/* && "${expected_path}" == expected/* ]] || {
     echo "fixture paths must remain under inputs/ and expected/: ${case_id}" >&2
+    exit 1
+  }
+  [[ "${schema_path}" == support/schemas/*.schema.json && "${schema_path}" != *".."* ]] || {
+    echo "fixture schema path must remain under support/schemas/: ${case_id}" >&2
     exit 1
   }
   [[ "${input_path}" != *".."* && "${expected_path}" != *".."* ]] || {
@@ -49,8 +53,15 @@ while IFS=$'\t' read -r case_id claim_layer family input_path expected_path; do
 
   input_file="${fixture_root}/${input_path}"
   expected_file="${fixture_root}/${expected_path}"
-  [[ -s "${input_file}" && -s "${expected_file}" ]] || {
+  schema_file="${fixture_root}/${schema_path}"
+  [[ -s "${schema_file}" && -s "${input_file}" && -s "${expected_file}" ]] || {
     echo "missing fixture pair: ${case_id}" >&2
+    exit 1
+  }
+  jq -e --arg family "${family}" \
+    '.properties.family.const == $family and .additionalProperties == false' \
+    "${schema_file}" >/dev/null || {
+    echo "fixture schema does not bind its family: ${case_id}" >&2
     exit 1
   }
   jq -e \
@@ -67,10 +78,10 @@ while IFS=$'\t' read -r case_id claim_layer family input_path expected_path; do
 
   case "${family}" in
     positive) result=accepted ;;
-    negative) result=rejected ;;
-    malformed) result=typed-failure ;;
-    resource) result=resource-limit ;;
-    deletion) result=destroyed ;;
+    denied) result=rejected ;;
+    malformed) result=namespaced-failure ;;
+    resource-exhaustion) result=resource-limit ;;
+    deletion-redaction) result=destroyed ;;
     downgrade) result=not-authorized ;;
     independent-evaluation) result=corroborated ;;
     *)
@@ -95,7 +106,7 @@ while IFS=$'\t' read -r case_id claim_layer family input_path expected_path; do
     --arg family "${family}" \
     --arg input_blake3_digest "${input_blake3_digest}" \
     --arg result "${result}" \
-    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, result: $result, status: "pending", draft_expected_result: {kind: "typed-failure", error_code: "ProvenanceMissing"}}' \
+    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, result: $result, status: "pending", draft_expected_result: {kind: "namespaced-failure", owner_id: "pigloros.core", contract_version: "1.0.0", code_id: "provenance-missing"}}' \
     > "${generated_file}"
   cmp -- "${generated_file}" "${expected_file}" || {
     echo "expected fixture record is not independently reproducible: ${case_id}" >&2
@@ -105,7 +116,7 @@ while IFS=$'\t' read -r case_id claim_layer family input_path expected_path; do
 done < <(
   find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 |
     sort -z |
-    xargs -0 -r jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .input, .expected] | @tsv'
+    xargs -0 -r jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected] | @tsv'
 )
 
 if (( generated_count != 49 )); then

@@ -3,10 +3,12 @@
   "case_id": "plugin-conformance-malformed",
   "family": "malformed",
   "input_blake3_digest": "e4abc9dda3d9b2ba2282d17a4ac1800d0754984f6f4f343a86b11ef4584e7522",
-  "result": "typed-failure",
+  "result": "namespaced-failure",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "typed-failure",
-    "error_code": "ProvenanceMissing"
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
   }
 }

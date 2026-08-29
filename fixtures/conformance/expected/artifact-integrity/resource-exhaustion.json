@@ -1,0 +1,14 @@
+{
+  "claim_layer": "artifact-integrity",
+  "case_id": "artifact-integrity-resource-exhaustion",
+  "family": "resource-exhaustion",
+  "input_blake3_digest": "7f60f31fd3de9833fcdb1a99ae4af21fa8c137779d6f3dd2e43312e80711680d",
+  "result": "resource-limit",
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
+  }
+}

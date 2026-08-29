@@ -147,7 +147,15 @@ for layer in "${profile_layers[@]}"; do
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
       (.fixtures | length == 7) and
       all(.fixtures[]; .claim_layer == $layer) and
-      ([.fixtures[].family] | unique | length == 7) and
+      all(.fixtures[]; (.schema | startswith("support/schemas/")) and (.schema | endswith(".schema.json"))) and
+      [.fixtures[].family] == [
+        "positive", "denied", "malformed", "resource-exhaustion",
+        "deletion-redaction", "downgrade", "independent-evaluation"
+      ] and
+      .fixture_provider.provider_id == ("pigloros.fixture." + $layer) and
+      .fixture_provider.contract_version == "1.0.0" and
+      .fixture_provider.abi_major == 1 and .fixture_provider.abi_minor == 0 and
+      .fixture_provider.package_path == ("authority/providers/" + $layer + ".cbor") and
       (if $layer == "knowledge-non-interference" then
         .adr_059_execution_matrix == $matrix and
         .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
@@ -165,8 +173,8 @@ for layer in "${profile_layers[@]}"; do
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
   }
-  while IFS=$'\t' read -r case_id fixture_layer family input_path expected_path; do
-    for path in "${input_path}" "${expected_path}"; do
+  while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path; do
+    for path in "${schema_path}" "${input_path}" "${expected_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
         echo "unsafe profile fixture path for ${layer}: ${path}" >&2
         exit 1
@@ -176,6 +184,12 @@ for layer in "${profile_layers[@]}"; do
         exit 1
       }
     done
+    jq -e --arg family "${family}" \
+      '.properties.family.const == $family and .additionalProperties == false' \
+      "${fixture_root}/${schema_path}" >/dev/null || {
+      echo "invalid fixture-family schema for ${layer}: ${schema_path}" >&2
+      exit 1
+    }
     jq -e \
       --arg case_id "${case_id}" \
       --arg fixture_layer "${fixture_layer}" \
@@ -199,14 +213,14 @@ for layer in "${profile_layers[@]}"; do
        .input_blake3_digest == $input_blake3_digest and
        ((.result | type) == "string") and (.result != "") and
        .status == "pending" and
-       .draft_expected_result == {kind: "typed-failure", error_code: "ProvenanceMissing"} and
+       .draft_expected_result == {kind: "namespaced-failure", owner_id: "pigloros.core", contract_version: "1.0.0", code_id: "provenance-missing"} and
        (has("verification") | not) and
        (has("source") | not)' \
       "${fixture_root}/${expected_path}" >/dev/null || {
       echo "invalid pending expected fixture record for ${layer}: ${expected_path}" >&2
       exit 1
     }
-  done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .input, .expected] | @tsv' "${profile}")
+  done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected] | @tsv' "${profile}")
 done
 for wire_code in {0..6}; do
   [[ -n "${profile_wire_codes[${wire_code}]:-}" ]] || {
@@ -385,8 +399,24 @@ if (( ${#profiles[@]} != 7 )); then
 fi
 
 mapfile -t support < <(find "${fixture_root}/support" -type f -print | sort)
-if (( ${#support[@]} != 7 )); then
-  echo "expected exactly seven required public support artifacts" >&2
+expected_support=(
+  "${fixture_root}/support/LICENSE"
+  "${fixture_root}/support/NOTICE"
+  "${fixture_root}/support/limitations.md"
+  "${fixture_root}/support/normative-requirements.md"
+  "${fixture_root}/support/provenance.json"
+  "${fixture_root}/support/sbom.json"
+  "${fixture_root}/support/schema-cpf1-v1.cddl"
+  "${fixture_root}/support/schemas/deletion-redaction.schema.json"
+  "${fixture_root}/support/schemas/denied.schema.json"
+  "${fixture_root}/support/schemas/downgrade.schema.json"
+  "${fixture_root}/support/schemas/independent-evaluation.schema.json"
+  "${fixture_root}/support/schemas/malformed.schema.json"
+  "${fixture_root}/support/schemas/positive.schema.json"
+  "${fixture_root}/support/schemas/resource-exhaustion.schema.json"
+)
+if [[ "${support[*]}" != "${expected_support[*]}" ]]; then
+  echo "public support artifact inventory does not match the current CPF1 contract" >&2
   exit 1
 fi
 

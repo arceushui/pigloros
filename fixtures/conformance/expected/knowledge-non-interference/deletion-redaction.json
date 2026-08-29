@@ -1,0 +1,14 @@
+{
+  "claim_layer": "knowledge-non-interference",
+  "case_id": "knowledge-non-interference-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "c0dc9f7bdc033f509ce24a691bc39e94930908e39d53b7661d8694d8cc68a956",
+  "result": "destroyed",
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
+  }
+}

@@ -3,47 +3,60 @@
   "claim_layer": "replay-conformance",
   "wire_code": 1,
   "subject_adapter": "exported-artifact",
+  "fixture_provider": {
+    "provider_id": "pigloros.fixture.replay-conformance",
+    "contract_version": "1.0.0",
+    "abi_major": 1,
+    "abi_minor": 0,
+    "package_path": "authority/providers/replay-conformance.cbor"
+  },
   "fixture_root": "replay-conformance",
   "fixtures": [
     {
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-positive",
       "family": "positive",
+      "schema": "support/schemas/positive.schema.json",
       "input": "inputs/replay-conformance/positive.json",
       "expected": "expected/replay-conformance/positive.json"
     },
     {
       "claim_layer": "replay-conformance",
-      "case_id": "replay-conformance-negative",
-      "family": "negative",
-      "input": "inputs/replay-conformance/negative.json",
-      "expected": "expected/replay-conformance/negative.json"
+      "case_id": "replay-conformance-denied",
+      "family": "denied",
+      "schema": "support/schemas/denied.schema.json",
+      "input": "inputs/replay-conformance/denied.json",
+      "expected": "expected/replay-conformance/denied.json"
     },
     {
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-malformed",
       "family": "malformed",
+      "schema": "support/schemas/malformed.schema.json",
       "input": "inputs/replay-conformance/malformed.json",
       "expected": "expected/replay-conformance/malformed.json"
     },
     {
       "claim_layer": "replay-conformance",
-      "case_id": "replay-conformance-resource",
-      "family": "resource",
-      "input": "inputs/replay-conformance/resource.json",
-      "expected": "expected/replay-conformance/resource.json"
+      "case_id": "replay-conformance-resource-exhaustion",
+      "family": "resource-exhaustion",
+      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "input": "inputs/replay-conformance/resource-exhaustion.json",
+      "expected": "expected/replay-conformance/resource-exhaustion.json"
     },
     {
       "claim_layer": "replay-conformance",
-      "case_id": "replay-conformance-deletion",
-      "family": "deletion",
-      "input": "inputs/replay-conformance/deletion.json",
-      "expected": "expected/replay-conformance/deletion.json"
+      "case_id": "replay-conformance-deletion-redaction",
+      "family": "deletion-redaction",
+      "schema": "support/schemas/deletion-redaction.schema.json",
+      "input": "inputs/replay-conformance/deletion-redaction.json",
+      "expected": "expected/replay-conformance/deletion-redaction.json"
     },
     {
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-downgrade",
       "family": "downgrade",
+      "schema": "support/schemas/downgrade.schema.json",
       "input": "inputs/replay-conformance/downgrade.json",
       "expected": "expected/replay-conformance/downgrade.json"
     },
@@ -51,6 +64,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-independent-evaluation",
       "family": "independent-evaluation",
+      "schema": "support/schemas/independent-evaluation.schema.json",
       "input": "inputs/replay-conformance/independent-evaluation.json",
       "expected": "expected/replay-conformance/independent-evaluation.json"
     }

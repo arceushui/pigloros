@@ -18,6 +18,7 @@ use std::io::Cursor;
 
 mod bundle_contract;
 mod profile_contract;
+mod provider_contract;
 
 pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
@@ -32,11 +33,19 @@ pub use bundle_contract::{
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
-    EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
-    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
-    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
-    StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
-    TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
+    DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1,
+    EvaluatorRequestV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureProvenanceV1,
+    IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
+    StableEvidenceAttestationV1, StableImplementationEvidenceV1, StrictOracleKindV1,
+    StrictOracleV1, SubjectAdapterKindV1, TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1,
+    EVALUATOR_REQUEST_MAGIC_V1,
+};
+pub use provider_contract::{
+    ArtifactDescriptorV1, FixtureFamilyV1, FixtureProviderEntryV1, FixtureProviderKeyV1,
+    FixtureProviderPackageV1, FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1,
+    ProviderContractErrorV1, ProviderFamilySchemaV1, FIXTURE_PROVIDER_PACKAGE_MAGIC_V1,
+    FIXTURE_PROVIDER_REGISTRY_MAGIC_V1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    MAX_PROVIDER_ARTIFACT_BYTES_V1,
 };
 
 /// Version of the first independent proof-evidence envelope.

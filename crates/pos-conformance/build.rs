@@ -16,6 +16,7 @@ struct CatalogRoot {
 }
 
 struct FixturePaths {
+    schema: String,
     input: String,
     expected: String,
 }
@@ -156,6 +157,30 @@ fn json_text(value: &Value, field: &str) -> Result<String, io::Error> {
         .ok_or_else(|| invalid_data(format!("profile catalog {field} must be text")))
 }
 
+fn json_u64(value: &Value, field: &str) -> Result<u64, io::Error> {
+    json_field(value, field)?
+        .as_u64()
+        .ok_or_else(|| invalid_data(format!("profile catalog {field} must be unsigned")))
+}
+
+fn validate_fixture_provider(profile: &Value, claim_layer: &str) -> Result<(), io::Error> {
+    let provider = json_field(profile, "fixture_provider")?;
+    let expected_provider_id = format!("pigloros.fixture.{claim_layer}");
+    let expected_package_path = format!("authority/providers/{claim_layer}.cbor");
+    let valid = json_text(provider, "provider_id")? == expected_provider_id
+        && json_text(provider, "contract_version")? == "1.0.0"
+        && json_u64(provider, "abi_major")? == 1
+        && json_u64(provider, "abi_minor")? == 0
+        && json_text(provider, "package_path")? == expected_package_path;
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_data(format!(
+            "profile catalog fixture_provider does not match claim layer {claim_layer}"
+        )))
+    }
+}
+
 fn relative_asset(root: &CatalogRoot, value: &Value, field: &str) -> Result<String, io::Error> {
     let relative = json_text(value, field)?;
     non_symlink_relative_path(root, &relative, &format!("profile catalog {field}"), false)?;
@@ -166,6 +191,8 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
     let canonical_profile = non_symlink_relative_path(root, &profile, "profile manifest", false)?;
     let bytes = fs::read(&canonical_profile)?;
     let profile_value: Value = serde_json::from_slice(&bytes)?;
+    let claim_layer = json_text(&profile_value, "claim_layer")?;
+    validate_fixture_provider(&profile_value, &claim_layer)?;
     let wire_code = json_field(&profile_value, "wire_code")?
         .as_u64()
         .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
@@ -174,7 +201,16 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
         .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?
         .iter()
         .map(|fixture| {
+            let family = json_text(fixture, "family")?;
+            let schema = relative_asset(root, fixture, "schema")?;
+            let expected_schema = format!("support/schemas/{family}.schema.json");
+            if schema != expected_schema {
+                return Err(invalid_data(format!(
+                    "profile fixture schema does not match family {family}"
+                )));
+            }
             Ok(FixturePaths {
+                schema,
                 input: relative_asset(root, fixture, "input")?,
                 expected: relative_asset(root, fixture, "expected")?,
             })
@@ -245,6 +281,11 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
             writeln!(generated, "            FixtureSource {{")?;
             writeln!(
                 generated,
+                "                schema: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../fixtures/conformance/\", {:?})),",
+                fixture.schema
+            )?;
+            writeln!(
+                generated,
                 "                input: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../fixtures/conformance/\", {:?})),",
                 fixture.input
             )?;
@@ -271,6 +312,7 @@ fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
         }
         paths.insert(profile_path);
         for fixture in &profile.fixtures {
+            paths.insert(root.source.join(&fixture.schema));
             paths.insert(root.source.join(&fixture.input));
             paths.insert(root.source.join(&fixture.expected));
         }

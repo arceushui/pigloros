@@ -3,7 +3,7 @@
 These files are the public, deterministic inputs and expected-result records
 for the seven CPF1 claim layers. Each directory under `profiles/` is a
 separate public profile manifest and binds exactly one claim layer to all seven
-required fixture families: positive, negative, malformed, resource, deletion,
+required fixture families: positive, denied, malformed, resource exhaustion, deletion/redaction,
 downgrade, and independent evaluation. The 49 records are layer-specific;
 there is no shared generic fixture record. They contain no implementation-
 private state, credentials, or signing material.
@@ -22,8 +22,8 @@ and signs only the canonical manifest. Local and Air-Gapped manifests must be
 materialized separately with the same expected-result records; the Air-Gapped
 profile capability policy remains network-deny.
 
-The scenario names intentionally cover positive, negative, malformed, resource
-limit, deletion, downgrade, and independent-evaluation cases. A profile
+The scenario names intentionally cover positive, denied, malformed, resource
+exhaustion, deletion/redaction, downgrade, and independent-evaluation cases. A profile
 manifest lists every family explicitly; no profile is represented by a single
 input/result pair.
 
@@ -36,11 +36,11 @@ bytes; the independent generator and hosted verifier recompute this binding.
 The `result` value in a checked-in expected record is descriptive fixture
 metadata only; `status: "pending"` and the CPF1 unavailable outcome prevent it
 from being interpreted as executed conformance evidence.
-Each expected record also declares the exact Draft-unavailable typed result
-(`ProvenanceMissing`) that the materializer encodes into the bundle, so the
+Each expected record also declares the exact Draft-unavailable namespaced
+failure (`pigloros.core` / `1.0.0` / `provenance-missing`) that the materializer encodes into the bundle, so the
 packaged result cannot silently diverge from the public record.
 Draft CPF1 bundles encode the exact checked-in expected-result record bytes;
-the record's `status: "pending"` and `ProvenanceMissing` declaration keep those
+the record's `status: "pending"` and namespaced failure declaration keep those
 bytes explicitly unavailable rather than executed evidence.
 
 `SHA256SUMS` and `BLAKE3SUMS` are independent byte inventories for every
@@ -57,7 +57,7 @@ their dependency/advisory checks remain CI responsibilities (`cargo-deny`,
 the byte-integrity authority for this scoped support record.
 
 The canonical architecture decisions for the CPF1 and authority workflow are
-ADR-058 through ADR-062 on the [Redmine project wiki](https://redmine.piglor.com/projects/pigloros/wiki).
+ADR-058 through ADR-068 on the [Redmine project wiki](https://redmine.piglor.com/projects/pigloros/wiki). ADR-068 owns the data-only FPR1/FPP1 provider contract used here.
 
 Repository settings must require the `ci-gate` check for protected branches;
 adding a workflow job does not change GitHub branch-protection rules. The

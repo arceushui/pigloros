@@ -6,7 +6,9 @@
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "typed-failure",
-    "error_code": "ProvenanceMissing"
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
   }
 }

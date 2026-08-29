@@ -2,6 +2,14 @@
   "source": "fixtures/conformance",
   "builder": "PiglorOS",
   "reproducible": true,
+  "fixture_provider_contract": {
+    "registry_magic": "FPR1",
+    "package_magic": "FPP1",
+    "contract_version": "1.0.0",
+    "provider_count": 7,
+    "families_per_provider": 7,
+    "adr": "ADR-068"
+  },
   "authority_inventory": {
     "digest_algorithm": "SHA-256",
     "path": "expected-authority/inventory.json",

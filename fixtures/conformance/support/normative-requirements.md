@@ -19,22 +19,27 @@ every claim-layer profile without claiming that any matrix case executed.
 Each of the seven public profiles declares all seven fixture families:
 
 1. positive canonical output;
-2. negative/denied behavior;
+2. denied behavior with no state change;
 3. malformed encoding or schema;
 4. deterministic resource exhaustion;
-5. deletion or redaction with a weakened ReplayClaim;
-6. downgrade/compatibility behavior; and
+5. deletion/redaction with a weakened ReplayClaim;
+6. downgrade authorization without fallback; and
 7. independent-evaluation evidence.
 
-Every fixture binds an exact ExecutionProfile digest, public schema digest,
-ordered input members, expected canonical bytes/digest or typed failure,
-VerificationOutcome, ReplayClaim, redaction state, deterministic CPU/memory/
-event/output/storage/step/time/watchdog bounds, default-deny capability policy,
-licence, notices, SBOM, source/build/publication provenance, limitations, and
-compatibility digest. Missing bounds or provenance are invalid, not unlimited.
-The family source records are layer-neutral; each profile materializes one
-descriptor per supported deterministic ExecutionProfile so Local and
-Air-Gapped bundles do not reuse the wrong profile identity.
+Every fixture binds an exact provider key, fixture-family schema and payload
+descriptor, ExecutionProfile digest, strict output/failure/divergence oracle,
+VerificationOutcome, ReplayClaim, redaction state, deterministic memory/CPU/
+host-call/event/output/storage/step/time budget, separate operational watchdog,
+default-deny capability policy, licence, notices, SBOM, source/build/publication
+provenance, and limitations. Missing bounds or provenance are invalid, not
+unlimited. Only downgrade fixtures carry trust-policy, release-admission, and
+provider-transition bindings; no implementation digest authorizes a downgrade.
+Each profile binds the full FPR1 provider-registry artifact and the exact
+provider key required by its claim layer. Every FPP1 provider package is data
+only and supplies exactly one schema for each of the seven families. Each
+profile materializes one descriptor per supported deterministic
+ExecutionProfile so Local and Air-Gapped bundles do not reuse the wrong profile
+identity.
 
 ## Bundle parity and authority
 

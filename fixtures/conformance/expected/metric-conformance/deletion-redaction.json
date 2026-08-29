@@ -1,0 +1,14 @@
+{
+  "claim_layer": "metric-conformance",
+  "case_id": "metric-conformance-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "bf22aa365fbb8cf2d09091606afd57d49c9516b595e7a2f771cbb354d8fe5cfa",
+  "result": "destroyed",
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
+  }
+}

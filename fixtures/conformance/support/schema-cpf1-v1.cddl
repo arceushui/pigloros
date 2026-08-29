@@ -1,55 +1,108 @@
-# CPF1 public conformance schema (canonical CBOR array)
+# CPF1 public conformance schema (deterministic, definite-length CBOR arrays)
 
 cpf1 = [
   magic: "CPF1",
   version: 1,
-  profile-id: tstr,
-  semantic-version: tstr,
+  profile-id: identifier,
+  semantic-version: tstr .size (1..64),
   lifecycle: 0..3,
   normative-spec-digest: digest,
   execution-matrix-digest: digest,
-  execution-profile-digests: [* digest],
-  public-schema-digests: [* digest],
-  fixtures: [* fixture],
+  execution-profile-digests: [1* digest],
+  fixture-provider-registry: provider-registry-binding,
+  fixtures: [1* fixture-contract],
   allowed-divergences: [* divergence],
   evaluator-protocol: protocol,
   independence-requirements: requirements,
-  compatibility-digest: digest,
+  fixture-contract-policy-digest: digest,
   limitations-digest: digest,
   provenance-digest: digest,
   previous-profile-digest: null / digest,
   profile-digest: digest
 ]
 
-fixture = [
-  case-id: tstr,
-  mandatory: bool,
-  claim-layer: 0..6,
-  execution-profile-digest: digest,
-  public-schema-digest: digest,
-  modes: [* 0..3],
-  subject-adapter: 0..2,
-  inputs: [* input-member],
-  expected: expected-result,
-  verification-outcome: 0..5,
-  verification-error: null / uint,
-  replay-claim: 0..4,
-  redaction-state: 0..3,
-  bounds: [8* uint],
-  capability-policy: [bool, [* tstr]],
-  provenance: [tstr, digest, digest, digest, digest, digest, digest],
-  compatibility-digest: digest
+provider-registry-binding = [
+  registry-artifact: artifact-descriptor,
+  required-provider-keys: [1* provider-key]
 ]
 
-input-member = [member-id: tstr, size-bytes: uint, digest, provenance-digest: digest]
-expected-result = [kind: 0..2, canonical-bytes: null / bstr,
-                   canonical-digest: null / digest,
-                   typed-failure: null / uint,
-                   divergence: null / divergence]
-divergence = [classification: uint, first-coordinate: bstr]
-protocol = [protocol-id: tstr, protocol-digest: digest,
+provider-registry = [
+  magic: "FPR1",
+  version: 1,
+  providers: [1* provider-entry],
+  registry-digest: digest
+]
+
+provider-entry = [
+  provider-id: identifier,
+  contract-version: tstr .size (1..64),
+  abi-major: 0..65535,
+  abi-minor: 0..65535,
+  claim-layer: 0..6,
+  subject-adapter: 0..2,
+  provider-package: artifact-descriptor
+]
+
+provider-key = [provider-id: identifier, contract-version: tstr .size (1..64),
+                abi-major: 0..65535, abi-minor: 0..65535]
+
+provider-package = [
+  magic: "FPP1",
+  version: 1,
+  provider: provider-key,
+  claim-layer: 0..6,
+  subject-adapter: 0..2,
+  family-schemas: [7*7 family-schema],
+  licence: artifact-descriptor,
+  notices: artifact-descriptor,
+  sbom: artifact-descriptor,
+  source-provenance: artifact-descriptor,
+  limitations: artifact-descriptor,
+  package-digest: digest
+]
+
+family-schema = [family: 0..6, schema: artifact-descriptor]
+
+fixture-contract = [
+  case-id: identifier,
+  mandatory: bool,
+  claim-layer: 0..6,
+  family: 0..6,
+  provider: provider-key,
+  subject-adapter: 0..2,
+  execution-profile-digest: digest,
+  modes: [1* 0..3],
+  schema: artifact-descriptor,
+  payload: artifact-descriptor,
+  auxiliary-artifacts: [* artifact-descriptor],
+  strict-oracle: strict-oracle,
+  verification-outcome: 0..5,
+  verification-error: null / namespaced-failure,
+  replay-claim: 0..4,
+  redaction-state: 0..3,
+  deterministic-budget: [8*8 uint .gt 0],
+  operational-safety: [watchdog-ms: uint .gt 0],
+  capability-policy: [network-allowed: bool, capability-ids: [* identifier]],
+  trust-policy-snapshot-digest: null / digest,
+  release-admission-digest: null / digest,
+  provenance: [licence-id: tstr .size (1..128), digest, digest, digest, digest, digest, digest],
+  contract-transition: null / [from: provider-key, to: provider-key],
+  fixture-digest: digest
+]
+
+artifact-descriptor = [member-path: tstr .size (1..512),
+                       media-type: tstr .size (3..127),
+                       byte-length: uint .gt 0, blake3-digest: digest]
+strict-oracle = [kind: 0..2, output: null / artifact-descriptor,
+                 failure: null / namespaced-failure,
+                 divergence: null / divergence]
+namespaced-failure = [owner-id: identifier,
+                      contract-version: tstr .size (1..64), code-id: identifier]
+divergence = [classification: 0..6, first-coordinate: bstr .size (1..128)]
+protocol = [protocol-id: identifier, protocol-digest: digest,
             request-schema-digest: digest, report-schema-digest: digest,
-            hard-caps: [10* uint]]
+            hard-caps: [10*10 uint]]
 requirements = [technical: bool, authorship: bool, organizational: bool,
                 trust-policy-snapshot-digest: digest, requirements-digest: digest]
+identifier = tstr .size (1..128)
 digest = bstr .size 32

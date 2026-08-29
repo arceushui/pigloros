@@ -1,0 +1,14 @@
+{
+  "claim_layer": "artifact-integrity",
+  "case_id": "artifact-integrity-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "a8f2bc526b772f0db48fe2552ca1f2b755689cefbb94eb808e9b642aa99b3efa",
+  "result": "destroyed",
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
+  }
+}

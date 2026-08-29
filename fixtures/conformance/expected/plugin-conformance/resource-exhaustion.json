@@ -1,0 +1,14 @@
+{
+  "claim_layer": "plugin-conformance",
+  "case_id": "plugin-conformance-resource-exhaustion",
+  "family": "resource-exhaustion",
+  "input_blake3_digest": "9f6edc9e23b96d0cab694cc7941466e428c6fc1ebcc66b5aa6aa6239c931ab26",
+  "result": "resource-limit",
+  "status": "pending",
+  "draft_expected_result": {
+    "kind": "namespaced-failure",
+    "owner_id": "pigloros.core",
+    "contract_version": "1.0.0",
+    "code_id": "provenance-missing"
+  }
+}

@@ -3,47 +3,60 @@
   "claim_layer": "empirical-evaluation",
   "wire_code": 6,
   "subject_adapter": "exported-artifact",
+  "fixture_provider": {
+    "provider_id": "pigloros.fixture.empirical-evaluation",
+    "contract_version": "1.0.0",
+    "abi_major": 1,
+    "abi_minor": 0,
+    "package_path": "authority/providers/empirical-evaluation.cbor"
+  },
   "fixture_root": "empirical-evaluation",
   "fixtures": [
     {
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-positive",
       "family": "positive",
+      "schema": "support/schemas/positive.schema.json",
       "input": "inputs/empirical-evaluation/positive.json",
       "expected": "expected/empirical-evaluation/positive.json"
     },
     {
       "claim_layer": "empirical-evaluation",
-      "case_id": "empirical-evaluation-negative",
-      "family": "negative",
-      "input": "inputs/empirical-evaluation/negative.json",
-      "expected": "expected/empirical-evaluation/negative.json"
+      "case_id": "empirical-evaluation-denied",
+      "family": "denied",
+      "schema": "support/schemas/denied.schema.json",
+      "input": "inputs/empirical-evaluation/denied.json",
+      "expected": "expected/empirical-evaluation/denied.json"
     },
     {
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-malformed",
       "family": "malformed",
+      "schema": "support/schemas/malformed.schema.json",
       "input": "inputs/empirical-evaluation/malformed.json",
       "expected": "expected/empirical-evaluation/malformed.json"
     },
     {
       "claim_layer": "empirical-evaluation",
-      "case_id": "empirical-evaluation-resource",
-      "family": "resource",
-      "input": "inputs/empirical-evaluation/resource.json",
-      "expected": "expected/empirical-evaluation/resource.json"
+      "case_id": "empirical-evaluation-resource-exhaustion",
+      "family": "resource-exhaustion",
+      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "input": "inputs/empirical-evaluation/resource-exhaustion.json",
+      "expected": "expected/empirical-evaluation/resource-exhaustion.json"
     },
     {
       "claim_layer": "empirical-evaluation",
-      "case_id": "empirical-evaluation-deletion",
-      "family": "deletion",
-      "input": "inputs/empirical-evaluation/deletion.json",
-      "expected": "expected/empirical-evaluation/deletion.json"
+      "case_id": "empirical-evaluation-deletion-redaction",
+      "family": "deletion-redaction",
+      "schema": "support/schemas/deletion-redaction.schema.json",
+      "input": "inputs/empirical-evaluation/deletion-redaction.json",
+      "expected": "expected/empirical-evaluation/deletion-redaction.json"
     },
     {
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-downgrade",
       "family": "downgrade",
+      "schema": "support/schemas/downgrade.schema.json",
       "input": "inputs/empirical-evaluation/downgrade.json",
       "expected": "expected/empirical-evaluation/downgrade.json"
     },
@@ -51,6 +64,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-independent-evaluation",
       "family": "independent-evaluation",
+      "schema": "support/schemas/independent-evaluation.schema.json",
       "input": "inputs/empirical-evaluation/independent-evaluation.json",
       "expected": "expected/empirical-evaluation/independent-evaluation.json"
     }
