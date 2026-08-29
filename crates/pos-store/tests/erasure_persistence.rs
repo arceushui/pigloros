@@ -20,7 +20,7 @@ use std::rc::Rc;
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
 
-fn reference(value: u8) -> ErasureReferenceV1 {
+const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
