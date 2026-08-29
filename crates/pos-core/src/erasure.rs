@@ -2679,6 +2679,11 @@ mod erasure_coverage_tests {
         ErasureReferenceV1::from_digest([2; 32])
     }
 
+    #[test]
+    fn erasure_record_limit_matches_the_public_contract() {
+        assert_eq!(ERASURE_COORDINATOR_RECORD_MAX_BYTES, 64 * 1024 * 1024);
+    }
+
     fn transition(
         lifecycle: ErasureLifecycleV1,
         freeze_position: Option<u64>,

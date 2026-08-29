@@ -5040,14 +5040,6 @@ mod erasure_coverage_tests {
         ErasureReferenceV1::from_digest([value; 32])
     }
 
-    #[test]
-    fn erasure_record_limit_matches_the_public_contract() {
-        assert_eq!(
-            pos_core::ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-            64 * 1024 * 1024
-        );
-    }
-
     fn record() -> Result<ErasureCoordinatorRecordV1, Box<dyn std::error::Error>> {
         let request = ErasureRequestV1::new(ErasureRequestInputV1 {
             request: reference(1),
