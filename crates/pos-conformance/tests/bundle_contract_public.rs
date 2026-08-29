@@ -746,7 +746,7 @@ fn typed_bundle_validation_rejects_profile_expected_and_signature_tampering() ->
     wrong_expected_mode.manifest.expected_results[0].mode = BundleModeV1::AirGapped;
     assert_eq!(
         wrong_expected_mode.validate(),
-        Err(BundleContractErrorV1::MemberMissing)
+        Err(BundleContractErrorV1::ExpectedResultMismatch)
     );
 
     let mut wrong_expected_digest = original.clone();
