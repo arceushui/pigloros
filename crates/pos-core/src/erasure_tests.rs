@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 #[derive(Clone)]
-struct TestCoordinatorPort {
+pub(super) struct TestCoordinatorPort {
     accepted: bool,
     authorization_admitted: bool,
     authorization_decisions: Rc<
