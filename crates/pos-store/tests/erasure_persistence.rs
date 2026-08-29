@@ -76,7 +76,7 @@ fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecord
     }
 }
 
-fn target(value: u8) -> ErasureRequiredTargetV1 {
+const fn target(value: u8) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
         artifact_digest: reference(value),
@@ -87,7 +87,10 @@ fn target(value: u8) -> ErasureRequiredTargetV1 {
     }
 }
 
-fn acknowledgement(target: ErasureRequiredTargetV1, evidence: u8) -> ErasureAcknowledgementV1 {
+const fn acknowledgement(
+    target: ErasureRequiredTargetV1,
+    evidence: u8,
+) -> ErasureAcknowledgementV1 {
     ErasureAcknowledgementV1 {
         target,
         owner: target.replica_id,
@@ -96,7 +99,7 @@ fn acknowledgement(target: ErasureRequiredTargetV1, evidence: u8) -> ErasureAckn
     }
 }
 
-fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 {
+const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 {
     ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::Artifact,
         target,
@@ -112,7 +115,7 @@ fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 {
     }
 }
 
-fn transition() -> ErasureStateTransitionV1 {
+const fn transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle: ErasureLifecycleV1::AccessFrozen,
         freeze_position: Some(10),
