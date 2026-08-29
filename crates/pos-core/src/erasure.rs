@@ -1949,13 +1949,9 @@ impl ErasureCoordinatorRecordV1 {
         let Some(receipt) = self.receipt.as_ref() else {
             return Err(ErasureErrorV1::ProvenanceMissing);
         };
-        if self.receipt_input.is_none() {
+        let Some(receipt_input) = self.receipt_input.as_ref() else {
             return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        let receipt_input = self
-            .receipt_input
-            .as_ref()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        };
         let reconstructed = ErasureReceiptV1::new(receipt_input.clone())?;
         if self.receipt.as_ref() != Some(&reconstructed) {
             return Err(ErasureErrorV1::PolicyConflict);
@@ -2011,6 +2007,7 @@ impl ErasureCoordinatorRecordV1 {
 #[cfg(test)]
 mod erasure_targeted_coverage_tests {
     use super::*;
+    use ciborium::value::Value;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -2071,6 +2068,37 @@ mod erasure_targeted_coverage_tests {
         let bytes = tests::complete_record().and_then(|record| record.to_canonical_cbor());
         assert!(bytes.is_ok());
         bytes.unwrap_or_default()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn malformed_record_bytes() -> Vec<Vec<u8>> {
+        let bytes = complete_record_bytes();
+        let Ok(Value::Array(fields)) = ciborium::from_reader(bytes.as_slice()) else {
+            return Vec::new();
+        };
+        let replacements = [
+            (2, Value::Null),
+            (3, Value::Null),
+            (4, Value::Null),
+            (5, Value::Null),
+            (6, Value::Null),
+            (7, Value::Array(Vec::new())),
+            (8, Value::Text(String::new())),
+            (9, Value::Text(String::new())),
+            (10, Value::Array(Vec::new())),
+            (11, Value::Text(String::new())),
+        ];
+        replacements
+            .into_iter()
+            .filter_map(|(index, replacement)| {
+                let mut fields = fields.clone();
+                fields[index] = replacement;
+                let mut bytes = Vec::new();
+                ciborium::into_writer(&Value::Array(fields), &mut bytes)
+                    .ok()
+                    .map(|()| bytes)
+            })
+            .collect()
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -2195,6 +2223,23 @@ mod erasure_targeted_coverage_tests {
         assert_eq!(
             ErasureCoordinatorRecordV1::from_canonical_cbor(&trailing),
             Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn canonical_record_decoder_rejects_malformed_fields_at_a_public_boundary() {
+        let malformed = malformed_record_bytes();
+        assert_eq!(malformed.len(), 10);
+        for bytes in malformed {
+            assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn limited_decoder_rejects_oversized_input_at_the_codec_boundary() {
+        assert_eq!(
+            decode_limited(&[0], 0, ERASURE_MAX_INVENTORY_RESULTS),
+            Err(ErasureErrorV1::ScopeInvalid)
         );
     }
 }
