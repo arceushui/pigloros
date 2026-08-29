@@ -2968,7 +2968,11 @@ fn safe_error(value: SafeErrorCodeV1) -> Value {
 mod current_wire_contract_tests {
     use super::*;
 
-    fn digest(seed: u8) -> [u8; 32] {
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const MAX_TEST_CASES: u32 = 65_536;
+
+    const fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
     }
 
@@ -3071,8 +3075,8 @@ mod current_wire_contract_tests {
                 report_schema_digest: digest(17),
                 hard_caps: EvaluatorHardCapsV1 {
                     max_profile_bytes: MAX_PROFILE_BYTES as u64,
-                    max_cases: u32::try_from(MAX_FIXTURES).unwrap_or(u32::MAX),
-                    max_bundle_members: u32::try_from(MAX_FIXTURES).unwrap_or(u32::MAX),
+                    max_cases: MAX_TEST_CASES,
+                    max_bundle_members: MAX_TEST_CASES,
                     max_member_path_bytes: 256,
                     max_member_bytes: MAX_MEMBER_BYTES,
                     max_total_bundle_bytes: MAX_TOTAL_BUNDLE_BYTES,
@@ -3107,33 +3111,45 @@ mod current_wire_contract_tests {
         value.profile_digest = value.digest();
     }
 
-    fn reject(value: ConformanceProfileV1) {
+    fn reject(value: &ConformanceProfileV1) {
         assert!(value.validate().is_err());
     }
 
     #[test]
-    fn cpf1_current_wire_contract_round_trips_exact_field_counts() {
+    fn cpf1_current_wire_contract_round_trips_exact_field_counts() -> TestResult {
         let value = profile();
-        let bytes = value.to_canonical_cbor().expect("current CPF1 encodes");
+        let bytes = value.to_canonical_cbor()?;
         assert_eq!(ConformanceProfileV1::from_canonical_cbor(&bytes), Ok(value));
         assert_eq!(
-            array_values(&encode_profile(&profile(), true)).map(|fields| fields.len()),
+            array_values(&encode_profile(&profile(), true)).map(<[Value]>::len),
             Ok(18)
         );
         assert_eq!(
-            array_values(&encode_fixture(&fixture())).map(|fields| fields.len()),
+            array_values(&encode_fixture(&fixture())).map(<[Value]>::len),
             Ok(24)
         );
+        Ok(())
+    }
+
+    fn array_field<'a>(
+        fields: &'a mut [Value],
+        index: usize,
+        name: &str,
+    ) -> TestResult<&'a mut Vec<Value>> {
+        match fields.get_mut(index) {
+            Some(Value::Array(values)) => Ok(values),
+            _ => Err(format!("{name} is not an array").into()),
+        }
     }
 
     #[test]
-    fn public_decoder_rejects_malformed_current_record_lengths() {
+    fn public_decoder_rejects_malformed_current_record_lengths() -> TestResult {
         let mut malformed_profile = encode_profile(&profile(), true);
         let Value::Array(fields) = &mut malformed_profile else {
-            panic!("profile codec is an array");
+            return Err("profile codec is not an array".into());
         };
         fields.pop();
-        let profile_bytes = encode_value(&malformed_profile).expect("mutated CBOR encodes");
+        let profile_bytes = encode_value(&malformed_profile)?;
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor(&profile_bytes),
             Err(ConformanceContractError::InvalidEncoding)
@@ -3141,20 +3157,17 @@ mod current_wire_contract_tests {
 
         let mut malformed_fixture = encode_profile(&profile(), true);
         let Value::Array(fields) = &mut malformed_fixture else {
-            panic!("profile codec is an array");
+            return Err("profile codec is not an array".into());
         };
-        let Value::Array(fixtures) = &mut fields[9] else {
-            panic!("fixture inventory is an array");
-        };
-        let Value::Array(fixture_fields) = &mut fixtures[0] else {
-            panic!("fixture is an array");
-        };
+        let fixtures = array_field(fields, 9, "fixture inventory")?;
+        let fixture_fields = array_field(fixtures, 0, "fixture")?;
         fixture_fields.pop();
-        let fixture_bytes = encode_value(&malformed_fixture).expect("mutated CBOR encodes");
+        let fixture_bytes = encode_value(&malformed_fixture)?;
         assert_eq!(
             ConformanceProfileV1::from_canonical_cbor(&fixture_bytes),
             Err(ConformanceContractError::InvalidEncoding)
         );
+        Ok(())
     }
 
     #[test]
@@ -3176,19 +3189,19 @@ mod current_wire_contract_tests {
         let mut unknown = profile();
         unknown.fixtures[0].provider_key.provider_id = "other.provider".to_owned();
         refresh(&mut unknown);
-        reject(unknown);
+        reject(&unknown);
 
         let mut unsorted = profile();
         unsorted.fixtures[0]
             .auxiliary
             .push(artifact("auxiliary/one.cbor", 23));
         refresh(&mut unsorted);
-        reject(unsorted);
+        reject(&unsorted);
 
         let mut invalid_path = profile();
         invalid_path.fixtures[0].payload.member_path = "../payload.cbor".to_owned();
         refresh(&mut invalid_path);
-        reject(invalid_path);
+        reject(&invalid_path);
     }
 
     #[test]
@@ -3196,7 +3209,7 @@ mod current_wire_contract_tests {
         let mut empty_modes = profile();
         empty_modes.fixtures[0].modes.clear();
         refresh(&mut empty_modes);
-        reject(empty_modes);
+        reject(&empty_modes);
 
         for zero_budget in 0..8 {
             let mut value = profile();
@@ -3211,14 +3224,14 @@ mod current_wire_contract_tests {
                 _ => value.fixtures[0].deterministic_budget.simulation_time_ns = 0,
             }
             refresh(&mut value);
-            reject(value);
+            reject(&value);
         }
 
         let mut plugin_network = profile();
         plugin_network.fixtures[0].subject_adapter = SubjectAdapterKindV1::PublicPluginProtocol;
         plugin_network.fixtures[0].capability_policy.network_allowed = true;
         refresh(&mut plugin_network);
-        reject(plugin_network);
+        reject(&plugin_network);
     }
 
     #[test]
@@ -3230,13 +3243,13 @@ mod current_wire_contract_tests {
             code_id: "invalid-input".to_owned(),
         });
         refresh(&mut mixed);
-        reject(mixed);
+        reject(&mixed);
 
         let mut wrong_outcome = profile();
         wrong_outcome.fixtures[0].expected_verification_outcome =
             VerificationOutcomeV1::InvalidManifest;
         refresh(&mut wrong_outcome);
-        reject(wrong_outcome);
+        reject(&wrong_outcome);
 
         let mut unauthorized_divergence = profile();
         unauthorized_divergence.fixtures[0].strict_oracle = StrictOracleV1 {
@@ -3251,7 +3264,7 @@ mod current_wire_contract_tests {
         unauthorized_divergence.fixtures[0].expected_verification_outcome =
             VerificationOutcomeV1::Diverged;
         refresh(&mut unauthorized_divergence);
-        reject(unauthorized_divergence);
+        reject(&unauthorized_divergence);
     }
 
     #[test]
@@ -3259,12 +3272,12 @@ mod current_wire_contract_tests {
         let mut non_downgrade = profile();
         non_downgrade.fixtures[0].trust_policy_snapshot_digest = Some(digest(24));
         refresh(&mut non_downgrade);
-        reject(non_downgrade);
+        reject(&non_downgrade);
 
         let mut incomplete = profile();
         incomplete.fixtures[0].family = FixtureFamilyV1::Downgrade;
         refresh(&mut incomplete);
-        reject(incomplete);
+        reject(&incomplete);
 
         let mut identical = profile();
         identical.fixtures[0].family = FixtureFamilyV1::Downgrade;
@@ -3276,6 +3289,6 @@ mod current_wire_contract_tests {
             to: key,
         });
         refresh(&mut identical);
-        reject(identical);
+        reject(&identical);
     }
 }
