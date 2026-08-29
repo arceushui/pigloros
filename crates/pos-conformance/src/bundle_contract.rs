@@ -13,6 +13,7 @@ use serde_json::Value as JsonValue;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::Cursor;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 use crate::{
@@ -91,6 +92,18 @@ const EXECUTION_MATRIX_CASE_KEYS: [&str; 9] = [
     "expected_result",
     "expected_result_digest",
 ];
+static EXPECTED_AUTHORITY_INVENTORY: LazyLock<Result<JsonValue, serde_json::Error>> =
+    LazyLock::new(|| {
+        serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/expected-authority/inventory.json"
+        ))
+    });
+static EXPECTED_EXECUTION_MATRIX: LazyLock<Result<JsonValue, serde_json::Error>> =
+    LazyLock::new(|| {
+        serde_json::from_slice(include_bytes!(
+            "../../../fixtures/conformance/matrix/execution-matrix.json"
+        ))
+    });
 const EXECUTION_MATRIX_PREDICATE_KEYS: [&str; 4] = ["fixture_id", "AuthEq", "PublicEq", "OpEq"];
 const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
@@ -1215,10 +1228,9 @@ fn independent_validate_authority_inventory(
     // verification has an independent authority for the accepted Draft
     // inventory. JSON-value equality retains the complete contract while
     // accepting harmless JSON whitespace and member-order differences.
-    if serde_json::from_slice::<JsonValue>(include_bytes!(
-        "../../../fixtures/conformance/expected-authority/inventory.json"
-    ))
-    .is_ok_and(|expected| inventory == &expected)
+    if EXPECTED_AUTHORITY_INVENTORY
+        .as_ref()
+        .is_ok_and(|expected| inventory == expected)
     {
         Ok(())
     } else {
@@ -1231,10 +1243,9 @@ fn independent_validate_execution_matrix(matrix: &JsonValue) -> Result<(), Bundl
     // verification has an independent authority for the accepted Draft matrix.
     // JSON-value equality retains the complete contract while accepting harmless
     // JSON whitespace and member-order differences.
-    if serde_json::from_slice::<JsonValue>(include_bytes!(
-        "../../../fixtures/conformance/matrix/execution-matrix.json"
-    ))
-    .is_ok_and(|expected| matrix == &expected)
+    if EXPECTED_EXECUTION_MATRIX
+        .as_ref()
+        .is_ok_and(|expected| matrix == expected)
     {
         Ok(())
     } else {
@@ -1247,11 +1258,15 @@ fn independent_required_member<'a>(
     role: BundleMemberRoleV1,
     path: &str,
 ) -> Result<&'a IndependentMember<'a>, BundleContractErrorV1> {
-    members
-        .iter()
-        .filter(|member| member.role == role)
-        .find(|member| member.path == path)
-        .ok_or(BundleContractErrorV1::MemberMissing)
+    let mut matching = members.iter().filter(|member| member.role == role);
+    let member = matching
+        .next()
+        .ok_or(BundleContractErrorV1::MemberMissing)?;
+    if matching.next().is_some() || member.path != path || member.bytes.is_empty() {
+        Err(BundleContractErrorV1::MemberMissing)
+    } else {
+        Ok(member)
+    }
 }
 
 fn independent_expected_member_path(
@@ -1355,7 +1370,6 @@ fn independent_verify_cpf1(
                             &allowed_divergences,
                             &execution_profiles,
                             &public_schemas,
-                            caps,
                         )
                         .map(|fixtures| (root, fixtures))
                     })
@@ -1479,7 +1493,6 @@ fn independent_verify_cpf1_fixtures(
     allowed_divergences: &[(u64, Vec<u8>)],
     execution_profiles: &[[u8; 32]],
     public_schemas: &[[u8; 32]],
-    caps: &IndependentArchiveCaps,
 ) -> Result<Vec<IndependentCpf1Fixture>, BundleContractErrorV1> {
     let fixtures = independent_profile_array_bounded(value)?;
     let mut previous = None;
@@ -1490,7 +1503,6 @@ fn independent_verify_cpf1_fixtures(
             allowed_divergences,
             execution_profiles,
             public_schemas,
-            caps,
         )?;
         let key = (
             fixture.case_id.clone(),
@@ -1511,7 +1523,6 @@ fn independent_verify_cpf1_fixture(
     allowed: &[(u64, Vec<u8>)],
     execution_profiles: &[[u8; 32]],
     public_schemas: &[[u8; 32]],
-    caps: &IndependentArchiveCaps,
 ) -> Result<IndependentCpf1Fixture, BundleContractErrorV1> {
     let fields = independent_profile_array(value, 17)?;
     let case_id = independent_profile_text(&fields[0], 128)?.to_owned();
@@ -1530,12 +1541,12 @@ fn independent_verify_cpf1_fixture(
     }
     let modes = independent_profile_modes(&fields[5])?;
     independent_profile_adapter(&fields[6])?;
-    let inputs = independent_verify_cpf1_fixture_inputs(&fields[7], caps)?;
+    let inputs = independent_verify_cpf1_fixture_inputs(&fields[7])?;
     let (expected_kind, expected_bytes) = independent_verify_cpf1_expected(&fields[8], allowed)?;
     independent_verify_cpf1_fixture_outcome(expected_kind, &fields[9], &fields[10])?;
     independent_verify_cpf1_fixture_claim(&fields[11], &fields[12])?;
     independent_verify_cpf1_bounds(&fields[13])?;
-    independent_verify_cpf1_expected_bounds(&fields[8], &fields[13], caps)?;
+    independent_verify_cpf1_expected_bounds(&fields[8], &fields[13])?;
     let network_enabled = independent_verify_cpf1_capabilities(&fields[14])?;
     let provenance = independent_verify_cpf1_provenance(&fields[15])?;
     if independent_profile_digest(&fields[16])? == [0; 32]
@@ -1558,7 +1569,6 @@ fn independent_verify_cpf1_fixture(
 
 fn independent_verify_cpf1_fixture_inputs(
     value: &Value,
-    caps: &IndependentArchiveCaps,
 ) -> Result<Vec<IndependentCpf1Input>, BundleContractErrorV1> {
     let inputs = independent_profile_array_bounded(value)?;
     let mut previous = None;
@@ -1569,16 +1579,15 @@ fn independent_verify_cpf1_fixture_inputs(
         let size = independent_profile_u64(&fields[1])?;
         let digest = independent_profile_digest(&fields[2])?;
         let provenance_digest = independent_profile_digest(&fields[3])?;
-        if size == 0
-            || size > MAX_MEMBER_BYTES
-            || size > caps.member_bytes
-            || u64::try_from(member_id.len()).unwrap_or(u64::MAX) > caps.member_path_bytes
-            || digest == [0; 32]
-            || provenance_digest == [0; 32]
-            || previous
+        let invalid = [
+            size == 0,
+            digest == [0; 32],
+            provenance_digest == [0; 32],
+            previous
                 .as_ref()
-                .is_some_and(|prior: &String| prior >= &member_id)
-        {
+                .is_some_and(|prior: &String| prior >= &member_id),
+        ];
+        if invalid.contains(&true) {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
         verified.push(IndependentCpf1Input {
@@ -1622,9 +1631,10 @@ fn independent_verify_cpf1_expected(
             let divergence = independent_profile_array(&fields[4], 2)?;
             let classification = independent_profile_divergence(&divergence[0])?;
             let coordinate = independent_profile_bytes(&divergence[1])?;
+            let expected = (classification, coordinate);
             if !allowed
                 .iter()
-                .any(|value| value.0 == classification && value.1.as_slice() == coordinate)
+                .any(|value| (value.0, value.1.as_slice()) == expected)
             {
                 return Err(BundleContractErrorV1::ProfileInvalid);
             }
@@ -1663,7 +1673,7 @@ fn independent_outcome_matches_expected(
             (3, Some(12)) => expected == 12,
             _ => false,
         },
-        IndependentExpectedKind::AllowedDivergence => outcome == 1 && error.is_none(),
+        IndependentExpectedKind::AllowedDivergence => matches!((outcome, error), (1, None)),
     }
 }
 
@@ -1683,7 +1693,6 @@ fn independent_verify_cpf1_fixture_claim(
 fn independent_verify_cpf1_expected_bounds(
     expected: &Value,
     bounds: &Value,
-    caps: &IndependentArchiveCaps,
 ) -> Result<(), BundleContractErrorV1> {
     independent_profile_array(expected, 5).and_then(|expected| {
         independent_profile_u64(&expected[0]).and_then(|kind| {
@@ -1692,7 +1701,7 @@ fn independent_verify_cpf1_expected_bounds(
                     independent_profile_array(bounds, 8).and_then(|bounds| {
                         independent_profile_u64(&bounds[3]).and_then(|maximum| {
                             let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                            if length > maximum || length > caps.member_bytes {
+                            if length > maximum {
                                 Err(BundleContractErrorV1::ProfileInvalid)
                             } else {
                                 Ok(())
@@ -1859,10 +1868,12 @@ fn independent_profile_modes(value: &Value) -> Result<Vec<u64>, BundleContractEr
         .iter()
         .map(independent_profile_u64)
         .collect::<Result<Vec<_>, _>>()?;
-    if modes.is_empty()
-        || modes.iter().any(|mode| *mode > 3)
-        || !independent_strictly_ordered(&modes)
-    {
+    let invalid = [
+        modes.is_empty(),
+        modes.iter().any(|mode| *mode > 3),
+        !independent_strictly_ordered(&modes),
+    ];
+    if invalid.contains(&true) {
         Err(BundleContractErrorV1::ProfileInvalid)
     } else {
         Ok(modes)

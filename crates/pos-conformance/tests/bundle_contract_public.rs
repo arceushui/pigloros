@@ -1264,6 +1264,22 @@ fn public_independent_verifier_rejects_rebound_semantic_versions(
             Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
         );
     }
+    for version in [
+        "1.2.3-alpha",
+        "1.2.3+build",
+        "1.2.3-alpha.1+build.01",
+        "1.2.3-a-b+build-id",
+    ] {
+        let valid_profile = signed_archive_variant(&bundle, &signing_key, |value| {
+            mutate_profile_and_rebind_identity(value, |fields| {
+                fields[3] = Value::Text(version.to_owned());
+            })
+        })?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&valid_profile),
+            Ok(())
+        );
+    }
     Ok(())
 }
 
@@ -1621,7 +1637,9 @@ fn cpf1_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
             mutate_profile(value, |fields| {
                 if let Value::Array(fixtures) = &mut fields[9] {
                     if let Value::Array(fixture) = &mut fixtures[0] {
-                        fixture[13] = Value::Array(vec![Value::Integer(0_u64.into()); 8]);
+                        if let Value::Array(bounds) = &mut fixture[13] {
+                            bounds[0] = Value::Integer(0_u64.into());
+                        }
                     }
                 }
             })
@@ -1631,7 +1649,7 @@ fn cpf1_fixture_semantic_mutations() -> Vec<ArchiveMutation> {
 }
 
 fn cpf1_divergence_shape_mutations() -> Vec<ArchiveMutation> {
-    [(9_u64, 0_usize), (0, 0), (0, 129)]
+    [(9_u64, 1_usize), (0, 0), (0, 129)]
         .into_iter()
         .map(|(kind, coordinate_length)| {
             Box::new(move |value: &mut Value| {
@@ -2063,7 +2081,35 @@ fn cpf1_bound_expected_result_mutations() -> Vec<ArchiveMutation> {
             })
         }) as ArchiveMutation
     };
-    vec![typed_failure(1, None)]
+    let divergence = |allowed_coordinate: u8, observed_error: Option<u64>| {
+        Box::new(move |value: &mut Value| {
+            mutate_profile_and_rebind_expected_member(value, |fields| {
+                fields[10] = Value::Array(vec![Value::Array(vec![
+                    Value::Integer(0_u64.into()),
+                    Value::Bytes(vec![allowed_coordinate]),
+                ])]);
+                if let Value::Array(fixtures) = &mut fields[9] {
+                    if let Value::Array(fixture) = &mut fixtures[0] {
+                        fixture[8] = Value::Array(vec![
+                            Value::Integer(2_u64.into()),
+                            Value::Bytes(Vec::new()),
+                            Value::Bytes(Vec::new()),
+                            Value::Null,
+                            Value::Array(vec![Value::Integer(0_u64.into()), Value::Bytes(vec![1])]),
+                        ]);
+                        fixture[9] = Value::Integer(1_u64.into());
+                        fixture[10] = observed_error
+                            .map_or(Value::Null, |error| Value::Integer(error.into()));
+                    }
+                }
+            })
+        }) as ArchiveMutation
+    };
+    vec![
+        typed_failure(1, None),
+        divergence(2, None),
+        divergence(1, Some(7)),
+    ]
 }
 
 fn cpf1_selected_cap_mutations() -> Vec<ArchiveMutation> {
@@ -2076,16 +2122,54 @@ fn cpf1_selected_cap_mutations() -> Vec<ArchiveMutation> {
                 }
             })
         }),
-        Box::new(|value| {
-            mutate_profile(value, |fields| {
-                if let Value::Array(protocol) = &mut fields[11] {
-                    if let Value::Array(caps) = &mut protocol[4] {
-                        caps[2] = Value::Integer(1_u64.into());
+        Box::new(|value| duplicate_first_fixture_with_cap(value, 1, 1)),
+    ]
+}
+
+#[test]
+fn public_independent_verifier_accepts_exact_profile_boundaries(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let exact_case_cap = signed_archive_variant(&bundle, &signing_key, |value| {
+        duplicate_first_fixture_with_cap(value, 1, 2)?;
+        mutate_profile_and_rebind_identity(value, |_| {})
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&exact_case_cap),
+        Ok(())
+    );
+
+    let exact_expected_bound = signed_archive_variant(&bundle, &signing_key, |value| {
+        mutate_profile_and_rebind_identity(value, |fields| {
+            if let Value::Array(fixtures) = &mut fields[9] {
+                for fixture in fixtures {
+                    if let Value::Array(fixture) = fixture {
+                        let expected_length = match &fixture[8] {
+                            Value::Array(expected) => match expected.get(1) {
+                                Some(Value::Bytes(bytes)) if !bytes.is_empty() => {
+                                    u64::try_from(bytes.len()).ok()
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let (Some(expected_length), Value::Array(bounds)) =
+                            (expected_length, &mut fixture[13])
+                        {
+                            bounds[3] = Value::Integer(expected_length.into());
+                            break;
+                        }
                     }
                 }
-            })
-        }),
-    ]
+            }
+        })
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&exact_expected_bound),
+        Ok(())
+    );
+    Ok(())
 }
 
 #[test]
@@ -4106,8 +4190,8 @@ fn public_independent_verifier_rejects_cross_field_cpf1_bound_violations(
                 }
             })
         }),
-        Box::new(|value| duplicate_first_fixture_with_cap(value, 1)),
-        Box::new(|value| duplicate_first_fixture_with_cap(value, 2)),
+        Box::new(|value| duplicate_first_fixture_with_cap(value, 1, 1)),
+        Box::new(|value| duplicate_first_fixture_with_cap(value, 2, 1)),
     ];
     for mutate in mutations {
         let archive = signed_archive_variant(&bundle, &signing_key, mutate)?;
@@ -4119,18 +4203,21 @@ fn public_independent_verifier_rejects_cross_field_cpf1_bound_violations(
 fn duplicate_first_fixture_with_cap(
     value: &mut Value,
     cap_index: usize,
+    cap_value: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     mutate_profile(value, |fields| {
         if let Value::Array(fixtures) = &mut fields[9] {
             let mut duplicate = fixtures[0].clone();
             if let Value::Array(fixture) = &mut duplicate {
                 fixture[0] = Value::Text("ART-002".to_owned());
+                fixture[1] = Value::Bool(false);
+                fixture[7] = Value::Array(Vec::new());
             }
             fixtures.push(duplicate);
         }
         if let Value::Array(protocol) = &mut fields[11] {
             if let Value::Array(caps) = &mut protocol[4] {
-                caps[cap_index] = Value::Integer(1_u64.into());
+                caps[cap_index] = Value::Integer(cap_value.into());
             }
         }
     })
@@ -4142,7 +4229,8 @@ fn public_independent_verifier_reaches_rebound_cpf1_case_cap(
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
     let archive = signed_archive_variant(&bundle, &signing_key, |value| {
-        duplicate_first_fixture_with_cap(value, 1)
+        duplicate_first_fixture_with_cap(value, 1, 1)?;
+        mutate_profile_and_rebind_identity(value, |_| {})
     })?;
     assert_eq!(
         pos_conformance::verify_archive_independently(&archive),
@@ -5138,6 +5226,43 @@ fn remove_archive_member_and_descriptor(
     Ok(())
 }
 
+fn duplicate_archive_member_and_descriptor(
+    value: &mut Value,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let members = archive_array(value, 3)?;
+    let member_index = members
+        .iter()
+        .position(|member| {
+            matches!(member, Value::Array(fields) if fields.first() == Some(&Value::Text(path.to_owned())))
+        })
+        .ok_or("archive member is missing")?;
+    let mut duplicate_member = members[member_index].clone();
+    let Value::Array(member_fields) = &mut duplicate_member else {
+        return Err("archive member is not an array".into());
+    };
+    member_fields[0] = Value::Text(format!("{path}x"));
+    members.insert(member_index + 1, duplicate_member);
+
+    let manifest = archive_array(value, 2)?;
+    let Some(Value::Array(descriptors)) = manifest.get_mut(4) else {
+        return Err("archive descriptors are missing".into());
+    };
+    let descriptor_index = descriptors
+        .iter()
+        .position(|descriptor| {
+            matches!(descriptor, Value::Array(fields) if fields.first() == Some(&Value::Text(path.to_owned())))
+        })
+        .ok_or("archive descriptor is missing")?;
+    let mut duplicate_descriptor = descriptors[descriptor_index].clone();
+    let Value::Array(descriptor_fields) = &mut duplicate_descriptor else {
+        return Err("archive descriptor is not an array".into());
+    };
+    descriptor_fields[0] = Value::Text(format!("{path}x"));
+    descriptors.insert(descriptor_index + 1, duplicate_descriptor);
+    Ok(())
+}
+
 #[test]
 fn public_independent_authority_slots_require_exact_members_and_bindings(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5149,6 +5274,19 @@ fn public_independent_authority_slots_require_exact_members_and_bindings(
     ] {
         let archive = signed_archive_variant(&bundle, &signing_key, |value| {
             remove_archive_member_and_descriptor(value, path)
+        })?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberMissing)
+        );
+    }
+
+    for path in [
+        AUTHORITY_INVENTORY_MEMBER_PATH,
+        EXECUTION_MATRIX_MEMBER_PATH,
+    ] {
+        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+            duplicate_archive_member_and_descriptor(value, path)
         })?;
         assert_eq!(
             pos_conformance::verify_archive_independently(&archive),

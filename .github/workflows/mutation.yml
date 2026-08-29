@@ -57,7 +57,9 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.97.1
+          # A pinned nightly enables libtest's per-test fail-fast mode. The
+          # stable workspace baseline above remains the compatibility gate.
+          toolchain: nightly-2026-08-28
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: mutation
@@ -71,10 +73,9 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
-      # The baseline proves the whole workspace first. Each mutant then runs
-      # its owning package's unit, integration, and binary tests, avoiding four
-      # concurrent copies of unrelated workspace tests without reducing the
-      # generated mutant set or weakening the aggregate gate.
+      # The baseline proves the whole workspace first. Each mutant retains the
+      # owning-package test selection used on main, while two harness threads
+      # limit four workers from multiplying test-thread concurrency.
       - name: Run mutants in changed lines
         run: |
           set -euo pipefail
@@ -82,7 +83,6 @@ jobs:
           timeout --foreground 60m cargo mutants \
             --workspace \
             --all-features \
-            --test-workspace false \
             --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
             --shard "${{ matrix.shard }}/8" \
@@ -91,7 +91,13 @@ jobs:
             --timeout 120 \
             --build-timeout 120 \
             --cap-lints true \
-            --cargo-arg=--locked
+            --cargo-arg=--locked \
+            -- \
+            -- \
+            -Zunstable-options \
+            --fail-fast \
+            --include-ignored \
+            --test-threads=2
           mutation_status=$?
           set -e
           if [[ "$mutation_status" -eq 124 ]]; then
