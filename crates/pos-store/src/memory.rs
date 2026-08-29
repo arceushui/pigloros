@@ -5583,6 +5583,7 @@ mod coverage_entrypoints {
         )?)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn erasure_staging_rejects_predecessors_with_wrong_identity_metadata_in_coverage(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5596,6 +5597,10 @@ mod coverage_entrypoints {
         let wrong_digest_record = erasure_coverage_record_with_predecessor(wrong_digest_key)?;
         let mut records = BTreeMap::new();
         let mut states = BTreeMap::new();
+        records.insert(
+            wrong_digest_record.request().reference(),
+            wrong_digest_record.to_canonical_cbor()?,
+        );
         states.insert(wrong_digest_key, wrong_digest_state.to_canonical_cbor()?);
         assert_eq!(
             stage_erasure_record(&mut records, &mut states, &wrong_digest_record),
@@ -5609,6 +5614,11 @@ mod coverage_entrypoints {
         )?;
         let wrong_request_record =
             erasure_coverage_record_with_predecessor(wrong_request_state.state_digest())?;
+        records.clear();
+        records.insert(
+            wrong_request_record.request().reference(),
+            wrong_request_record.to_canonical_cbor()?,
+        );
         states.clear();
         states.insert(
             wrong_request_state.state_digest(),
@@ -5626,6 +5636,11 @@ mod coverage_entrypoints {
         )?;
         let wrong_coordinator_record =
             erasure_coverage_record_with_predecessor(wrong_coordinator_state.state_digest())?;
+        records.clear();
+        records.insert(
+            wrong_coordinator_record.request().reference(),
+            wrong_coordinator_record.to_canonical_cbor()?,
+        );
         states.clear();
         states.insert(
             wrong_coordinator_state.state_digest(),

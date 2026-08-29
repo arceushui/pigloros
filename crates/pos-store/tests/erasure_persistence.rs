@@ -139,6 +139,7 @@ struct DeletePredecessorBeforeCommit {
     commit_calls: usize,
     delete_on_call: usize,
     replace_predecessor: bool,
+    replace_request: bool,
 }
 
 #[cfg(feature = "sqlite")]
@@ -173,14 +174,29 @@ impl ErasurePersistencePortV1 for DeletePredecessorBeforeCommit {
                         reference(77),
                     )?
                     .to_canonical_cbor()?;
-                    connection
-                        .execute(
-                            "UPDATE erasure_states
-                             SET state_cbor = ?1
-                             WHERE state_digest = ?2",
-                            rusqlite::params![replacement, previous.digest().as_slice(),],
-                        )
-                        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                    if self.replace_request {
+                        connection
+                            .execute(
+                                "UPDATE erasure_states
+                                 SET request_digest = ?1, state_cbor = ?2
+                                 WHERE state_digest = ?3",
+                                rusqlite::params![
+                                    reference(99).digest().as_slice(),
+                                    replacement,
+                                    previous.digest().as_slice()
+                                ],
+                            )
+                            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                    } else {
+                        connection
+                            .execute(
+                                "UPDATE erasure_states
+                                 SET state_cbor = ?1
+                                 WHERE state_digest = ?2",
+                                rusqlite::params![replacement, previous.digest().as_slice(),],
+                            )
+                            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                    }
                 } else {
                     connection
                         .execute(
@@ -425,6 +441,7 @@ fn sqlite_erasure_persistence_rejects_a_missing_predecessor_during_commit(
         commit_calls: 0,
         delete_on_call: 4,
         replace_predecessor: false,
+        replace_request: false,
     }));
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
         CoordinatorHost {
@@ -460,6 +477,43 @@ fn sqlite_erasure_persistence_rejects_a_mismatched_predecessor_during_commit(
         commit_calls: 0,
         delete_on_call: 4,
         replace_predecessor: true,
+        replace_request: true,
+    }));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        CoordinatorHost {
+            store: Rc::clone(&shared),
+            targets: vec![target],
+        },
+        reference(30),
+    );
+    coordinator.submit(request()?, reference(7))?;
+    coordinator.authorize(reference(1), reference(8))?;
+    assert_eq!(
+        coordinator.freeze_inventory(reference(1), transition()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_persistence_rejects_a_predecessor_state_under_the_wrong_digest(
+) -> Result<(), ErasureErrorV1> {
+    let database =
+        tempfile::NamedTempFile::new().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::ReceiptCommitFailed)?
+        .to_owned();
+    let target = target(10);
+    let shared = Rc::new(RefCell::new(DeletePredecessorBeforeCommit {
+        store: SqliteStore::open(&path).map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?,
+        path,
+        commit_calls: 0,
+        delete_on_call: 4,
+        replace_predecessor: true,
+        replace_request: false,
     }));
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
         CoordinatorHost {

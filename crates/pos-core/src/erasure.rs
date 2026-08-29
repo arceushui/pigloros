@@ -2086,6 +2086,7 @@ mod erasure_targeted_coverage_tests {
         ErasureCoordinatorRecordV1::from_parts(parts, frozen.state().coordinator())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn same_state_reservation_rejects_unrelated_metadata() -> Result<(), ErasureErrorV1> {
         let authorized = authorized_record()?;
@@ -2101,6 +2102,7 @@ mod erasure_targeted_coverage_tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn same_state_dispatch_intent_rejects_unrelated_metadata() -> Result<(), ErasureErrorV1> {
         let frozen = tests::record_after_freeze(vec![target()])?;
@@ -2121,6 +2123,7 @@ mod erasure_targeted_coverage_tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn same_state_acknowledgement_rejects_unrelated_metadata() -> Result<(), ErasureErrorV1> {
         let target = target();
@@ -2144,6 +2147,7 @@ mod erasure_targeted_coverage_tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn advanced_replacement_rejects_a_backward_lifecycle() -> Result<(), ErasureErrorV1> {
         let frozen = tests::record_after_freeze(vec![target()])?;
