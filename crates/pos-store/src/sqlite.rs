@@ -12445,11 +12445,8 @@ pub(super) mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn expect_err<T, E: std::fmt::Debug>(value: Result<T, E>) {
-        assert!(
-            value.is_err(),
-            "expected a rejected coverage value: {value:?}"
-        );
+    fn expect_err<T, E>(value: Result<T, E>) {
+        assert!(value.is_err(), "expected a rejected coverage value");
         std::mem::drop(value);
     }
 
