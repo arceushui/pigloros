@@ -2068,9 +2068,9 @@ mod erasure_targeted_coverage_tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn complete_record_bytes() -> Vec<u8> {
-        tests::complete_record()
-            .and_then(|record| record.to_canonical_cbor())
-            .unwrap_or_else(|error| panic!("unexpected decoder fixture error: {error:?}"))
+        let bytes = tests::complete_record().and_then(|record| record.to_canonical_cbor());
+        assert!(bytes.is_ok());
+        bytes.unwrap_or_default()
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
