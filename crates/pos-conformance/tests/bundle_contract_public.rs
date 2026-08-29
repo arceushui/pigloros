@@ -527,24 +527,21 @@ impl Drop for TemporaryOutput {
     }
 }
 
-fn release_archives(root: &Path) -> TestResult<Vec<PathBuf>> {
+fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     let mut pending = vec![root.to_path_buf()];
-    let mut archives = Vec::new();
+    let mut files = Vec::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
             if path.is_dir() {
                 pending.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("cfb1"))
-            {
-                archives.push(path);
+            } else {
+                files.push(path);
             }
         }
     }
-    archives.sort();
-    Ok(archives)
+    files.sort();
+    Ok(files)
 }
 
 #[test]
@@ -605,7 +602,15 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
         .status()?;
     assert!(status.success());
 
-    let archives = release_archives(&publication)?;
+    let files = release_files(&publication)?;
+    let archives = files
+        .iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("cfb1"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(archives.len(), 14);
     for archive_path in &archives {
         let bytes = fs::read(archive_path)?;
@@ -616,6 +621,18 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
             .ok_or("archive filename is not UTF-8")?;
         verify_archive_release_filename(&bytes, filename)?;
     }
+    let metadata_path = files
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "MATERIALIZATION-METADATA.json")
+        })
+        .ok_or("materialization metadata is absent")?;
+    let metadata: serde_json::Value = serde_json::from_slice(&fs::read(metadata_path)?)?;
+    assert_eq!(
+        metadata["published_file_count"].as_u64(),
+        Some(u64::try_from(files.len())?)
+    );
     let verifier = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
         .ok_or("verifier binary path is unavailable")?;
     assert!(Command::new(verifier).args(&archives).status()?.success());

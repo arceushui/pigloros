@@ -546,7 +546,7 @@ fn validate_fixture_members(
                     && e.execution_profile_digest == fixture.execution_profile_digest
                     && e.mode == mode
             })
-            .ok_or(BundleContractErrorV1::MemberMissing)?;
+            .ok_or(BundleContractErrorV1::ExpectedResultMismatch)?;
         let expected_member = one(members, BundleMemberRoleV1::ExpectedResult, &e.member_path)?;
         let expected_size = u64::try_from(expected_member.bytes.len())
             .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
@@ -733,6 +733,9 @@ pub fn verify_archive_independently(archive_bytes: &[u8]) -> Result<(), BundleCo
     let profile = decode(bytes(&profile_member[1])?)?;
     let profile_fields = array(&profile, 18)?;
     raw_cpf1_value(profile_fields)?;
+    if profile_fields[4] != manifest[1] {
+        return Err(BundleContractErrorV1::LifecycleInvalid);
+    }
     let profile_digest = digest::<32>(&profile_fields[17])?;
     if profile_digest
         != digest_domain(

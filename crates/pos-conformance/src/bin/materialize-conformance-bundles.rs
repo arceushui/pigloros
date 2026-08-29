@@ -782,7 +782,8 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
             })
         })
         .map(|mut outputs| {
-            outputs.push(materialization_metadata(&catalog));
+            let published_file_count = outputs.len().saturating_add(2);
+            outputs.push(materialization_metadata(&catalog, published_file_count));
             outputs.push(output_checksum_inventory(&outputs));
             outputs
         })
@@ -960,7 +961,10 @@ fn materialized_bundle_files(
         )
 }
 
-fn materialization_metadata(catalog: &LayerCatalog) -> MaterializedFile {
+fn materialization_metadata(
+    catalog: &LayerCatalog,
+    published_file_count: usize,
+) -> MaterializedFile {
     let layer_names = catalog
         .entries
         .iter()
@@ -978,6 +982,7 @@ fn materialization_metadata(catalog: &LayerCatalog) -> MaterializedFile {
             "lifecycles": ["draft"],
             "layers": layer_names,
             "modes": mode_names,
+            "published_file_count": published_file_count,
         })
         .to_string()
         .into_bytes(),

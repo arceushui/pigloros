@@ -70,7 +70,8 @@ jq -e '
   .format == 1 and
   (.lifecycles | type == "array" and length > 0) and
   (.layers | type == "array" and length > 0) and
-  (.modes | type == "array" and length > 0)
+  (.modes | type == "array" and length > 0) and
+  (.published_file_count | type == "number" and . > 0 and floor == .)
 ' "${metadata_file}" >/dev/null
 layer_count="$(jq -r '.layers | length' "${metadata_file}")"
 lifecycle_count="$(jq -r '.lifecycles | length' "${metadata_file}")"
@@ -78,7 +79,7 @@ mode_count="$(jq -r '.modes | length' "${metadata_file}")"
 expected_profile_count=$((layer_count * lifecycle_count))
 expected_manifest_count=$((expected_profile_count * mode_count))
 expected_archive_count=$((expected_profile_count * mode_count))
-expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count + 2))
+expected_file_count="$(jq -r '.published_file_count' "${metadata_file}")"
 if ((
   ${#profile_files[@]} != expected_profile_count ||
   ${#manifest_files[@]} != expected_manifest_count ||
