@@ -4215,21 +4215,33 @@ fn validate_erasure_record_slot(
     record: &ErasureCoordinatorRecordV1,
     record_bytes: &[u8],
 ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-    let existing_bytes = conn
+    let existing_row = conn
         .query_row(
-            "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
+            "SELECT state_digest, record_cbor
+             FROM erasure_records WHERE request_digest = ?1",
             params![request.digest().as_slice()],
-            |row| row.get::<_, Vec<u8>>(0),
+            |row| {
+                row.get::<_, Vec<u8>>(0).and_then(|state_digest| {
+                    row.get::<_, Vec<u8>>(1)
+                        .map(|record_cbor| (state_digest, record_cbor))
+                })
+            },
         )
         .optional()
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-    let Some(existing_bytes) = existing_bytes else {
+    let Some((metadata_state_digest, existing_bytes)) = existing_row else {
         if record.state().previous_state().is_some() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         return Ok(None);
     };
     let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(&existing_bytes)?;
+    let metadata_state_digest: [u8; 32] = metadata_state_digest
+        .try_into()
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    if ErasureReferenceV1::from_digest(metadata_state_digest) != existing.state().state_digest() {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
     if existing_bytes.as_slice() != record_bytes {
         existing.validate_replacement(record)?;
     }
@@ -12635,6 +12647,32 @@ pub(super) mod key_registry_coverage {
         assert!(malformed_state_metadata_on_commit
             .commit_record(record)
             .is_err());
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn erasure_commit_rejects_corrupt_record_state_metadata() {
+        let record = erasure_record();
+        let request = record.request().reference();
+
+        for metadata_state_digest in [vec![9_u8], vec![9_u8; 32]] {
+            let mut store = tests::new_store();
+            fixture(store.commit_record(record.clone()));
+            fixture(
+                store
+                    .conn
+                    .execute_batch("PRAGMA ignore_check_constraints = ON"),
+            );
+            fixture(store.conn.execute(
+                "UPDATE erasure_records SET state_digest = ?1 WHERE request_digest = ?2",
+                params![metadata_state_digest, request.digest().as_slice()],
+            ));
+
+            assert_eq!(
+                store.commit_record(record.clone()),
+                Err(ErasureErrorV1::ProvenanceMissing)
+            );
+        }
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

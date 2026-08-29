@@ -1193,13 +1193,16 @@ fn stage_erasure_record(
 ) -> Result<(), ErasureErrorV1> {
     let request = record.request().reference();
     let record_bytes = record.to_canonical_cbor()?;
-    if let Some(existing_bytes) = records.get(&request) {
+    let existing_state_digest = if let Some(existing_bytes) = records.get(&request) {
+        let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(existing_bytes)?;
         if existing_bytes.as_slice() != record_bytes.as_slice() {
-            let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(existing_bytes)?;
             existing.validate_replacement(record)?;
         }
+        Some(existing.state().state_digest())
     } else if record.state().previous_state().is_some() {
         return Err(ErasureErrorV1::ProvenanceMissing);
+    } else {
+        None
     }
 
     let state_digest = record.state().state_digest();
@@ -1208,14 +1211,17 @@ fn stage_erasure_record(
         if existing_bytes.as_slice() != state_bytes.as_slice() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-    } else if let Some(previous) = record.state().previous_state() {
-        let previous_bytes = states
-            .get(&previous)
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let previous_state = pos_core::ErasureStateV1::from_canonical_cbor(previous_bytes)?;
-        record.state().validate_predecessor(&previous_state)?;
-        states.insert(state_digest, state_bytes);
     } else {
+        if existing_state_digest == Some(state_digest) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if let Some(previous) = record.state().previous_state() {
+            let previous_bytes = states
+                .get(&previous)
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let previous_state = pos_core::ErasureStateV1::from_canonical_cbor(previous_bytes)?;
+            record.state().validate_predecessor(&previous_state)?;
+        }
         states.insert(state_digest, state_bytes);
     }
     records.insert(request, record_bytes);
@@ -5155,6 +5161,23 @@ mod erasure_coverage_tests {
         staged_states.insert(state_digest, vec![0]);
         assert_eq!(
             stage_erasure_record(&mut staged_records, &mut staged_states, &record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn erasure_staging_rejects_an_exact_retry_when_its_root_state_is_missing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let record = record()?;
+        let state_digest = record.state().state_digest();
+        let mut store = MemoryStore::new();
+
+        store.commit_record(record.clone())?;
+        store.erasure_states.remove(&state_digest);
+
+        assert_eq!(
+            store.commit_record(record),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())
