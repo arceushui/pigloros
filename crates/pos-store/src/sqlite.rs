@@ -12445,6 +12445,15 @@ pub(super) mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn expect_err<T, E: std::fmt::Debug>(value: Result<T, E>) {
+        assert!(
+            value.is_err(),
+            "expected a rejected coverage value: {value:?}"
+        );
+        std::mem::drop(value);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn erasure_record() -> ErasureCoordinatorRecordV1 {
         let request = fixture(pos_core::ErasureRequestV1::new(
             pos_core::ErasureRequestInputV1 {
@@ -12487,15 +12496,30 @@ pub(super) mod key_registry_coverage {
     fn erasure_record_with_predecessor() -> (ErasureCoordinatorRecordV1, pos_core::ErasureStateV1) {
         let submitted = erasure_record();
         let predecessor = submitted.state().clone();
-        let state = fixture(predecessor.transition(pos_core::ErasureStateTransitionV1 {
-            lifecycle: pos_core::ErasureLifecycleV1::Authorized,
-            freeze_position: None,
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
-            provenance: erasure_reference(10),
-        }));
+        let mut fields = vec![
+            ciborium::value::Value::Text("ERS1".to_owned()),
+            ciborium::value::Value::Integer(1_u64.into()),
+            ciborium::value::Value::Bytes(submitted.request().reference().digest().to_vec()),
+            ciborium::value::Value::Integer(1_u64.into()),
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Bytes(submitted.state().coordinator().digest().to_vec()),
+            ciborium::value::Value::Array(Vec::new()),
+            ciborium::value::Value::Array(Vec::new()),
+            ciborium::value::Value::Integer(2_u64.into()),
+            ciborium::value::Value::Bytes(predecessor.state_digest().digest().to_vec()),
+            ciborium::value::Value::Bytes(erasure_reference(10).digest().to_vec()),
+        ];
+        let mut core_bytes = Vec::new();
+        fixture(ciborium::into_writer(&fields, &mut core_bytes));
+        let mut digest_input = b"ERS1\0".to_vec();
+        digest_input.extend_from_slice(&core_bytes);
+        let state_digest = ErasureReferenceV1::from_digest(*blake3::hash(&digest_input).as_bytes());
+        fields.push(ciborium::value::Value::Bytes(
+            state_digest.digest().to_vec(),
+        ));
+        let mut state_bytes = Vec::new();
+        fixture(ciborium::into_writer(&fields, &mut state_bytes));
+        let state = fixture(pos_core::ErasureStateV1::from_canonical_cbor(&state_bytes));
         let record = fixture(ErasureCoordinatorRecordV1::from_parts(
             pos_core::ErasureCoordinatorRecordPartsV1 {
                 request: submitted.request().clone(),

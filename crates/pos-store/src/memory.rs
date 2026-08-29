@@ -5499,7 +5499,7 @@ mod coverage_entrypoints {
 
     #[test]
     fn erasure_persistence_error_regions_are_instrumented() {
-        let record = ok(super::erasure_coverage_tests::erasure_coverage_record());
+        let record = ok(erasure_coverage_record());
         let request = record.request().reference();
         let state_digest = record.state().state_digest();
         let record_bytes = ok(record.to_canonical_cbor());
@@ -5521,11 +5521,7 @@ mod coverage_entrypoints {
         ));
 
         let predecessor_key = pos_core::ErasureReferenceV1::from_digest([30; 32]);
-        let next = ok(
-            super::erasure_coverage_tests::erasure_coverage_record_with_predecessor(
-                predecessor_key,
-            ),
-        );
+        let next = ok(erasure_coverage_record_with_predecessor(predecessor_key));
         let next_bytes = ok(next.to_canonical_cbor());
         let mut records = BTreeMap::new();
         records.insert(next.request().reference(), next_bytes);
