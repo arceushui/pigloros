@@ -2147,7 +2147,6 @@ mod erasure_targeted_coverage_tests {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn advanced_replacement_rejects_a_backward_lifecycle() -> Result<(), ErasureErrorV1> {
         let frozen = tests::record_after_freeze(vec![target()])?;
@@ -2162,6 +2161,10 @@ mod erasure_targeted_coverage_tests {
             ErasureCoordinatorRecordV1::from_parts(parts, frozen.state().coordinator())?;
         assert_eq!(
             dispatched.validate_replacement(&replacement),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            dispatched.validate_advanced_replacement(&replacement),
             Err(ErasureErrorV1::PolicyConflict)
         );
         Ok(())
