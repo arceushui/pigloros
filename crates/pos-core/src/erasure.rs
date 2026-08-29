@@ -2672,6 +2672,7 @@ use codec::{
 mod tests;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod erasure_coverage_tests {
     use super::*;
 
