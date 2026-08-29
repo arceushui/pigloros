@@ -8,7 +8,7 @@ use crate::{
     ArtifactDescriptorV1, CaseOutcomeStatusV1, ClaimLayerV1, ConformanceReportV1,
     DivergenceMismatchKindV1, ExecutionModeV1, FixtureFamilyV1, FixtureProviderKeyV1,
     FixtureProviderRegistryBindingV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, VerificationOutcomeV1,
+    ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
@@ -2171,25 +2171,6 @@ fn encode_requirements(value: &IndependenceRequirementsV1) -> Value {
     ])
 }
 
-fn encode_stable_evidence(value: &StableImplementationEvidenceV1) -> Value {
-    Value::Array(vec![
-        encode_identity(&value.implementation),
-        encode_independence(&value.independence),
-        digest(&value.evaluator_protocol_digest),
-        crate::strict_codec::encode_report_value(&value.report, true),
-        Value::Array(value.case_outcomes.iter().map(encode_case).collect()),
-        encode_stable_attestation(&value.attestation),
-    ])
-}
-
-fn encode_stable_attestation(value: &StableEvidenceAttestationV1) -> Value {
-    Value::Array(vec![
-        digest(&value.signer_public_key),
-        Value::Bytes(value.signature.to_vec()),
-        digest(&value.trust_root_digest),
-    ])
-}
-
 fn encode_request(request: &EvaluatorRequestV1, include_digest: bool) -> Value {
     Value::Array(vec![
         text(EVALUATOR_REQUEST_MAGIC_V1),
@@ -2558,32 +2539,6 @@ fn encode_independence(value: &IndependenceEvidenceV1) -> Value {
     ])
 }
 
-fn encode_case(value: &CaseOutcomeV1) -> Value {
-    Value::Array(vec![
-        text(&value.case_id),
-        digest(&value.fixture_digest),
-        digest(&value.execution_profile_digest),
-        mode(value.mode),
-        claim_layer(value.claim_layer),
-        case_outcome(value.outcome),
-        verification_outcome(value.verification_outcome),
-        optional(value.divergence_kind.map(divergence_mismatch)),
-        optional(
-            value
-                .first_coordinate
-                .as_ref()
-                .map(|coordinate| Value::Bytes(coordinate.clone())),
-        ),
-        optional(value.expected_digest.as_ref().map(digest)),
-        optional(value.actual_digest.as_ref().map(digest)),
-        optional(value.expected_error.map(safe_error)),
-        optional(value.actual_error.map(safe_error)),
-        replay_claim(value.replay_claim),
-        redaction(value.redaction_state),
-        digest(&value.provenance_digest),
-    ])
-}
-
 fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
     let mut bytes = Vec::new();
     encode_value_to_writer(value, &mut bytes).map(|()| bytes)
@@ -2869,15 +2824,6 @@ fn decode_family(value: &Value) -> Result<FixtureFamilyV1, ConformanceContractEr
         _ => Err(ConformanceContractError::InvalidEncoding),
     }
 }
-fn case_outcome(value: CaseOutcomeStatusV1) -> Value {
-    uint(match value {
-        CaseOutcomeStatusV1::Pass => 0,
-        CaseOutcomeStatusV1::Fail => 1,
-        CaseOutcomeStatusV1::Skip => 2,
-        CaseOutcomeStatusV1::Unavailable => 3,
-        CaseOutcomeStatusV1::NotApplicable => 4,
-    })
-}
 fn verification_outcome(value: VerificationOutcomeV1) -> Value {
     uint(match value {
         VerificationOutcomeV1::VerifiedExact => 0,
@@ -2964,50 +2910,6 @@ fn decode_redaction(value: &Value) -> Result<RedactionStateV1, ConformanceContra
         2 => Ok(RedactionStateV1::StructuralOnly),
         3 => Ok(RedactionStateV1::EvidenceMissing),
         _ => Err(ConformanceContractError::InvalidEncoding),
-    }
-}
-fn safe_error(value: SafeErrorCodeV1) -> Value {
-    uint(match value {
-        SafeErrorCodeV1::InvalidEncoding => 0,
-        SafeErrorCodeV1::UnsupportedVersion => 1,
-        SafeErrorCodeV1::FieldOutOfBounds => 2,
-        SafeErrorCodeV1::NonCanonicalOrder => 3,
-        SafeErrorCodeV1::DigestMismatch => 4,
-        SafeErrorCodeV1::SignatureInvalid => 5,
-        SafeErrorCodeV1::TrustRootUnknown => 6,
-        SafeErrorCodeV1::TrustSnapshotRollback => 7,
-        SafeErrorCodeV1::ArtifactRevoked => 8,
-        SafeErrorCodeV1::ClosureIncomplete => 9,
-        SafeErrorCodeV1::ProfileClassMismatch => 10,
-        SafeErrorCodeV1::ProfileUnsupported => 11,
-        SafeErrorCodeV1::ProvenanceMissing => 12,
-        SafeErrorCodeV1::ResourceLimitExceeded => 13,
-    })
-}
-fn decode_safe_error(value: &Value) -> Result<SafeErrorCodeV1, ConformanceContractError> {
-    match uint_value(value)? {
-        0 => Ok(SafeErrorCodeV1::InvalidEncoding),
-        1 => Ok(SafeErrorCodeV1::UnsupportedVersion),
-        2 => Ok(SafeErrorCodeV1::FieldOutOfBounds),
-        3 => Ok(SafeErrorCodeV1::NonCanonicalOrder),
-        4 => Ok(SafeErrorCodeV1::DigestMismatch),
-        5 => Ok(SafeErrorCodeV1::SignatureInvalid),
-        6 => Ok(SafeErrorCodeV1::TrustRootUnknown),
-        7 => Ok(SafeErrorCodeV1::TrustSnapshotRollback),
-        8 => Ok(SafeErrorCodeV1::ArtifactRevoked),
-        9 => Ok(SafeErrorCodeV1::ClosureIncomplete),
-        10 => Ok(SafeErrorCodeV1::ProfileClassMismatch),
-        11 => Ok(SafeErrorCodeV1::ProfileUnsupported),
-        12 => Ok(SafeErrorCodeV1::ProvenanceMissing),
-        13 => Ok(SafeErrorCodeV1::ResourceLimitExceeded),
-        _ => Err(ConformanceContractError::InvalidEncoding),
-    }
-}
-fn optional_safe_error(value: &Value) -> Result<Option<SafeErrorCodeV1>, ConformanceContractError> {
-    if matches!(value, Value::Null) {
-        Ok(None)
-    } else {
-        decode_safe_error(value).map(Some)
     }
 }
 #[cfg(test)]

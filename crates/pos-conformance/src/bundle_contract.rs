@@ -745,11 +745,6 @@ pub fn verify_archive_independently(archive_bytes: &[u8]) -> Result<(), BundleCo
         )
         .map_err(|_| BundleContractErrorV1::SignatureInvalid)
 }
-fn raw_cpf1(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
-    let value = decode(bytes)?;
-    let f = array(&value, 18)?;
-    raw_cpf1_value(f)
-}
 fn raw_cpf1_value(f: &[Value]) -> Result<(), BundleContractErrorV1> {
     if text(&f[0])? != "CPF1"
         || uint(&f[1])? != 1
