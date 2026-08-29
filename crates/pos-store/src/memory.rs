@@ -1213,10 +1213,13 @@ fn stage_erasure_record(
             .get(&previous)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         let previous_state = pos_core::ErasureStateV1::from_canonical_cbor(previous_bytes)?;
-        if previous_state.state_digest() != previous
-            || previous_state.request() != request
-            || previous_state.coordinator() != record.state().coordinator()
-        {
+        if previous_state.state_digest() != previous {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if previous_state.request() != request {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if previous_state.coordinator() != record.state().coordinator() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         states.insert(state_digest, state_bytes);
@@ -5035,6 +5038,14 @@ mod erasure_coverage_tests {
 
     const fn reference(value: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    #[test]
+    fn erasure_record_limit_matches_the_public_contract() {
+        assert_eq!(
+            pos_core::ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+            64 * 1024 * 1024
+        );
     }
 
     fn record() -> Result<ErasureCoordinatorRecordV1, Box<dyn std::error::Error>> {

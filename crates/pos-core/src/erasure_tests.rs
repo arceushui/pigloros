@@ -4004,29 +4004,12 @@ fn finalization_persists_the_atomic_batch_across_restart() -> Result<(), Erasure
         ),
     )?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
-    coordinator.acknowledge(reference(1), ack)?;
-    let awaiting = coordinator
-        .existing(reference(1))
-        .cloned()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let terminal_state = awaiting.transition({
-        let mut transition = change(
-            ErasureLifecycleV1::Complete,
-            awaiting.freeze_position(),
-            Vec::new(),
-            Vec::new(),
-        );
-        transition.acknowledged_targets = vec![ack.target];
-        transition.provenance = reference(10);
-        transition
-    })?;
     let mut input = receipt_input(
-        ErasureLifecycleV1::Complete,
-        vec![ack],
+        ErasureLifecycleV1::PartialFailure,
         Vec::new(),
+        vec![ack.target.replica_id],
         Vec::new(),
     );
-    input.terminal_state = terminal_state.state_digest();
     input.inventories.artifacts = vec![inventory_result(ack.target)];
     coordinator.finalize(reference(1), input)?;
     drop(coordinator);
@@ -4034,7 +4017,7 @@ fn finalization_persists_the_atomic_batch_across_restart() -> Result<(), Erasure
     let mut restarted = ErasureCoordinatorStateMachineV1::new(restart_port, reference(2));
     assert_eq!(
         restarted.submit(request()?, reference(99))?.lifecycle(),
-        ErasureLifecycleV1::Complete
+        ErasureLifecycleV1::PartialFailure
     );
     Ok(())
 }

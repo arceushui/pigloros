@@ -562,6 +562,30 @@ fn memory_erasure_persistence_rejects_a_conflicting_terminal_retry() -> Result<(
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_persistence_rejects_a_conflicting_terminal_retry() -> Result<(), ErasureErrorV1> {
+    let store = SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let (shared, _) = run_full_lifecycle(store)?;
+    let record = shared
+        .borrow()
+        .load_record(reference(1))?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let mut parts = record_parts(&record);
+    let input = parts
+        .receipt_input
+        .as_mut()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    input.signature = reference(99);
+    parts.receipt = Some(ErasureReceiptV1::new(input.clone())?);
+    let conflicting = ErasureCoordinatorRecordV1::from_parts(parts, reference(30))?;
+    assert_eq!(
+        shared.borrow_mut().commit_record(conflicting),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
 #[test]
 fn memory_erasure_persistence_rejects_noncanonical_acknowledgement_and_provenance_shapes(
 ) -> Result<(), ErasureErrorV1> {

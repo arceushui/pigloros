@@ -1626,40 +1626,44 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_same_state_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
-        if self.state.lifecycle() == ErasureLifecycleV1::Authorized
-            && matches!(
-                (
-                    self.reserved_targets.is_empty(),
-                    next.reserved_targets.is_empty()
-                ),
-                (true, false)
-            )
-        {
+        if matches!(
+            (
+                self.state.lifecycle(),
+                self.reserved_targets.is_empty(),
+                next.reserved_targets.is_empty(),
+            ),
+            (ErasureLifecycleV1::Authorized, true, false)
+        ) {
             let mut without_reservation = next.clone();
             without_reservation.reserved_targets.clear();
             if without_reservation == *self {
                 return Ok(());
             }
         }
-        if self.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
-            && matches!(
-                (self.dispatch_provenance, next.dispatch_provenance),
-                (None, Some(_))
-            )
-        {
+        if matches!(
+            (
+                self.state.lifecycle(),
+                self.dispatch_provenance,
+                next.dispatch_provenance,
+            ),
+            (ErasureLifecycleV1::AccessFrozen, None, Some(_))
+        ) {
             let mut without_dispatch_intent = next.clone();
             without_dispatch_intent.dispatch_provenance = None;
             if without_dispatch_intent == *self {
                 return Ok(());
             }
         }
-        if self.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
-            && self
-                .acknowledgements
-                .iter()
-                .all(|acknowledgement| next.acknowledgements.contains(acknowledgement))
-            && next.acknowledgements.len() > self.acknowledgements.len()
-        {
+        if matches!(
+            (
+                self.state.lifecycle(),
+                self.acknowledgements
+                    .iter()
+                    .all(|acknowledgement| next.acknowledgements.contains(acknowledgement)),
+                next.acknowledgements != self.acknowledgements,
+            ),
+            (ErasureLifecycleV1::AwaitingAcknowledgements, true, true)
+        ) {
             let mut without_new_acknowledgements = next.clone();
             without_new_acknowledgements
                 .acknowledgements
