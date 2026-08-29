@@ -4321,7 +4321,7 @@ fn state_predecessor_validation_enforces_the_shared_transition_contract(
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let mut wrong_claim = previous.clone();
+    let mut wrong_claim = previous;
     wrong_claim.replay_claim = ErasureReplayClaimV1::StructuralOnly;
     let mut exact_current = current;
     exact_current.replay_claim = ErasureReplayClaimV1::Exact;
