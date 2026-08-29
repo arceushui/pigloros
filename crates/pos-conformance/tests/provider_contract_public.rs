@@ -176,7 +176,7 @@ fn independent_self_digest(bytes: &[u8], domain: &[u8]) -> TestResult<[u8; 32]> 
     Ok(*blake3::hash(&preimage).as_bytes())
 }
 
-fn support_descriptor_mut(
+const fn support_descriptor_mut(
     value: &mut FixtureProviderPackageV1,
     index: usize,
 ) -> Option<&mut ArtifactDescriptorV1> {
@@ -658,7 +658,7 @@ fn package_registry_binding_rejects_every_mismatch_dimension() -> TestResult {
         Err(ProviderContractErrorV1::PackageBindingMismatch)
     );
 
-    let mut changed_bytes = package_bytes.clone();
+    let mut changed_bytes = package_bytes;
     let last = changed_bytes
         .last_mut()
         .ok_or("canonical FPP1 must contain at least one byte")?;
