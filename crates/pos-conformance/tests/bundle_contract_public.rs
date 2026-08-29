@@ -5328,7 +5328,7 @@ fn public_independent_authority_slots_require_exact_members_and_bindings(
         })?;
         assert_eq!(
             pos_conformance::verify_archive_independently(&archive),
-            Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+            Err(pos_conformance::BundleContractErrorV1::MemberMissing)
         );
     }
 
