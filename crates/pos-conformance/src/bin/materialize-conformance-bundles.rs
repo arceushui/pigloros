@@ -10,23 +10,23 @@ use pos_conformance::{
     RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, SubjectAdapterKindV1, VerificationOutcomeV1,
 };
 #[cfg(target_os = "linux")]
-use rustix::fs::{self, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
+use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
 #[cfg(target_os = "linux")]
 use rustix::io::Errno;
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::collections::BTreeSet;
 use std::error::Error;
-#[cfg(target_os = "linux")]
-use std::ffi::CString;
 use std::ffi::OsString;
+#[cfg(target_os = "linux")]
+use std::ffi::{CString, OsStr};
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "linux")]
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "linux")]
@@ -36,11 +36,10 @@ use thiserror::Error as ThisError;
 
 const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
 const OUTPUT_CHECKSUM_INVENTORY_PATH: &str = "SHA256SUMS";
+const REQUIRED_FIXTURE_FAMILIES: usize = 7;
 #[derive(Clone, Copy)]
 struct FixtureContext {
     claim_layer: ClaimLayerV1,
-    local_execution_profile_digest: [u8; 32],
-    air_gapped_execution_profile_digest: [u8; 32],
     profile_record_digest: [u8; 32],
     schema_digest: [u8; 32],
     provenance_digest: [u8; 32],
@@ -102,45 +101,6 @@ struct LayerSource {
 
 include!(concat!(env!("OUT_DIR"), "/conformance_fixture_catalog.rs"));
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-enum CatalogClaimLayer {
-    ArtifactIntegrity,
-    ReplayConformance,
-    KnowledgeNonInterference,
-    GatewayClientConformance,
-    PluginConformance,
-    MetricConformance,
-    EmpiricalEvaluation,
-}
-
-impl CatalogClaimLayer {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::ArtifactIntegrity => "artifact-integrity",
-            Self::ReplayConformance => "replay-conformance",
-            Self::KnowledgeNonInterference => "knowledge-non-interference",
-            Self::GatewayClientConformance => "gateway-client-conformance",
-            Self::PluginConformance => "plugin-conformance",
-            Self::MetricConformance => "metric-conformance",
-            Self::EmpiricalEvaluation => "empirical-evaluation",
-        }
-    }
-
-    const fn domain_layer(self, wire_code: u8) -> Result<ClaimLayerV1, &'static str> {
-        match (self, wire_code) {
-            (Self::ArtifactIntegrity, 0) => Ok(ClaimLayerV1::ArtifactIntegrity),
-            (Self::ReplayConformance, 1) => Ok(ClaimLayerV1::ReplayConformance),
-            (Self::KnowledgeNonInterference, 2) => Ok(ClaimLayerV1::KnowledgeNonInterference),
-            (Self::GatewayClientConformance, 3) => Ok(ClaimLayerV1::GatewayClientConformance),
-            (Self::PluginConformance, 4) => Ok(ClaimLayerV1::PluginConformance),
-            (Self::MetricConformance, 5) => Ok(ClaimLayerV1::MetricConformance),
-            (Self::EmpiricalEvaluation, 6) => Ok(ClaimLayerV1::EmpiricalEvaluation),
-            _ => Err("typed layer catalog claim layer and wire code disagree"),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
 #[serde(rename_all = "kebab-case")]
 enum CatalogFixtureFamily {
@@ -151,6 +111,60 @@ enum CatalogFixtureFamily {
     Deletion,
     Downgrade,
     IndependentEvaluation,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogExecutionProfile {
+    DeterministicLocalV1,
+    DeterministicAirGappedV1,
+}
+
+impl CatalogExecutionProfile {
+    const ALL: [Self; 2] = [Self::DeterministicLocalV1, Self::DeterministicAirGappedV1];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::DeterministicLocalV1 => "deterministic-local-v1",
+            Self::DeterministicAirGappedV1 => "deterministic-air-gapped-v1",
+        }
+    }
+
+    fn digest(self) -> [u8; 32] {
+        labeled_digest("PiglorOS.ExecutionProfile.v1", self.name().as_bytes())
+    }
+
+    const fn execution_mode(self) -> pos_conformance::ExecutionModeV1 {
+        match self {
+            Self::DeterministicLocalV1 => pos_conformance::ExecutionModeV1::Local,
+            Self::DeterministicAirGappedV1 => pos_conformance::ExecutionModeV1::AirGapped,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogBundleMode {
+    Local,
+    AirGapped,
+}
+
+impl CatalogBundleMode {
+    const ALL: [Self; 2] = [Self::Local, Self::AirGapped];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::AirGapped => "air-gapped",
+        }
+    }
+
+    const fn bundle_mode(self) -> BundleModeV1 {
+        match self {
+            Self::Local => BundleModeV1::Local,
+            Self::AirGapped => BundleModeV1::AirGapped,
+        }
+    }
 }
 
 impl CatalogFixtureFamily {
@@ -170,17 +184,19 @@ impl CatalogFixtureFamily {
 #[derive(Deserialize)]
 struct ProfileCatalogRecord {
     profile_id: String,
-    claim_layer: CatalogClaimLayer,
+    claim_layer: String,
     wire_code: u8,
     subject_adapter: String,
-    fixture_root: CatalogClaimLayer,
+    fixture_root: String,
     fixtures: Vec<ProfileFixtureRecord>,
+    execution_profiles: [CatalogExecutionProfile; 2],
+    bundle_modes: [CatalogBundleMode; 2],
 }
 
 #[derive(Deserialize)]
 struct ProfileFixtureRecord {
     case_id: String,
-    claim_layer: CatalogClaimLayer,
+    claim_layer: String,
     family: CatalogFixtureFamily,
     input: String,
     expected: String,
@@ -188,7 +204,7 @@ struct ProfileFixtureRecord {
 
 #[derive(Deserialize, Eq, PartialEq)]
 struct FixtureAssetIdentity {
-    claim_layer: CatalogClaimLayer,
+    claim_layer: String,
     case_id: String,
     family: CatalogFixtureFamily,
 }
@@ -206,9 +222,15 @@ struct LayerCatalogEntry {
     subject_adapter: SubjectAdapterKindV1,
     profile_record: &'static [u8],
     fixtures: Vec<CatalogFixture>,
+    execution_profiles: [CatalogExecutionProfile; 2],
 }
 
-fn layer_catalog() -> Result<Vec<LayerCatalogEntry>, Box<dyn Error>> {
+struct LayerCatalog {
+    entries: Vec<LayerCatalogEntry>,
+    bundle_modes: [CatalogBundleMode; 2],
+}
+
+fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
     let entries = LAYER_SOURCES
         .iter()
         .map(catalog_entry)
@@ -222,7 +244,10 @@ fn layer_catalog() -> Result<Vec<LayerCatalogEntry>, Box<dyn Error>> {
         .map(|entry| entry.name)
         .collect::<BTreeSet<_>>();
     if entries.len() == 7 && claim_layers.len() == entries.len() && names.len() == entries.len() {
-        Ok(entries)
+        Ok(LayerCatalog {
+            entries,
+            bundle_modes: CatalogBundleMode::ALL,
+        })
     } else {
         Err("typed layer catalog must contain seven unique entries".into())
     }
@@ -230,10 +255,14 @@ fn layer_catalog() -> Result<Vec<LayerCatalogEntry>, Box<dyn Error>> {
 
 fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Error>> {
     let record: ProfileCatalogRecord = serde_json::from_slice(source.profile_record)?;
-    let claim_layer = record.claim_layer.domain_layer(record.wire_code)?;
+    let claim_layer = ClaimLayerV1::from_wire_code(record.wire_code)
+        .filter(|layer| layer.catalog_name() == record.claim_layer)
+        .ok_or("typed layer catalog claim layer and wire code disagree")?;
     if record.profile_id.is_empty()
         || record.fixture_root != record.claim_layer
         || record.fixtures.len() != source.fixtures.len()
+        || record.execution_profiles != CatalogExecutionProfile::ALL
+        || record.bundle_modes != CatalogBundleMode::ALL
     {
         return Err("invalid typed layer catalog entry".into());
     }
@@ -246,16 +275,20 @@ fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Erro
         .iter()
         .map(|fixture| fixture.record.family)
         .collect::<BTreeSet<_>>();
-    if fixture_families.len() != source.fixtures.len() {
-        return Err("typed fixture catalog contains duplicate families".into());
+    if source.fixtures.len() != REQUIRED_FIXTURE_FAMILIES
+        || fixture_families.len() != REQUIRED_FIXTURE_FAMILIES
+    {
+        return Err("typed fixture catalog must contain all seven unique families".into());
     }
     Ok(LayerCatalogEntry {
         claim_layer,
-        name: record.claim_layer.name(),
+        name: claim_layer.catalog_name(),
         profile_id: record.profile_id,
-        subject_adapter: subject_adapter_from_name(&record.subject_adapter)?,
+        subject_adapter: SubjectAdapterKindV1::from_catalog_name(&record.subject_adapter)
+            .ok_or("typed layer catalog subject adapter is invalid")?,
         profile_record: source.profile_record,
         fixtures,
+        execution_profiles: record.execution_profiles,
     })
 }
 
@@ -278,12 +311,12 @@ fn catalog_fixture(
     };
     let expected_input = format!(
         "inputs/{}/{}.json",
-        profile.fixture_root.name(),
+        profile.fixture_root,
         input_identity.family.name()
     );
     let expected_result = format!(
         "expected/{}/{}.json",
-        profile.fixture_root.name(),
+        profile.fixture_root,
         input_identity.family.name()
     );
     if record.claim_layer != profile.claim_layer
@@ -297,7 +330,7 @@ fn catalog_fixture(
     Ok(CatalogFixture {
         record: ProfileFixtureRecord {
             case_id: record.case_id.clone(),
-            claim_layer: record.claim_layer,
+            claim_layer: record.claim_layer.clone(),
             family: record.family,
             input: record.input.clone(),
             expected: record.expected.clone(),
@@ -305,15 +338,6 @@ fn catalog_fixture(
         input: source.input,
         expected: source.expected,
     })
-}
-
-fn subject_adapter_from_name(name: &str) -> Result<SubjectAdapterKindV1, Box<dyn Error>> {
-    match name {
-        "exported-artifact" => Ok(SubjectAdapterKindV1::ExportedArtifact),
-        "public-gateway-protocol" => Ok(SubjectAdapterKindV1::PublicGatewayProtocol),
-        "public-plugin-protocol" => Ok(SubjectAdapterKindV1::PublicPluginProtocol),
-        _ => Err("typed layer catalog subject adapter is invalid".into()),
-    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -378,9 +402,10 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
     };
     let catalog = layer_catalog()?;
     catalog
+        .entries
         .iter()
         .try_fold(Vec::new(), |mut outputs, spec| {
-            materialize_profile(&context, spec).map(|files| {
+            materialize_profile(&context, spec, catalog.bundle_modes).map(|files| {
                 outputs.extend(files);
                 outputs
             })
@@ -439,6 +464,7 @@ fn signing_key_from_encoded(
 fn materialize_profile(
     context: &MaterializationContext<'_>,
     layer: &LayerCatalogEntry,
+    bundle_modes: [CatalogBundleMode; 2],
 ) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
     let mut profile = profile_from_catalog(layer);
     profile.lifecycle = ProfileLifecycleV1::Draft;
@@ -448,15 +474,21 @@ fn materialize_profile(
         .to_canonical_cbor()
         .map_err(Into::into)
         .and_then(|profile_bytes| {
-            signed_bundle(context, layer, &profile, BundleModeV1::Local).and_then(|local| {
-                signed_bundle(context, layer, &profile, BundleModeV1::AirGapped).and_then(
-                    |air_gapped| {
-                        let pair = ConformanceBundlePairV1 { local, air_gapped };
-                        pair.validate().map_err(Into::into).and_then(|()| {
-                            materialized_profile_outputs(&profile, &prefix, profile_bytes, &pair)
-                        })
-                    },
-                )
+            let [local, air_gapped] = bundle_modes
+                .map(|mode| signed_bundle(context, layer, &profile, mode.bundle_mode()));
+            local.and_then(|local| {
+                air_gapped.and_then(|air_gapped| {
+                    let pair = ConformanceBundlePairV1 { local, air_gapped };
+                    pair.validate().map_err(Into::into).and_then(|()| {
+                        materialized_profile_outputs(
+                            &profile,
+                            &prefix,
+                            profile_bytes,
+                            &pair,
+                            bundle_modes,
+                        )
+                    })
+                })
             })
         })
 }
@@ -479,6 +511,7 @@ fn materialized_profile_outputs(
     prefix: &str,
     profile_bytes: Vec<u8>,
     pair: &ConformanceBundlePairV1,
+    modes: [CatalogBundleMode; 2],
 ) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
     let outputs = vec![MaterializedFile {
         relative_path: format!(
@@ -488,8 +521,10 @@ fn materialized_profile_outputs(
         bytes: profile_bytes,
         archive_release_filename: None,
     }];
-    [("local", &pair.local), ("air-gapped", &pair.air_gapped)]
+    modes
         .into_iter()
+        .map(CatalogBundleMode::name)
+        .zip([&pair.local, &pair.air_gapped])
         .try_fold(outputs, |mut outputs, (mode_name, bundle)| {
             materialized_bundle_files(prefix, mode_name, bundle).map(|files| {
                 outputs.extend(files);
@@ -528,7 +563,7 @@ fn materialized_bundle_files(
         .map_err(Into::into)
         .and_then(
             |(manifest_digest, release_filename, manifest_bytes, bundle_bytes)| {
-                verify_public_archive(&bundle_bytes, &release_filename).map(|_| {
+                verify_public_archive(&bundle_bytes, &release_filename).map(|()| {
                     [
                         MaterializedFile {
                             relative_path: format!(
@@ -549,15 +584,24 @@ fn materialized_bundle_files(
         )
 }
 
-fn materialization_metadata(catalog: &[LayerCatalogEntry]) -> MaterializedFile {
-    let layer_names = catalog.iter().map(|layer| layer.name).collect::<Vec<_>>();
+fn materialization_metadata(catalog: &LayerCatalog) -> MaterializedFile {
+    let layer_names = catalog
+        .entries
+        .iter()
+        .map(|layer| layer.name)
+        .collect::<Vec<_>>();
+    let mode_names = catalog
+        .bundle_modes
+        .into_iter()
+        .map(CatalogBundleMode::name)
+        .collect::<Vec<_>>();
     MaterializedFile {
         relative_path: MATERIALIZATION_METADATA_PATH.to_owned(),
         bytes: serde_json::json!({
             "format": 1,
             "lifecycles": ["draft"],
             "layers": layer_names,
-            "modes": ["local", "air-gapped"],
+            "modes": mode_names,
         })
         .to_string()
         .into_bytes(),
@@ -598,16 +642,8 @@ fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> Fi
     let notice_digest = *blake3::hash(notice).as_bytes();
     let sbom_digest = *blake3::hash(sbom).as_bytes();
     let limitations_digest = *blake3::hash(limitations).as_bytes();
-    let local_execution_profile_digest =
-        labeled_digest("PiglorOS.ExecutionProfile.v1", b"deterministic-local-v1");
-    let air_gapped_execution_profile_digest = labeled_digest(
-        "PiglorOS.ExecutionProfile.v1",
-        b"deterministic-air-gapped-v1",
-    );
     FixtureContext {
         claim_layer,
-        local_execution_profile_digest,
-        air_gapped_execution_profile_digest,
         profile_record_digest,
         schema_digest,
         provenance_digest,
@@ -622,20 +658,17 @@ fn fixtures_for_layer(
     layer: &LayerCatalogEntry,
     context: &FixtureContext,
 ) -> Vec<FixtureDescriptorV1> {
-    let mut fixtures = Vec::with_capacity(layer.fixtures.len() * 2);
+    let mut fixtures = Vec::with_capacity(layer.fixtures.len() * layer.execution_profiles.len());
     for fixture in &layer.fixtures {
-        let local = fixture_descriptor_from_record(
-            layer,
-            fixture,
-            context,
-            context.local_execution_profile_digest,
-            pos_conformance::ExecutionModeV1::Local,
-        );
-        let mut air_gapped = local.clone();
-        air_gapped.execution_profile_digest = context.air_gapped_execution_profile_digest;
-        air_gapped.modes = vec![pos_conformance::ExecutionModeV1::AirGapped];
-        fixtures.push(local);
-        fixtures.push(air_gapped);
+        fixtures.extend(layer.execution_profiles.map(|execution_profile| {
+            fixture_descriptor_from_record(
+                layer,
+                fixture,
+                context,
+                execution_profile.digest(),
+                execution_profile.execution_mode(),
+            )
+        }));
     }
     fixtures.sort_by_key(|fixture| {
         (
@@ -650,10 +683,10 @@ fn fixtures_for_layer(
 fn profile_from_catalog(layer: &LayerCatalogEntry) -> ConformanceProfileV1 {
     let context = fixture_context(layer.profile_record, layer.claim_layer);
     let fixtures = fixtures_for_layer(layer, &context);
-    let mut execution_profile_digests = vec![
-        context.local_execution_profile_digest,
-        context.air_gapped_execution_profile_digest,
-    ];
+    let mut execution_profile_digests = layer
+        .execution_profiles
+        .map(CatalogExecutionProfile::digest)
+        .to_vec();
     execution_profile_digests.sort_unstable();
     let execution_matrix_digest = *blake3::hash(include_bytes!(
         "../../../../fixtures/conformance/matrix/execution-matrix.json"
@@ -705,7 +738,7 @@ fn fixture_descriptor_from_record(
     let input_path = fixture.record.input.clone();
     let fixture_record = serde_json::json!({
         "case_id": &fixture.record.case_id,
-        "claim_layer": fixture.record.claim_layer.name(),
+        "claim_layer": &fixture.record.claim_layer,
         "expected": &fixture.record.expected,
         "family": fixture.record.family.name(),
         "input": &fixture.record.input,
@@ -911,16 +944,13 @@ fn append_supporting_members(members: &mut Vec<BundleMemberV1>, inventory_bytes:
 fn verify_public_archive(
     archive_bytes: &[u8],
     release_filename: &str,
-) -> Result<VerifiedArchive, Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>> {
     ConformanceBundleV1::from_canonical_cbor(archive_bytes)
         .map_err(Into::into)
         .and_then(|_| {
             verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
         })
-        .map(|()| VerifiedArchive)
 }
-
-struct VerifiedArchive;
 
 #[cfg(target_os = "linux")]
 struct AtomicPublication {
@@ -928,6 +958,7 @@ struct AtomicPublication {
     staging: OwnedFd,
     staging_name: CString,
     destination_name: CString,
+    staging_present: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -959,6 +990,7 @@ impl AtomicPublication {
                     staging,
                     staging_name,
                     destination_name,
+                    staging_present: true,
                 })
             })
         })
@@ -1019,7 +1051,6 @@ impl AtomicPublication {
                         .as_deref()
                         .map_or(Ok(()), |release_filename| {
                             verify_public_archive(&bytes, release_filename)
-                                .map(|_| ())
                                 .map_err(|_| MaterializationError::ArchiveDigestMismatch)
                         })
                 })
@@ -1065,7 +1096,7 @@ impl AtomicPublication {
 #[cfg(target_os = "linux")]
 impl VerifiedPublication {
     fn publish(self) -> Result<(), MaterializationError> {
-        let publication = self.0;
+        let mut publication = self.0;
         fs::renameat_with(
             &publication.parent,
             publication.staging_name.as_c_str(),
@@ -1075,8 +1106,20 @@ impl VerifiedPublication {
         )
         .map_err(map_publish_error)
         .and_then(|()| {
+            publication.staging_present = false;
             fs::fsync(&publication.parent).map_err(|_| MaterializationError::DurabilitySyncFailed)
         })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for AtomicPublication {
+    fn drop(&mut self) {
+        if self.staging_present {
+            let staging_path = PathBuf::from(format!("/proc/self/fd/{}", self.parent.as_raw_fd()))
+                .join(OsStr::from_bytes(self.staging_name.as_bytes()));
+            drop(std::fs::remove_dir_all(staging_path));
+        }
     }
 }
 
@@ -1137,7 +1180,13 @@ fn create_private_staging(parent: &OwnedFd) -> Result<(CString, OwnedFd), Materi
     for _ in 0..16 {
         let attempt = random_staging_name().and_then(|name| {
             match fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
-                Ok(()) => open_directory(parent, &name).map(|staging| Some((name, staging))),
+                Ok(()) => match open_directory(parent, &name) {
+                    Ok(staging) => Ok(Some((name, staging))),
+                    Err(error) => match fs::unlinkat(parent, name.as_c_str(), AtFlags::REMOVEDIR) {
+                        Ok(()) => Err(error),
+                        Err(_) => Err(MaterializationError::DurabilitySyncFailed),
+                    },
+                },
                 Err(Errno::EXIST) => Ok(None),
                 Err(_) => Err(MaterializationError::UntrustedOutputDirectory),
             }

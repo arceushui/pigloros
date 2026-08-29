@@ -312,15 +312,41 @@ fn mutate_profile_and_rebind_identity(
     value: &mut Value,
     mutate: impl FnOnce(&mut Vec<Value>),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
-        Some(Value::Bytes(bytes)) => bytes.clone(),
-        _ => return Err("profile bytes are missing".into()),
-    };
-    let mut profile: Value = ciborium::from_reader(Cursor::new(profile_bytes))?;
+    let mut profile = archive_profile_value(value)?;
     let Value::Array(fields) = &mut profile else {
         return Err("profile is not an array".into());
     };
     mutate(fields);
+    rebind_profile_identity(value, profile)
+}
+
+fn mutate_profile_and_rebind_identity_fallible(
+    value: &mut Value,
+    mutate: impl FnOnce(&mut Vec<Value>) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut profile = archive_profile_value(value)?;
+    let Value::Array(fields) = &mut profile else {
+        return Err("profile is not an array".into());
+    };
+    mutate(fields)?;
+    rebind_profile_identity(value, profile)
+}
+
+fn archive_profile_value(value: &mut Value) -> Result<Value, Box<dyn std::error::Error>> {
+    let profile_bytes = match archive_member(value, "profile/CPF1.cbor")?.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("profile bytes are missing".into()),
+    };
+    ciborium::from_reader(Cursor::new(profile_bytes)).map_err(Into::into)
+}
+
+fn rebind_profile_identity(
+    value: &mut Value,
+    mut profile: Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Value::Array(fields) = &mut profile else {
+        return Err("profile is not an array".into());
+    };
     fields[17] = Value::Null;
     let stable_evidence = test_domain_digest(
         b"PiglorOS.ConformanceProfileStableEvidence.v1",
@@ -4185,6 +4211,204 @@ fn public_archive_decoders_enforce_selected_caps_at_their_validation_boundary(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum DeclaredInputCapMutation {
+    FixtureCount,
+    InputCount,
+    MemberId,
+    MemberSize,
+    TotalBytes,
+}
+
+struct DeclaredInputCapContext {
+    archive_member_count: u32,
+    additional_input_count: usize,
+    member_path_cap: u16,
+    member_size_cap: u64,
+    total_input_bytes_cap: u64,
+}
+
+fn raw_hard_caps(fields: &mut [Value]) -> Result<&mut Vec<Value>, Box<dyn std::error::Error>> {
+    let Some(Value::Array(protocol)) = fields.get_mut(11) else {
+        return Err("profile evaluator protocol is missing".into());
+    };
+    let Some(Value::Array(caps)) = protocol.get_mut(4) else {
+        return Err("profile evaluator hard caps are missing".into());
+    };
+    Ok(caps)
+}
+
+fn raw_unselected_replay_fixture(
+    fields: &[Value],
+    case_id: &str,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let Some(Value::Array(fixtures)) = fields.get(9) else {
+        return Err("profile fixtures are missing".into());
+    };
+    let Some(Value::Array(template)) = fixtures.first() else {
+        return Err("profile fixture template is missing".into());
+    };
+    let mut fixture = template.clone();
+    let Some(case_id_field) = fixture.get_mut(0) else {
+        return Err("fixture case ID is missing".into());
+    };
+    *case_id_field = Value::Text(case_id.to_owned());
+    let Some(modes) = fixture.get_mut(5) else {
+        return Err("fixture modes are missing".into());
+    };
+    *modes = Value::Array(vec![Value::Integer(2_u64.into())]);
+    Ok(fixture)
+}
+
+fn raw_input_with_id(template: &Value, index: usize) -> Result<Value, Box<dyn std::error::Error>> {
+    let Value::Array(template) = template else {
+        return Err("fixture input is malformed".into());
+    };
+    let mut input = template.clone();
+    let Some(member_id) = input.get_mut(0) else {
+        return Err("fixture input member ID is missing".into());
+    };
+    *member_id = Value::Text(format!("z-{index:03}.json"));
+    Ok(Value::Array(input))
+}
+
+impl DeclaredInputCapMutation {
+    fn apply(
+        self,
+        fields: &mut [Value],
+        context: &DeclaredInputCapContext,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = match self {
+            Self::FixtureCount => {
+                raw_hard_caps(fields)?[1] = Value::Integer(1_u64.into());
+                raw_unselected_replay_fixture(fields, "zz-unselected-replay-fixture-count")?
+            }
+            Self::InputCount => {
+                raw_hard_caps(fields)?[2] =
+                    Value::Integer(u64::from(context.archive_member_count).into());
+                let mut fixture =
+                    raw_unselected_replay_fixture(fields, "zz-unselected-replay-input-count")?;
+                let Some(Value::Array(inputs)) = fixture.get_mut(7) else {
+                    return Err("fixture inputs are missing".into());
+                };
+                let template = inputs.first().cloned().ok_or("fixture input is missing")?;
+                *inputs = (0..context.additional_input_count)
+                    .map(|index| raw_input_with_id(&template, index))
+                    .collect::<Result<Vec<_>, _>>()?;
+                fixture
+            }
+            Self::MemberId => {
+                raw_hard_caps(fields)?[3] =
+                    Value::Integer(u64::from(context.member_path_cap).into());
+                raw_unselected_replay_fixture(fields, "zz-unselected-replay-member-id")?
+            }
+            Self::MemberSize => {
+                raw_hard_caps(fields)?[4] = Value::Integer(context.member_size_cap.into());
+                raw_unselected_replay_fixture(fields, "zz-unselected-replay-member-size")?
+            }
+            Self::TotalBytes => {
+                raw_hard_caps(fields)?[5] = Value::Integer(context.total_input_bytes_cap.into());
+                raw_unselected_replay_fixture(fields, "zz-unselected-replay-total-bytes")?
+            }
+        };
+        let Some(Value::Array(inputs)) = fixture.get_mut(7) else {
+            return Err("fixture inputs are missing".into());
+        };
+        let Some(Value::Array(first_input)) = inputs.first_mut() else {
+            return Err("fixture input is missing".into());
+        };
+        match self {
+            Self::MemberId => {
+                first_input[0] =
+                    Value::Text("z".repeat(usize::from(context.member_path_cap).saturating_add(1)));
+            }
+            Self::MemberSize => {
+                first_input[1] = Value::Integer(context.member_size_cap.saturating_add(1).into());
+            }
+            Self::TotalBytes => {
+                first_input[1] =
+                    Value::Integer(context.total_input_bytes_cap.saturating_add(1).into());
+            }
+            Self::FixtureCount | Self::InputCount => {}
+        }
+        let Some(Value::Array(fixtures)) = fields.get_mut(9) else {
+            return Err("profile fixtures are missing".into());
+        };
+        fixtures.push(Value::Array(fixture));
+        Ok(())
+    }
+}
+
+#[test]
+fn public_archive_decoders_reject_declared_input_caps_for_every_fixture(
+) -> Result<(), Box<dyn std::error::Error>> {
+    const CAP_HEADROOM_BYTES: u64 = 4_096;
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let archive_member_count = u32::try_from(bundle.members.len())?;
+    let context = DeclaredInputCapContext {
+        archive_member_count,
+        additional_input_count: usize::try_from(u64::from(archive_member_count).saturating_add(1))?,
+        member_path_cap: u16::try_from(
+            bundle
+                .members
+                .iter()
+                .map(|member| member.path.len())
+                .max()
+                .ok_or("archive member path is missing")?,
+        )?,
+        member_size_cap: u64::try_from(
+            bundle
+                .members
+                .iter()
+                .map(|member| member.bytes.len())
+                .max()
+                .ok_or("archive member bytes are missing")?,
+        )?
+        .saturating_add(CAP_HEADROOM_BYTES),
+        total_input_bytes_cap: u64::try_from(canonical_archive_bytes(&bundle)?.len())?
+            .saturating_add(CAP_HEADROOM_BYTES),
+    };
+    let mutations = [
+        (DeclaredInputCapMutation::FixtureCount, "fixture count"),
+        (
+            DeclaredInputCapMutation::InputCount,
+            "aggregate input-member count",
+        ),
+        (
+            DeclaredInputCapMutation::MemberId,
+            "input member ID byte length",
+        ),
+        (
+            DeclaredInputCapMutation::MemberSize,
+            "declared input member size",
+        ),
+        (
+            DeclaredInputCapMutation::TotalBytes,
+            "aggregate declared input bytes",
+        ),
+    ];
+
+    for (mutation, label) in mutations {
+        let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+            mutate_profile_and_rebind_identity_fallible(value, |fields| {
+                mutation.apply(fields, &context)
+            })
+        })?;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&archive),
+            Err(pos_conformance::BundleContractErrorV1::ProfileInvalid),
+            "{label}"
+        );
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::ProfileInvalid),
+            "{label}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn public_independent_verifier_rejects_cross_field_cpf1_bound_violations(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5227,27 +5451,79 @@ fn public_supporting_member_bindings_cover_every_required_role(
 }
 
 #[test]
-fn public_supporting_member_binding_rejects_a_masked_fixture_digest(
+fn public_supporting_member_binding_rejects_every_masked_fixture_digest(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    type ProfileMutation = Box<dyn Fn(&mut ConformanceProfileV1)>;
+
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let bundle = signed_draft_bundle()?;
-    let (mut profile, _, _) = public_bundle_inputs(&bundle)?;
-    let mut additional_fixture = profile.fixtures[0].clone();
-    additional_fixture.case_id = "zz-masked-support-digest".to_owned();
-    additional_fixture.modes = vec![ExecutionModeV1::Replay];
-    additional_fixture.provenance.notices_digest = [99; 32];
-    profile.fixtures.push(additional_fixture);
-    profile.profile_digest = profile.digest();
-    let archive = archive_with_public_profile(&bundle, &profile, &signing_key)?;
+    let (profile, _, _) = public_bundle_inputs(&bundle)?;
+    let mutations: Vec<(&str, ProfileMutation)> = vec![
+        (
+            "schema",
+            Box::new(|value| {
+                value.public_schema_digests.push([99; 32]);
+                value.public_schema_digests.sort_unstable();
+                value.fixtures[1].public_schema_digest = [99; 32];
+            }),
+        ),
+        (
+            "licence",
+            Box::new(|value| value.fixtures[1].provenance.licence_id = "Apache-2.0".to_owned()),
+        ),
+        (
+            "notice",
+            Box::new(|value| value.fixtures[1].provenance.notices_digest = [99; 32]),
+        ),
+        (
+            "SBOM",
+            Box::new(|value| value.fixtures[1].provenance.sbom_digest = [99; 32]),
+        ),
+        (
+            "source provenance",
+            Box::new(|value| value.fixtures[1].provenance.source_digest = [99; 32]),
+        ),
+        (
+            "build provenance",
+            Box::new(|value| value.fixtures[1].provenance.build_digest = [99; 32]),
+        ),
+        (
+            "publication review provenance",
+            Box::new(|value| {
+                value.fixtures[1].provenance.publication_review_digest = [99; 32];
+            }),
+        ),
+        (
+            "input provenance",
+            Box::new(|value| value.fixtures[1].inputs[0].provenance_digest = [99; 32]),
+        ),
+        (
+            "limitations",
+            Box::new(|value| value.fixtures[1].provenance.limitations_digest = [99; 32]),
+        ),
+    ];
 
-    assert_eq!(
-        ConformanceBundleV1::from_canonical_cbor(&archive),
-        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
-    );
-    assert_eq!(
-        pos_conformance::verify_archive_independently(&archive),
-        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
-    );
+    for (label, mutate) in mutations {
+        let mut changed = profile.clone();
+        let mut additional_fixture = changed.fixtures[0].clone();
+        additional_fixture.case_id = "zz-masked-support-digest".to_owned();
+        additional_fixture.modes = vec![ExecutionModeV1::Replay];
+        changed.fixtures.push(additional_fixture);
+        mutate(&mut changed);
+        changed.profile_digest = changed.digest();
+        let archive = archive_with_public_profile(&bundle, &changed, &signing_key)?;
+
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch),
+            "{label}"
+        );
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch),
+            "{label}"
+        );
+    }
     Ok(())
 }
 

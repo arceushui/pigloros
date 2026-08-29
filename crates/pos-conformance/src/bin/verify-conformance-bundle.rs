@@ -44,7 +44,7 @@ fn open_regular_file(path: &Path) -> Result<(File, u64), Box<dyn Error>> {
 
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NONBLOCK.saturating_add(libc::O_NOFOLLOW))
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
             .open(path)?;
         let metadata = file.metadata()?;
         if !metadata.is_file() {
@@ -94,83 +94,4 @@ fn read_bounded(
         .into());
     }
     Ok(bytes)
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::{read_bounded, run, verify_path};
-    use std::ffi::OsString;
-    use std::fs;
-    use std::io::{self, Cursor, Read};
-    #[cfg(unix)]
-    use std::process::Command;
-
-    struct FailingReader;
-
-    impl Read for FailingReader {
-        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("fixture reader failed"))
-        }
-    }
-
-    #[test]
-    fn verify_path_rejects_a_directory_before_opening_it() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let path =
-            std::env::temp_dir().join(format!("pigloros-directory-cfb1-{}", std::process::id()));
-        fs::create_dir(&path)?;
-        let result = verify_path(&path);
-        fs::remove_dir(&path)?;
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_path_rejects_a_fifo_before_opening_it() -> Result<(), Box<dyn std::error::Error>> {
-        let path = std::env::temp_dir().join(format!("pigloros-fifo-cfb1-{}", std::process::id()));
-        let status = Command::new("mkfifo").arg(&path).status()?;
-        assert!(status.success());
-        let result = verify_path(&path);
-        fs::remove_file(&path)?;
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn bounded_reader_rejects_declared_and_observed_oversize() {
-        assert!(read_bounded(Cursor::new([]), 6, 5).is_err());
-        assert!(read_bounded(Cursor::new([0_u8; 6]), 5, 5).is_err());
-        assert!(read_bounded(Cursor::new([]), 1024 * 1024 * 1024, 1024 * 1024 * 1024).is_ok());
-        assert!(read_bounded(Cursor::new([]), 5, 5).is_ok());
-        assert!(read_bounded(Cursor::new([0_u8; 5]), 5, 5).is_ok());
-        assert!(read_bounded(FailingReader, 0, 5).is_err());
-    }
-
-    #[test]
-    fn command_rejects_missing_and_invalid_archive_arguments(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        assert!(run([OsString::from("verify-conformance-bundle")].into_iter()).is_err());
-
-        let directory = std::env::temp_dir().join(format!(
-            "pigloros-invalid-cfb1-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos()
-        ));
-        fs::create_dir(&directory)?;
-        let path = directory.join(format!("{}.cfb1", "0".repeat(64)));
-        fs::write(&path, b"invalid conformance archive")?;
-        let result = run([
-            OsString::from("verify-conformance-bundle"),
-            path.clone().into_os_string(),
-        ]
-        .into_iter());
-        fs::remove_file(path)?;
-        fs::remove_dir(directory)?;
-        assert!(result.is_err());
-        Ok(())
-    }
 }

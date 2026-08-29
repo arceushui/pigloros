@@ -125,6 +125,19 @@ pub enum SubjectAdapterKindV1 {
     PublicPluginProtocol,
 }
 
+impl SubjectAdapterKindV1 {
+    /// Decode the canonical public catalog name for an evaluator adapter.
+    #[must_use]
+    pub fn from_catalog_name(name: &str) -> Option<Self> {
+        match name {
+            "exported-artifact" => Some(Self::ExportedArtifact),
+            "public-gateway-protocol" => Some(Self::PublicGatewayProtocol),
+            "public-plugin-protocol" => Some(Self::PublicPluginProtocol),
+            _ => None,
+        }
+    }
+}
+
 /// One immutable digest-identified input member.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixtureInputMemberV1 {
@@ -2484,27 +2497,13 @@ fn decode_mode(value: &Value) -> Result<ExecutionModeV1, ConformanceContractErro
     }
 }
 fn claim_layer(value: ClaimLayerV1) -> Value {
-    uint(match value {
-        ClaimLayerV1::ArtifactIntegrity => 0,
-        ClaimLayerV1::ReplayConformance => 1,
-        ClaimLayerV1::KnowledgeNonInterference => 2,
-        ClaimLayerV1::GatewayClientConformance => 3,
-        ClaimLayerV1::PluginConformance => 4,
-        ClaimLayerV1::MetricConformance => 5,
-        ClaimLayerV1::EmpiricalEvaluation => 6,
-    })
+    uint(u64::from(value.wire_code()))
 }
 fn decode_claim_layer(value: &Value) -> Result<ClaimLayerV1, ConformanceContractError> {
-    match uint_value(value)? {
-        0 => Ok(ClaimLayerV1::ArtifactIntegrity),
-        1 => Ok(ClaimLayerV1::ReplayConformance),
-        2 => Ok(ClaimLayerV1::KnowledgeNonInterference),
-        3 => Ok(ClaimLayerV1::GatewayClientConformance),
-        4 => Ok(ClaimLayerV1::PluginConformance),
-        5 => Ok(ClaimLayerV1::MetricConformance),
-        6 => Ok(ClaimLayerV1::EmpiricalEvaluation),
-        _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    u8::try_from(uint_value(value)?)
+        .ok()
+        .and_then(ClaimLayerV1::from_wire_code)
+        .ok_or(ConformanceContractError::InvalidEncoding)
 }
 fn case_outcome(value: CaseOutcomeStatusV1) -> Value {
     uint(match value {

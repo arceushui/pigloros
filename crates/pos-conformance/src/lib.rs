@@ -428,6 +428,51 @@ pub enum ClaimLayerV1 {
     EmpiricalEvaluation,
 }
 
+impl ClaimLayerV1 {
+    /// Decode the canonical CPF1 wire code for a claim layer.
+    #[must_use]
+    pub const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::ArtifactIntegrity),
+            1 => Some(Self::ReplayConformance),
+            2 => Some(Self::KnowledgeNonInterference),
+            3 => Some(Self::GatewayClientConformance),
+            4 => Some(Self::PluginConformance),
+            5 => Some(Self::MetricConformance),
+            6 => Some(Self::EmpiricalEvaluation),
+            _ => None,
+        }
+    }
+
+    /// Return the canonical CPF1 wire code for this claim layer.
+    #[must_use]
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::ArtifactIntegrity => 0,
+            Self::ReplayConformance => 1,
+            Self::KnowledgeNonInterference => 2,
+            Self::GatewayClientConformance => 3,
+            Self::PluginConformance => 4,
+            Self::MetricConformance => 5,
+            Self::EmpiricalEvaluation => 6,
+        }
+    }
+
+    /// Return the canonical public catalog name for this claim layer.
+    #[must_use]
+    pub const fn catalog_name(self) -> &'static str {
+        match self {
+            Self::ArtifactIntegrity => "artifact-integrity",
+            Self::ReplayConformance => "replay-conformance",
+            Self::KnowledgeNonInterference => "knowledge-non-interference",
+            Self::GatewayClientConformance => "gateway-client-conformance",
+            Self::PluginConformance => "plugin-conformance",
+            Self::MetricConformance => "metric-conformance",
+            Self::EmpiricalEvaluation => "empirical-evaluation",
+        }
+    }
+}
+
 /// One case's closed conformance outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2561,30 +2606,16 @@ pub mod strict_codec {
     }
 
     fn enum_claim_layer(value: ClaimLayerV1) -> Value {
-        uint(match value {
-            ClaimLayerV1::ArtifactIntegrity => 0,
-            ClaimLayerV1::ReplayConformance => 1,
-            ClaimLayerV1::KnowledgeNonInterference => 2,
-            ClaimLayerV1::GatewayClientConformance => 3,
-            ClaimLayerV1::PluginConformance => 4,
-            ClaimLayerV1::MetricConformance => 5,
-            ClaimLayerV1::EmpiricalEvaluation => 6,
-        })
+        uint(u64::from(value.wire_code()))
     }
 
     fn decode_claim_layer(value: &Value) -> Result<ClaimLayerV1, StrictCborError> {
-        match uint_value(value, "claim_layer")? {
-            0 => Ok(ClaimLayerV1::ArtifactIntegrity),
-            1 => Ok(ClaimLayerV1::ReplayConformance),
-            2 => Ok(ClaimLayerV1::KnowledgeNonInterference),
-            3 => Ok(ClaimLayerV1::GatewayClientConformance),
-            4 => Ok(ClaimLayerV1::PluginConformance),
-            5 => Ok(ClaimLayerV1::MetricConformance),
-            6 => Ok(ClaimLayerV1::EmpiricalEvaluation),
-            _ => Err(StrictCborError::InvalidField {
+        u8::try_from(uint_value(value, "claim_layer")?)
+            .ok()
+            .and_then(ClaimLayerV1::from_wire_code)
+            .ok_or_else(|| StrictCborError::InvalidField {
                 field: "claim_layer".to_owned(),
-            }),
-        }
+            })
     }
 
     fn enum_case_outcome(value: CaseOutcomeStatusV1) -> Value {

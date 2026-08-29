@@ -1421,7 +1421,7 @@ fn independent_verify_cpf1(
                         .map(|fixtures| (root, fixtures))
                     })
                     .and_then(|(root, fixtures)| {
-                        independent_verify_cpf1_selected_caps(fixtures.len(), caps)
+                        independent_verify_cpf1_selected_caps(&fixtures, caps)
                             .map(|()| (root, fixtures))
                     })
                     .and_then(|(root, fixtures)| {
@@ -1825,10 +1825,29 @@ fn independent_verify_cpf1_provenance(
 }
 
 fn independent_verify_cpf1_selected_caps(
-    fixture_count: usize,
+    fixtures: &[IndependentCpf1Fixture],
     caps: &IndependentArchiveCaps,
 ) -> Result<(), BundleContractErrorV1> {
-    if u64::try_from(fixture_count).unwrap_or(u64::MAX) > caps.cases {
+    if u64::try_from(fixtures.len()).unwrap_or(u64::MAX) > caps.cases {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+
+    let mut input_member_count = 0_u64;
+    let mut input_bytes = 0_u64;
+    for fixture in fixtures {
+        for input in &fixture.inputs {
+            input_member_count = input_member_count.saturating_add(1);
+            input_bytes = input_bytes.saturating_add(input.size);
+            let input_exceeds_caps = [
+                u64::try_from(input.member_id.len()).unwrap_or(u64::MAX) > caps.member_path_bytes,
+                input.size > caps.member_bytes,
+            ];
+            if input_exceeds_caps.contains(&true) {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
+        }
+    }
+    if input_member_count > caps.bundle_members || input_bytes > caps.total_bundle_bytes {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     Ok(())
@@ -2652,17 +2671,11 @@ const fn decode_lifecycle(code: u64) -> Result<ProfileLifecycleV1, BundleContrac
     }
 }
 
-const fn decode_claim_layer(code: u64) -> Result<ClaimLayerV1, BundleContractErrorV1> {
-    match code {
-        0 => Ok(ClaimLayerV1::ArtifactIntegrity),
-        1 => Ok(ClaimLayerV1::ReplayConformance),
-        2 => Ok(ClaimLayerV1::KnowledgeNonInterference),
-        3 => Ok(ClaimLayerV1::GatewayClientConformance),
-        4 => Ok(ClaimLayerV1::PluginConformance),
-        5 => Ok(ClaimLayerV1::MetricConformance),
-        6 => Ok(ClaimLayerV1::EmpiricalEvaluation),
-        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
-    }
+fn decode_claim_layer(code: u64) -> Result<ClaimLayerV1, BundleContractErrorV1> {
+    u8::try_from(code)
+        .ok()
+        .and_then(ClaimLayerV1::from_wire_code)
+        .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)
 }
 
 /// Derive the deterministic archive path for one CPF1 fixture-input member.
@@ -3567,13 +3580,5 @@ fn manifest_value(manifest: &BundleManifestV1) -> Value {
 }
 
 const fn claim_layer_code(layer: ClaimLayerV1) -> u8 {
-    match layer {
-        ClaimLayerV1::ArtifactIntegrity => 0,
-        ClaimLayerV1::ReplayConformance => 1,
-        ClaimLayerV1::KnowledgeNonInterference => 2,
-        ClaimLayerV1::GatewayClientConformance => 3,
-        ClaimLayerV1::PluginConformance => 4,
-        ClaimLayerV1::MetricConformance => 5,
-        ClaimLayerV1::EmpiricalEvaluation => 6,
-    }
+    layer.wire_code()
 }
