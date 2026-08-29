@@ -12440,7 +12440,7 @@ pub(super) mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn erasure_reference(value: u8) -> ErasureReferenceV1 {
+    const fn erasure_reference(value: u8) -> ErasureReferenceV1 {
         ErasureReferenceV1::from_digest([value; 32])
     }
 
@@ -12536,14 +12536,9 @@ pub(super) mod key_registry_coverage {
         (record, predecessor)
     }
 
-    #[test]
-    fn erasure_persistence_error_regions_are_instrumented() {
-        let record = erasure_record();
-        let request = record.request().reference();
-        let state_digest = record.state().state_digest();
-        let record_bytes = fixture(record.to_canonical_cbor());
-
-        let mut state_query_error = tests::new_store();
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn exercise_state_resolution_errors(state_digest: ErasureReferenceV1) {
+        let state_query_error = tests::new_store();
         fixture(
             state_query_error
                 .conn
@@ -12551,7 +12546,7 @@ pub(super) mod key_registry_coverage {
         );
         expect_err(state_query_error.resolve_state(state_digest));
 
-        let mut malformed_state_metadata = tests::new_store();
+        let malformed_state_metadata = tests::new_store();
         fixture(
             malformed_state_metadata
                 .conn
@@ -12563,8 +12558,11 @@ pub(super) mod key_registry_coverage {
             params![state_digest.digest().as_slice()],
         ));
         expect_err(malformed_state_metadata.resolve_state(state_digest));
+    }
 
-        let mut record_query_error = tests::new_store();
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn exercise_record_load_errors(request: ErasureReferenceV1, record_bytes: Vec<u8>) {
+        let record_query_error = tests::new_store();
         fixture(
             record_query_error
                 .conn
@@ -12572,7 +12570,7 @@ pub(super) mod key_registry_coverage {
         );
         expect_err(record_query_error.load_record(request));
 
-        let mut malformed_record_metadata = tests::new_store();
+        let malformed_record_metadata = tests::new_store();
         fixture(
             malformed_record_metadata
                 .conn
@@ -12581,10 +12579,13 @@ pub(super) mod key_registry_coverage {
         fixture(malformed_record_metadata.conn.execute(
             "INSERT INTO erasure_records
              (request_digest, state_digest, record_cbor) VALUES (?1, X'01', ?2)",
-            params![request.digest().as_slice(), record_bytes.clone()],
+            params![request.digest().as_slice(), record_bytes],
         ));
         expect_err(malformed_record_metadata.load_record(request));
+    }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn exercise_commit_errors(record: &ErasureCoordinatorRecordV1) {
         let mut begin_error = tests::new_store();
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
         let begin_result = begin_error.commit_record(record.clone());
@@ -12599,6 +12600,7 @@ pub(super) mod key_registry_coverage {
         );
         expect_err(slot_query_error.commit_record(record.clone()));
 
+        let request = record.request().reference();
         let mut malformed_existing_record = tests::new_store();
         fixture(malformed_existing_record.commit_record(record.clone()));
         fixture(malformed_existing_record.conn.execute(
@@ -12615,6 +12617,7 @@ pub(super) mod key_registry_coverage {
         );
         expect_err(state_row_query_error.commit_record(record.clone()));
 
+        let state_digest = record.state().state_digest();
         let mut malformed_state_metadata_on_commit = tests::new_store();
         fixture(malformed_state_metadata_on_commit.commit_record(record.clone()));
         fixture(
@@ -12626,14 +12629,19 @@ pub(super) mod key_registry_coverage {
             "UPDATE erasure_states SET request_digest = X'01' WHERE state_digest = ?1",
             params![state_digest.digest().as_slice()],
         ));
-        expect_err(malformed_state_metadata_on_commit.commit_record(record));
+        expect_err(malformed_state_metadata_on_commit.commit_record(record.clone()));
+    }
 
-        let (next, predecessor) = erasure_record_with_predecessor();
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn exercise_predecessor_errors(
+        next: &ErasureCoordinatorRecordV1,
+        predecessor: &pos_core::ErasureStateV1,
+    ) {
         let next_request = next.request().reference();
         let predecessor_digest = predecessor.state_digest();
         let predecessor_bytes = fixture(predecessor.to_canonical_cbor());
 
-        let mut predecessor_query_error = tests::new_store();
+        let predecessor_query_error = tests::new_store();
         fixture(
             predecessor_query_error
                 .conn
@@ -12642,10 +12650,10 @@ pub(super) mod key_registry_coverage {
         expect_err(validate_erasure_predecessor(
             &predecessor_query_error.conn,
             next_request,
-            &next,
+            next,
         ));
 
-        let mut malformed_predecessor_metadata = tests::new_store();
+        let malformed_predecessor_metadata = tests::new_store();
         fixture(
             malformed_predecessor_metadata
                 .conn
@@ -12654,18 +12662,15 @@ pub(super) mod key_registry_coverage {
         fixture(malformed_predecessor_metadata.conn.execute(
             "INSERT INTO erasure_states
              (state_digest, request_digest, state_cbor) VALUES (?1, X'01', ?2)",
-            params![
-                predecessor_digest.digest().as_slice(),
-                predecessor_bytes.clone()
-            ],
+            params![predecessor_digest.digest().as_slice(), predecessor_bytes],
         ));
         expect_err(validate_erasure_predecessor(
             &malformed_predecessor_metadata.conn,
             next_request,
-            &next,
+            next,
         ));
 
-        let mut malformed_predecessor_state = tests::new_store();
+        let malformed_predecessor_state = tests::new_store();
         fixture(malformed_predecessor_state.conn.execute(
             "INSERT INTO erasure_states
              (state_digest, request_digest, state_cbor) VALUES (?1, ?2, X'01')",
@@ -12677,7 +12682,21 @@ pub(super) mod key_registry_coverage {
         expect_err(validate_erasure_predecessor(
             &malformed_predecessor_state.conn,
             next_request,
-            &next,
+            next,
         ));
+    }
+
+    #[test]
+    fn erasure_persistence_error_regions_are_instrumented() {
+        let record = erasure_record();
+        let request = record.request().reference();
+        let state_digest = record.state().state_digest();
+        let record_bytes = fixture(record.to_canonical_cbor());
+        exercise_state_resolution_errors(state_digest);
+        exercise_record_load_errors(request, record_bytes);
+        exercise_commit_errors(&record);
+
+        let (next, predecessor) = erasure_record_with_predecessor();
+        exercise_predecessor_errors(&next, &predecessor);
     }
 }

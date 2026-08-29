@@ -5507,7 +5507,7 @@ mod coverage_entrypoints {
         let mut malformed_state = MemoryStore::new();
         malformed_state
             .erasure_records
-            .insert(request, record_bytes.clone());
+            .insert(request, record_bytes);
         malformed_state.erasure_states.insert(state_digest, vec![0]);
         expect_err(malformed_state.load_record(request));
 
