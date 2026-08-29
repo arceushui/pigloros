@@ -4,12 +4,12 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
-    verify_archive_release_filename, AllowedDivergenceV1, ArtifactDescriptorV1,
-    BundleContractErrorV1, BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1,
-    BundleMemberV1, BundleModeV1, CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1,
-    ConformanceBundleV1, ConformanceProfileV1, DeterministicBudgetV1, EvaluatorHardCapsV1,
-    EvaluatorProtocolV1, ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1,
-    FixtureProvenanceV1, FixtureProviderEntryV1, FixtureProviderKeyV1, FixtureProviderPackageV1,
+    verify_archive_release_filename, ArtifactDescriptorV1, BundleContractErrorV1,
+    BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1,
+    BundleModeV1, CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1,
+    ConformanceProfileV1, DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1,
+    ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1,
+    FixtureProviderEntryV1, FixtureProviderKeyV1, FixtureProviderPackageV1,
     FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1, IndependenceRequirementsV1,
     NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1,
     RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,

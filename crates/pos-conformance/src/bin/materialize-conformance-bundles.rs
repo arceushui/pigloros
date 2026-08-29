@@ -356,6 +356,8 @@ fn artifact_descriptor(path: &str, media_type: &str, bytes: &[u8]) -> ArtifactDe
 
 struct ProviderPackage {
     provider_key: FixtureProviderKeyV1,
+    claim_layer: ClaimLayerV1,
+    subject_adapter: SubjectAdapterKindV1,
     artifact: PublicArtifact,
 }
 
@@ -426,7 +428,7 @@ fn package_support_artifacts() -> Vec<PublicArtifact> {
 fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
     let schemas = provider_schema_artifacts(catalog)?;
     let package_support = package_support_artifacts();
-    let packages = catalog
+    let mut packages = catalog
         .entries
         .iter()
         .map(|layer| provider_package(layer, &schemas, &package_support))
@@ -434,13 +436,13 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
     if packages.len() != REQUIRED_FIXTURE_FAMILIES {
         return Err("fixture-provider catalog must contain exactly seven packages".into());
     }
+    packages.sort_by(|left, right| left.provider_key.cmp(&right.provider_key));
     let providers = packages
         .iter()
-        .zip(&catalog.entries)
-        .map(|(package, layer)| FixtureProviderEntryV1 {
+        .map(|package| FixtureProviderEntryV1 {
             provider_key: package.provider_key.clone(),
-            claim_layer: layer.claim_layer,
-            subject_adapter: layer.subject_adapter,
+            claim_layer: package.claim_layer,
+            subject_adapter: package.subject_adapter,
             provider_package_descriptor: package.artifact.descriptor(),
         })
         .collect::<Vec<_>>();
@@ -518,6 +520,8 @@ fn provider_package(
     );
     Ok(ProviderPackage {
         provider_key,
+        claim_layer: layer.claim_layer,
+        subject_adapter: layer.subject_adapter,
         artifact,
     })
 }
