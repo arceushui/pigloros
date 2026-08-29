@@ -1173,32 +1173,10 @@ fn fixture_descriptor_from_record(
         expected_verification_error: Some(failure),
         replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
         redaction_state: RedactionStateV1::EvidenceMissing,
-        deterministic_budget: DeterministicBudgetV1 {
-            memory_bytes: 64 * 1024 * 1024,
-            cpu_fuel: 10_000_000,
-            host_calls: 10_000,
-            event_count: 100_000,
-            output_bytes: 16 * 1024 * 1024,
-            storage_bytes: 64 * 1024 * 1024,
-            execution_steps: 10_000_000,
-            simulation_time_ns: 60_000_000_000,
-        },
-        operational_safety: OperationalSafetyV1 {
-            watchdog_ms: 120_000,
-        },
-        capability_policy: CapabilityPolicyV1 {
-            network_allowed: false,
-            capability_ids: vec!["read-public-bundle".to_owned()],
-        },
-        provenance: FixtureProvenanceV1 {
-            licence_id: "MIT".to_owned(),
-            notices_digest: context.notice_digest,
-            sbom_digest: context.sbom_digest,
-            source_digest: context.provenance_digest,
-            build_digest: context.provenance_digest,
-            publication_review_digest: context.provenance_digest,
-            limitations_digest: context.limitations_digest,
-        },
+        deterministic_budget: fixture_budget(),
+        operational_safety: fixture_operational_safety(),
+        capability_policy: fixture_capability_policy(),
+        provenance: fixture_provenance(context),
         trust_policy_snapshot_digest: downgrade.then(|| {
             labeled_digest(
                 "PiglorOS.DowngradeTrustPolicy.v1",
@@ -1232,6 +1210,44 @@ fn fixture_descriptor_from_record(
     };
     descriptor.fixture_digest = descriptor.digest();
     descriptor
+}
+
+const fn fixture_budget() -> DeterministicBudgetV1 {
+    DeterministicBudgetV1 {
+        memory_bytes: 64 * 1024 * 1024,
+        cpu_fuel: 10_000_000,
+        host_calls: 10_000,
+        event_count: 100_000,
+        output_bytes: 16 * 1024 * 1024,
+        storage_bytes: 64 * 1024 * 1024,
+        execution_steps: 10_000_000,
+        simulation_time_ns: 60_000_000_000,
+    }
+}
+
+const fn fixture_operational_safety() -> OperationalSafetyV1 {
+    OperationalSafetyV1 {
+        watchdog_ms: 120_000,
+    }
+}
+
+fn fixture_capability_policy() -> CapabilityPolicyV1 {
+    CapabilityPolicyV1 {
+        network_allowed: false,
+        capability_ids: vec!["read-public-bundle".to_owned()],
+    }
+}
+
+fn fixture_provenance(context: &FixtureContext) -> FixtureProvenanceV1 {
+    FixtureProvenanceV1 {
+        licence_id: "MIT".to_owned(),
+        notices_digest: context.notice_digest,
+        sbom_digest: context.sbom_digest,
+        source_digest: context.provenance_digest,
+        build_digest: context.provenance_digest,
+        publication_review_digest: context.provenance_digest,
+        limitations_digest: context.limitations_digest,
+    }
 }
 
 fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {

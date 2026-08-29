@@ -467,6 +467,13 @@ fn knowledge_non_interference_profile() -> ConformanceProfileV1 {
         fixture_digest: [0; 32],
     };
     fixture.fixture_digest = fixture.digest();
+    knowledge_profile(provider_key, fixture)
+}
+
+fn knowledge_profile(
+    provider_key: FixtureProviderKeyV1,
+    fixture: FixtureDescriptorV1,
+) -> ConformanceProfileV1 {
     let mut profile = ConformanceProfileV1 {
         profile_id: "pigloros.w8.knowledge-non-interference.1.0.0".to_owned(),
         semantic_version: "1.0.0".to_owned(),
@@ -846,7 +853,8 @@ fn public_request_output_limits_accept_exact_caps_and_reject_each_overflow() {
 }
 
 #[test]
-fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
+fn public_profile_caps_accept_exact_profile_and_member_path_limits(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut exact_profiles = profile_for_digest();
     exact_profiles.execution_profile_digests = (1_u8..=64).map(|seed| [seed; 32]).collect();
     exact_profiles.profile_digest = exact_profiles.digest();
@@ -879,11 +887,11 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
                 .len(),
         ))
         .max()
-        .expect("profile contains public artifacts");
+        .ok_or("profile must contain public artifacts")?;
     exact_path
         .evaluator_protocol
         .hard_caps
-        .max_member_path_bytes = u16::try_from(longest_path).expect("fixture path fits u16");
+        .max_member_path_bytes = u16::try_from(longest_path)?;
     exact_path.profile_digest = exact_path.digest();
     assert_eq!(exact_path.validate(), Ok(()));
 
@@ -891,12 +899,13 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits() {
     short_path
         .evaluator_protocol
         .hard_caps
-        .max_member_path_bytes = u16::try_from(longest_path - 1).expect("fixture path fits u16");
+        .max_member_path_bytes = u16::try_from(longest_path - 1)?;
     short_path.profile_digest = short_path.digest();
     assert_eq!(
         short_path.validate(),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
+    Ok(())
 }
 
 #[test]
