@@ -4199,6 +4199,24 @@ fn stage_erasure_record_sql(
 ) -> Result<(), ErasureErrorV1> {
     let request = record.request().reference();
     let state_digest = record.state().state_digest();
+    let existing_state_digest = validate_erasure_record_slot(conn, request, record, record_bytes)?;
+    persist_erasure_state(
+        conn,
+        request,
+        record,
+        state_digest,
+        state_bytes,
+        existing_state_digest,
+    )?;
+    insert_erasure_record(conn, request, state_digest, record_bytes)
+}
+
+fn validate_erasure_record_slot(
+    conn: &Connection,
+    request: ErasureReferenceV1,
+    record: &ErasureCoordinatorRecordV1,
+    record_bytes: &[u8],
+) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
     let existing_bytes = conn
         .query_row(
             "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
@@ -4207,77 +4225,53 @@ fn stage_erasure_record_sql(
         )
         .optional()
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-    let existing_state_digest = if let Some(existing_bytes) = existing_bytes {
-        let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(&existing_bytes)?;
-        if existing_bytes.as_slice() != record_bytes {
-            existing.validate_replacement(record)?;
-        }
-        Some(existing.state().state_digest())
-    } else {
+    let Some(existing_bytes) = existing_bytes else {
         if record.state().previous_state().is_some() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        None
+        return Ok(None);
     };
+    let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(&existing_bytes)?;
+    if existing_bytes.as_slice() != record_bytes {
+        existing.validate_replacement(record)?;
+    }
+    Ok(Some(existing.state().state_digest()))
+}
 
-    let stored_state = conn
-        .query_row(
-            "SELECT request_digest, state_cbor
-             FROM erasure_states WHERE state_digest = ?1",
-            params![state_digest.digest().as_slice()],
-            |row| {
-                row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
-                    row.get::<_, Vec<u8>>(1)
-                        .map(|state_cbor| (request_digest, state_cbor))
-                })
-            },
-        )
-        .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-    if let Some((request_digest, stored_state)) = stored_state {
-        let metadata_request: [u8; 32] = request_digest
-            .try_into()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        let expected_request = ErasureReferenceV1::from_digest(metadata_request);
-        let decoded_state = pos_core::ErasureStateV1::from_canonical_cbor(&stored_state)?;
-        if stored_state != state_bytes
-            || expected_request != request
-            || !decoded_state.eq(record.state())
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
+fn load_erasure_state_row(
+    conn: &Connection,
+    digest: ErasureReferenceV1,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT request_digest, state_cbor
+         FROM erasure_states WHERE state_digest = ?1",
+        params![digest.digest().as_slice()],
+        |row| {
+            row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
+                row.get::<_, Vec<u8>>(1)
+                    .map(|state_cbor| (request_digest, state_cbor))
+            })
+        },
+    )
+    .optional()
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+}
+
+fn persist_erasure_state(
+    conn: &Connection,
+    request: ErasureReferenceV1,
+    record: &ErasureCoordinatorRecordV1,
+    state_digest: ErasureReferenceV1,
+    state_bytes: &[u8],
+    existing_state_digest: Option<ErasureReferenceV1>,
+) -> Result<(), ErasureErrorV1> {
+    if let Some((request_digest, stored_state)) = load_erasure_state_row(conn, state_digest)? {
+        validate_erasure_state_row(request, record, state_bytes, request_digest, stored_state)
     } else {
         if existing_state_digest == Some(state_digest) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if let Some(previous) = record.state().previous_state() {
-            let previous_state = conn
-                .query_row(
-                    "SELECT request_digest, state_cbor
-                     FROM erasure_states WHERE state_digest = ?1",
-                    params![previous.digest().as_slice()],
-                    |row| {
-                        row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
-                            row.get::<_, Vec<u8>>(1)
-                                .map(|state_cbor| (request_digest, state_cbor))
-                        })
-                    },
-                )
-                .optional()
-                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let metadata_request: [u8; 32] = previous_state
-                .0
-                .try_into()
-                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-            let decoded_previous =
-                pos_core::ErasureStateV1::from_canonical_cbor(&previous_state.1)?;
-            if ErasureReferenceV1::from_digest(metadata_request) != request
-                || decoded_previous.state_digest() != previous
-            {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
+        validate_erasure_predecessor(conn, request, record)?;
         conn.execute(
             "INSERT INTO erasure_states
              (state_digest, request_digest, state_cbor) VALUES (?1, ?2, ?3)",
@@ -4287,8 +4281,59 @@ fn stage_erasure_record_sql(
                 state_bytes,
             ],
         )
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
     }
+}
+
+fn validate_erasure_state_row(
+    request: ErasureReferenceV1,
+    record: &ErasureCoordinatorRecordV1,
+    state_bytes: &[u8],
+    request_digest: Vec<u8>,
+    stored_state: Vec<u8>,
+) -> Result<(), ErasureErrorV1> {
+    let metadata_request: [u8; 32] = request_digest
+        .try_into()
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    let expected_request = ErasureReferenceV1::from_digest(metadata_request);
+    let decoded_state = pos_core::ErasureStateV1::from_canonical_cbor(&stored_state)?;
+    if stored_state != state_bytes
+        || expected_request != request
+        || !decoded_state.eq(record.state())
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
+}
+
+fn validate_erasure_predecessor(
+    conn: &Connection,
+    request: ErasureReferenceV1,
+    record: &ErasureCoordinatorRecordV1,
+) -> Result<(), ErasureErrorV1> {
+    let Some(previous) = record.state().previous_state() else {
+        return Ok(());
+    };
+    let (request_digest, previous_bytes) = load_erasure_state_row(conn, previous)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let metadata_request: [u8; 32] = request_digest
+        .try_into()
+        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+    let decoded_previous = pos_core::ErasureStateV1::from_canonical_cbor(&previous_bytes)?;
+    if ErasureReferenceV1::from_digest(metadata_request) != request
+        || decoded_previous.state_digest() != previous
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
+}
+
+fn insert_erasure_record(
+    conn: &Connection,
+    request: ErasureReferenceV1,
+    state_digest: ErasureReferenceV1,
+    record_bytes: &[u8],
+) -> Result<(), ErasureErrorV1> {
     conn.execute(
         "INSERT INTO erasure_records
          (request_digest, state_digest, record_cbor) VALUES (?1, ?2, ?3)
@@ -4301,8 +4346,8 @@ fn stage_erasure_record_sql(
             record_bytes,
         ],
     )
-    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-    Ok(())
+    .map(|_| ())
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
 }
 
 fn finish_erasure_transaction<T>(
@@ -4310,15 +4355,15 @@ fn finish_erasure_transaction<T>(
     result: Result<T, ErasureErrorV1>,
 ) -> Result<T, ErasureErrorV1> {
     match result {
-        Ok(value) => match conn.execute_batch("COMMIT") {
-            Ok(()) => Ok(value),
-            Err(_) => {
-                if conn.execute_batch("ROLLBACK").is_err() {
-                    return Err(ErasureErrorV1::ReceiptCommitFailed);
-                }
+        Ok(value) => {
+            if conn.execute_batch("COMMIT").is_ok() {
+                Ok(value)
+            } else if conn.execute_batch("ROLLBACK").is_err() {
+                Err(ErasureErrorV1::ReceiptCommitFailed)
+            } else {
                 Err(ErasureErrorV1::ReceiptCommitFailed)
             }
-        },
+        }
         Err(error) => {
             if conn.execute_batch("ROLLBACK").is_err() {
                 return Err(ErasureErrorV1::ReceiptCommitFailed);
