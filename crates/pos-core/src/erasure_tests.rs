@@ -1279,7 +1279,15 @@ fn durable_record_freeze_reservation_and_admission_bindings_are_checked(
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let frozen = record_after_freeze(vec![target])?;
+    let frozen = {
+        let frozen = record_after_freeze(vec![target])?;
+        let mut state = frozen.state.clone();
+        state.replay_claim = ErasureReplayClaimV1::StructuralOnly;
+        state.state_digest = reference_zero();
+        let mut parts = record_parts(&frozen);
+        parts.state = state.with_digest()?;
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2))?
+    };
     let mut frozen_without_admission = record_parts(&frozen);
     frozen_without_admission.freeze_admission = None;
     assert_eq!(
@@ -4234,11 +4242,16 @@ fn destruction_commands_are_retry_stable_and_target_bound() {
 fn terminal_receipt_claim_cannot_upgrade_independently() -> Result<(), ErasureErrorV1> {
     let complete = complete_record()?;
     let mut parts = record_parts(&complete);
+    let mut terminal_state = complete.state.clone();
+    terminal_state.replay_claim = ErasureReplayClaimV1::Exact;
+    terminal_state.state_digest = reference_zero();
+    let terminal_state = terminal_state.with_digest()?;
+    parts.state = terminal_state.clone();
     let input = parts
         .receipt_input
         .as_mut()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    input.replay_claim = ErasureReplayClaimV1::Exact;
+    input.terminal_state = terminal_state.state_digest();
     parts.receipt = Some(ErasureReceiptV1::new(input.clone())?);
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),

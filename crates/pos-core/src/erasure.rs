@@ -2845,11 +2845,16 @@ mod erasure_coverage_tests {
     fn terminal_receipt_claim_is_bound_to_terminal_state() -> Result<(), ErasureErrorV1> {
         let complete = tests::complete_record()?;
         let mut parts = tests::record_parts(&complete);
+        let mut terminal_state = complete.state().clone();
+        terminal_state.replay_claim = ErasureReplayClaimV1::Exact;
+        terminal_state.state_digest = reference_zero();
+        let terminal_state = terminal_state.with_digest()?;
+        parts.state = terminal_state.clone();
         let input = parts
             .receipt_input
             .as_mut()
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        input.replay_claim = ErasureReplayClaimV1::Exact;
+        input.terminal_state = terminal_state.state_digest();
         parts.receipt = Some(ErasureReceiptV1::new(input.clone())?);
         assert_eq!(
             ErasureCoordinatorRecordV1::from_parts(parts, coordinator()),
