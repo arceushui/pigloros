@@ -5497,8 +5497,71 @@ mod coverage_entrypoints {
         );
     }
 
+    #[test]
+    fn erasure_persistence_error_regions_are_instrumented() {
+        let record = ok(super::erasure_coverage_tests::erasure_coverage_record());
+        let request = record.request().reference();
+        let state_digest = record.state().state_digest();
+        let record_bytes = ok(record.to_canonical_cbor());
+
+        let mut malformed_state = MemoryStore::new();
+        malformed_state
+            .erasure_records
+            .insert(request, record_bytes.clone());
+        malformed_state.erasure_states.insert(state_digest, vec![0]);
+        expect_err(malformed_state.load_record(request));
+
+        let mut malformed_record = BTreeMap::new();
+        malformed_record.insert(request, vec![0]);
+        let mut states = BTreeMap::new();
+        expect_err(stage_erasure_record(
+            &mut malformed_record,
+            &mut states,
+            &record,
+        ));
+
+        let predecessor_key = pos_core::ErasureReferenceV1::from_digest([30; 32]);
+        let next = ok(
+            super::erasure_coverage_tests::erasure_coverage_record_with_predecessor(
+                predecessor_key,
+            ),
+        );
+        let next_bytes = ok(next.to_canonical_cbor());
+        let mut records = BTreeMap::new();
+        records.insert(next.request().reference(), next_bytes);
+
+        let mut missing_predecessor = BTreeMap::new();
+        expect_err(stage_erasure_record(
+            &mut records,
+            &mut missing_predecessor,
+            &next,
+        ));
+
+        let mut malformed_predecessor = BTreeMap::new();
+        malformed_predecessor.insert(predecessor_key, vec![0]);
+        expect_err(stage_erasure_record(
+            &mut records,
+            &mut malformed_predecessor,
+            &next,
+        ));
+
+        let wrong_digest_state = ok(pos_core::ErasureStateV1::submitted(
+            next.request().reference(),
+            next.state().coordinator(),
+            pos_core::ErasureReferenceV1::from_digest([77; 32]),
+        ));
+        let mut wrong_digest_predecessor = BTreeMap::new();
+        wrong_digest_predecessor
+            .insert(predecessor_key, ok(wrong_digest_state.to_canonical_cbor()));
+        expect_err(stage_erasure_record(
+            &mut records,
+            &mut wrong_digest_predecessor,
+            &next,
+        ));
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn erasure_coverage_record(
+    pub(super) fn erasure_coverage_record(
     ) -> Result<pos_core::ErasureCoordinatorRecordV1, Box<dyn std::error::Error>> {
         let request = pos_core::ErasureRequestV1::new(pos_core::ErasureRequestInputV1 {
             request: pos_core::ErasureReferenceV1::from_digest([1; 32]),
@@ -5536,7 +5599,7 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn erasure_coverage_record_with_predecessor(
+    pub(super) fn erasure_coverage_record_with_predecessor(
         predecessor: pos_core::ErasureReferenceV1,
     ) -> Result<pos_core::ErasureCoordinatorRecordV1, Box<dyn std::error::Error>> {
         let submitted = erasure_coverage_record()?;

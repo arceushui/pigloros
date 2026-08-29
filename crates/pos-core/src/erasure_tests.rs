@@ -262,7 +262,10 @@ impl ErasureStateResolverV1 for TestCoordinatorPort {
     }
 }
 
-fn test_port(accepted: bool, targets: Vec<ErasureRequiredTargetV1>) -> TestCoordinatorPort {
+pub(super) fn test_port(
+    accepted: bool,
+    targets: Vec<ErasureRequiredTargetV1>,
+) -> TestCoordinatorPort {
     TestCoordinatorPort {
         accepted,
         authorization_admitted: true,
@@ -322,10 +325,26 @@ pub(super) fn request_input(selectors: Vec<ErasureReferenceV1>) -> ErasureReques
         provenance: reference(6),
     }
 }
-fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+
+pub(super) fn test_port_with_commit_error() -> TestCoordinatorPort {
+    let mut port = test_port(true, Vec::new());
+    port.commit_error = Some(ErasureErrorV1::ReceiptCommitFailed);
+    port
+}
+
+pub(super) fn test_port_with_commit_error_on_call(
+    call: usize,
+    targets: Vec<ErasureRequiredTargetV1>,
+) -> TestCoordinatorPort {
+    let mut port = test_port(true, targets);
+    port.commit_error_on_call = Some(call);
+    port
+}
+
+pub(super) fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(request_input(vec![reference(8), reference(7)]))
 }
-fn change(
+pub(super) fn change(
     lifecycle: ErasureLifecycleV1,
     freeze_position: Option<u64>,
     pending_owners: Vec<ErasureReferenceV1>,
@@ -341,7 +360,7 @@ fn change(
         provenance: reference(9),
     }
 }
-fn acknowledgement(
+pub(super) fn acknowledgement(
     owner: u8,
     outcome: ErasureAcknowledgementOutcomeV1,
 ) -> ErasureAcknowledgementV1 {

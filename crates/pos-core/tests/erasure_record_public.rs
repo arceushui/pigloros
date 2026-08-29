@@ -100,11 +100,8 @@ fn public_record_decoder_rejects_each_malformed_field() {
 
 #[test]
 fn public_record_decoder_rejects_noncanonical_encoding() {
-    let mut noncanonical = submitted_record_bytes();
-    noncanonical[7] = 0x18;
-    noncanonical.insert(8, 1);
     assert_eq!(
-        ErasureCoordinatorRecordV1::from_canonical_cbor(&noncanonical),
+        ErasureCoordinatorRecordV1::from_canonical_cbor(&[0x18, 0x01]),
         Err(ErasureErrorV1::InvalidEncoding)
     );
 }

@@ -12438,4 +12438,225 @@ pub(super) mod key_registry_coverage {
         FAIL_REGISTRY_SERIALIZATION.with(|flag| flag.set(false));
         assert!(matches!(serialization, Err(CoreError::Serialization(_))));
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn erasure_reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn erasure_record() -> ErasureCoordinatorRecordV1 {
+        let request = fixture(pos_core::ErasureRequestV1::new(
+            pos_core::ErasureRequestInputV1 {
+                request: erasure_reference(1),
+                subject: erasure_reference(2),
+                scope: pos_core::ErasureScopeV1::PrivateSubjectData,
+                selectors: vec![erasure_reference(3)],
+                requester: erasure_reference(4),
+                authorization: erasure_reference(5),
+                policy: erasure_reference(6),
+                request_position: 10,
+                horizon_position: 20,
+                provenance: erasure_reference(7),
+            },
+        ));
+        let state = fixture(pos_core::ErasureStateV1::submitted(
+            request.reference(),
+            erasure_reference(8),
+            erasure_reference(9),
+        ));
+        fixture(ErasureCoordinatorRecordV1::from_parts(
+            pos_core::ErasureCoordinatorRecordPartsV1 {
+                request,
+                state,
+                reserved_targets: Vec::new(),
+                targets: Vec::new(),
+                acknowledgements: Vec::new(),
+                receipt: None,
+                receipt_input: None,
+                authorize_provenance: None,
+                freeze_provenance: None,
+                freeze_admission: None,
+                dispatch_provenance: None,
+            },
+            erasure_reference(8),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn erasure_record_with_predecessor() -> (ErasureCoordinatorRecordV1, pos_core::ErasureStateV1) {
+        let submitted = erasure_record();
+        let predecessor = submitted.state().clone();
+        let state = fixture(predecessor.transition(pos_core::ErasureStateTransitionV1 {
+            lifecycle: pos_core::ErasureLifecycleV1::Authorized,
+            freeze_position: None,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+            provenance: erasure_reference(10),
+        }));
+        let record = fixture(ErasureCoordinatorRecordV1::from_parts(
+            pos_core::ErasureCoordinatorRecordPartsV1 {
+                request: submitted.request().clone(),
+                state,
+                reserved_targets: Vec::new(),
+                targets: Vec::new(),
+                acknowledgements: Vec::new(),
+                receipt: None,
+                receipt_input: None,
+                authorize_provenance: Some(erasure_reference(10)),
+                freeze_provenance: None,
+                freeze_admission: None,
+                dispatch_provenance: None,
+            },
+            submitted.state().coordinator(),
+        ));
+        (record, predecessor)
+    }
+
+    #[test]
+    fn erasure_persistence_error_regions_are_instrumented() {
+        let record = erasure_record();
+        let request = record.request().reference();
+        let state_digest = record.state().state_digest();
+        let record_bytes = fixture(record.to_canonical_cbor());
+
+        let mut state_query_error = tests::new_store();
+        fixture(
+            state_query_error
+                .conn
+                .execute_batch("DROP TABLE erasure_states"),
+        );
+        expect_err(state_query_error.resolve_state(state_digest));
+
+        let mut malformed_state_metadata = tests::new_store();
+        fixture(
+            malformed_state_metadata
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON"),
+        );
+        fixture(malformed_state_metadata.conn.execute(
+            "INSERT INTO erasure_states
+             (state_digest, request_digest, state_cbor) VALUES (?1, X'01', X'01')",
+            params![state_digest.digest().as_slice()],
+        ));
+        expect_err(malformed_state_metadata.resolve_state(state_digest));
+
+        let mut record_query_error = tests::new_store();
+        fixture(
+            record_query_error
+                .conn
+                .execute_batch("DROP TABLE erasure_records"),
+        );
+        expect_err(record_query_error.load_record(request));
+
+        let mut malformed_record_metadata = tests::new_store();
+        fixture(
+            malformed_record_metadata
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON"),
+        );
+        fixture(malformed_record_metadata.conn.execute(
+            "INSERT INTO erasure_records
+             (request_digest, state_digest, record_cbor) VALUES (?1, X'01', ?2)",
+            params![request.digest().as_slice(), record_bytes.clone()],
+        ));
+        expect_err(malformed_record_metadata.load_record(request));
+
+        let mut begin_error = tests::new_store();
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
+        let begin_result = begin_error.commit_record(record.clone());
+        FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
+        expect_err(begin_result);
+
+        let mut slot_query_error = tests::new_store();
+        fixture(
+            slot_query_error
+                .conn
+                .execute_batch("DROP TABLE erasure_records"),
+        );
+        expect_err(slot_query_error.commit_record(record.clone()));
+
+        let mut malformed_existing_record = tests::new_store();
+        fixture(malformed_existing_record.commit_record(record.clone()));
+        fixture(malformed_existing_record.conn.execute(
+            "UPDATE erasure_records SET record_cbor = X'01' WHERE request_digest = ?1",
+            params![request.digest().as_slice()],
+        ));
+        expect_err(malformed_existing_record.commit_record(record.clone()));
+
+        let mut state_row_query_error = tests::new_store();
+        fixture(
+            state_row_query_error
+                .conn
+                .execute_batch("DROP TABLE erasure_states"),
+        );
+        expect_err(state_row_query_error.commit_record(record.clone()));
+
+        let mut malformed_state_metadata_on_commit = tests::new_store();
+        fixture(malformed_state_metadata_on_commit.commit_record(record.clone()));
+        fixture(
+            malformed_state_metadata_on_commit
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON"),
+        );
+        fixture(malformed_state_metadata_on_commit.conn.execute(
+            "UPDATE erasure_states SET request_digest = X'01' WHERE state_digest = ?1",
+            params![state_digest.digest().as_slice()],
+        ));
+        expect_err(malformed_state_metadata_on_commit.commit_record(record));
+
+        let (next, predecessor) = erasure_record_with_predecessor();
+        let next_request = next.request().reference();
+        let predecessor_digest = predecessor.state_digest();
+        let predecessor_bytes = fixture(predecessor.to_canonical_cbor());
+
+        let mut predecessor_query_error = tests::new_store();
+        fixture(
+            predecessor_query_error
+                .conn
+                .execute_batch("DROP TABLE erasure_states"),
+        );
+        expect_err(validate_erasure_predecessor(
+            &predecessor_query_error.conn,
+            next_request,
+            &next,
+        ));
+
+        let mut malformed_predecessor_metadata = tests::new_store();
+        fixture(
+            malformed_predecessor_metadata
+                .conn
+                .execute_batch("PRAGMA ignore_check_constraints = ON"),
+        );
+        fixture(malformed_predecessor_metadata.conn.execute(
+            "INSERT INTO erasure_states
+             (state_digest, request_digest, state_cbor) VALUES (?1, X'01', ?2)",
+            params![
+                predecessor_digest.digest().as_slice(),
+                predecessor_bytes.clone()
+            ],
+        ));
+        expect_err(validate_erasure_predecessor(
+            &malformed_predecessor_metadata.conn,
+            next_request,
+            &next,
+        ));
+
+        let mut malformed_predecessor_state = tests::new_store();
+        fixture(malformed_predecessor_state.conn.execute(
+            "INSERT INTO erasure_states
+             (state_digest, request_digest, state_cbor) VALUES (?1, ?2, X'01')",
+            params![
+                predecessor_digest.digest().as_slice(),
+                next_request.digest().as_slice()
+            ],
+        ));
+        expect_err(validate_erasure_predecessor(
+            &malformed_predecessor_state.conn,
+            next_request,
+            &next,
+        ));
+    }
 }

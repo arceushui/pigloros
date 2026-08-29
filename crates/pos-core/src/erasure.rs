@@ -2182,6 +2182,7 @@ mod erasure_targeted_coverage_tests {
         Ok(())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn advanced_replacement_rejects_a_backward_lifecycle() -> Result<(), ErasureErrorV1> {
         let frozen = tests::record_after_freeze(vec![target()])?;
@@ -2241,6 +2242,91 @@ mod erasure_targeted_coverage_tests {
             decode_limited(&[0], 0, ERASURE_MAX_INVENTORY_RESULTS),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn required_record(
+        value: Result<ErasureCoordinatorRecordV1, ErasureErrorV1>,
+    ) -> ErasureCoordinatorRecordV1 {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected erasure coverage fixture error: {error:?}"
+            )))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn required_request(value: Result<ErasureRequestV1, ErasureErrorV1>) -> ErasureRequestV1 {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected erasure coverage request error: {error:?}"
+            )))
+        })
+    }
+
+    #[test]
+    fn replacement_validation_rejects_an_invalid_persisted_record() {
+        let valid = required_record(tests::record_after_submit());
+        let mut invalid = valid.clone();
+        invalid.state.request = reference(99);
+
+        assert_eq!(
+            invalid.validate_replacement(&valid),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn batch_commit_and_dispatch_intent_failures_are_propagated() {
+        let valid = required_record(tests::record_after_submit());
+        let mut invalid = valid.clone();
+        invalid.state.request = reference(99);
+        let mut validation_failure =
+            ErasureCoordinatorStateMachineV1::new(tests::test_port(true, Vec::new()), reference(2));
+        assert_eq!(
+            validation_failure.commit_records(&[invalid]),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut persistence_failure = ErasureCoordinatorStateMachineV1::new(
+            tests::test_port_with_commit_error(),
+            reference(2),
+        );
+        assert_eq!(
+            persistence_failure.commit_records(&[valid]),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+
+        let target =
+            tests::acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+        let mut dispatch_failure = ErasureCoordinatorStateMachineV1::new(
+            tests::test_port_with_commit_error_on_call(5, vec![target]),
+            reference(2),
+        );
+        required_state(dispatch_failure.submit(required_request(tests::request()), reference(3)));
+        required_state(dispatch_failure.authorize(reference(1), reference(9)));
+        required_state(dispatch_failure.freeze_inventory(
+            reference(1),
+            tests::change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ));
+        assert_eq!(
+            dispatch_failure.dispatch_destruction(reference(1), reference(9)),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn required_state(value: Result<ErasureStateV1, ErasureErrorV1>) -> ErasureStateV1 {
+        value.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!(
+                "unexpected erasure coverage state error: {error:?}"
+            )))
+        })
     }
 }
 
@@ -2685,13 +2771,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
             if let Some(stored) = record.receipt.clone() {
-                let normalized =
-                    Self::normalize_receipt_input(request, self.coordinator, &record, input)?;
-                return if record.receipt_input.as_ref() == Some(&normalized) {
-                    Ok(stored)
-                } else {
-                    Err(ErasureErrorV1::PolicyConflict)
-                };
+                return Self::normalize_receipt_input(request, self.coordinator, &record, input)
+                    .and_then(|normalized| {
+                        if record.receipt_input.as_ref() == Some(&normalized) {
+                            Ok(stored)
+                        } else {
+                            Err(ErasureErrorV1::PolicyConflict)
+                        }
+                    });
             }
             if record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched {
                 let freeze_position = record.state.freeze_position();
