@@ -794,6 +794,7 @@ fn raw_cpf1_value(f: &[Value]) -> Result<(), BundleContractErrorV1> {
         if !raw_identifier(text(&x[0])?, 128)
             || uint(&x[2])? > 6
             || uint(&x[3])? > 6
+            || uint(&x[5])? > 2
             || !matches!(&x[1], Value::Bool(_))
             || !matches!(&x[2], Value::Integer(_))
             || !matches!(&x[5], Value::Integer(_))

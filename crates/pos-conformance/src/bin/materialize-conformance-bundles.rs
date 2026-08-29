@@ -285,6 +285,7 @@ struct FixtureSchema {
     value_type: String,
     required: Vec<String>,
     properties: FixtureSchemaProperties,
+    #[serde(rename = "additionalProperties")]
     additional_properties: bool,
 }
 
