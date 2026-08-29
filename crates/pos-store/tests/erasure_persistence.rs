@@ -902,6 +902,9 @@ fn sqlite_erasure_persistence_rejects_recommit_after_state_row_deletion(
         store.commit_record(record),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    assert_eq!(store.load_record(request)?, None);
+    assert_eq!(
+        store.load_record(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
