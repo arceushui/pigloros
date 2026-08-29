@@ -13,12 +13,16 @@ use std::io::Cursor;
 use thiserror::Error;
 
 use crate::{
-    ArtifactDescriptorV1, ConformanceProfileV1, ExecutionModeV1, FixtureProviderPackageV1,
-    FixtureProviderRegistryV1, ProfileLifecycleV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    ArtifactDescriptorV1, ConformanceProfileV1, ExecutionModeV1, FixtureFamilyV1,
+    FixtureProviderPackageV1, FixtureProviderRegistryV1, ProfileLifecycleV1,
+    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 
 pub const CONFORMANCE_BUNDLE_MAGIC_V1: &str = "CFB1";
 pub const MAX_CONFORMANCE_BUNDLE_BYTES_V1: u64 = 1024 * 1024 * 1024;
+const MAX_CONFORMANCE_MEMBER_BYTES_V1: u64 = 64 * 1024 * 1024;
+const MAX_CONFORMANCE_ITEMS_V1: u64 = 65_536;
+const MAX_CONFORMANCE_NESTING_V1: u8 = 32;
 const PROFILE_PATH: &str = "profile/CPF1.cbor";
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -129,48 +133,48 @@ impl BundleMemberV1 {
         }
     }
     #[must_use]
-    pub fn fixture_input(p: impl Into<String>, b: Vec<u8>) -> Self {
-        Self::new(p, b, BundleMemberRoleV1::FixtureInput)
+    pub fn fixture_input(path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self::new(path, bytes, BundleMemberRoleV1::FixtureInput)
     }
     #[must_use]
-    pub fn expected_result(p: impl Into<String>, b: Vec<u8>) -> Self {
-        Self::new(p, b, BundleMemberRoleV1::ExpectedResult)
+    pub fn expected_result(path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self::new(path, bytes, BundleMemberRoleV1::ExpectedResult)
     }
     #[must_use]
-    pub fn profile(b: Vec<u8>) -> Self {
-        Self::new(PROFILE_PATH, b, BundleMemberRoleV1::Profile)
+    pub fn profile(bytes: Vec<u8>) -> Self {
+        Self::new(PROFILE_PATH, bytes, BundleMemberRoleV1::Profile)
     }
     #[must_use]
-    pub fn supporting(p: impl Into<String>, b: Vec<u8>, r: BundleMemberRoleV1) -> Self {
-        Self::new(p, b, r)
+    pub fn supporting(path: impl Into<String>, bytes: Vec<u8>, role: BundleMemberRoleV1) -> Self {
+        Self::new(path, bytes, role)
     }
     #[must_use]
-    pub fn authority_inventory(b: Vec<u8>) -> Self {
+    pub fn authority_inventory(bytes: Vec<u8>) -> Self {
         Self::new(
             "authority/expected-authority-inventory.json",
-            b,
+            bytes,
             BundleMemberRoleV1::AuthorityInventory,
         )
     }
     #[must_use]
-    pub fn execution_matrix(b: Vec<u8>) -> Self {
+    pub fn execution_matrix(bytes: Vec<u8>) -> Self {
         Self::new(
             "authority/execution-matrix.json",
-            b,
+            bytes,
             BundleMemberRoleV1::ExecutionMatrix,
         )
     }
     #[must_use]
-    pub fn fixture_provider_registry(b: Vec<u8>) -> Self {
+    pub fn fixture_provider_registry(bytes: Vec<u8>) -> Self {
         Self::new(
             FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
-            b,
+            bytes,
             BundleMemberRoleV1::FixtureProviderRegistry,
         )
     }
     #[must_use]
-    pub fn fixture_provider_package(p: impl Into<String>, b: Vec<u8>) -> Self {
-        Self::new(p, b, BundleMemberRoleV1::FixtureProviderPackage)
+    pub fn fixture_provider_package(path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self::new(path, bytes, BundleMemberRoleV1::FixtureProviderPackage)
     }
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -222,35 +226,36 @@ impl ConformanceBundleV1 {
         if profile.lifecycle != ProfileLifecycleV1::Draft {
             return Err(BundleContractErrorV1::LifecycleInvalid);
         }
-        members.push(BundleMemberV1::profile(
-            profile
-                .to_canonical_cbor()
-                .map_err(|_| BundleContractErrorV1::ProfileInvalid)?,
-        ));
-        members.sort_by(|a, b| a.path.cmp(&b.path));
-        let descriptors = members
-            .iter()
-            .map(|m| BundleMemberDescriptorV1 {
-                path: m.path.clone(),
-                size_bytes: u64::try_from(m.bytes.len()).unwrap_or(u64::MAX),
-                digest: m.digest,
-                role: m.role,
+        profile
+            .to_canonical_cbor()
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+            .and_then(|profile_bytes| {
+                members.push(BundleMemberV1::profile(profile_bytes));
+                members.sort_by(|a, b| a.path.cmp(&b.path));
+                let descriptors = members
+                    .iter()
+                    .map(|member| BundleMemberDescriptorV1 {
+                        path: member.path.clone(),
+                        size_bytes: u64::try_from(member.bytes.len()).unwrap_or(u64::MAX),
+                        digest: member.digest,
+                        role: member.role,
+                    })
+                    .collect();
+                let result = Self {
+                    manifest: BundleManifestV1 {
+                        magic: CONFORMANCE_BUNDLE_MAGIC_V1.to_owned(),
+                        lifecycle: ProfileLifecycleV1::Draft,
+                        mode,
+                        profile_digest: profile.profile_digest,
+                        members: descriptors,
+                        expected_results,
+                    },
+                    members,
+                    signer_public_key: PublicKey::from_bytes([0; 32]),
+                    signature: Signature::from_bytes([0; 64]),
+                };
+                result.validate_unsigned().map(|()| result)
             })
-            .collect();
-        let result = Self {
-            manifest: BundleManifestV1 {
-                magic: CONFORMANCE_BUNDLE_MAGIC_V1.to_owned(),
-                lifecycle: ProfileLifecycleV1::Draft,
-                mode,
-                profile_digest: profile.profile_digest,
-                members: descriptors,
-                expected_results,
-            },
-            members,
-            signer_public_key: PublicKey::from_bytes([0; 32]),
-            signature: Signature::from_bytes([0; 64]),
-        };
-        result.validate_unsigned().map(|()| result)
     }
     /// Sign the canonical manifest after revalidating the complete unsigned bundle.
     ///
@@ -258,10 +263,15 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error when validation, encoding, or signature verification fails.
     pub fn sign(mut self, key: &ed25519_dalek::SigningKey) -> Result<Self, BundleContractErrorV1> {
-        self.validate_unsigned()?;
-        self.signer_public_key = PublicKey::from_bytes(key.verifying_key().to_bytes());
-        self.signature = Signature::from_bytes(key.sign(&self.manifest_bytes()?).to_bytes());
-        self.validate().map(|()| self)
+        self.validate_unsigned().and_then(|()| {
+            self.signer_public_key = PublicKey::from_bytes(key.verifying_key().to_bytes());
+            self.manifest_bytes()
+                .map(|manifest| {
+                    self.signature = Signature::from_bytes(key.sign(&manifest).to_bytes());
+                })
+                .and_then(|()| self.validate())
+                .map(|()| self)
+        })
     }
     /// Decode and validate exact canonical CFB1 archive bytes.
     ///
@@ -269,28 +279,34 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error for malformed, noncanonical, oversized, or invalid bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, BundleContractErrorV1> {
-        if u64::try_from(bytes.len()).map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
-            > MAX_CONFORMANCE_BUNDLE_BYTES_V1
-        {
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
             return Err(BundleContractErrorV1::MemberOutOfBounds);
         }
-        let value = decode(bytes)?;
-        let fields = array(&value, 4)?;
-        let manifest = decode_manifest(&fields[0])?;
-        let members = array_values(&fields[1])?
-            .iter()
-            .map(decode_member)
-            .collect::<Result<Vec<_>, _>>()?;
-        let signer_public_key = PublicKey::from_bytes(digest::<32>(&fields[2])?);
-        let signature = Signature::from_bytes(digest::<64>(&fields[3])?);
-        let bundle = Self {
-            manifest,
-            members,
-            signer_public_key,
-            signature,
-        };
-        bundle.validate()?;
-        Ok(bundle)
+        decode(bytes).and_then(|value| {
+            array(&value, 4).and_then(|fields| {
+                decode_manifest(&fields[0]).and_then(|manifest| {
+                    array_values(&fields[1]).and_then(|member_values| {
+                        member_values
+                            .iter()
+                            .map(decode_member)
+                            .collect::<Result<Vec<_>, _>>()
+                            .and_then(|members| {
+                                digest::<32>(&fields[2]).and_then(|public_key| {
+                                    digest::<64>(&fields[3]).and_then(|signature| {
+                                        let bundle = Self {
+                                            manifest,
+                                            members,
+                                            signer_public_key: PublicKey::from_bytes(public_key),
+                                            signature: Signature::from_bytes(signature),
+                                        };
+                                        bundle.validate().map(|()| bundle)
+                                    })
+                                })
+                            })
+                    })
+                })
+            })
+        })
     }
     /// Validate member closure, descriptor bindings, profile/provider contracts, and signature.
     ///
@@ -298,15 +314,16 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error for the first rejected invariant.
     pub fn validate(&self) -> Result<(), BundleContractErrorV1> {
-        self.validate_unsigned()?;
-        let key = signing::verifying_key_from_public_key(&self.signer_public_key)
-            .map_err(|_| BundleContractErrorV1::SignatureInvalid)?;
-        signing::verify(
-            &key,
-            &CanonicalBytes::from_vec(self.manifest_bytes()?),
-            &self.signature,
-        )
-        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+        self.validate_unsigned().and_then(|()| {
+            signing::verifying_key_from_public_key(&self.signer_public_key)
+                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                .and_then(|key| {
+                    self.manifest_bytes().and_then(|manifest| {
+                        signing::verify(&key, &CanonicalBytes::from_vec(manifest), &self.signature)
+                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                    })
+                })
+        })
     }
     /// Encode the canonical six-field CFB1 manifest.
     ///
@@ -331,8 +348,7 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error when validation or canonical encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
-        self.validate()?;
-        encode(&archive_value(self))
+        self.validate().and_then(|()| encode(&archive_value(self)))
     }
     /// Compute the BLAKE3 digest of the complete canonical archive bytes.
     ///
@@ -360,7 +376,7 @@ impl ConformanceBundleV1 {
                 .members
                 .iter()
                 .try_fold(0_u64, |total, member| {
-                    total.checked_add(u64::try_from(member.bytes.len()).ok()?)
+                    total.checked_add(u64::try_from(member.bytes.len()).unwrap_or(u64::MAX))
                 })
                 .is_none_or(|total| total > MAX_CONFORMANCE_BUNDLE_BYTES_V1)
         {
@@ -373,29 +389,42 @@ impl ConformanceBundleV1 {
         {
             return Err(BundleContractErrorV1::NonCanonicalOrder);
         }
-        let profile_member = one(&self.members, BundleMemberRoleV1::Profile, PROFILE_PATH)?;
-        let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
-            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-        if profile.profile_digest != self.manifest.profile_digest {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-        for (m, d) in self.members.iter().zip(&self.manifest.members) {
-            if m.path != d.path
-                || m.role != d.role
-                || m.digest != d.digest
-                || d.size_bytes != u64::try_from(m.bytes.len()).unwrap_or(u64::MAX)
-                || m.digest != *blake3::hash(&m.bytes).as_bytes()
-            {
-                return Err(BundleContractErrorV1::MemberDigestMismatch);
-            }
-        }
-        validate_provider_members(&profile, &self.members)?;
-        validate_fixture_members(
-            &profile,
-            self.manifest.mode,
-            &self.members,
-            &self.manifest.expected_results,
-        )
+        one(&self.members, BundleMemberRoleV1::Profile, PROFILE_PATH).and_then(|profile_member| {
+            ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+                .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+                .and_then(|profile| {
+                    if profile.profile_digest != self.manifest.profile_digest {
+                        return Err(BundleContractErrorV1::ProfileInvalid);
+                    }
+                    validate_member_descriptors(&self.members, &self.manifest.members)
+                        .and_then(|()| validate_provider_members(&profile, &self.members))
+                        .and_then(|()| {
+                            validate_fixture_members(
+                                &profile,
+                                self.manifest.mode,
+                                &self.members,
+                                &self.manifest.expected_results,
+                            )
+                        })
+                })
+        })
+    }
+}
+
+fn validate_member_descriptors(
+    members: &[BundleMemberV1],
+    descriptors: &[BundleMemberDescriptorV1],
+) -> Result<(), BundleContractErrorV1> {
+    if members.iter().zip(descriptors).any(|(member, descriptor)| {
+        member.path != descriptor.path
+            || member.role != descriptor.role
+            || member.digest != descriptor.digest
+            || descriptor.size_bytes != u64::try_from(member.bytes.len()).unwrap_or(u64::MAX)
+            || member.digest != *blake3::hash(&member.bytes).as_bytes()
+    }) {
+        Err(BundleContractErrorV1::MemberDigestMismatch)
+    } else {
+        Ok(())
     }
 }
 
@@ -404,16 +433,24 @@ fn validate_provider_members(
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
     let binding = &profile.fixture_provider_registry;
-    let registry_member = descriptor_member(
+    descriptor_member(
         members,
         &binding.registry_artifact,
         BundleMemberRoleV1::FixtureProviderRegistry,
-    )?;
-    if registry_member.path != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
-        return Err(BundleContractErrorV1::MemberMissing);
-    }
-    let registry = FixtureProviderRegistryV1::from_canonical_cbor(&registry_member.bytes)
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    )
+    .and_then(|registry_member| {
+        FixtureProviderRegistryV1::from_canonical_cbor(&registry_member.bytes)
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+    })
+    .and_then(|registry| validate_provider_registry(profile, members, &registry))
+}
+
+fn validate_provider_registry(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+    registry: &FixtureProviderRegistryV1,
+) -> Result<(), BundleContractErrorV1> {
+    let binding = &profile.fixture_provider_registry;
     let used = profile
         .fixtures
         .iter()
@@ -447,75 +484,126 @@ fn validate_provider_members(
     {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    for entry in &registry.providers {
-        let p = descriptor_member(
-            members,
-            &entry.provider_package_descriptor,
-            BundleMemberRoleV1::FixtureProviderPackage,
-        )?;
-        let package = FixtureProviderPackageV1::from_canonical_cbor(&p.bytes)
-            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-        package
-            .validate_registry_binding(entry, &p.bytes)
-            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-        validate_provider_support_members(members, &package)?;
-        if !binding.required_provider_keys.contains(&entry.provider_key) {
-            continue;
-        }
-        let fixtures = profile
-            .fixtures
-            .iter()
-            .filter(|f| f.provider_key == entry.provider_key);
-        for fixture in fixtures {
-            let family = usize::try_from(fixture.family.wire_code())
-                .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-            if fixture.claim_layer != entry.claim_layer
-                || fixture.subject_adapter != entry.subject_adapter
-                || package
+    registry
+        .providers
+        .iter()
+        .try_for_each(|entry| validate_provider_entry(profile, members, entry))
+}
+
+fn validate_provider_entry(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+    entry: &crate::FixtureProviderEntryV1,
+) -> Result<(), BundleContractErrorV1> {
+    descriptor_member(
+        members,
+        &entry.provider_package_descriptor,
+        BundleMemberRoleV1::FixtureProviderPackage,
+    )
+    .and_then(|member| {
+        FixtureProviderPackageV1::from_canonical_cbor(&member.bytes)
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+            .and_then(|package| {
+                package
+                    .validate_registry_binding(entry, &member.bytes)
+                    .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+                    .and_then(|()| validate_provider_support_members(members, &package))
+                    .and_then(|()| validate_provider_fixtures(profile, entry, &package))
+            })
+    })
+}
+
+fn validate_provider_fixtures(
+    profile: &ConformanceProfileV1,
+    entry: &crate::FixtureProviderEntryV1,
+    package: &FixtureProviderPackageV1,
+) -> Result<(), BundleContractErrorV1> {
+    if !profile
+        .fixture_provider_registry
+        .required_provider_keys
+        .contains(&entry.provider_key)
+    {
+        return Ok(());
+    }
+    profile
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.provider_key == entry.provider_key)
+        .try_for_each(|fixture| {
+            let family = match fixture.family {
+                FixtureFamilyV1::Positive => 0,
+                FixtureFamilyV1::Denied => 1,
+                FixtureFamilyV1::Malformed => 2,
+                FixtureFamilyV1::ResourceExhaustion => 3,
+                FixtureFamilyV1::DeletionRedaction => 4,
+                FixtureFamilyV1::Downgrade => 5,
+                FixtureFamilyV1::IndependentEvaluation => 6,
+            };
+            if fixture.claim_layer == entry.claim_layer
+                && fixture.subject_adapter == entry.subject_adapter
+                && package
                     .family_schemas
                     .get(family)
-                    .is_none_or(|s| s.schema_descriptor != fixture.schema)
+                    .is_some_and(|schema| schema.schema_descriptor == fixture.schema)
             {
-                return Err(BundleContractErrorV1::ProfileInvalid);
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
             }
-        }
-    }
-    Ok(())
+        })
 }
 
 fn validate_provider_support_members(
     members: &[BundleMemberV1],
     package: &FixtureProviderPackageV1,
 ) -> Result<(), BundleContractErrorV1> {
-    for schema in &package.family_schemas {
-        descriptor_member(
-            members,
-            &schema.schema_descriptor,
-            BundleMemberRoleV1::Schema,
-        )?;
-    }
-    descriptor_member(
-        members,
-        &package.licence_descriptor,
-        BundleMemberRoleV1::Licence,
-    )?;
-    descriptor_member(
-        members,
-        &package.notices_descriptor,
-        BundleMemberRoleV1::Notice,
-    )?;
-    descriptor_member(members, &package.sbom_descriptor, BundleMemberRoleV1::Sbom)?;
-    descriptor_member(
-        members,
-        &package.source_provenance_descriptor,
-        BundleMemberRoleV1::Provenance,
-    )?;
-    descriptor_member(
-        members,
-        &package.limitations_descriptor,
-        BundleMemberRoleV1::Limitations,
-    )?;
-    Ok(())
+    package
+        .family_schemas
+        .iter()
+        .try_for_each(|schema| {
+            descriptor_member(
+                members,
+                &schema.schema_descriptor,
+                BundleMemberRoleV1::Schema,
+            )
+            .map(|_| ())
+        })
+        .and_then(|()| {
+            descriptor_member(
+                members,
+                &package.licence_descriptor,
+                BundleMemberRoleV1::Licence,
+            )
+            .map(|_| ())
+        })
+        .and_then(|()| {
+            descriptor_member(
+                members,
+                &package.notices_descriptor,
+                BundleMemberRoleV1::Notice,
+            )
+            .map(|_| ())
+        })
+        .and_then(|()| {
+            descriptor_member(members, &package.sbom_descriptor, BundleMemberRoleV1::Sbom)
+                .map(|_| ())
+        })
+        .and_then(|()| {
+            descriptor_member(
+                members,
+                &package.source_provenance_descriptor,
+                BundleMemberRoleV1::Provenance,
+            )
+            .map(|_| ())
+        })
+        .and_then(|()| {
+            descriptor_member(
+                members,
+                &package.limitations_descriptor,
+                BundleMemberRoleV1::Limitations,
+            )
+            .map(|_| ())
+        })
 }
 
 fn validate_fixture_members(
@@ -527,53 +615,76 @@ fn validate_fixture_members(
     if expected.windows(2).any(|p| p[0] >= p[1]) {
         return Err(BundleContractErrorV1::NonCanonicalOrder);
     }
-    for fixture in profile
+    let members_valid = profile
         .fixtures
         .iter()
         .filter(|f| f.modes.contains(&mode.execution()))
-    {
-        descriptor_member(members, &fixture.payload, BundleMemberRoleV1::FixtureInput)?;
-        descriptor_member(members, &fixture.schema, BundleMemberRoleV1::Schema)?;
-        for a in &fixture.auxiliary {
-            descriptor_member(members, a, BundleMemberRoleV1::FixtureInput)
-                .or_else(|_| descriptor_member(members, a, BundleMemberRoleV1::ExpectedResult))?;
-        }
-        let e = expected
+        .try_for_each(|fixture| {
+            descriptor_member(members, &fixture.payload, BundleMemberRoleV1::FixtureInput)
+                .and_then(|_| {
+                    fixture.auxiliary.iter().try_for_each(|artifact| {
+                        descriptor_member(members, artifact, BundleMemberRoleV1::FixtureInput)
+                            .or_else(|_| {
+                                descriptor_member(
+                                    members,
+                                    artifact,
+                                    BundleMemberRoleV1::ExpectedResult,
+                                )
+                            })
+                            .map(|_| ())
+                    })
+                })
+                .and_then(|()| {
+                    expected
+                        .iter()
+                        .find(|result| {
+                            result.case_id == fixture.case_id
+                                && result.claim_layer == fixture.claim_layer
+                                && result.execution_profile_digest
+                                    == fixture.execution_profile_digest
+                                && result.mode == mode
+                        })
+                        .ok_or(BundleContractErrorV1::ExpectedResultMismatch)
+                })
+                .and_then(|result| {
+                    one(
+                        members,
+                        BundleMemberRoleV1::ExpectedResult,
+                        &result.member_path,
+                    )
+                    .map(|member| (result, member))
+                })
+                .and_then(|(result, member)| {
+                    let expected_size = u64::try_from(member.bytes.len()).unwrap_or(u64::MAX);
+                    fixture
+                        .auxiliary
+                        .iter()
+                        .find(|artifact| {
+                            (
+                                artifact.member_path.as_str(),
+                                artifact.blake3_digest,
+                                artifact.byte_length,
+                            ) == (result.member_path.as_str(), result.digest, expected_size)
+                        })
+                        .ok_or(BundleContractErrorV1::ExpectedResultMismatch)
+                })
+                .and_then(|artifact| {
+                    descriptor_member(members, artifact, BundleMemberRoleV1::ExpectedResult)
+                        .map(|_| ())
+                })
+        });
+    members_valid.and_then(|()| {
+        let selected = profile
+            .fixtures
             .iter()
-            .find(|e| {
-                e.case_id == fixture.case_id
-                    && e.claim_layer == fixture.claim_layer
-                    && e.execution_profile_digest == fixture.execution_profile_digest
-                    && e.mode == mode
-            })
-            .ok_or(BundleContractErrorV1::ExpectedResultMismatch)?;
-        let expected_member = one(members, BundleMemberRoleV1::ExpectedResult, &e.member_path)?;
-        let expected_size = u64::try_from(expected_member.bytes.len())
-            .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
-        let expected_digest = e.digest;
-        let a = fixture
-            .auxiliary
-            .iter()
-            .find(|a| {
-                a.member_path == e.member_path
-                    && a.blake3_digest == expected_digest
-                    && a.byte_length == expected_size
-            })
-            .ok_or(BundleContractErrorV1::ExpectedResultMismatch)?;
-        let m = descriptor_member(members, a, BundleMemberRoleV1::ExpectedResult)?;
-        if m.digest != expected_digest {
-            return Err(BundleContractErrorV1::ExpectedResultMismatch);
+            .filter(|fixture| fixture.modes.contains(&mode.execution()))
+            .count();
+        if expected.len() == selected {
+            Ok(())
+        } else {
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
         }
-    }
-    let selected = profile
-        .fixtures
-        .iter()
-        .filter(|fixture| fixture.modes.contains(&mode.execution()))
-        .count();
-    if expected.len() != selected {
-        return Err(BundleContractErrorV1::ExpectedResultMismatch);
-    }
-    Ok(())
+    })
 }
 fn one<'a>(
     members: &'a [BundleMemberV1],
@@ -595,82 +706,147 @@ fn descriptor_member<'a>(
     d: &ArtifactDescriptorV1,
     r: BundleMemberRoleV1,
 ) -> Result<&'a BundleMemberV1, BundleContractErrorV1> {
-    let m = one(members, r, &d.member_path)?;
-    if m.digest == d.blake3_digest
-        && u64::try_from(m.bytes.len()).unwrap_or(u64::MAX) == d.byte_length
-    {
-        Ok(m)
-    } else {
-        Err(BundleContractErrorV1::MemberDigestMismatch)
-    }
+    one(members, r, &d.member_path).and_then(|member| {
+        if member.digest == d.blake3_digest
+            && u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) == d.byte_length
+        {
+            Ok(member)
+        } else {
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        }
+    })
 }
 fn decode_manifest(value: &Value) -> Result<BundleManifestV1, BundleContractErrorV1> {
-    let f = array(value, 6)?;
-    let lifecycle = match uint(&f[1])? {
-        0 => ProfileLifecycleV1::Draft,
-        1 => ProfileLifecycleV1::Candidate,
-        2 => ProfileLifecycleV1::Stable,
-        3 => ProfileLifecycleV1::Retired,
-        _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    let Ok(fields) = array(value, 6) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     };
-    let mode = decode_mode(&f[2])?;
-    let members = array_values(&f[4])?
-        .iter()
-        .map(|v| {
-            let x = array(v, 4)?;
-            Ok(BundleMemberDescriptorV1 {
-                path: text(&x[0])?.to_owned(),
-                size_bytes: uint(&x[1])?,
-                digest: digest(&x[2])?,
-                role: decode_role(&x[3])?,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let expected_results = array_values(&f[5])?
-        .iter()
-        .map(|v| {
-            let x = array(v, 6)?;
-            Ok(BundleExpectedResultV1 {
-                case_id: text(&x[0])?.to_owned(),
-                claim_layer: crate::ClaimLayerV1::from_wire_code(
-                    u8::try_from(uint(&x[1])?)
-                        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?,
-                )
-                .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?,
-                execution_profile_digest: digest(&x[2])?,
-                mode: decode_mode(&x[3])?,
-                member_path: text(&x[4])?.to_owned(),
-                digest: digest(&x[5])?,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let (
+        Ok(magic),
+        Ok(lifecycle),
+        Ok(mode),
+        Ok(profile_digest),
+        Ok(member_values),
+        Ok(expected_values),
+    ) = (
+        text(&fields[0]),
+        decode_lifecycle(&fields[1]),
+        decode_mode(&fields[2]),
+        digest(&fields[3]),
+        array_values(&fields[4]),
+        array_values(&fields[5]),
+    )
+    else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (Ok(members), Ok(expected_results)) = (
+        member_values
+            .iter()
+            .map(decode_member_descriptor)
+            .collect::<Result<Vec<_>, _>>(),
+        expected_values
+            .iter()
+            .map(decode_expected_result)
+            .collect::<Result<Vec<_>, _>>(),
+    ) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
     Ok(BundleManifestV1 {
-        magic: text(&f[0])?.to_owned(),
+        magic: magic.to_owned(),
         lifecycle,
         mode,
-        profile_digest: digest(&f[3])?,
+        profile_digest,
         members,
         expected_results,
     })
 }
+
+fn decode_lifecycle(value: &Value) -> Result<ProfileLifecycleV1, BundleContractErrorV1> {
+    uint(value).and_then(|code| match code {
+        0 => Ok(ProfileLifecycleV1::Draft),
+        1 => Ok(ProfileLifecycleV1::Candidate),
+        2 => Ok(ProfileLifecycleV1::Stable),
+        3 => Ok(ProfileLifecycleV1::Retired),
+        _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+    })
+}
+
+fn decode_member_descriptor(
+    value: &Value,
+) -> Result<BundleMemberDescriptorV1, BundleContractErrorV1> {
+    let Ok(fields) = array(value, 4) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (Ok(path), Ok(size_bytes), Ok(digest), Ok(role)) = (
+        text(&fields[0]),
+        uint(&fields[1]),
+        digest(&fields[2]),
+        decode_role(&fields[3]),
+    ) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    Ok(BundleMemberDescriptorV1 {
+        path: path.to_owned(),
+        size_bytes,
+        digest,
+        role,
+    })
+}
+
+fn decode_expected_result(value: &Value) -> Result<BundleExpectedResultV1, BundleContractErrorV1> {
+    let Ok(fields) = array(value, 6) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (
+        Ok(case_id),
+        Ok(claim_layer),
+        Ok(execution_profile_digest),
+        Ok(mode),
+        Ok(member_path),
+        Ok(digest),
+    ) = (
+        text(&fields[0]),
+        uint(&fields[1]).and_then(|code| {
+            u8::try_from(code)
+                .ok()
+                .and_then(crate::ClaimLayerV1::from_wire_code)
+                .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)
+        }),
+        digest(&fields[2]),
+        decode_mode(&fields[3]),
+        text(&fields[4]),
+        digest(&fields[5]),
+    )
+    else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    Ok(BundleExpectedResultV1 {
+        case_id: case_id.to_owned(),
+        claim_layer,
+        execution_profile_digest,
+        mode,
+        member_path: member_path.to_owned(),
+        digest,
+    })
+}
 fn decode_member(value: &Value) -> Result<BundleMemberV1, BundleContractErrorV1> {
-    let f = array(value, 3)?;
-    let bytes = bytes(&f[1])?.to_vec();
-    Ok(BundleMemberV1::new(
-        text(&f[0])?.to_owned(),
-        bytes,
-        decode_role(&f[2])?,
-    ))
+    array(value, 3).and_then(|fields| {
+        text(&fields[0]).and_then(|path| {
+            bytes(&fields[1]).and_then(|raw| {
+                decode_role(&fields[2])
+                    .map(|role| BundleMemberV1::new(path.to_owned(), raw.to_vec(), role))
+            })
+        })
+    })
 }
 fn decode_mode(value: &Value) -> Result<BundleModeV1, BundleContractErrorV1> {
-    match uint(value)? {
+    uint(value).and_then(|code| match code {
         0 => Ok(BundleModeV1::Local),
         1 => Ok(BundleModeV1::AirGapped),
         _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
-    }
+    })
 }
 fn decode_role(value: &Value) -> Result<BundleMemberRoleV1, BundleContractErrorV1> {
-    match uint(value)? {
+    uint(value).and_then(|code| match code {
         0 => Ok(BundleMemberRoleV1::FixtureInput),
         1 => Ok(BundleMemberRoleV1::ExpectedResult),
         2 => Ok(BundleMemberRoleV1::Profile),
@@ -686,7 +862,7 @@ fn decode_role(value: &Value) -> Result<BundleMemberRoleV1, BundleContractErrorV
         12 => Ok(BundleMemberRoleV1::FixtureProviderRegistry),
         13 => Ok(BundleMemberRoleV1::FixtureProviderPackage),
         _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
-    }
+    })
 }
 /// Independently validate canonical CFB1, CPF1, FPR1, and FPP1 bytes without typed codecs.
 ///
@@ -694,226 +870,454 @@ fn decode_role(value: &Value) -> Result<BundleMemberRoleV1, BundleContractErrorV
 ///
 /// Returns a closed bundle error for malformed bytes or any failed archive-contract invariant.
 pub fn verify_archive_independently(archive_bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
-    if u64::try_from(archive_bytes.len()).map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
-        > MAX_CONFORMANCE_BUNDLE_BYTES_V1
-    {
+    if u64::try_from(archive_bytes.len()).unwrap_or(u64::MAX) > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
-    let value = decode(archive_bytes)?;
-    let fields = array(&value, 4)?;
-    let manifest = array(&fields[0], 6)?;
-    if text(&manifest[0])? != CONFORMANCE_BUNDLE_MAGIC_V1
-        || uint(&manifest[1])? != 0
-        || uint(&manifest[2])? > 1
-    {
-        return Err(BundleContractErrorV1::LifecycleInvalid);
-    }
-    let members = array_values(&fields[1])?;
-    let descriptors = array_values(&manifest[4])?;
-    if members.len() != descriptors.len()
-        || !raw_member_paths_ordered(members)?
-        || !raw_descriptor_paths_ordered(descriptors)?
-    {
+    decode(archive_bytes).and_then(|value| {
+        array(&value, 4).and_then(|fields| {
+            array(&fields[0], 6).and_then(|manifest| {
+                raw_manifest_header(manifest)
+                    .and_then(|()| raw_archive_body(fields, manifest))
+                    .and_then(|()| raw_archive_signature(fields))
+            })
+        })
+    })
+}
+
+fn raw_manifest_header(manifest: &[Value]) -> Result<(), BundleContractErrorV1> {
+    text(&manifest[0]).and_then(|magic| {
+        uint(&manifest[1]).and_then(|lifecycle| {
+            uint(&manifest[2]).and_then(|mode| {
+                if magic == CONFORMANCE_BUNDLE_MAGIC_V1 && lifecycle == 0 && mode <= 1 {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::LifecycleInvalid)
+                }
+            })
+        })
+    })
+}
+
+fn raw_archive_body(fields: &[Value], manifest: &[Value]) -> Result<(), BundleContractErrorV1> {
+    array_values(&fields[1]).and_then(|members| {
+        array_values(&manifest[4]).and_then(|descriptors| {
+            raw_member_paths_ordered(members).and_then(|members_ordered| {
+                raw_descriptor_paths_ordered(descriptors).and_then(|descriptors_ordered| {
+                    if members.len() != descriptors.len()
+                        || !members_ordered
+                        || !descriptors_ordered
+                    {
+                        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+                    }
+                    members
+                        .iter()
+                        .zip(descriptors)
+                        .try_for_each(|(member, descriptor)| {
+                            raw_member_descriptor_pair(member, descriptor)
+                        })
+                        .and_then(|()| raw_archive_profile(manifest, members))
+                })
+            })
+        })
+    })
+}
+
+fn raw_member_descriptor_pair(
+    member: &Value,
+    descriptor: &Value,
+) -> Result<(), BundleContractErrorV1> {
+    let (Ok(member_fields), Ok(descriptor_fields)) = (array(member, 3), array(descriptor, 4))
+    else {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-    }
-    for (member, descriptor) in members.iter().zip(descriptors) {
-        let member_fields = array(member, 3)?;
-        let descriptor_fields = array(descriptor, 4)?;
-        let raw = bytes(&member_fields[1])?;
-        if text(&member_fields[0])? != text(&descriptor_fields[0])?
-            || uint(&member_fields[2])? != uint(&descriptor_fields[3])?
-            || u64::try_from(raw.len()).map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
-                != uint(&descriptor_fields[1])?
-            || *blake3::hash(raw).as_bytes() != digest::<32>(&descriptor_fields[2])?
-        {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
-        }
-    }
-    let profile_member = raw_member(members, PROFILE_PATH, 2)?;
-    let profile = decode(bytes(&profile_member[1])?)?;
-    let profile_fields = array(&profile, 18)?;
-    raw_cpf1_value(profile_fields)?;
-    if profile_fields[4] != manifest[1] {
-        return Err(BundleContractErrorV1::LifecycleInvalid);
-    }
-    let profile_digest = digest::<32>(&profile_fields[17])?;
-    if profile_digest
-        != digest_domain(
-            b"PiglorOS.ConformanceProfile.v1\0",
-            &length_bound(&Value::Array(profile_fields[..17].to_vec()))?,
-        )
-        || profile_digest != digest::<32>(&manifest[3])?
+    };
+    let (
+        Ok(raw),
+        Ok(member_path),
+        Ok(descriptor_path),
+        Ok(member_role),
+        Ok(descriptor_role),
+        Ok(descriptor_size),
+        Ok(descriptor_digest),
+    ) = (
+        bytes(&member_fields[1]),
+        text(&member_fields[0]),
+        text(&descriptor_fields[0]),
+        uint(&member_fields[2]),
+        uint(&descriptor_fields[3]),
+        uint(&descriptor_fields[1]),
+        digest::<32>(&descriptor_fields[2]),
+    )
+    else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let raw_size = u64::try_from(raw.len()).unwrap_or(u64::MAX);
+    if member_path == descriptor_path
+        && member_role == descriptor_role
+        && raw_size == descriptor_size
+        && *blake3::hash(raw).as_bytes() == descriptor_digest
     {
-        return Err(BundleContractErrorV1::ProfileInvalid);
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::MemberDigestMismatch)
     }
-    raw_registry_and_packages(profile_fields, members)?;
-    raw_expected_results(&manifest[5], profile_fields, members, uint(&manifest[2])?)?;
-    let key = digest::<32>(&fields[2])?;
-    let sig = digest::<64>(&fields[3])?;
-    ed25519_dalek::VerifyingKey::from_bytes(&key)
-        .map_err(|_| BundleContractErrorV1::SignatureInvalid)?
-        .verify(
-            &encode(&fields[0])?,
-            &ed25519_dalek::Signature::from_bytes(&sig),
-        )
-        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+}
+
+fn raw_archive_profile(manifest: &[Value], members: &[Value]) -> Result<(), BundleContractErrorV1> {
+    raw_member(members, PROFILE_PATH, 2).and_then(|profile_member| {
+        bytes(&profile_member[1]).and_then(|profile_bytes| {
+            decode(profile_bytes).and_then(|profile| {
+                array(&profile, 18).and_then(|profile_fields| {
+                    raw_cpf1_value(profile_fields).and_then(|()| {
+                        if profile_fields[4] != manifest[1] {
+                            return Err(BundleContractErrorV1::LifecycleInvalid);
+                        }
+                        raw_profile_digest(manifest, profile_fields)
+                            .and_then(|()| raw_registry_and_packages(profile_fields, members))
+                            .and_then(|()| {
+                                uint(&manifest[2]).and_then(|mode| {
+                                    raw_expected_results(
+                                        &manifest[5],
+                                        profile_fields,
+                                        members,
+                                        mode,
+                                    )
+                                })
+                            })
+                    })
+                })
+            })
+        })
+    })
+}
+
+fn raw_profile_digest(manifest: &[Value], profile: &[Value]) -> Result<(), BundleContractErrorV1> {
+    digest::<32>(&profile[17]).and_then(|profile_digest| {
+        length_bound(&Value::Array(profile[..17].to_vec())).and_then(|bound| {
+            digest::<32>(&manifest[3]).and_then(|manifest_digest| {
+                if profile_digest == digest_domain(b"PiglorOS.ConformanceProfile.v1\0", &bound)
+                    && profile_digest == manifest_digest
+                {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ProfileInvalid)
+                }
+            })
+        })
+    })
+}
+
+fn raw_archive_signature(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    digest::<32>(&fields[2]).and_then(|key| {
+        digest::<64>(&fields[3]).and_then(|signature| {
+            ed25519_dalek::VerifyingKey::from_bytes(&key)
+                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                .and_then(|verifying_key| {
+                    encode(&fields[0]).and_then(|manifest| {
+                        verifying_key
+                            .verify(&manifest, &ed25519_dalek::Signature::from_bytes(&signature))
+                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                    })
+                })
+        })
+    })
 }
 fn raw_cpf1_value(f: &[Value]) -> Result<(), BundleContractErrorV1> {
-    if text(&f[0])? != "CPF1"
-        || uint(&f[1])? != 1
-        || !raw_identifier(text(&f[2])?, 128)
-        || !raw_semver(text(&f[3])?)
-        || uint(&f[4])? > 3
-        || digest::<32>(&f[5])? == [0; 32]
-        || digest::<32>(&f[6])? == [0; 32]
-        || digest::<32>(&f[13])? == [0; 32]
-        || digest::<32>(&f[14])? == [0; 32]
-        || digest::<32>(&f[15])? == [0; 32]
+    raw_cpf1_header(f)
+        .and_then(|()| raw_execution_digests(&f[7]))
+        .and_then(|()| raw_provider_binding(&f[8]))
+        .and_then(|()| raw_fixtures(&f[9]))
+        .and_then(|()| {
+            array_values(&f[10])
+                .and_then(|divergences| divergences.iter().try_for_each(raw_divergence))
+        })
+        .and_then(|()| raw_protocol(&f[11]))
+        .and_then(|()| raw_independence(&f[12]))
+        .and_then(|()| raw_nullable_digest(&f[16]))
+}
+
+fn raw_cpf1_header(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    let (
+        Ok(magic),
+        Ok(version),
+        Ok(profile_id),
+        Ok(semantic_version),
+        Ok(lifecycle),
+        Ok(normative_spec),
+        Ok(execution_matrix),
+        Ok(limitations),
+        Ok(provenance),
+        Ok(provider_registry),
+    ) = (
+        text(&fields[0]),
+        uint(&fields[1]),
+        text(&fields[2]),
+        text(&fields[3]),
+        uint(&fields[4]),
+        digest::<32>(&fields[5]),
+        digest::<32>(&fields[6]),
+        digest::<32>(&fields[13]),
+        digest::<32>(&fields[14]),
+        digest::<32>(&fields[15]),
+    )
+    else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    if magic == "CPF1"
+        && version == 1
+        && raw_identifier(profile_id, 128)
+        && raw_semver(semantic_version)
+        && lifecycle <= 3
+        && normative_spec != [0; 32]
+        && execution_matrix != [0; 32]
+        && limitations != [0; 32]
+        && provenance != [0; 32]
+        && provider_registry != [0; 32]
     {
-        return Err(BundleContractErrorV1::ProfileInvalid);
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
     }
-    let executions = array_values(&f[7])?;
-    if executions.is_empty()
-        || !raw_digests_ordered(executions)?
-        || executions.iter().any(|value| digest::<32>(value).is_err())
-    {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    let binding = array(&f[8], 2)?;
-    raw_artifact(&binding[0])?;
-    let provider_keys = array_values(&binding[1])?;
-    if provider_keys.is_empty() || !raw_provider_keys_ordered(provider_keys)? {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    for key in provider_keys {
-        raw_provider_key(key)?;
-    }
-    let fixtures = array_values(&f[9])?;
-    if fixtures.is_empty() || !raw_fixture_ordered(fixtures)? {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    for fixture in fixtures {
-        let x = array(fixture, 24)?;
-        if !raw_identifier(text(&x[0])?, 128)
-            || uint(&x[2])? > 6
-            || uint(&x[3])? > 6
-            || uint(&x[5])? > 2
-            || !matches!(&x[1], Value::Bool(_))
-            || !matches!(&x[2], Value::Integer(_))
-            || !matches!(&x[5], Value::Integer(_))
-            || digest::<32>(&x[6]).is_err()
-            || array_values(&x[7]).is_err()
-            || raw_artifact(&x[8]).is_err()
-            || raw_artifact(&x[9]).is_err()
-            || raw_oracle(&x[11]).is_err()
-            || raw_budget(&x[16]).is_err()
-            || raw_watchdog(&x[17]).is_err()
-            || raw_capabilities(&x[18]).is_err()
-            || digest::<32>(&x[23]).is_err()
+}
+
+fn raw_execution_digests(value: &Value) -> Result<(), BundleContractErrorV1> {
+    array_values(value).and_then(|executions| {
+        raw_digests_ordered(executions).and_then(|ordered| {
+            if !executions.is_empty()
+                && ordered
+                && executions.iter().all(|value| digest::<32>(value).is_ok())
+            {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        })
+    })
+}
+
+fn raw_provider_binding(value: &Value) -> Result<(), BundleContractErrorV1> {
+    array(value, 2).and_then(|binding| {
+        raw_artifact(&binding[0]).and_then(|()| {
+            array_values(&binding[1]).and_then(|provider_keys| {
+                raw_provider_keys_ordered(provider_keys).and_then(|ordered| {
+                    if provider_keys.is_empty() || !ordered {
+                        return Err(BundleContractErrorV1::ProfileInvalid);
+                    }
+                    provider_keys.iter().try_for_each(raw_provider_key)
+                })
+            })
+        })
+    })
+}
+
+fn raw_fixtures(value: &Value) -> Result<(), BundleContractErrorV1> {
+    array_values(value).and_then(|fixtures| {
+        raw_fixture_ordered(fixtures).and_then(|ordered| {
+            if fixtures.is_empty() || !ordered {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
+            fixtures.iter().try_for_each(raw_fixture)
+        })
+    })
+}
+
+fn raw_fixture(value: &Value) -> Result<(), BundleContractErrorV1> {
+    array(value, 24).and_then(|fields| {
+        raw_capabilities(&fields[18]).and_then(|network_allowed| {
+            text(&fields[0]).and_then(|case_id| {
+                uint(&fields[2]).and_then(|claim_layer| {
+                    uint(&fields[3]).and_then(|family| {
+                        uint(&fields[5]).and_then(|adapter| {
+                            if !raw_identifier(case_id, 128)
+                                || claim_layer > 6
+                                || family > 6
+                                || adapter > 2
+                                || !matches!(&fields[1], Value::Bool(_))
+                                || digest::<32>(&fields[6]).is_err()
+                                || raw_artifact(&fields[8]).is_err()
+                                || raw_artifact(&fields[9]).is_err()
+                                || raw_oracle(&fields[11]).is_err()
+                                || raw_budget(&fields[16]).is_err()
+                                || raw_watchdog(&fields[17]).is_err()
+                            {
+                                return Err(BundleContractErrorV1::ProfileInvalid);
+                            }
+                            raw_fixture_members(fields, network_allowed)
+                        })
+                    })
+                })
+            })
+        })
+    })
+}
+
+fn raw_fixture_members(
+    fields: &[Value],
+    network_allowed: bool,
+) -> Result<(), BundleContractErrorV1> {
+    raw_provider_key(&fields[4])
+        .and_then(|()| array_values(&fields[7]))
+        .and_then(|modes| {
+            raw_uints_ordered(modes).and_then(|ordered| {
+                if modes.is_empty() || !ordered {
+                    return Err(BundleContractErrorV1::ProfileInvalid);
+                }
+                raw_fixture_network_policy(fields, modes, network_allowed)
+            })
+        })
+        .and_then(|()| {
+            array_values(&fields[10])
+                .and_then(|artifacts| artifacts.iter().try_for_each(raw_artifact))
+        })
+        .and_then(|()| {
+            uint(&fields[12]).and_then(|verification| {
+                uint(&fields[14]).and_then(|replay| {
+                    uint(&fields[15]).and_then(|redaction| {
+                        if verification <= 5 && replay <= 4 && redaction <= 3 {
+                            Ok(())
+                        } else {
+                            Err(BundleContractErrorV1::ProfileInvalid)
+                        }
+                    })
+                })
+            })
+        })
+        .and_then(|()| raw_nullable_failure(&fields[13]))
+        .and_then(|()| raw_provenance(&fields[21]))
+        .and_then(|()| raw_nullable_digest(&fields[19]))
+        .and_then(|()| raw_nullable_digest(&fields[20]))
+        .and_then(|()| raw_transition(&fields[22]))
+        .and_then(|()| {
+            length_bound(&Value::Array(fields[..23].to_vec())).and_then(|bound| {
+                digest::<32>(&fields[23]).and_then(|recorded| {
+                    let computed = digest_domain(b"PiglorOS.Conformance.Fixture.v1\0", &bound);
+                    if computed == recorded {
+                        Ok(())
+                    } else {
+                        Err(BundleContractErrorV1::ProfileInvalid)
+                    }
+                })
+            })
+        })
+}
+
+fn raw_fixture_network_policy(
+    fixture: &[Value],
+    modes: &[Value],
+    network_allowed: bool,
+) -> Result<(), BundleContractErrorV1> {
+    uint(&fixture[5]).and_then(|adapter| {
+        if network_allowed
+            && (adapter == 2
+                || modes
+                    .iter()
+                    .any(|mode| uint(mode).is_ok_and(|code| code == 1)))
         {
-            return Err(BundleContractErrorV1::ProfileInvalid);
+            Err(BundleContractErrorV1::ProfileInvalid)
+        } else {
+            Ok(())
         }
-        raw_provider_key(&x[4])?;
-        let modes = array_values(&x[7])?;
-        if modes.is_empty()
-            || !raw_uints_ordered(modes)?
-            || modes
-                .iter()
-                .any(|mode| uint(mode).map_or(true, |code| code > 1))
-        {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-        for auxiliary in array_values(&x[10])? {
-            raw_artifact(auxiliary)?;
-        }
-        if uint(&x[12])? > 5 || uint(&x[14])? > 4 || uint(&x[15])? > 3 {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-        raw_nullable_failure(&x[13])?;
-        raw_provenance(&x[21])?;
-        raw_nullable_digest(&x[19])?;
-        raw_nullable_digest(&x[20])?;
-        raw_transition(&x[22])?;
-        let fixture_digest = digest_domain(
-            b"PiglorOS.Conformance.Fixture.v1\0",
-            &length_bound(&Value::Array(x[..23].to_vec()))?,
-        );
-        if fixture_digest != digest::<32>(&x[23])? {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-    }
-    for divergence in array_values(&f[10])? {
-        let fields = array(divergence, 2)?;
-        if uint(&fields[0])? > 6 || bytes(&fields[1])?.is_empty() {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-    }
-    raw_protocol(&f[11])?;
-    raw_independence(&f[12])?;
-    raw_nullable_digest(&f[16])?;
-    Ok(())
+    })
 }
 
 fn raw_nullable_digest(value: &Value) -> Result<(), BundleContractErrorV1> {
-    if !matches!(value, Value::Null) {
-        let _ = digest::<32>(value)?;
+    if matches!(value, Value::Null) {
+        Ok(())
+    } else {
+        digest::<32>(value).map(|_| ())
     }
-    Ok(())
 }
 fn raw_nullable_failure(value: &Value) -> Result<(), BundleContractErrorV1> {
-    if !matches!(value, Value::Null) {
-        let f = array(value, 3)?;
-        if text(&f[0])?.is_empty() || text(&f[1])?.is_empty() || text(&f[2])?.is_empty() {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
+    if matches!(value, Value::Null) {
+        return Ok(());
     }
-    Ok(())
+    array(value, 3).and_then(|fields| {
+        text(&fields[0]).and_then(|owner| {
+            text(&fields[1]).and_then(|version| {
+                text(&fields[2]).and_then(|code| {
+                    if owner.is_empty() || version.is_empty() || code.is_empty() {
+                        Err(BundleContractErrorV1::ProfileInvalid)
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
+        })
+    })
 }
 fn raw_provenance(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let f = array(value, 7)?;
-    if text(&f[0])?.is_empty() {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    for digest_value in &f[1..] {
-        if digest::<32>(digest_value)? == [0; 32] {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-    }
-    Ok(())
+    array(value, 7).and_then(|fields| {
+        text(&fields[0]).and_then(|licence| {
+            if licence.is_empty() {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
+            fields[1..].iter().try_for_each(|value| {
+                digest::<32>(value).and_then(|digest| {
+                    if digest == [0; 32] {
+                        Err(BundleContractErrorV1::ProfileInvalid)
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
+        })
+    })
 }
 fn raw_transition(value: &Value) -> Result<(), BundleContractErrorV1> {
-    if !matches!(value, Value::Null) {
-        let f = array(value, 2)?;
-        raw_provider_key(&f[0])?;
-        raw_provider_key(&f[1])?;
+    if matches!(value, Value::Null) {
+        return Ok(());
     }
-    Ok(())
+    array(value, 2)
+        .and_then(|fields| raw_provider_key(&fields[0]).and_then(|()| raw_provider_key(&fields[1])))
 }
 fn raw_protocol(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let f = array(value, 5)?;
-    if text(&f[0])?.is_empty() {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    for digest_value in &f[1..4] {
-        if digest::<32>(digest_value)? == [0; 32] {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-    }
-    let caps = array(&f[4], 10)?;
-    if caps.iter().any(|v| uint(v).map_or(true, |n| n == 0)) {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    Ok(())
+    array(value, 5).and_then(|fields| {
+        text(&fields[0]).and_then(|version| {
+            if version.is_empty() {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
+            fields[1..4]
+                .iter()
+                .try_for_each(|value| {
+                    digest::<32>(value).and_then(|digest| {
+                        if digest == [0; 32] {
+                            Err(BundleContractErrorV1::ProfileInvalid)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                })
+                .and_then(|()| {
+                    array(&fields[4], 10).and_then(|caps| {
+                        if caps
+                            .iter()
+                            .any(|value| uint(value).map_or(true, |cap| cap == 0))
+                        {
+                            Err(BundleContractErrorV1::ProfileInvalid)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                })
+        })
+    })
 }
 fn raw_independence(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let f = array(value, 5)?;
-    if f[..3].iter().any(|v| !matches!(v, Value::Bool(_)))
-        || digest::<32>(&f[3])? == [0; 32]
-        || digest::<32>(&f[4])? == [0; 32]
-    {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    Ok(())
+    array(value, 5).and_then(|fields| {
+        digest::<32>(&fields[3]).and_then(|shared_code_audit| {
+            digest::<32>(&fields[4]).and_then(|declaration| {
+                if fields[..3]
+                    .iter()
+                    .all(|value| matches!(value, Value::Bool(_)))
+                    && shared_code_audit != [0; 32]
+                    && declaration != [0; 32]
+                {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ProfileInvalid)
+                }
+            })
+        })
+    })
 }
 
 fn raw_member<'a>(
@@ -921,85 +1325,154 @@ fn raw_member<'a>(
     path: &str,
     role: u64,
 ) -> Result<&'a [Value], BundleContractErrorV1> {
-    let mut result = None;
-    for member in members {
-        let fields = array(member, 3)?;
-        if text(&fields[0])? == path
-            && uint(&fields[2])? == role
-            && result.replace(fields).is_some()
-        {
-            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-        }
-    }
-    result.ok_or(BundleContractErrorV1::MemberMissing)
+    members
+        .iter()
+        .find_map(|member| {
+            array(member, 3).ok().filter(|fields| {
+                text(&fields[0]).ok() == Some(path) && uint(&fields[2]).ok() == Some(role)
+            })
+        })
+        .ok_or(BundleContractErrorV1::MemberMissing)
 }
 
 fn raw_registry_and_packages(
     profile: &[Value],
     members: &[Value],
 ) -> Result<(), BundleContractErrorV1> {
-    let binding = array(&profile[8], 2)?;
-    let descriptor = array(&binding[0], 4)?;
-    if text(&descriptor[0])? != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    let registry_member = raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12)?;
-    raw_descriptor_matches_member(descriptor, registry_member)?;
-    let registry = decode(bytes(&registry_member[1])?)?;
-    let fields = array(&registry, 4)?;
-    if text(&fields[0])? != "FPR1" || uint(&fields[1])? != 1 {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    let providers = array_values(&fields[2])?;
-    if providers.is_empty() || !raw_provider_entries_ordered(providers)? {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    let expected_digest = digest_domain(
-        b"PiglorOS.Conformance.ProviderRegistry.v1\0",
-        &length_bound(&Value::Array(fields[..3].to_vec()))?,
-    );
-    if expected_digest != digest::<32>(&fields[3])? {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    for required in array_values(&binding[1])? {
-        let required_fields = array(required, 4)?;
-        if !providers.iter().any(|provider| {
-            array(provider, 7).is_ok_and(|entry| {
-                entry[..4]
-                    .iter()
-                    .zip(required_fields.iter())
-                    .all(|(left, right)| left == right)
+    array(&profile[8], 2).and_then(|binding| {
+        array(&binding[0], 4).and_then(|descriptor| {
+            text(&descriptor[0]).and_then(|registry_path| {
+                if registry_path != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
+                    return Err(BundleContractErrorV1::ProfileInvalid);
+                }
+                raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12).and_then(
+                    |registry_member| {
+                        raw_descriptor_matches_member(descriptor, registry_member).and_then(|()| {
+                            bytes(&registry_member[1]).and_then(|registry_bytes| {
+                                decode(registry_bytes).and_then(|registry| {
+                                    array(&registry, 4).and_then(|fields| {
+                                        raw_registry_fields(fields, binding, members)
+                                    })
+                                })
+                            })
+                        })
+                    },
+                )
             })
-        }) {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-    }
-    for member in members {
-        let member_fields = array(member, 3)?;
-        if uint(&member_fields[2])? == 13
-            && !providers.iter().any(|provider| {
-                array(provider, 7).is_ok_and(|entry| {
-                    array(&entry[6], 4)
-                        .is_ok_and(|package| text(&package[0]).ok() == text(&member_fields[0]).ok())
+        })
+    })
+}
+
+fn raw_registry_fields(
+    fields: &[Value],
+    binding: &[Value],
+    members: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    text(&fields[0]).and_then(|magic| {
+        uint(&fields[1]).and_then(|version| {
+            if magic != "FPR1" || version != 1 {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
+            array_values(&fields[2]).and_then(|providers| {
+                raw_provider_entries_ordered(providers).and_then(|ordered| {
+                    if providers.is_empty() || !ordered {
+                        return Err(BundleContractErrorV1::ProfileInvalid);
+                    }
+                    raw_registry_digest(fields)
+                        .and_then(|()| raw_required_providers(&binding[1], providers))
+                        .and_then(|()| raw_declared_packages(members, providers))
+                        .and_then(|()| {
+                            providers
+                                .iter()
+                                .try_for_each(|provider| raw_provider_package(provider, members))
+                        })
                 })
             })
-        {
-            return Err(BundleContractErrorV1::UndeclaredMember);
-        }
-    }
-    for provider in providers {
-        let entry = array(provider, 7)?;
-        raw_provider_key(&Value::Array(entry[..4].to_vec()))?;
-        if uint(&entry[4])? > 6 || uint(&entry[5])? > 2 {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-        let package_descriptor = array(&entry[6], 4)?;
-        raw_artifact(&entry[6])?;
-        let package_member = raw_member(members, text(&package_descriptor[0])?, 13)?;
-        raw_descriptor_matches_member(package_descriptor, package_member)?;
-        raw_fpp1(bytes(&package_member[1])?, entry, members)?;
-    }
-    Ok(())
+        })
+    })
+}
+
+fn raw_registry_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    length_bound(&Value::Array(fields[..3].to_vec())).and_then(|bound| {
+        digest::<32>(&fields[3]).and_then(|recorded| {
+            let computed = digest_domain(b"PiglorOS.Conformance.ProviderRegistry.v1\0", &bound);
+            if computed == recorded {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        })
+    })
+}
+
+fn raw_required_providers(value: &Value, providers: &[Value]) -> Result<(), BundleContractErrorV1> {
+    array_values(value).and_then(|required| {
+        required.iter().try_for_each(|key| {
+            array(key, 4).and_then(|key_fields| {
+                if providers
+                    .iter()
+                    .any(|provider| array(provider, 7).is_ok_and(|entry| entry[..4] == *key_fields))
+                {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ProfileInvalid)
+                }
+            })
+        })
+    })
+}
+
+fn raw_declared_packages(
+    members: &[Value],
+    providers: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    members.iter().try_for_each(|member| {
+        array(member, 3).and_then(|member_fields| {
+            uint(&member_fields[2]).and_then(|role| {
+                if role != 13
+                    || providers.iter().any(|provider| {
+                        array(provider, 7).is_ok_and(|entry| {
+                            array(&entry[6], 4).is_ok_and(|package| {
+                                text(&package[0]).ok() == text(&member_fields[0]).ok()
+                            })
+                        })
+                    })
+                {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::UndeclaredMember)
+                }
+            })
+        })
+    })
+}
+
+fn raw_provider_package(provider: &Value, members: &[Value]) -> Result<(), BundleContractErrorV1> {
+    array(provider, 7).and_then(|entry| {
+        raw_provider_key(&Value::Array(entry[..4].to_vec())).and_then(|()| {
+            uint(&entry[4]).and_then(|claim_layer| {
+                uint(&entry[5]).and_then(|adapter| {
+                    if claim_layer > 6 || adapter > 2 {
+                        return Err(BundleContractErrorV1::ProfileInvalid);
+                    }
+                    raw_artifact(&entry[6]).and_then(|()| {
+                        array(&entry[6], 4).and_then(|descriptor| {
+                            text(&descriptor[0]).and_then(|path| {
+                                raw_member(members, path, 13).and_then(|package_member| {
+                                    raw_descriptor_matches_member(descriptor, package_member)
+                                        .and_then(|()| {
+                                            bytes(&package_member[1]).and_then(|package_bytes| {
+                                                raw_fpp1(package_bytes, entry, members)
+                                            })
+                                        })
+                                })
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    })
 }
 
 fn raw_fpp1(
@@ -1007,65 +1480,106 @@ fn raw_fpp1(
     entry: &[Value],
     members: &[Value],
 ) -> Result<(), BundleContractErrorV1> {
-    let value = decode(bytes_value)?;
-    let fields = array(&value, 12)?;
-    if text(&fields[0])? != "FPP1"
-        || uint(&fields[1])? != 1
-        || fields[2] != Value::Array(entry[..4].to_vec())
-        || fields[3] != entry[4]
-        || fields[4] != entry[5]
-    {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    let schemas = array_values(&fields[5])?;
-    if schemas.len() != 7 {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    for (index, schema) in schemas.iter().enumerate() {
-        let record = array(schema, 2)?;
-        if uint(&record[0])?
-            != u64::try_from(index).map_err(|_| BundleContractErrorV1::ProfileInvalid)?
-        {
+    decode(bytes_value).and_then(|value| {
+        array(&value, 12).and_then(|fields| {
+            raw_fpp1_header(fields, entry)
+                .and_then(|()| raw_fpp1_schemas(&fields[5], members))
+                .and_then(|()| raw_fpp1_support(&fields[6..11], members))
+                .and_then(|()| raw_fpp1_digest(fields))
+        })
+    })
+}
+
+fn raw_fpp1_header(fields: &[Value], entry: &[Value]) -> Result<(), BundleContractErrorV1> {
+    text(&fields[0]).and_then(|magic| {
+        uint(&fields[1]).and_then(|version| {
+            if magic == "FPP1"
+                && version == 1
+                && fields[2] == Value::Array(entry[..4].to_vec())
+                && fields[3] == entry[4]
+                && fields[4] == entry[5]
+            {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        })
+    })
+}
+
+fn raw_fpp1_schemas(value: &Value, members: &[Value]) -> Result<(), BundleContractErrorV1> {
+    array_values(value).and_then(|schemas| {
+        if schemas.len() != 7 {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
-        raw_artifact(&record[1])?;
-        let descriptor = array(&record[1], 4)?;
-        raw_descriptor_matches_member(descriptor, raw_member(members, text(&descriptor[0])?, 4)?)?;
-    }
-    for (offset, descriptor) in fields[6..11].iter().enumerate() {
-        raw_artifact(descriptor)?;
-        let descriptor = array(descriptor, 4)?;
-        raw_descriptor_matches_member(
-            descriptor,
-            raw_member(
-                members,
-                text(&descriptor[0])?,
-                5 + u64::try_from(offset).map_err(|_| BundleContractErrorV1::ProfileInvalid)?,
-            )?,
-        )?;
-    }
-    let expected = digest_domain(
-        b"PiglorOS.Conformance.ProviderPackage.v1\0",
-        &length_bound(&Value::Array(fields[..11].to_vec()))?,
-    );
-    if expected != digest::<32>(&fields[11])? {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    Ok(())
+        schemas.iter().enumerate().try_for_each(|(index, schema)| {
+            array(schema, 2).and_then(|record| {
+                uint(&record[0]).and_then(|family| {
+                    if family != u64::try_from(index).unwrap_or(u64::MAX) {
+                        return Err(BundleContractErrorV1::ProfileInvalid);
+                    }
+                    raw_bound_artifact(&record[1], members, 4)
+                })
+            })
+        })
+    })
+}
+
+fn raw_fpp1_support(values: &[Value], members: &[Value]) -> Result<(), BundleContractErrorV1> {
+    values
+        .iter()
+        .enumerate()
+        .try_for_each(|(offset, descriptor)| {
+            let role = 5 + u64::try_from(offset).unwrap_or(u64::MAX);
+            raw_bound_artifact(descriptor, members, role)
+        })
+}
+
+fn raw_bound_artifact(
+    value: &Value,
+    members: &[Value],
+    role: u64,
+) -> Result<(), BundleContractErrorV1> {
+    raw_artifact(value).and_then(|()| {
+        array(value, 4).and_then(|descriptor| {
+            text(&descriptor[0]).and_then(|path| {
+                raw_member(members, path, role)
+                    .and_then(|member| raw_descriptor_matches_member(descriptor, member))
+            })
+        })
+    })
+}
+
+fn raw_fpp1_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    length_bound(&Value::Array(fields[..11].to_vec())).and_then(|bound| {
+        digest::<32>(&fields[11]).and_then(|recorded| {
+            let computed = digest_domain(b"PiglorOS.Conformance.ProviderPackage.v1\0", &bound);
+            if computed == recorded {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        })
+    })
 }
 
 fn raw_descriptor_matches_member(
     descriptor: &[Value],
     member: &[Value],
 ) -> Result<(), BundleContractErrorV1> {
-    let raw = bytes(&member[1])?;
-    if u64::try_from(raw.len()).map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
-        != uint(&descriptor[2])?
-        || *blake3::hash(raw).as_bytes() != digest::<32>(&descriptor[3])?
-    {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    Ok(())
+    bytes(&member[1]).and_then(|raw| {
+        uint(&descriptor[2]).and_then(|expected_size| {
+            digest::<32>(&descriptor[3]).and_then(|expected_digest| {
+                if u64::try_from(raw.len()).unwrap_or(u64::MAX) == expected_size
+                    && *blake3::hash(raw).as_bytes() == expected_digest
+                {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                }
+            })
+        })
+    })
 }
 
 fn raw_expected_results(
@@ -1074,60 +1588,93 @@ fn raw_expected_results(
     members: &[Value],
     mode: u64,
 ) -> Result<(), BundleContractErrorV1> {
-    let expected = array_values(value)?;
-    if !raw_expected_ordered(expected)? {
-        return Err(BundleContractErrorV1::NonCanonicalOrder);
-    }
-    for record in expected {
-        let fields = array(record, 6)?;
-        if uint(&fields[3])? != mode {
-            return Err(BundleContractErrorV1::ExpectedResultMismatch);
-        }
-        let member = raw_member(members, text(&fields[4])?, 1)?;
-        if *blake3::hash(bytes(&member[1])?).as_bytes() != digest::<32>(&fields[5])? {
-            return Err(BundleContractErrorV1::ExpectedResultMismatch);
-        }
-        let mut bound = false;
-        for fixture in array_values(&profile[9])? {
-            let fixture_fields = array(fixture, 24)?;
-            if text(&fixture_fields[0])? != text(&fields[0])?
-                || uint(&fixture_fields[2])? != uint(&fields[1])?
-                || digest::<32>(&fixture_fields[6])? != digest::<32>(&fields[2])?
-            {
-                continue;
+    array_values(value).and_then(|expected| {
+        raw_expected_ordered(expected).and_then(|ordered| {
+            if !ordered {
+                return Err(BundleContractErrorV1::NonCanonicalOrder);
             }
-            for auxiliary in array_values(&fixture_fields[10])? {
-                let descriptor = array(auxiliary, 4)?;
-                if text(&descriptor[0])? == text(&fields[4])?
-                    && digest::<32>(&descriptor[3])? == digest::<32>(&fields[5])?
-                    && uint(&descriptor[2])?
-                        == u64::try_from(bytes(&member[1])?.len())
-                            .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
-                {
-                    bound = true;
-                }
+            expected
+                .iter()
+                .try_for_each(|record| raw_expected_result(record, profile, members, mode))
+                .and_then(|()| {
+                    array_values(&profile[9]).and_then(|fixtures| {
+                        let selected = fixtures
+                            .iter()
+                            .filter(|fixture| raw_fixture_selects_mode(fixture, mode))
+                            .count();
+                        if expected.len() == selected {
+                            Ok(())
+                        } else {
+                            Err(BundleContractErrorV1::ExpectedResultMismatch)
+                        }
+                    })
+                })
+        })
+    })
+}
+
+fn raw_expected_result(
+    value: &Value,
+    profile: &[Value],
+    members: &[Value],
+    mode: u64,
+) -> Result<(), BundleContractErrorV1> {
+    array(value, 6).and_then(|fields| {
+        uint(&fields[3]).and_then(|record_mode| {
+            if record_mode != mode {
+                return Err(BundleContractErrorV1::ExpectedResultMismatch);
             }
-        }
-        if !bound {
-            return Err(BundleContractErrorV1::ExpectedResultMismatch);
-        }
-    }
-    let selected = array_values(&profile[9])?
-        .iter()
-        .filter(|fixture| {
-            array(fixture, 24).is_ok_and(|fields| {
-                array_values(&fields[7]).is_ok_and(|modes| {
-                    modes
-                        .iter()
-                        .any(|candidate| uint(candidate).ok() == Some(mode))
+            text(&fields[4]).and_then(|path| {
+                raw_member(members, path, 1).and_then(|member| {
+                    bytes(&member[1]).and_then(|member_bytes| {
+                        digest::<32>(&fields[5]).and_then(|recorded_digest| {
+                            if *blake3::hash(member_bytes).as_bytes() != recorded_digest
+                                || !raw_expected_fixture_bound(profile, fields, member_bytes.len())
+                            {
+                                Err(BundleContractErrorV1::ExpectedResultMismatch)
+                            } else {
+                                Ok(())
+                            }
+                        })
+                    })
                 })
             })
         })
-        .count();
-    if expected.len() != selected {
-        return Err(BundleContractErrorV1::ExpectedResultMismatch);
-    }
-    Ok(())
+    })
+}
+
+fn raw_expected_fixture_bound(profile: &[Value], expected: &[Value], member_size: usize) -> bool {
+    let Ok(fixtures) = array_values(&profile[9]) else {
+        return false;
+    };
+    let size = u64::try_from(member_size).unwrap_or(u64::MAX);
+    fixtures.iter().any(|fixture| {
+        array(fixture, 24).is_ok_and(|fields| {
+            text(&fields[0]).ok() == text(&expected[0]).ok()
+                && uint(&fields[2]).ok() == uint(&expected[1]).ok()
+                && digest::<32>(&fields[6]).ok() == digest::<32>(&expected[2]).ok()
+                && array_values(&fields[10]).is_ok_and(|artifacts| {
+                    artifacts.iter().any(|artifact| {
+                        array(artifact, 4).is_ok_and(|descriptor| {
+                            text(&descriptor[0]).ok() == text(&expected[4]).ok()
+                                && digest::<32>(&descriptor[3]).ok()
+                                    == digest::<32>(&expected[5]).ok()
+                                && uint(&descriptor[2]).ok() == Some(size)
+                        })
+                    })
+                })
+        })
+    })
+}
+
+fn raw_fixture_selects_mode(value: &Value, mode: u64) -> bool {
+    array(value, 24).is_ok_and(|fields| {
+        array_values(&fields[7]).is_ok_and(|modes| {
+            modes
+                .iter()
+                .any(|candidate| uint(candidate).ok() == Some(mode))
+        })
+    })
 }
 
 fn raw_member_paths_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
@@ -1159,32 +1706,44 @@ fn raw_digests_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> 
     Ok(true)
 }
 fn raw_uints_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
-    let mut previous = None;
-    for value in values {
-        let current = uint(value)?;
-        if current > 1 || previous.is_some_and(|old| old >= current) {
-            return Ok(false);
-        }
-        previous = Some(current);
-    }
-    Ok(true)
+    values
+        .iter()
+        .try_fold((None, true), |(previous, ordered), value| {
+            uint(value).map(|current| {
+                let next_ordered =
+                    ordered && current <= 1 && previous.is_none_or(|old| old < current);
+                (Some(current), next_ordered)
+            })
+        })
+        .map(|(_, ordered)| ordered)
 }
 fn raw_provider_keys_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
-    let mut previous = None;
-    for value in values {
-        let fields = array(value, 4)?;
-        let current = (
-            text(&fields[0])?.to_owned(),
-            text(&fields[1])?.to_owned(),
-            uint(&fields[2])?,
-            uint(&fields[3])?,
-        );
-        if previous.as_ref().is_some_and(|old| old >= &current) {
-            return Ok(false);
-        }
-        previous = Some(current);
-    }
-    Ok(true)
+    values
+        .iter()
+        .try_fold((None, true), |(previous, ordered), value| {
+            raw_provider_order_key(value).map(|current| {
+                let next_ordered = ordered && previous.as_ref().is_none_or(|old| old < &current);
+                (Some(current), next_ordered)
+            })
+        })
+        .map(|(_, ordered)| ordered)
+}
+
+fn raw_provider_order_key(
+    value: &Value,
+) -> Result<(String, String, u64, u64), BundleContractErrorV1> {
+    let Ok(fields) = array(value, 4) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (Ok(provider_id), Ok(version), Ok(major), Ok(minor)) = (
+        text(&fields[0]),
+        text(&fields[1]),
+        uint(&fields[2]),
+        uint(&fields[3]),
+    ) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    Ok((provider_id.to_owned(), version.to_owned(), major, minor))
 }
 fn raw_provider_entries_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
     let mut previous = None;
@@ -1230,57 +1789,97 @@ fn raw_fixture_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> 
     Ok(true)
 }
 fn raw_expected_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
-    let mut previous = None;
-    for value in values {
-        let f = array(value, 6)?;
-        let current = (
-            text(&f[0])?.to_owned(),
-            uint(&f[1])?,
-            digest::<32>(&f[2])?,
-            uint(&f[3])?,
-            text(&f[4])?.to_owned(),
-            digest::<32>(&f[5])?,
-        );
-        if previous.as_ref().is_some_and(|old| old >= &current) {
-            return Ok(false);
-        }
-        previous = Some(current);
-    }
-    Ok(true)
+    values
+        .iter()
+        .try_fold((None, true), |(previous, ordered), value| {
+            raw_expected_order_key(value).map(|current| {
+                let next_ordered = ordered && previous.as_ref().is_none_or(|old| old < &current);
+                (Some(current), next_ordered)
+            })
+        })
+        .map(|(_, ordered)| ordered)
+}
+
+type RawExpectedOrderKey = (String, u64, [u8; 32], u64, String, [u8; 32]);
+
+fn raw_expected_order_key(value: &Value) -> Result<RawExpectedOrderKey, BundleContractErrorV1> {
+    let Ok(fields) = array(value, 6) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (Ok(case_id), Ok(claim_layer), Ok(execution_profile), Ok(mode), Ok(path), Ok(digest)) = (
+        text(&fields[0]),
+        uint(&fields[1]),
+        digest::<32>(&fields[2]),
+        uint(&fields[3]),
+        text(&fields[4]),
+        digest::<32>(&fields[5]),
+    ) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    Ok((
+        case_id.to_owned(),
+        claim_layer,
+        execution_profile,
+        mode,
+        path.to_owned(),
+        digest,
+    ))
 }
 fn length_bound(value: &Value) -> Result<Vec<u8>, BundleContractErrorV1> {
-    let encoded = encode(value)?;
-    let mut bound = u64::try_from(encoded.len())
-        .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
-        .to_be_bytes()
-        .to_vec();
-    bound.extend(encoded);
-    Ok(bound)
+    encode(value).map(|encoded| {
+        let mut bound = u64::try_from(encoded.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes()
+            .to_vec();
+        bound.extend(encoded);
+        bound
+    })
 }
 
 fn raw_provider_key(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let fields = array(value, 4)?;
-    if !raw_identifier(text(&fields[0])?, 128)
-        || !raw_semver(text(&fields[1])?)
-        || uint(&fields[2])? > u64::from(u16::MAX)
-        || uint(&fields[3])? > u64::from(u16::MAX)
+    let Ok(fields) = array(value, 4) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (Ok(provider_id), Ok(contract_version), Ok(abi_major), Ok(abi_minor)) = (
+        text(&fields[0]),
+        text(&fields[1]),
+        uint(&fields[2]),
+        uint(&fields[3]),
+    ) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    if raw_identifier(provider_id, 128)
+        && raw_semver(contract_version)
+        && u16::try_from(abi_major).is_ok()
+        && u16::try_from(abi_minor).is_ok()
     {
-        return Err(BundleContractErrorV1::ProfileInvalid);
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
     }
-    Ok(())
 }
 
 fn raw_artifact(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let fields = array(value, 4)?;
-    if !raw_member_path(text(&fields[0])?)
-        || !raw_media_type(text(&fields[1])?)
-        || uint(&fields[2])? == 0
-        || uint(&fields[2])? > 64 * 1024 * 1024
-        || digest::<32>(&fields[3])? == [0; 32]
+    let Ok(fields) = array(value, 4) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (Ok(member_path), Ok(media_type), Ok(byte_length), Ok(digest)) = (
+        text(&fields[0]),
+        text(&fields[1]),
+        uint(&fields[2]),
+        digest::<32>(&fields[3]),
+    ) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    if raw_member_path(member_path)
+        && raw_media_type(media_type)
+        && (1..=64 * 1024 * 1024).contains(&byte_length)
+        && digest != [0; 32]
     {
-        return Err(BundleContractErrorV1::ProfileInvalid);
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
     }
-    Ok(())
 }
 
 fn raw_identifier(value: &str, maximum: usize) -> bool {
@@ -1365,47 +1964,83 @@ fn raw_semver_identifiers(value: &str, no_leading_zero: bool) -> bool {
         })
 }
 
+type RawValueValidator = fn(&Value) -> Result<(), BundleContractErrorV1>;
+
 fn raw_oracle(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let fields = array(value, 4)?;
-    let active = match uint(&fields[0])? {
-        0 => 1,
-        1 => 2,
-        2 => 3,
-        _ => return Err(BundleContractErrorV1::ProfileInvalid),
-    };
-    for (index, field) in fields.iter().enumerate().skip(1) {
-        if (index == active) != !matches!(field, Value::Null) {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-    }
-    Ok(())
+    array(value, 4).and_then(|fields| {
+        uint(&fields[0]).and_then(|kind| {
+            let (active, validate): (usize, RawValueValidator) = match kind {
+                0 => (1, raw_artifact),
+                1 => (2, raw_nullable_failure),
+                2 => (3, raw_divergence),
+                _ => return Err(BundleContractErrorV1::ProfileInvalid),
+            };
+            if fields
+                .iter()
+                .enumerate()
+                .skip(1)
+                .any(|(index, field)| (index == active) != !matches!(field, Value::Null))
+            {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
+            validate(&fields[active])
+        })
+    })
+}
+
+fn raw_divergence(value: &Value) -> Result<(), BundleContractErrorV1> {
+    array(value, 2).and_then(|fields| {
+        uint(&fields[0]).and_then(|classification| {
+            bytes(&fields[1]).and_then(|coordinate| {
+                if classification <= 8 && !coordinate.is_empty() {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ProfileInvalid)
+                }
+            })
+        })
+    })
 }
 
 fn raw_budget(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let fields = array(value, 8)?;
-    if fields.iter().any(|field| uint(field).unwrap_or(0) == 0) {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    Ok(())
+    array(value, 8).and_then(|fields| {
+        if fields
+            .iter()
+            .all(|field| uint(field).is_ok_and(|limit| limit > 0))
+        {
+            Ok(())
+        } else {
+            Err(BundleContractErrorV1::ProfileInvalid)
+        }
+    })
 }
 
 fn raw_watchdog(value: &Value) -> Result<(), BundleContractErrorV1> {
-    if uint(&array(value, 1)?[0])? == 0 {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    Ok(())
+    array(value, 1).and_then(|fields| {
+        uint(&fields[0]).and_then(|watchdog| {
+            if watchdog == 0 {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            } else {
+                Ok(())
+            }
+        })
+    })
 }
 
-fn raw_capabilities(value: &Value) -> Result<(), BundleContractErrorV1> {
-    let fields = array(value, 2)?;
-    if !matches!(fields[0], Value::Bool(_)) {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    let ids = array_values(&fields[1])?;
-    if ids.windows(2).any(|pair| pair[0] >= pair[1]) || ids.iter().any(|id| text(id).is_err()) {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    Ok(())
+fn raw_capabilities(value: &Value) -> Result<bool, BundleContractErrorV1> {
+    array(value, 2).and_then(|fields| {
+        let Value::Bool(network_allowed) = &fields[0] else {
+            return Err(BundleContractErrorV1::ProfileInvalid);
+        };
+        array_values(&fields[1]).and_then(|ids| {
+            if ids.windows(2).all(|pair| pair[0] < pair[1]) && ids.iter().all(|id| text(id).is_ok())
+            {
+                Ok(*network_allowed)
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        })
+    })
 }
 /// Independently validate an archive and its full-archive content-addressed filename.
 ///
@@ -1416,12 +2051,13 @@ pub fn verify_archive_release_filename(
     bytes: &[u8],
     filename: &str,
 ) -> Result<(), BundleContractErrorV1> {
-    verify_archive_independently(bytes)?;
-    if filename == format!("{}.cfb1", crate::hex_digest(blake3::hash(bytes).as_bytes())) {
-        Ok(())
-    } else {
-        Err(BundleContractErrorV1::ReleaseFilenameInvalid)
-    }
+    verify_archive_independently(bytes).and_then(|()| {
+        if filename == format!("{}.cfb1", crate::hex_digest(blake3::hash(bytes).as_bytes())) {
+            Ok(())
+        } else {
+            Err(BundleContractErrorV1::ReleaseFilenameInvalid)
+        }
+    })
 }
 fn ordered_members(v: &[BundleMemberV1]) -> bool {
     v.windows(2).all(|p| p[0].path < p[1].path)
@@ -1435,11 +2071,88 @@ fn encode(v: &Value) -> Result<Vec<u8>, BundleContractErrorV1> {
         .map_err(|_| BundleContractErrorV1::EncodingFailed)
         .map(|()| b)
 }
-fn decode(b: &[u8]) -> Result<Value, BundleContractErrorV1> {
-    let v = ciborium::from_reader(Cursor::new(b))
-        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?;
-    if encode(&v)? == b {
-        Ok(v)
+fn decode(bytes: &[u8]) -> Result<Value, BundleContractErrorV1> {
+    preflight_archive_cbor(bytes).and_then(|()| {
+        ciborium::from_reader(Cursor::new(bytes))
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
+            .and_then(|value| {
+                encode(&value).and_then(|canonical| {
+                    if canonical == bytes {
+                        Ok(value)
+                    } else {
+                        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+                    }
+                })
+            })
+    })
+}
+
+fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+    fn read_length(
+        bytes: &[u8],
+        index: &mut usize,
+        additional: u8,
+    ) -> Result<u64, BundleContractErrorV1> {
+        let width = match additional {
+            value @ 0..=23 => return Ok(u64::from(value)),
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        };
+        let end = index.saturating_add(width);
+        let encoded = bytes
+            .get(*index..end)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        *index = end;
+        let mut value = [0_u8; 8];
+        value[8 - width..].copy_from_slice(encoded);
+        Ok(u64::from_be_bytes(value))
+    }
+
+    fn item(bytes: &[u8], index: &mut usize, depth: u8) -> Result<(), BundleContractErrorV1> {
+        if depth > MAX_CONFORMANCE_NESTING_V1 {
+            return Err(BundleContractErrorV1::MemberOutOfBounds);
+        }
+        let initial = *bytes
+            .get(*index)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        *index += 1;
+        let major = initial >> 5;
+        let length = read_length(bytes, index, initial & 0x1f)?;
+        match major {
+            0 | 1 => Ok(()),
+            7 if matches!(initial & 0x1f, 20..=22) => Ok(()),
+            2 | 3 => {
+                if major == 2 && length > MAX_CONFORMANCE_MEMBER_BYTES_V1 {
+                    return Err(BundleContractErrorV1::MemberOutOfBounds);
+                }
+                let count = usize::try_from(length).unwrap_or(usize::MAX);
+                let end = index.saturating_add(count);
+                bytes
+                    .get(*index..end)
+                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+                *index = end;
+                Ok(())
+            }
+            4 => {
+                if length > MAX_CONFORMANCE_ITEMS_V1 {
+                    return Err(BundleContractErrorV1::MemberOutOfBounds);
+                }
+                for _ in 0..length {
+                    item(bytes, index, depth.saturating_add(1))?;
+                }
+                Ok(())
+            }
+            _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        }
+    }
+
+    let mut index = 0;
+    item(bytes, &mut index, 0)?;
+    if index == bytes.len() {
+        Ok(())
     } else {
         Err(BundleContractErrorV1::ArchiveEncodingInvalid)
     }
@@ -1477,9 +2190,11 @@ fn uint(v: &Value) -> Result<u64, BundleContractErrorV1> {
     }
 }
 fn digest<const N: usize>(v: &Value) -> Result<[u8; N], BundleContractErrorV1> {
-    bytes(v)?
-        .try_into()
-        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
+    bytes(v).and_then(|value| {
+        value
+            .try_into()
+            .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)
+    })
 }
 fn digest_domain(d: &[u8], b: &[u8]) -> [u8; 32] {
     let mut x = d.to_vec();
@@ -1549,13 +2264,14 @@ pub fn fixture_input_member_path(
     execution: &[u8; 32],
     member: &str,
 ) -> String {
-    let mut x = b"PiglorOS.CPF1InputPath.v1\0".to_vec();
-    x.extend_from_slice(case.as_bytes());
-    x.push(layer.wire_code());
-    x.extend_from_slice(execution);
-    x.extend_from_slice(member.as_bytes());
-    let digest = blake3::hash(&x).to_hex();
-    format!("inputs/{digest}.bin")
+    fixture_member_path(
+        b"PiglorOS.CPF1InputPath.v1\0",
+        "inputs",
+        case,
+        layer,
+        execution,
+        member,
+    )
 }
 /// Derive the deterministic expected-result member path for one fixture execution.
 #[must_use]
@@ -1564,7 +2280,31 @@ pub fn expected_result_member_path(
     layer: crate::ClaimLayerV1,
     execution: &[u8; 32],
 ) -> String {
-    fixture_input_member_path(case, layer, execution, "strict-oracle")
+    fixture_member_path(
+        b"PiglorOS.CPF1ExpectedResultPath.v1\0",
+        "expected",
+        case,
+        layer,
+        execution,
+        "strict-oracle",
+    )
+}
+
+fn fixture_member_path(
+    domain: &[u8],
+    namespace: &str,
+    case: &str,
+    layer: crate::ClaimLayerV1,
+    execution: &[u8; 32],
+    purpose: &str,
+) -> String {
+    let mut preimage = domain.to_vec();
+    preimage.extend_from_slice(case.as_bytes());
+    preimage.push(layer.wire_code());
+    preimage.extend_from_slice(execution);
+    preimage.extend_from_slice(purpose.as_bytes());
+    let digest = blake3::hash(&preimage).to_hex();
+    format!("{namespace}/{digest}.bin")
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceBundlePairV1 {
@@ -1579,12 +2319,14 @@ impl ConformanceBundlePairV1 {
     ///
     /// Returns a closed bundle error when either bundle is invalid or parity is absent.
     pub fn validate(&self) -> Result<(), BundleContractErrorV1> {
-        self.local.validate()?;
-        self.air_gapped.validate()?;
-        if self.local.manifest.profile_digest == self.air_gapped.manifest.profile_digest {
-            Ok(())
-        } else {
-            Err(BundleContractErrorV1::ModeParityMismatch)
-        }
+        self.local.validate().and_then(|()| {
+            self.air_gapped.validate().and_then(|()| {
+                if self.local.manifest.profile_digest == self.air_gapped.manifest.profile_digest {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ModeParityMismatch)
+                }
+            })
+        })
     }
 }

@@ -15,6 +15,7 @@ use pos_conformance::{
     RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
     VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
+use sha2::{Digest as Sha2Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -430,6 +431,19 @@ fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &str) -
 }
 
 fn mutate_profile_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
+    mutate_profile_archive_staged(mutate, |_| Ok(()))
+}
+
+fn mutate_profile_archive_after_fixture_digest(
+    mutate: impl FnOnce(&mut [Value]) -> TestResult,
+) -> TestResult<Vec<u8>> {
+    mutate_profile_archive_staged(|_| Ok(()), mutate)
+}
+
+fn mutate_profile_archive_staged(
+    mutate: impl FnOnce(&mut [Value]) -> TestResult,
+    mutate_after_fixture_digest: impl FnOnce(&mut [Value]) -> TestResult,
+) -> TestResult<Vec<u8>> {
     let bundle = signed_current_bundle(BundleModeV1::Local)?;
     let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
     let Value::Array(archive_fields) = &mut archive else {
@@ -467,6 +481,7 @@ fn mutate_profile_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> Te
             }
         }
     }
+    mutate_after_fixture_digest(profile_fields)?;
     if profile_fields.len() == 18 {
         profile_fields[17] = Value::Bytes(
             contract_digest(b"PiglorOS.ConformanceProfile.v1", &profile_fields[..17])?.to_vec(),
@@ -512,11 +527,529 @@ fn mutate_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult
     encode_value(&archive)
 }
 
+fn mutate_unsealed_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
+    let bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let Value::Array(fields) = &mut archive else {
+        return Err("archive is not an array".into());
+    };
+    mutate(fields)?;
+    encode_value(&archive)
+}
+
+fn archive_member_fields<'a>(
+    archive: &'a mut [Value],
+    path: &str,
+) -> TestResult<&'a mut Vec<Value>> {
+    let members = array_field(archive, 1, "archive members")?;
+    let member = members
+        .iter_mut()
+        .find(|member| matches!(member, Value::Array(fields) if matches!(fields.first(), Some(Value::Text(value)) if value == path)))
+        .ok_or_else(|| format!("archive member {path} is absent"))?;
+    match member {
+        Value::Array(fields) => Ok(fields),
+        _ => Err(format!("archive member {path} is not an array").into()),
+    }
+}
+
+fn archive_descriptor_fields<'a>(
+    archive: &'a mut [Value],
+    path: &str,
+) -> TestResult<&'a mut Vec<Value>> {
+    let manifest = array_field(archive, 0, "manifest")?;
+    let descriptors = array_field(manifest, 4, "member descriptors")?;
+    let descriptor = descriptors
+        .iter_mut()
+        .find(|descriptor| matches!(descriptor, Value::Array(fields) if matches!(fields.first(), Some(Value::Text(value)) if value == path)))
+        .ok_or_else(|| format!("archive descriptor {path} is absent"))?;
+    match descriptor {
+        Value::Array(fields) => Ok(fields),
+        _ => Err(format!("archive descriptor {path} is not an array").into()),
+    }
+}
+
+fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[u8]) -> TestResult {
+    {
+        let member = archive_member_fields(archive, path)?;
+        replace_value(
+            member,
+            1,
+            Value::Bytes(bytes.to_owned()),
+            "archive member bytes",
+        )?;
+    }
+    let descriptor = archive_descriptor_fields(archive, path)?;
+    replace_value(
+        descriptor,
+        1,
+        Value::Integer(u64::try_from(bytes.len())?.into()),
+        "archive member length",
+    )?;
+    replace_value(
+        descriptor,
+        2,
+        Value::Bytes(blake3::hash(bytes).as_bytes().to_vec()),
+        "archive member digest",
+    )
+}
+
+fn refresh_profile_registry_binding(archive: &mut [Value], registry_bytes: &[u8]) -> TestResult {
+    let profile_bytes = match archive_member_fields(archive, "profile/CPF1.cbor")?.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("profile member is not bytes".into()),
+    };
+    let mut profile: Value = ciborium::from_reader(profile_bytes.as_slice())?;
+    let Value::Array(profile_fields) = &mut profile else {
+        return Err("profile is not an array".into());
+    };
+    let binding = array_field(profile_fields, 8, "provider binding")?;
+    let descriptor = array_field(binding, 0, "provider registry descriptor")?;
+    replace_value(
+        descriptor,
+        2,
+        Value::Integer(u64::try_from(registry_bytes.len())?.into()),
+        "provider registry length",
+    )?;
+    replace_value(
+        descriptor,
+        3,
+        Value::Bytes(blake3::hash(registry_bytes).as_bytes().to_vec()),
+        "provider registry digest",
+    )?;
+    let profile_digest = contract_digest(b"PiglorOS.ConformanceProfile.v1", &profile_fields[..17])?;
+    replace_value(
+        profile_fields,
+        17,
+        Value::Bytes(profile_digest.to_vec()),
+        "profile digest",
+    )?;
+    let profile_digest = match profile_fields.get(17) {
+        Some(Value::Bytes(digest)) => digest.clone(),
+        _ => return Err("profile digest is not bytes".into()),
+    };
+    let profile_bytes = encode_value(&profile)?;
+    replace_archive_member_bytes(archive, "profile/CPF1.cbor", &profile_bytes)?;
+    replace_value(
+        array_field(archive, 0, "manifest")?,
+        3,
+        Value::Bytes(profile_digest),
+        "manifest profile digest",
+    )
+}
+
+fn mutate_provider_registry_fields(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
+    match mutation {
+        0 => {
+            replace_value(fields, 0, Value::Text("FPR0".to_owned()), "registry magic")?;
+            Ok(false)
+        }
+        1 => {
+            replace_value(fields, 1, Value::Integer(2_u64.into()), "registry version")?;
+            Ok(false)
+        }
+        2 => {
+            replace_value(fields, 2, Value::Array(Vec::new()), "registry providers")?;
+            Ok(true)
+        }
+        3 => {
+            replace_value(fields, 3, Value::Bytes(vec![0; 32]), "registry digest")?;
+            Ok(false)
+        }
+        4 => {
+            replace_value(
+                array_field(fields, 2, "registry providers")?,
+                0,
+                Value::Array(Vec::new()),
+                "registry provider entry",
+            )?;
+            Ok(true)
+        }
+        5 => {
+            replace_value(
+                array_field(
+                    array_field(fields, 2, "registry providers")?,
+                    0,
+                    "provider entry",
+                )?,
+                4,
+                Value::Integer(7_u64.into()),
+                "provider claim layer",
+            )?;
+            Ok(true)
+        }
+        6 => {
+            replace_value(
+                array_field(
+                    array_field(fields, 2, "registry providers")?,
+                    0,
+                    "provider entry",
+                )?,
+                5,
+                Value::Integer(3_u64.into()),
+                "provider subject adapter",
+            )?;
+            Ok(true)
+        }
+        7 => {
+            replace_value(
+                array_field(
+                    array_field(
+                        array_field(fields, 2, "registry providers")?,
+                        0,
+                        "provider entry",
+                    )?,
+                    6,
+                    "provider package descriptor",
+                )?,
+                0,
+                Value::Text("authority/providers/missing.cbor".to_owned()),
+                "provider package path",
+            )?;
+            Ok(true)
+        }
+        8..=17 => mutate_provider_registry_extended(fields, mutation),
+        _ => Err(format!("unsupported registry mutation {mutation}").into()),
+    }
+}
+
+fn mutate_provider_registry_extended(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
+    let providers = array_field(fields, 2, "registry providers")?;
+    if mutation == 16 {
+        let duplicate = providers.first().ok_or("provider entry is absent")?.clone();
+        providers.push(duplicate);
+        return Ok(true);
+    }
+    let entry = array_field(providers, 0, "provider entry")?;
+    match mutation {
+        8 => replace_value(
+            entry,
+            0,
+            Value::Text("INVALID".to_owned()),
+            "provider identifier",
+        )?,
+        9 => replace_value(
+            entry,
+            1,
+            Value::Text("01.0.0".to_owned()),
+            "provider version",
+        )?,
+        10..=11 => replace_value(
+            entry,
+            mutation - 8,
+            Value::Integer(65_536_u64.into()),
+            "provider ABI",
+        )?,
+        12..=15 | 17 => {
+            let descriptor = array_field(entry, 6, "provider package descriptor")?;
+            let replacement = match mutation {
+                12 => Value::Text("/invalid.cbor".to_owned()),
+                13 => Value::Text("INVALID".to_owned()),
+                14 => Value::Integer(0_u64.into()),
+                15 => Value::Bytes(vec![0; 32]),
+                17 => Value::Integer(999_u64.into()),
+                _ => return Err(format!("unsupported registry descriptor {mutation}").into()),
+            };
+            replace_value(
+                descriptor,
+                if mutation == 17 { 2 } else { mutation - 12 },
+                replacement,
+                "provider package descriptor field",
+            )?;
+        }
+        _ => return Err(format!("unsupported registry extension {mutation}").into()),
+    }
+    Ok(true)
+}
+
+fn mutate_provider_registry_archive(mutation: usize) -> TestResult<Vec<u8>> {
+    mutate_provider_registry_archive_with(|fields| {
+        mutate_provider_registry_fields(fields, mutation)
+    })
+}
+
+fn mutate_provider_registry_archive_with(
+    mutate: impl FnOnce(&mut [Value]) -> TestResult<bool>,
+) -> TestResult<Vec<u8>> {
+    let bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let Value::Array(archive_fields) = &mut archive else {
+        return Err("archive is not an array".into());
+    };
+    let registry_bytes =
+        match archive_member_fields(archive_fields, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1)?
+            .get(1)
+        {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => return Err("provider registry is not bytes".into()),
+        };
+    let mut registry: Value = ciborium::from_reader(registry_bytes.as_slice())?;
+    let Value::Array(fields) = &mut registry else {
+        return Err("provider registry is not an array".into());
+    };
+    if mutate(fields)? {
+        let registry_digest =
+            contract_digest(b"PiglorOS.Conformance.ProviderRegistry.v1", &fields[..3])?;
+        replace_value(
+            fields,
+            3,
+            Value::Bytes(registry_digest.to_vec()),
+            "registry digest",
+        )?;
+    }
+    let registry_bytes = encode_value(&registry)?;
+    replace_archive_member_bytes(
+        archive_fields,
+        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+        &registry_bytes,
+    )?;
+    refresh_profile_registry_binding(archive_fields, &registry_bytes)?;
+    resign_archive(&mut archive)?;
+    encode_value(&archive)
+}
+
+fn mutate_provider_package_fields(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
+    match mutation {
+        0 => {
+            replace_value(fields, 0, Value::Text("FPP0".to_owned()), "package magic")?;
+            Ok(false)
+        }
+        1 => {
+            replace_value(fields, 1, Value::Integer(2_u64.into()), "package version")?;
+            Ok(false)
+        }
+        2 => {
+            replace_value(fields, 2, Value::Array(Vec::new()), "package provider key")?;
+            Ok(false)
+        }
+        3 => {
+            replace_value(fields, 5, Value::Array(Vec::new()), "package schemas")?;
+            Ok(true)
+        }
+        4 => {
+            replace_value(
+                array_field(
+                    array_field(fields, 5, "package schemas")?,
+                    0,
+                    "package schema",
+                )?,
+                0,
+                Value::Integer(1_u64.into()),
+                "package schema family",
+            )?;
+            Ok(true)
+        }
+        5 => {
+            replace_value(
+                array_field(
+                    array_field(fields, 5, "package schemas")?,
+                    0,
+                    "package schema",
+                )?,
+                1,
+                Value::Array(Vec::new()),
+                "package schema descriptor",
+            )?;
+            Ok(true)
+        }
+        6 => {
+            replace_value(
+                array_field(fields, 6, "package licence descriptor")?,
+                3,
+                Value::Bytes(vec![0; 32]),
+                "package licence digest",
+            )?;
+            Ok(true)
+        }
+        7 => {
+            replace_value(fields, 11, Value::Bytes(vec![0; 32]), "package digest")?;
+            Ok(false)
+        }
+        8..=20 => mutate_provider_package_extended(fields, mutation),
+        _ => Err(format!("unsupported package mutation {mutation}").into()),
+    }
+}
+
+fn mutate_provider_package_extended(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
+    match mutation {
+        8..=9 => replace_value(
+            array_field(fields, 2, "package provider key")?,
+            mutation - 8,
+            if mutation == 8 {
+                Value::Text("INVALID".to_owned())
+            } else {
+                Value::Text("01.0.0".to_owned())
+            },
+            "package provider identity",
+        )?,
+        10..=11 => replace_value(
+            array_field(fields, 2, "package provider key")?,
+            mutation - 8,
+            Value::Integer(65_536_u64.into()),
+            "package provider ABI",
+        )?,
+        12 => replace_value(
+            fields,
+            3,
+            Value::Integer(7_u64.into()),
+            "package claim layer",
+        )?,
+        13 => replace_value(
+            fields,
+            4,
+            Value::Integer(3_u64.into()),
+            "package subject adapter",
+        )?,
+        14 => {
+            array_field(fields, 5, "package schemas")?.pop();
+        }
+        15 => replace_value(
+            array_field(fields, 5, "package schemas")?,
+            0,
+            Value::Array(Vec::new()),
+            "package schema",
+        )?,
+        16..=19 => {
+            let descriptor = array_field(
+                array_field(
+                    array_field(fields, 5, "package schemas")?,
+                    0,
+                    "package schema",
+                )?,
+                1,
+                "package schema descriptor",
+            )?;
+            let replacement = match mutation {
+                16 => Value::Text("/invalid.json".to_owned()),
+                17 => Value::Text("INVALID".to_owned()),
+                18 => Value::Integer(0_u64.into()),
+                19 => Value::Bytes(vec![0; 32]),
+                _ => return Err(format!("unsupported schema descriptor {mutation}").into()),
+            };
+            replace_value(
+                descriptor,
+                mutation - 16,
+                replacement,
+                "package schema descriptor field",
+            )?;
+        }
+        20 => replace_value(fields, 7, Value::Null, "package notice descriptor")?,
+        _ => return Err(format!("unsupported package extension {mutation}").into()),
+    }
+    Ok(true)
+}
+
+fn mutate_provider_package_archive(mutation: usize) -> TestResult<Vec<u8>> {
+    mutate_provider_package_archive_with(|fields| mutate_provider_package_fields(fields, mutation))
+}
+
+fn mutate_provider_package_archive_with(
+    mutate: impl FnOnce(&mut [Value]) -> TestResult<bool>,
+) -> TestResult<Vec<u8>> {
+    let bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let Value::Array(archive_fields) = &mut archive else {
+        return Err("archive is not an array".into());
+    };
+    let registry_bytes =
+        match archive_member_fields(archive_fields, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1)?
+            .get(1)
+        {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => return Err("provider registry is not bytes".into()),
+        };
+    let mut registry: Value = ciborium::from_reader(registry_bytes.as_slice())?;
+    let Value::Array(registry_fields) = &mut registry else {
+        return Err("provider registry is not an array".into());
+    };
+    let package_path = match array_field(
+        array_field(
+            array_field(registry_fields, 2, "registry providers")?,
+            0,
+            "provider entry",
+        )?,
+        6,
+        "package descriptor",
+    )?
+    .first()
+    {
+        Some(Value::Text(path)) => path.clone(),
+        _ => return Err("provider package path is not text".into()),
+    };
+    let package_bytes = match archive_member_fields(archive_fields, &package_path)?.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("provider package is not bytes".into()),
+    };
+    let mut package: Value = ciborium::from_reader(package_bytes.as_slice())?;
+    let Value::Array(package_fields) = &mut package else {
+        return Err("provider package is not an array".into());
+    };
+    if mutate(package_fields)? {
+        let package_digest = contract_digest(
+            b"PiglorOS.Conformance.ProviderPackage.v1",
+            &package_fields[..11],
+        )?;
+        replace_value(
+            package_fields,
+            11,
+            Value::Bytes(package_digest.to_vec()),
+            "package digest",
+        )?;
+    }
+    let package_bytes = encode_value(&package)?;
+    replace_archive_member_bytes(archive_fields, &package_path, &package_bytes)?;
+    let package_descriptor = array_field(
+        array_field(
+            array_field(registry_fields, 2, "registry providers")?,
+            0,
+            "provider entry",
+        )?,
+        6,
+        "package descriptor",
+    )?;
+    replace_value(
+        package_descriptor,
+        2,
+        Value::Integer(u64::try_from(package_bytes.len())?.into()),
+        "package length",
+    )?;
+    replace_value(
+        package_descriptor,
+        3,
+        Value::Bytes(blake3::hash(&package_bytes).as_bytes().to_vec()),
+        "package digest",
+    )?;
+    let registry_digest = contract_digest(
+        b"PiglorOS.Conformance.ProviderRegistry.v1",
+        &registry_fields[..3],
+    )?;
+    replace_value(
+        registry_fields,
+        3,
+        Value::Bytes(registry_digest.to_vec()),
+        "registry digest",
+    )?;
+    let registry_bytes = encode_value(&registry)?;
+    replace_archive_member_bytes(
+        archive_fields,
+        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+        &registry_bytes,
+    )?;
+    refresh_profile_registry_binding(archive_fields, &registry_bytes)?;
+    resign_archive(&mut archive)?;
+    encode_value(&archive)
+}
+
 fn temporary_root(label: &str) -> TestResult<PathBuf> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
     Ok(std::env::temp_dir().join(format!("pigloros-{label}-{}-{nonce}", std::process::id())))
+}
+
+fn source_inventory_address() -> String {
+    let digest: [u8; 32] =
+        Sha256::digest(include_bytes!("../../../fixtures/conformance/SHA256SUMS")).into();
+    pos_conformance::hex_digest(&digest)
 }
 
 struct TemporaryOutput(PathBuf);
@@ -589,7 +1122,7 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
     let root = temporary_root("conformance-cli")?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
-    let publication = root.join("publication");
+    let publication = root.join(source_inventory_address());
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let status = Command::new(&materializer)
@@ -598,7 +1131,7 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
             "PIGLOROS_CONFORMANCE_SIGNING_KEY",
             "0707070707070707070707070707070707070707070707070707070707070707",
         )
-        .arg("publication")
+        .arg(&publication)
         .status()?;
     assert!(status.success());
 
@@ -660,7 +1193,13 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
     let root = temporary_root("invalid-materializer")?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
-    let output = root.join("output");
+    let output = root.join(source_inventory_address());
+    let wrong_address = root.join("not-the-source-inventory-digest");
+    assert!(!Command::new(&materializer)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
+        .arg(&wrong_address)
+        .status()?
+        .success());
     assert!(!Command::new(&materializer).arg(&output).status()?.success());
     assert!(!Command::new(&materializer)
         .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", "not-a-key")
@@ -671,6 +1210,52 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
     assert!(!Command::new(&materializer)
         .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
         .arg(&output)
+        .status()?
+        .success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn public_binaries_reject_unsafe_filesystem_boundaries() -> TestResult {
+    use std::os::unix::fs::symlink;
+
+    let root = temporary_root("unsafe-public-boundaries")?;
+    let _cleanup = TemporaryOutput(root.clone());
+    let trusted = root.join("trusted");
+    fs::create_dir_all(&trusted)?;
+    let alias = root.join("alias");
+    symlink(&trusted, &alias)?;
+
+    let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    assert!(!Command::new(materializer)
+        .env(
+            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
+            "0707070707070707070707070707070707070707070707070707070707070707",
+        )
+        .arg(alias.join(source_inventory_address()))
+        .status()?
+        .success());
+
+    let verifier = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
+        .ok_or("verifier binary path is unavailable")?;
+    assert!(!Command::new(&verifier).status()?.success());
+    assert!(!Command::new(&verifier).arg(&trusted).status()?.success());
+
+    let invalid_archive = trusted.join("invalid.cfb1");
+    fs::write(&invalid_archive, b"not a canonical archive")?;
+    let archive_alias = root.join("archive-alias.cfb1");
+    symlink(&invalid_archive, &archive_alias)?;
+    assert!(!Command::new(&verifier)
+        .arg(&archive_alias)
+        .status()?
+        .success());
+
+    let oversized_archive = trusted.join("oversized.cfb1");
+    fs::File::create(&oversized_archive)?.set_len(1024 * 1024 * 1024 + 1)?;
+    assert!(!Command::new(verifier)
+        .arg(&oversized_archive)
         .status()?
         .success());
     Ok(())
@@ -721,6 +1306,74 @@ fn typed_bundle_validation_rejects_manifest_and_member_tampering() -> TestResult
         changed_descriptor.validate(),
         Err(BundleContractErrorV1::MemberDigestMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn public_bundle_entry_points_propagate_invalid_profile_and_bundle_state() -> TestResult {
+    let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+    inputs.profile.profile_digest[0] ^= 1;
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &inputs.profile,
+            BundleModeV1::Local,
+            inputs.members,
+            inputs.expected,
+        ),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+
+    let mut invalid = signed_current_bundle(BundleModeV1::Local)?;
+    invalid.manifest.magic = "BAD1".to_owned();
+    assert_eq!(
+        invalid.clone().sign(&SigningKey::from_bytes(&[7; 32])),
+        Err(BundleContractErrorV1::NonCanonicalOrder)
+    );
+    assert_eq!(
+        invalid.to_canonical_cbor(),
+        Err(BundleContractErrorV1::NonCanonicalOrder)
+    );
+    assert_eq!(
+        invalid.archive_digest(),
+        Err(BundleContractErrorV1::NonCanonicalOrder)
+    );
+    assert_eq!(
+        invalid.release_filename(),
+        Err(BundleContractErrorV1::NonCanonicalOrder)
+    );
+
+    let mut missing_profile = signed_current_bundle(BundleModeV1::Local)?;
+    missing_profile
+        .members
+        .retain(|member| member.role != BundleMemberRoleV1::Profile);
+    missing_profile
+        .manifest
+        .members
+        .retain(|descriptor| descriptor.role != BundleMemberRoleV1::Profile);
+    assert_eq!(
+        missing_profile.validate(),
+        Err(BundleContractErrorV1::MemberMissing)
+    );
+
+    let mut invalid_key = signed_current_bundle(BundleModeV1::Local)?;
+    invalid_key.signer_public_key = pos_core::PublicKey::from_bytes([0xff; 32]);
+    assert_eq!(
+        invalid_key.validate(),
+        Err(BundleContractErrorV1::SignatureInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn both_archive_decoders_reject_top_level_shape_errors() -> TestResult {
+    for malformed in [
+        Value::Null,
+        Value::Array(Vec::new()),
+        Value::Array(vec![Value::Null; 4]),
+    ] {
+        let bytes = encode_value(&malformed)?;
+        assert_archive_rejected_by_both(&bytes, "top-level archive shape");
+    }
     Ok(())
 }
 
@@ -826,7 +1479,462 @@ fn materialize_requires_draft_profile_and_complete_expected_binding() -> TestRes
     Ok(())
 }
 
+#[test]
+fn materialize_rejects_each_missing_provider_support_member() -> TestResult {
+    let paths = [
+        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+        "support/schemas/6.schema.json",
+        "support/LICENSE",
+        "support/NOTICE",
+        "support/sbom.json",
+        "support/provenance.json",
+        "support/limitations.md",
+    ];
+    for path in paths {
+        let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+        inputs.members.retain(|member| member.path != path);
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &inputs.profile,
+                BundleModeV1::Local,
+                inputs.members,
+                inputs.expected,
+            ),
+            Err(BundleContractErrorV1::MemberMissing),
+            "missing support member {path} was accepted",
+        );
+    }
+    Ok(())
+}
+
+fn remove_archive_member_and_descriptor(archive: &mut [Value], path: &str) -> TestResult {
+    let members = array_field(archive, 1, "archive members")?;
+    let member_index = members
+        .iter()
+        .position(|member| {
+            matches!(member, Value::Array(fields) if matches!(fields.first(), Some(Value::Text(value)) if value == path))
+        })
+        .ok_or_else(|| format!("archive member {path} is absent"))?;
+    members.remove(member_index);
+
+    let descriptors = array_field(
+        array_field(archive, 0, "manifest")?,
+        4,
+        "member descriptors",
+    )?;
+    let descriptor_index = descriptors
+        .iter()
+        .position(|descriptor| {
+            matches!(descriptor, Value::Array(fields) if matches!(fields.first(), Some(Value::Text(value)) if value == path))
+        })
+        .ok_or_else(|| format!("archive descriptor {path} is absent"))?;
+    descriptors.remove(descriptor_index);
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_rejects_provider_packages_with_missing_support_members() -> TestResult {
+    for path in [
+        "support/schemas/0.schema.json",
+        "support/schemas/6.schema.json",
+        "support/LICENSE",
+        "support/NOTICE",
+        "support/sbom.json",
+        "support/provenance.json",
+        "support/limitations.md",
+    ] {
+        let archive =
+            mutate_archive(|archive| remove_archive_member_and_descriptor(archive, path))?;
+        assert_archive_rejected_by_both(&archive, path);
+    }
+    Ok(())
+}
+
+#[test]
+fn archive_decoders_reject_a_noncanonical_manifest_version() -> TestResult {
+    let canonical = signed_current_bundle(BundleModeV1::Local)?.to_canonical_cbor()?;
+    let marker = [0x64, b'C', b'F', b'B', b'1', 0x00];
+    let version_index = canonical
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .map(|index| index + marker.len() - 1)
+        .ok_or("canonical CFB1 lifecycle marker must exist")?;
+    let mut noncanonical = canonical;
+    noncanonical.splice(version_index..=version_index, [0x18, 0x00]);
+    assert_archive_rejected_by_both(&noncanonical, "noncanonical manifest lifecycle");
+    Ok(())
+}
+
+#[test]
+fn materialize_rejects_an_unused_required_provider() -> TestResult {
+    let mut unused_required = current_bundle_inputs(BundleModeV1::Local)?;
+    let mut other_provider = provider_key();
+    other_provider.provider_id = "pigloros.fixture.other".to_owned();
+    unused_required
+        .profile
+        .fixture_provider_registry
+        .required_provider_keys
+        .push(other_provider);
+    unused_required
+        .profile
+        .fixture_provider_registry
+        .required_provider_keys
+        .sort();
+    unused_required.profile.profile_digest = unused_required.profile.digest();
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &unused_required.profile,
+            BundleModeV1::Local,
+            unused_required.members,
+            unused_required.expected,
+        ),
+        Err(BundleContractErrorV1::ProfileInvalid),
+    );
+    Ok(())
+}
+
+#[test]
+fn materialize_rejects_unknown_provider_and_family_schema_mismatch() -> TestResult {
+    let mut unknown_provider = current_bundle_inputs(BundleModeV1::Local)?;
+    let mut other_provider = provider_key();
+    other_provider.provider_id = "pigloros.fixture.other".to_owned();
+    unknown_provider.profile.fixtures[0].provider_key = other_provider.clone();
+    unknown_provider.profile.fixtures[0].fixture_digest =
+        unknown_provider.profile.fixtures[0].digest();
+    unknown_provider
+        .profile
+        .fixture_provider_registry
+        .required_provider_keys = vec![other_provider];
+    unknown_provider.profile.profile_digest = unknown_provider.profile.digest();
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &unknown_provider.profile,
+            BundleModeV1::Local,
+            unknown_provider.members,
+            unknown_provider.expected,
+        ),
+        Err(BundleContractErrorV1::ProfileInvalid),
+    );
+
+    let mut wrong_schema = current_bundle_inputs(BundleModeV1::Local)?;
+    wrong_schema.profile.fixtures[0].schema = artifact(
+        "support/schemas/1.schema.json",
+        "application/schema+json",
+        CURRENT_SCHEMA_BYTES[1],
+    )?;
+    wrong_schema.profile.fixtures[0].fixture_digest = wrong_schema.profile.fixtures[0].digest();
+    wrong_schema.profile.profile_digest = wrong_schema.profile.digest();
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &wrong_schema.profile,
+            BundleModeV1::Local,
+            wrong_schema.members,
+            wrong_schema.expected,
+        ),
+        Err(BundleContractErrorV1::ProfileInvalid),
+    );
+    Ok(())
+}
+
+#[test]
+fn materialize_rejects_more_expected_results_than_selected_fixtures() -> TestResult {
+    let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+    let extra_path = "expected/extra.json";
+    let extra_member = BundleMemberV1::expected_result(extra_path, EXPECTED_BYTES.to_vec());
+    inputs.profile.fixtures[0].auxiliary.push(artifact(
+        extra_path,
+        "application/json",
+        EXPECTED_BYTES,
+    )?);
+    inputs.profile.fixtures[0]
+        .auxiliary
+        .sort_by(|left, right| left.member_path.cmp(&right.member_path));
+    inputs.profile.fixtures[0].fixture_digest = inputs.profile.fixtures[0].digest();
+    inputs.profile.profile_digest = inputs.profile.digest();
+    inputs.expected.push(BundleExpectedResultV1 {
+        case_id: "example-positive".to_owned(),
+        claim_layer: ClaimLayerV1::ArtifactIntegrity,
+        execution_profile_digest: digest(31),
+        mode: BundleModeV1::Local,
+        member_path: extra_path.to_owned(),
+        digest: extra_member.digest,
+    });
+    inputs.expected.sort();
+    inputs.members.push(extra_member);
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &inputs.profile,
+            BundleModeV1::Local,
+            inputs.members,
+            inputs.expected,
+        ),
+        Err(BundleContractErrorV1::ExpectedResultMismatch),
+    );
+    Ok(())
+}
+
+#[test]
+fn bundle_pair_rejects_valid_bundles_for_different_profiles() -> TestResult {
+    let local = signed_current_bundle(BundleModeV1::Local)?;
+    let mut inputs = current_bundle_inputs(BundleModeV1::AirGapped)?;
+    inputs.profile.profile_id = "pigloros.current.other".to_owned();
+    inputs.profile.profile_digest = inputs.profile.digest();
+    let air_gapped = ConformanceBundleV1::materialize(
+        &inputs.profile,
+        BundleModeV1::AirGapped,
+        inputs.members,
+        inputs.expected,
+    )?
+    .sign(&SigningKey::from_bytes(&[7; 32]))?;
+    assert_eq!(
+        ConformanceBundlePairV1 { local, air_gapped }.validate(),
+        Err(BundleContractErrorV1::ModeParityMismatch),
+    );
+    Ok(())
+}
+
+#[test]
+fn archive_decoders_reject_trailing_cbor_items() -> TestResult {
+    let mut archive = signed_current_bundle(BundleModeV1::Local)?.to_canonical_cbor()?;
+    archive.push(0);
+    assert_archive_rejected_by_both(&archive, "trailing CBOR item");
+    Ok(())
+}
+
 fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
+        0..=19 => mutate_profile_header_fields(profile, mutation),
+        20..=31 => mutate_profile_policy_fields(profile, mutation),
+        32..=40 => mutate_profile_fixture_core_fields(profile, mutation),
+        41..=48 => mutate_profile_fixture_tail_fields(profile, mutation),
+        49..=73 => mutate_profile_text_contracts(profile, mutation),
+        74..=90 => mutate_profile_nested_contracts(profile, mutation),
+        91..=101 => mutate_profile_order_and_shape_contracts(profile, mutation),
+        _ => Err(format!("unsupported profile mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_order_and_shape_contracts(profile: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
+        91 => replace_value(
+            profile,
+            10,
+            Value::Array(vec![Value::Array(Vec::new())]),
+            "allowed divergence",
+        ),
+        92 => replace_value(
+            profile,
+            10,
+            Value::Array(vec![Value::Array(vec![
+                Value::Integer(9_u64.into()),
+                Value::Bytes(vec![1]),
+            ])]),
+            "allowed divergence classification",
+        ),
+        93 => replace_value(
+            profile,
+            10,
+            Value::Array(vec![Value::Array(vec![
+                Value::Integer(0_u64.into()),
+                Value::Bytes(Vec::new()),
+            ])]),
+            "allowed divergence coordinate",
+        ),
+        94 | 95 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                11,
+                "strict oracle",
+            )?,
+            0,
+            Value::Integer((if mutation == 94 { 0_u64 } else { 2 }).into()),
+            "strict oracle kind",
+        ),
+        96 => {
+            let executions = array_field(profile, 7, "profile executions")?;
+            executions.push(
+                executions
+                    .first()
+                    .ok_or("profile execution is absent")?
+                    .clone(),
+            );
+            Ok(())
+        }
+        97 => {
+            let providers = array_field(
+                array_field(profile, 8, "provider binding")?,
+                1,
+                "required providers",
+            )?;
+            providers.push(
+                providers
+                    .first()
+                    .ok_or("required provider is absent")?
+                    .clone(),
+            );
+            Ok(())
+        }
+        98 => {
+            let fixtures = array_field(profile, 9, "fixtures")?;
+            fixtures.push(fixtures.first().ok_or("fixture is absent")?.clone());
+            Ok(())
+        }
+        99 => replace_value(
+            array_field(
+                array_field(profile, 8, "provider binding")?,
+                0,
+                "provider registry descriptor",
+            )?,
+            0,
+            Value::Text("authority/other-registry.cbor".to_owned()),
+            "provider registry path",
+        ),
+        100 => replace_value(
+            profile,
+            3,
+            Value::Text("1".repeat(65)),
+            "oversized semantic version",
+        ),
+        101 => replace_value(
+            profile,
+            3,
+            Value::Text("é.0.0".to_owned()),
+            "non-ASCII semantic version",
+        ),
+        _ => Err(format!("unsupported order or shape mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_text_contracts(profile: &mut [Value], mutation: usize) -> TestResult {
+    let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+    let value = match mutation {
+        49 | 66 => String::new(),
+        50 => "a".repeat(129),
+        51 => "é".to_owned(),
+        52 => "-fixture".to_owned(),
+        53 => "Fixture".to_owned(),
+        54 => "1.0.0+".to_owned(),
+        55 => "1.0.0+x+y".to_owned(),
+        56 => "1.0.0-".to_owned(),
+        57 => "1.0".to_owned(),
+        58 => "1.0.0.0".to_owned(),
+        59 => "01.0.0".to_owned(),
+        60 => "12345678901.0.0".to_owned(),
+        61 => "x.0.0".to_owned(),
+        62 => "1.0.0-a..b".to_owned(),
+        63 => "1.0.0-01".to_owned(),
+        64 => "1.0.0-a_b".to_owned(),
+        65 => "1.0.0+a..b".to_owned(),
+        67 => "a".repeat(513),
+        68 => "/absolute".to_owned(),
+        69 => "a\\b".to_owned(),
+        70 => "a\0b".to_owned(),
+        71 => (0..17).map(|_| "a").collect::<Vec<_>>().join("/"),
+        72 => "a//b".to_owned(),
+        73 => "a/../b".to_owned(),
+        _ => return Err(format!("unsupported text mutation {mutation}").into()),
+    };
+    match mutation {
+        49..=53 => replace_value(profile, 2, Value::Text(value), "profile identifier"),
+        54..=65 => replace_value(profile, 3, Value::Text(value), "profile version"),
+        66..=73 => replace_value(
+            array_field(fixture, 8, "fixture schema descriptor")?,
+            0,
+            Value::Text(value),
+            "fixture schema path",
+        ),
+        _ => Err(format!("unsupported text mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_nested_contracts(profile: &mut [Value], mutation: usize) -> TestResult {
+    let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+    match mutation {
+        74 => replace_value(
+            array_field(fixture, 8, "fixture schema descriptor")?,
+            0,
+            Value::Text(".".to_owned()),
+            "fixture schema path",
+        ),
+        75 => replace_value(
+            array_field(fixture, 8, "fixture schema descriptor")?,
+            0,
+            Value::Text("a/".to_owned() + &"b".repeat(129)),
+            "fixture schema path",
+        ),
+        76..=83 => {
+            let media_type = match mutation {
+                76 => "ab",
+                77 => "textplain",
+                78 => "a/b/c",
+                79 => "/json",
+                80 => "json/",
+                81 => "Text/plain",
+                82 => "text/pl@in",
+                83 => "téxt/plain",
+                _ => return Err(format!("unsupported media type mutation {mutation}").into()),
+            };
+            replace_value(
+                array_field(fixture, 8, "fixture schema descriptor")?,
+                1,
+                Value::Text(media_type.to_owned()),
+                "fixture schema media type",
+            )
+        }
+        84 => replace_value(
+            array_field(fixture, 11, "strict oracle")?,
+            2,
+            Value::Null,
+            "active strict oracle value",
+        ),
+        85 => replace_value(
+            array_field(fixture, 11, "strict oracle")?,
+            1,
+            Value::Bytes(vec![1]),
+            "inactive strict oracle value",
+        ),
+        86 => replace_value(
+            array_field(fixture, 18, "capability policy")?,
+            1,
+            Value::Array(vec![
+                Value::Text("z".to_owned()),
+                Value::Text("a".to_owned()),
+            ]),
+            "capability identifiers",
+        ),
+        87 => replace_value(
+            array_field(fixture, 18, "capability policy")?,
+            1,
+            Value::Array(vec![Value::Integer(1_u64.into())]),
+            "capability identifiers",
+        ),
+        88 => replace_value(
+            array_field(profile, 11, "evaluator protocol")?,
+            1,
+            Value::Bytes(vec![0; 32]),
+            "evaluator input digest",
+        ),
+        89 => replace_value(
+            array_field(
+                array_field(profile, 11, "evaluator protocol")?,
+                4,
+                "evaluator hard caps",
+            )?,
+            9,
+            Value::Integer(0_u64.into()),
+            "evaluator final hard cap",
+        ),
+        90 => replace_value(
+            array_field(profile, 12, "independence requirements")?,
+            3,
+            Value::Bytes(vec![0; 32]),
+            "independent implementation digest",
+        ),
+        _ => Err(format!("unsupported nested mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_header_fields(profile: &mut [Value], mutation: usize) -> TestResult {
     match mutation {
         0 => replace_value(profile, 0, Value::Text("BAD1".to_owned()), "profile magic"),
         1 => replace_value(profile, 1, Value::Integer(2_u64.into()), "profile version"),
@@ -856,6 +1964,12 @@ fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
             "required providers",
         ),
         7..=19 => mutate_fixture_fields(array_field(profile, 9, "fixtures")?, mutation),
+        _ => Err(format!("unsupported profile mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_policy_fields(profile: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
         20 => replace_value(
             profile,
             16,
@@ -883,6 +1997,214 @@ fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
             0,
             Value::Null,
             "technical independence requirement",
+        ),
+        24 => replace_value(
+            profile,
+            5,
+            Value::Bytes(vec![0; 32]),
+            "normative specification digest",
+        ),
+        25 => replace_value(
+            profile,
+            6,
+            Value::Bytes(vec![0; 32]),
+            "execution matrix digest",
+        ),
+        26 => replace_value(
+            profile,
+            13,
+            Value::Bytes(vec![0; 32]),
+            "fixture policy digest",
+        ),
+        27 => replace_value(profile, 14, Value::Bytes(vec![0; 32]), "limitations digest"),
+        28 => replace_value(profile, 15, Value::Bytes(vec![0; 32]), "provenance digest"),
+        29 => replace_value(
+            array_field(profile, 7, "profile executions")?,
+            0,
+            Value::Bytes(vec![1; 31]),
+            "execution digest",
+        ),
+        30 => replace_value(
+            array_field(
+                array_field(profile, 8, "provider binding")?,
+                0,
+                "provider registry descriptor",
+            )?,
+            0,
+            Value::Text("../registry.cbor".to_owned()),
+            "registry member path",
+        ),
+        31 => replace_value(
+            array_field(
+                array_field(
+                    array_field(profile, 8, "provider binding")?,
+                    1,
+                    "required providers",
+                )?,
+                0,
+                "required provider",
+            )?,
+            1,
+            Value::Text("01.0.0".to_owned()),
+            "provider semantic version",
+        ),
+        _ => Err(format!("unsupported profile mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_fixture_core_fields(profile: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
+        32 => replace_value(
+            array_field(profile, 9, "fixtures")?,
+            0,
+            Value::Array(Vec::new()),
+            "fixture record",
+        ),
+        33 => replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            0,
+            Value::Text(String::new()),
+            "fixture case identifier",
+        ),
+        34 => replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            1,
+            Value::Integer(1_u64.into()),
+            "fixture mandatory flag",
+        ),
+        35 => replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            6,
+            Value::Bytes(vec![1; 31]),
+            "fixture execution digest",
+        ),
+        36 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                7,
+                "fixture modes",
+            )?,
+            0,
+            Value::Integer(2_u64.into()),
+            "fixture mode",
+        ),
+        37 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                8,
+                "fixture schema descriptor",
+            )?,
+            1,
+            Value::Text("not-a-media-type".to_owned()),
+            "fixture schema media type",
+        ),
+        38 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                9,
+                "fixture payload descriptor",
+            )?,
+            2,
+            Value::Integer(0_u64.into()),
+            "fixture payload size",
+        ),
+        39 => replace_value(
+            array_field(
+                array_field(
+                    array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                    10,
+                    "fixture auxiliary descriptors",
+                )?,
+                0,
+                "fixture auxiliary descriptor",
+            )?,
+            3,
+            Value::Bytes(vec![0; 32]),
+            "fixture auxiliary digest",
+        ),
+        40 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                11,
+                "strict oracle",
+            )?,
+            2,
+            Value::Null,
+            "strict oracle failure",
+        ),
+        _ => Err(format!("unsupported profile mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_fixture_tail_fields(profile: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
+        41 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                13,
+                "expected verification error",
+            )?,
+            0,
+            Value::Text(String::new()),
+            "expected verification error owner",
+        ),
+        42 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                18,
+                "capability policy",
+            )?,
+            0,
+            Value::Integer(0_u64.into()),
+            "network capability",
+        ),
+        43 => replace_value(
+            array_field(
+                array_field(
+                    array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                    18,
+                    "capability policy",
+                )?,
+                1,
+                "capability identifiers",
+            )?,
+            0,
+            Value::Integer(1_u64.into()),
+            "capability identifier",
+        ),
+        44 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                21,
+                "fixture provenance",
+            )?,
+            1,
+            Value::Bytes(vec![0; 32]),
+            "fixture notice digest",
+        ),
+        45 => replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            19,
+            Value::Bytes(vec![1; 31]),
+            "trust policy snapshot digest",
+        ),
+        46 => replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            20,
+            Value::Bytes(vec![1; 31]),
+            "release admission digest",
+        ),
+        47 => replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            22,
+            Value::Array(Vec::new()),
+            "fixture transition",
+        ),
+        48 => replace_value(
+            profile,
+            16,
+            Value::Bytes(vec![1; 31]),
+            "previous profile digest",
         ),
         _ => Err(format!("unsupported profile mutation {mutation}").into()),
     }
@@ -943,14 +2265,374 @@ fn mutate_fixture_fields(fixtures: &mut [Value], mutation: usize) -> TestResult 
     }
 }
 
+fn assert_archive_rejected_by_both(archive: &[u8], label: &str) {
+    assert!(
+        verify_archive_independently(archive).is_err(),
+        "{label} unexpectedly passed independent verification"
+    );
+    assert!(
+        ConformanceBundleV1::from_canonical_cbor(archive).is_err(),
+        "{label} unexpectedly passed typed verification"
+    );
+}
+
 #[test]
 fn independent_verifier_rejects_each_current_profile_contract_mutation() -> TestResult {
-    for mutation in 0..24 {
+    for mutation in 0..102 {
         let archive = mutate_profile_archive(|profile| mutate_profile_fields(profile, mutation))?;
-        assert!(
-            verify_archive_independently(&archive).is_err(),
-            "profile mutation {mutation} unexpectedly verified"
+        if matches!(mutation, 4 | 89) {
+            assert_eq!(
+                verify_archive_independently(&archive),
+                Err(if mutation == 4 {
+                    BundleContractErrorV1::LifecycleInvalid
+                } else {
+                    BundleContractErrorV1::ProfileInvalid
+                })
+            );
+        } else {
+            assert_archive_rejected_by_both(&archive, &format!("profile mutation {mutation}"));
+        }
+    }
+    Ok(())
+}
+
+fn replace_nested_profile_value(
+    profile: &mut [Value],
+    path: &[usize],
+    replacement: Value,
+) -> TestResult {
+    let (first, rest) = path.split_first().ok_or("profile path must not be empty")?;
+    let mut selected = profile
+        .get_mut(*first)
+        .ok_or("profile path starts out of bounds")?;
+    if rest.is_empty() {
+        *selected = replacement;
+        return Ok(());
+    }
+    let (field, parents) = rest
+        .split_last()
+        .ok_or("profile path must select a nested field")?;
+    for index in parents {
+        let Value::Array(fields) = selected else {
+            return Err("profile path must select arrays".into());
+        };
+        selected = fields
+            .get_mut(*index)
+            .ok_or("profile path is out of bounds")?;
+    }
+    let Value::Array(fields) = selected else {
+        return Err("profile path parent must be an array".into());
+    };
+    replace_value(fields, *field, replacement, "nested profile field")
+}
+
+fn raw_profile_type_paths() -> Vec<Vec<usize>> {
+    let mut paths = (0..16).map(|field| vec![field]).collect::<Vec<_>>();
+    paths.extend((0..4).map(|field| vec![8, 0, field]));
+    paths.extend((0..4).map(|field| vec![8, 1, 0, field]));
+    paths.push(vec![7, 0]);
+    paths.extend(
+        (0..=12)
+            .chain(14..=18)
+            .chain(std::iter::once(21))
+            .map(|field| vec![9, 0, field]),
+    );
+    paths.extend((0..4).map(|field| vec![9, 0, 4, field]));
+    paths.push(vec![9, 0, 7, 0]);
+    for descriptor in [8, 9] {
+        paths.extend((0..4).map(|field| vec![9, 0, descriptor, field]));
+    }
+    paths.extend((0..4).map(|field| vec![9, 0, 10, 0, field]));
+    paths.extend([0, 2].map(|field| vec![9, 0, 11, field]));
+    paths.extend((0..3).map(|field| vec![9, 0, 11, 2, field]));
+    paths.extend((0..8).map(|field| vec![9, 0, 16, field]));
+    paths.push(vec![9, 0, 17, 0]);
+    paths.extend((0..2).map(|field| vec![9, 0, 18, field]));
+    paths.extend((0..7).map(|field| vec![9, 0, 21, field]));
+    paths.extend((0..5).map(|field| vec![11, field]));
+    paths.extend((0..10).map(|field| vec![11, 4, field]));
+    paths.extend((0..5).map(|field| vec![12, field]));
+    paths
+}
+
+#[test]
+fn independent_verifier_rejects_wrong_types_across_every_raw_profile_record() -> TestResult {
+    for replacement in [Value::Null, Value::Map(Vec::new())] {
+        for path in raw_profile_type_paths() {
+            let archive = mutate_profile_archive(|profile| {
+                replace_nested_profile_value(profile, &path, replacement.clone())
+            })?;
+            assert_archive_rejected_by_both(&archive, &format!("raw profile path {path:?}"));
+        }
+    }
+    for path in [
+        vec![16],
+        vec![9, 0, 13],
+        vec![9, 0, 19],
+        vec![9, 0, 20],
+        vec![9, 0, 22],
+    ] {
+        let archive = mutate_profile_archive(|profile| {
+            replace_nested_profile_value(profile, &path, Value::Map(Vec::new()))
+        })?;
+        assert_archive_rejected_by_both(&archive, &format!("optional profile path {path:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn both_verifiers_reject_wrong_types_across_every_archive_record() -> TestResult {
+    let mut paths = (0..4).map(|field| vec![field]).collect::<Vec<_>>();
+    paths.extend((0..6).map(|field| vec![0, field]));
+    paths.push(vec![0, 4, 0]);
+    paths.extend((0..4).map(|field| vec![0, 4, 0, field]));
+    paths.push(vec![0, 5, 0]);
+    paths.extend((0..6).map(|field| vec![0, 5, 0, field]));
+    paths.push(vec![1, 0]);
+    paths.extend((0..3).map(|field| vec![1, 0, field]));
+
+    for path in paths {
+        let archive = mutate_unsealed_archive(|fields| {
+            replace_nested_profile_value(fields, &path, Value::Map(Vec::new()))
+        })?;
+        assert_archive_rejected_by_both(&archive, &format!("raw archive path {path:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn both_verifiers_accept_the_full_divergence_classification_vocabulary() -> TestResult {
+    for classification in 7_u64..=8 {
+        let archive = mutate_profile_archive(|profile| {
+            replace_value(
+                profile,
+                10,
+                Value::Array(vec![Value::Array(vec![
+                    Value::Integer(classification.into()),
+                    Value::Bytes(vec![1]),
+                ])]),
+                "allowed divergence",
+            )
+        })?;
+        verify_archive_independently(&archive)?;
+        ConformanceBundleV1::from_canonical_cbor(&archive)?;
+    }
+    Ok(())
+}
+
+fn set_raw_divergence_fixture(
+    profile: &mut [Value],
+    classification: Value,
+    coordinate: Value,
+) -> TestResult {
+    let divergence = Value::Array(vec![classification, coordinate]);
+    replace_value(
+        profile,
+        10,
+        Value::Array(vec![divergence.clone()]),
+        "allowed divergence",
+    )?;
+    let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+    replace_value(
+        fixture,
+        11,
+        Value::Array(vec![
+            Value::Integer(2_u64.into()),
+            Value::Null,
+            Value::Null,
+            divergence,
+        ]),
+        "divergence oracle",
+    )?;
+    replace_value(
+        fixture,
+        12,
+        Value::Integer(1_u64.into()),
+        "verification outcome",
+    )?;
+    replace_value(fixture, 13, Value::Null, "verification error")
+}
+
+#[test]
+fn independent_verifier_exercises_active_divergence_oracles() -> TestResult {
+    let valid = mutate_profile_archive(|profile| {
+        set_raw_divergence_fixture(profile, Value::Integer(5_u64.into()), Value::Bytes(vec![1]))
+    })?;
+    verify_archive_independently(&valid)?;
+    ConformanceBundleV1::from_canonical_cbor(&valid)?;
+
+    for (classification, coordinate) in [
+        (Value::Map(Vec::new()), Value::Bytes(vec![1])),
+        (Value::Integer(5_u64.into()), Value::Map(Vec::new())),
+        (Value::Integer(5_u64.into()), Value::Bytes(Vec::new())),
+    ] {
+        let invalid = mutate_profile_archive(|profile| {
+            set_raw_divergence_fixture(profile, classification, coordinate)
+        })?;
+        assert_archive_rejected_by_both(&invalid, "malformed active divergence");
+    }
+    Ok(())
+}
+
+fn set_raw_downgrade_fixture(profile: &mut [Value]) -> TestResult {
+    let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+    let from = fixture
+        .get(4)
+        .ok_or("fixture provider key is absent")?
+        .clone();
+    let mut to = from.clone();
+    let Value::Array(to_fields) = &mut to else {
+        return Err("fixture provider key is not an array".into());
+    };
+    replace_value(
+        to_fields,
+        3,
+        Value::Integer(1_u64.into()),
+        "target ABI minor",
+    )?;
+    replace_value(fixture, 3, Value::Integer(5_u64.into()), "downgrade family")?;
+    let schema_bytes = CURRENT_SCHEMA_BYTES[5];
+    replace_value(
+        fixture,
+        8,
+        Value::Array(vec![
+            Value::Text("support/schemas/5.schema.json".to_owned()),
+            Value::Text("application/schema+json".to_owned()),
+            Value::Integer(u64::try_from(schema_bytes.len())?.into()),
+            Value::Bytes(blake3::hash(schema_bytes).as_bytes().to_vec()),
+        ]),
+        "downgrade schema",
+    )?;
+    replace_value(fixture, 19, Value::Bytes(vec![40; 32]), "trust snapshot")?;
+    replace_value(fixture, 20, Value::Bytes(vec![41; 32]), "release admission")?;
+    replace_value(
+        fixture,
+        22,
+        Value::Array(vec![from, to]),
+        "provider transition",
+    )
+}
+
+#[test]
+fn independent_verifier_exercises_active_provider_transitions() -> TestResult {
+    let valid = mutate_profile_archive(set_raw_downgrade_fixture)?;
+    verify_archive_independently(&valid)?;
+    ConformanceBundleV1::from_canonical_cbor(&valid)?;
+
+    for endpoint in 0..2 {
+        let invalid = mutate_profile_archive(|profile| {
+            set_raw_downgrade_fixture(profile)?;
+            replace_nested_profile_value(profile, &[9, 0, 22, endpoint], Value::Map(Vec::new()))
+        })?;
+        assert_archive_rejected_by_both(&invalid, "malformed provider transition");
+    }
+    Ok(())
+}
+
+#[test]
+fn both_verifiers_reject_a_fixture_digest_changed_after_canonicalization() -> TestResult {
+    let archive = mutate_profile_archive_after_fixture_digest(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            23,
+            Value::Bytes(vec![9; 32]),
+            "fixture digest",
+        )
+    })?;
+    assert_archive_rejected_by_both(&archive, "fixture digest mismatch");
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_rejects_network_for_air_gapped_fixture() -> TestResult {
+    let archive = mutate_profile_archive(|profile| {
+        let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+        replace_value(
+            array_field(fixture, 18, "capability policy")?,
+            0,
+            Value::Bool(true),
+            "network capability",
+        )
+    })?;
+    assert_eq!(
+        verify_archive_independently(&archive),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+
+    let plugin_archive = mutate_profile_archive(|profile| {
+        let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+        replace_value(fixture, 5, Value::Integer(2_u64.into()), "subject adapter")?;
+        replace_value(
+            fixture,
+            7,
+            Value::Array(vec![Value::Integer(0_u64.into())]),
+            "fixture modes",
+        )?;
+        replace_value(
+            array_field(fixture, 18, "capability policy")?,
+            0,
+            Value::Bool(true),
+            "network capability",
+        )
+    })?;
+    assert_eq!(
+        verify_archive_independently(&plugin_archive),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_rejects_each_current_provider_registry_mutation() -> TestResult {
+    for mutation in 0..18 {
+        let archive = mutate_provider_registry_archive(mutation)?;
+        assert_archive_rejected_by_both(
+            &archive,
+            &format!("provider registry mutation {mutation}"),
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_rejects_each_current_provider_package_mutation() -> TestResult {
+    for mutation in 0..21 {
+        let archive = mutate_provider_package_archive(mutation)?;
+        assert_archive_rejected_by_both(&archive, &format!("provider package mutation {mutation}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_rejects_wrong_types_across_provider_records() -> TestResult {
+    let mut registry_paths = (0..3).map(|field| vec![field]).collect::<Vec<_>>();
+    registry_paths.extend((0..7).map(|field| vec![2, 0, field]));
+    registry_paths.extend((0..4).map(|field| vec![2, 0, 6, field]));
+    for path in registry_paths {
+        for replacement in [Value::Null, Value::Map(Vec::new())] {
+            let archive = mutate_provider_registry_archive_with(|registry| {
+                replace_nested_profile_value(registry, &path, replacement)?;
+                Ok(true)
+            })?;
+            assert_archive_rejected_by_both(&archive, &format!("raw registry path {path:?}"));
+        }
+    }
+
+    let mut package_paths = (0..11).map(|field| vec![field]).collect::<Vec<_>>();
+    package_paths.extend((0..4).map(|field| vec![2, field]));
+    package_paths.extend((0..2).map(|field| vec![5, 0, field]));
+    package_paths.extend((0..4).map(|field| vec![5, 0, 1, field]));
+    for descriptor in 6..=10 {
+        package_paths.extend((0..4).map(|field| vec![descriptor, field]));
+    }
+    for path in package_paths {
+        for replacement in [Value::Null, Value::Map(Vec::new())] {
+            let archive = mutate_provider_package_archive_with(|package| {
+                replace_nested_profile_value(package, &path, replacement)?;
+                Ok(true)
+            })?;
+            assert_archive_rejected_by_both(&archive, &format!("raw package path {path:?}"));
+        }
     }
     Ok(())
 }
@@ -1034,18 +2716,180 @@ fn mutate_archive_fields(archive: &mut [Value], mutation: usize) -> TestResult {
             array_field(archive, 1, "archive members")?.pop();
             Ok(())
         }
+        10..=21 => mutate_archive_shape_fields(archive, mutation),
+        22..=31 => mutate_archive_expected_fields(archive, mutation),
+        32..=36 => mutate_archive_additional_fields(archive, mutation),
         _ => Err(format!("unsupported archive mutation {mutation}").into()),
+    }
+}
+
+fn mutate_archive_shape_fields(archive: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
+        10 => replace_value(archive, 0, Value::Null, "manifest"),
+        11 => replace_value(
+            array_field(archive, 0, "manifest")?,
+            4,
+            Value::Null,
+            "member descriptors",
+        ),
+        12 => replace_value(
+            array_field(archive, 0, "manifest")?,
+            5,
+            Value::Null,
+            "expected results",
+        ),
+        13 => replace_value(
+            array_field(
+                array_field(archive, 0, "manifest")?,
+                4,
+                "member descriptors",
+            )?,
+            0,
+            Value::Array(Vec::new()),
+            "member descriptor",
+        ),
+        14..=17 => {
+            let replacement = match mutation {
+                14..=16 => Value::Null,
+                17 => Value::Integer(14_u64.into()),
+                _ => return Err(format!("unsupported descriptor mutation {mutation}").into()),
+            };
+            replace_value(
+                array_field(
+                    array_field(
+                        array_field(archive, 0, "manifest")?,
+                        4,
+                        "member descriptors",
+                    )?,
+                    0,
+                    "member descriptor",
+                )?,
+                mutation - 14,
+                replacement,
+                "member descriptor field",
+            )
+        }
+        18 => replace_value(
+            array_field(archive, 1, "archive members")?,
+            0,
+            Value::Array(Vec::new()),
+            "archive member",
+        ),
+        19..=21 => replace_value(
+            array_field(
+                array_field(archive, 1, "archive members")?,
+                0,
+                "archive member",
+            )?,
+            mutation - 19,
+            if mutation == 21 {
+                Value::Integer(14_u64.into())
+            } else {
+                Value::Null
+            },
+            "archive member field",
+        ),
+        _ => Err(format!("unsupported archive shape mutation {mutation}").into()),
+    }
+}
+
+fn mutate_archive_expected_fields(archive: &mut [Value], mutation: usize) -> TestResult {
+    if mutation == 29 {
+        return replace_value(
+            array_field(archive, 0, "manifest")?,
+            3,
+            Value::Bytes(vec![0; 32]),
+            "manifest profile digest",
+        );
+    }
+    if mutation == 30 {
+        return replace_value(
+            array_field(
+                array_field(archive, 1, "archive members")?,
+                0,
+                "archive member",
+            )?,
+            0,
+            Value::Text("aaa".to_owned()),
+            "archive member path",
+        );
+    }
+    if mutation == 31 {
+        return replace_value(
+            array_field(
+                array_field(
+                    array_field(archive, 0, "manifest")?,
+                    4,
+                    "member descriptors",
+                )?,
+                0,
+                "member descriptor",
+            )?,
+            0,
+            Value::Text("aaa".to_owned()),
+            "member descriptor path",
+        );
+    }
+    let expected = array_field(
+        array_field(array_field(archive, 0, "manifest")?, 5, "expected results")?,
+        0,
+        "expected result",
+    )?;
+    match mutation {
+        22 => {
+            *expected = Vec::new();
+            Ok(())
+        }
+        23..=28 => replace_value(
+            expected,
+            mutation - 23,
+            match mutation {
+                24 => Value::Integer(256_u64.into()),
+                26 => Value::Integer(2_u64.into()),
+                _ => Value::Null,
+            },
+            "expected result field",
+        ),
+        _ => Err(format!("unsupported expected result mutation {mutation}").into()),
+    }
+}
+
+fn mutate_archive_additional_fields(archive: &mut [Value], mutation: usize) -> TestResult {
+    if matches!(mutation, 32..=34) {
+        return replace_value(
+            array_field(archive, 0, "manifest")?,
+            1,
+            Value::Integer(u64::try_from(mutation - 30)?.into()),
+            "manifest lifecycle",
+        );
+    }
+    let expected_results =
+        array_field(array_field(archive, 0, "manifest")?, 5, "expected results")?;
+    match mutation {
+        35 => {
+            expected_results.push(
+                expected_results
+                    .first()
+                    .ok_or("expected result is absent")?
+                    .clone(),
+            );
+            Ok(())
+        }
+        36 => replace_value(
+            array_field(expected_results, 0, "expected result")?,
+            5,
+            Value::Bytes(vec![9; 32]),
+            "expected result digest",
+        ),
+        _ => Err(format!("unsupported additional archive mutation {mutation}").into()),
     }
 }
 
 #[test]
 fn independent_verifier_rejects_manifest_member_and_expected_mutations() -> TestResult {
-    for mutation in 0..10 {
+    for mutation in 0..37 {
         let archive = mutate_archive(|archive| mutate_archive_fields(archive, mutation))?;
-        assert!(
-            verify_archive_independently(&archive).is_err(),
-            "archive mutation {mutation} unexpectedly verified"
-        );
+        assert_archive_rejected_by_both(&archive, &format!("archive mutation {mutation}"));
     }
     Ok(())
 }
@@ -1106,7 +2950,33 @@ fn deterministic_member_paths_bind_case_layer_execution_and_purpose() {
     assert_eq!(input, same);
     assert_ne!(input, expected);
     assert!(input.starts_with("inputs/"));
-    assert!(expected.starts_with("inputs/"));
+    assert!(expected.starts_with("expected/"));
+}
+
+#[test]
+fn independent_verifier_preflights_resource_bounds_before_decoding() {
+    let oversized_byte_string = [0x5a, 0x04, 0x00, 0x00, 0x01];
+    assert_eq!(
+        verify_archive_independently(&oversized_byte_string),
+        Err(BundleContractErrorV1::MemberOutOfBounds)
+    );
+
+    let excessive_item_count = [0x9a, 0x00, 0x01, 0x00, 0x01];
+    assert_eq!(
+        verify_archive_independently(&excessive_item_count),
+        Err(BundleContractErrorV1::MemberOutOfBounds)
+    );
+
+    let mut excessive_nesting = vec![0x81; 34];
+    excessive_nesting.push(0xf6);
+    assert_eq!(
+        verify_archive_independently(&excessive_nesting),
+        Err(BundleContractErrorV1::MemberOutOfBounds)
+    );
+
+    for malformed in [&[][..], &[0x1a, 0, 0][..], &[0xa0][..], &[0xf7][..]] {
+        assert!(verify_archive_independently(malformed).is_err());
+    }
 }
 
 #[test]

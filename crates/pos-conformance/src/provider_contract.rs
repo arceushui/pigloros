@@ -244,7 +244,7 @@ impl FixtureProviderRegistryV1 {
     /// Returns a closed provider-contract error when validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ProviderContractErrorV1> {
         self.validate()
-            .and_then(|()| encode_bounded(&encode_registry(self)))
+            .and_then(|()| encode_value(&encode_registry(self)))
     }
 
     /// Decode and validate exact canonical FPR1 bytes.
@@ -304,7 +304,7 @@ impl FixtureProviderRegistryBindingV1 {
     /// Returns a closed provider-contract error when validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ProviderContractErrorV1> {
         self.validate()
-            .and_then(|()| encode_bounded(&encode_registry_binding(self)))
+            .and_then(|()| encode_value(&encode_registry_binding(self)))
     }
 
     /// Decode and validate exact canonical two-field CPF1 registry-binding bytes.
@@ -344,7 +344,7 @@ impl FixtureProviderPackageV1 {
     /// Returns a closed provider-contract error when validation or encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ProviderContractErrorV1> {
         self.validate()
-            .and_then(|()| encode_bounded(&encode_package(self)))
+            .and_then(|()| encode_value(&encode_package(self)))
     }
 
     /// Decode and validate exact canonical FPP1 bytes.
@@ -384,14 +384,16 @@ impl FixtureProviderPackageV1 {
             .and_then(|()| validate_provider_entry(entry))
             .and_then(|()| {
                 let descriptor = &entry.provider_package_descriptor;
-                let length = u64::try_from(package_bytes.len())
-                    .map_err(|_| ProviderContractErrorV1::FieldOutOfBounds)?;
-                let canonical_bytes = self.to_canonical_cbor()?;
+                let canonical_matches = self
+                    .to_canonical_cbor()
+                    .is_ok_and(|canonical| canonical == package_bytes);
+                let length_matches = usize::try_from(descriptor.byte_length)
+                    .is_ok_and(|length| length == package_bytes.len());
                 if self.provider_key != entry.provider_key
                     || self.claim_layer != entry.claim_layer
                     || self.subject_adapter != entry.subject_adapter
-                    || canonical_bytes != package_bytes
-                    || descriptor.byte_length != length
+                    || !canonical_matches
+                    || !length_matches
                     || descriptor.blake3_digest != *blake3::hash(package_bytes).as_bytes()
                 {
                     Err(ProviderContractErrorV1::PackageBindingMismatch)
@@ -584,14 +586,13 @@ fn media_type(value: &str) -> bool {
 }
 
 fn digest_fields(domain: &[u8], fields: &Value) -> Result<[u8; 32], ProviderContractErrorV1> {
-    encode_bounded(fields).and_then(|bytes| {
-        let encoded_length =
-            u64::try_from(bytes.len()).map_err(|_| ProviderContractErrorV1::FieldOutOfBounds)?;
+    encode_value(fields).map(|bytes| {
+        let encoded_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         let mut preimage = Vec::with_capacity(domain.len() + 8 + bytes.len());
         preimage.extend_from_slice(domain);
         preimage.extend_from_slice(&encoded_length.to_be_bytes());
         preimage.extend_from_slice(&bytes);
-        Ok(*blake3::hash(&preimage).as_bytes())
+        *blake3::hash(&preimage).as_bytes()
     })
 }
 
@@ -702,45 +703,46 @@ fn encode_artifact_descriptor(value: &ArtifactDescriptorV1) -> Value {
 }
 
 fn decode_registry(value: &Value) -> Result<FixtureProviderRegistryV1, ProviderContractErrorV1> {
-    let fields = array(value, 4)?;
-    if text_value(&fields[0])? != FIXTURE_PROVIDER_REGISTRY_MAGIC_V1 || uint_value(&fields[1])? != 1
-    {
-        return Err(ProviderContractErrorV1::UnsupportedVersion);
-    }
-    array_values(&fields[2]).and_then(|providers| {
-        if providers.len() > MAX_PROVIDER_ENTRIES {
-            return Err(ProviderContractErrorV1::FieldOutOfBounds);
-        }
-        providers
-            .iter()
-            .map(decode_provider_entry)
-            .collect::<Result<Vec<_>, _>>()
-            .and_then(|providers| {
-                digest_value(&fields[3]).map(|registry_digest| FixtureProviderRegistryV1 {
-                    providers,
-                    registry_digest,
+    array(value, 4).and_then(|fields| {
+        text_value(&fields[0]).and_then(|magic| {
+            uint_value(&fields[1]).and_then(|version| {
+                if magic != FIXTURE_PROVIDER_REGISTRY_MAGIC_V1 || version != 1 {
+                    return Err(ProviderContractErrorV1::UnsupportedVersion);
+                }
+                array_values(&fields[2]).and_then(|provider_values| {
+                    provider_values
+                        .iter()
+                        .map(decode_provider_entry)
+                        .collect::<Result<Vec<_>, _>>()
+                        .and_then(|providers| {
+                            digest_value(&fields[3]).map(|registry_digest| {
+                                FixtureProviderRegistryV1 {
+                                    providers,
+                                    registry_digest,
+                                }
+                            })
+                        })
                 })
             })
+        })
     })
 }
 
 fn decode_registry_binding(
     value: &Value,
 ) -> Result<FixtureProviderRegistryBindingV1, ProviderContractErrorV1> {
-    let fields = array(value, 2)?;
-    decode_artifact_descriptor(&fields[0]).and_then(|registry_artifact| {
-        array_values(&fields[1]).and_then(|required_provider_keys| {
-            if required_provider_keys.len() > MAX_PROVIDER_ENTRIES {
-                return Err(ProviderContractErrorV1::FieldOutOfBounds);
-            }
-            required_provider_keys
-                .iter()
-                .map(decode_provider_key)
-                .collect::<Result<Vec<_>, _>>()
-                .map(|required_provider_keys| FixtureProviderRegistryBindingV1 {
-                    registry_artifact,
-                    required_provider_keys,
-                })
+    array(value, 2).and_then(|fields| {
+        decode_artifact_descriptor(&fields[0]).and_then(|registry_artifact| {
+            array_values(&fields[1]).and_then(|key_values| {
+                key_values
+                    .iter()
+                    .map(decode_provider_key)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|required_provider_keys| FixtureProviderRegistryBindingV1 {
+                        registry_artifact,
+                        required_provider_keys,
+                    })
+            })
         })
     })
 }
@@ -758,17 +760,22 @@ fn decode_package(value: &Value) -> Result<FixtureProviderPackageV1, ProviderCon
         .iter()
         .map(decode_family_schema)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(FixtureProviderPackageV1 {
+    let licence_descriptor = decode_artifact_descriptor(&fields[6])?;
+    let notices_descriptor = decode_artifact_descriptor(&fields[7])?;
+    let sbom_descriptor = decode_artifact_descriptor(&fields[8])?;
+    let source_provenance_descriptor = decode_artifact_descriptor(&fields[9])?;
+    let limitations_descriptor = decode_artifact_descriptor(&fields[10])?;
+    digest_value(&fields[11]).map(|package_digest| FixtureProviderPackageV1 {
         provider_key,
         claim_layer,
         subject_adapter,
         family_schemas,
-        licence_descriptor: decode_artifact_descriptor(&fields[6])?,
-        notices_descriptor: decode_artifact_descriptor(&fields[7])?,
-        sbom_descriptor: decode_artifact_descriptor(&fields[8])?,
-        source_provenance_descriptor: decode_artifact_descriptor(&fields[9])?,
-        limitations_descriptor: decode_artifact_descriptor(&fields[10])?,
-        package_digest: digest_value(&fields[11])?,
+        licence_descriptor,
+        notices_descriptor,
+        sbom_descriptor,
+        source_provenance_descriptor,
+        limitations_descriptor,
+        package_digest,
     })
 }
 
@@ -840,15 +847,11 @@ fn decode_artifact_descriptor(
     })
 }
 
-fn encode_bounded(value: &Value) -> Result<Vec<u8>, ProviderContractErrorV1> {
+fn encode_value(value: &Value) -> Result<Vec<u8>, ProviderContractErrorV1> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)
-        .map_err(|_| ProviderContractErrorV1::InvalidEncoding)?;
-    if bytes.len() > MAX_PROVIDER_RECORD_BYTES {
-        Err(ProviderContractErrorV1::FieldOutOfBounds)
-    } else {
-        Ok(bytes)
-    }
+        .map_err(|_| ProviderContractErrorV1::InvalidEncoding)
+        .map(|()| bytes)
 }
 
 fn decode_bounded(bytes: &[u8]) -> Result<Value, ProviderContractErrorV1> {
@@ -859,7 +862,7 @@ fn decode_bounded(bytes: &[u8]) -> Result<Value, ProviderContractErrorV1> {
         ciborium::from_reader(Cursor::new(bytes))
             .map_err(|_| ProviderContractErrorV1::InvalidEncoding)
             .and_then(|value| {
-                encode_bounded(&value).and_then(|canonical| {
+                encode_value(&value).and_then(|canonical| {
                     if canonical == bytes {
                         Ok(value)
                     } else {
@@ -906,8 +909,7 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ProviderContractErrorV1> {
         match initial >> 5 {
             0 | 1 => Ok(()),
             2 | 3 => {
-                let count = usize::try_from(length)
-                    .map_err(|_| ProviderContractErrorV1::FieldOutOfBounds)?;
+                let count = usize::try_from(length).unwrap_or(usize::MAX);
                 let end = index
                     .checked_add(count)
                     .ok_or(ProviderContractErrorV1::FieldOutOfBounds)?;
@@ -947,10 +949,10 @@ fn array(value: &Value, length: usize) -> Result<&[Value], ProviderContractError
 }
 
 fn array_values(value: &Value) -> Result<&[Value], ProviderContractErrorV1> {
-    match value {
-        Value::Array(values) => Ok(values),
-        _ => Err(ProviderContractErrorV1::InvalidEncoding),
-    }
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or(ProviderContractErrorV1::InvalidEncoding)
 }
 
 fn text(value: &str) -> Value {
@@ -958,10 +960,10 @@ fn text(value: &str) -> Value {
 }
 
 fn text_value(value: &Value) -> Result<String, ProviderContractErrorV1> {
-    match value {
-        Value::Text(value) => Ok(value.clone()),
-        _ => Err(ProviderContractErrorV1::InvalidEncoding),
-    }
+    value
+        .as_text()
+        .map(str::to_owned)
+        .ok_or(ProviderContractErrorV1::InvalidEncoding)
 }
 
 fn uint(value: u64) -> Value {
@@ -969,20 +971,24 @@ fn uint(value: u64) -> Value {
 }
 
 fn uint_value(value: &Value) -> Result<u64, ProviderContractErrorV1> {
-    match value {
-        Value::Integer(value) => {
-            u64::try_from(*value).map_err(|_| ProviderContractErrorV1::InvalidEncoding)
-        }
-        _ => Err(ProviderContractErrorV1::InvalidEncoding),
-    }
+    value
+        .as_integer()
+        .ok_or(ProviderContractErrorV1::InvalidEncoding)
+        .and_then(|integer| {
+            u64::try_from(integer).map_err(|_| ProviderContractErrorV1::InvalidEncoding)
+        })
 }
 
 fn u8_value(value: &Value) -> Result<u8, ProviderContractErrorV1> {
-    u8::try_from(uint_value(value)?).map_err(|_| ProviderContractErrorV1::FieldOutOfBounds)
+    uint_value(value).and_then(|value| {
+        u8::try_from(value).map_err(|_| ProviderContractErrorV1::FieldOutOfBounds)
+    })
 }
 
 fn u16_value(value: &Value) -> Result<u16, ProviderContractErrorV1> {
-    u16::try_from(uint_value(value)?).map_err(|_| ProviderContractErrorV1::FieldOutOfBounds)
+    uint_value(value).and_then(|value| {
+        u16::try_from(value).map_err(|_| ProviderContractErrorV1::FieldOutOfBounds)
+    })
 }
 
 fn digest(value: &[u8; 32]) -> Value {
@@ -990,13 +996,10 @@ fn digest(value: &[u8; 32]) -> Value {
 }
 
 fn digest_value(value: &Value) -> Result<[u8; 32], ProviderContractErrorV1> {
-    match value {
-        Value::Bytes(bytes) => bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| ProviderContractErrorV1::InvalidEncoding),
-        _ => Err(ProviderContractErrorV1::InvalidEncoding),
-    }
+    value
+        .as_bytes()
+        .and_then(|bytes| bytes.as_slice().try_into().ok())
+        .ok_or(ProviderContractErrorV1::InvalidEncoding)
 }
 
 fn claim_layer(value: ClaimLayerV1) -> Value {
@@ -1018,277 +1021,10 @@ fn subject_adapter(value: SubjectAdapterKindV1) -> Value {
 }
 
 fn decode_subject_adapter(value: &Value) -> Result<SubjectAdapterKindV1, ProviderContractErrorV1> {
-    match uint_value(value)? {
+    uint_value(value).and_then(|code| match code {
         0 => Ok(SubjectAdapterKindV1::ExportedArtifact),
         1 => Ok(SubjectAdapterKindV1::PublicGatewayProtocol),
         2 => Ok(SubjectAdapterKindV1::PublicPluginProtocol),
         _ => Err(ProviderContractErrorV1::FieldOutOfBounds),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-    const fn digest(seed: u8) -> [u8; 32] {
-        [seed; 32]
-    }
-
-    fn descriptor(path: &str, seed: u8) -> ArtifactDescriptorV1 {
-        ArtifactDescriptorV1 {
-            member_path: path.to_owned(),
-            media_type: "application/cbor".to_owned(),
-            byte_length: 1,
-            blake3_digest: digest(seed),
-        }
-    }
-
-    fn provider_key() -> FixtureProviderKeyV1 {
-        FixtureProviderKeyV1 {
-            provider_id: "pigloros.conformance.example".to_owned(),
-            contract_version: "1.2.3-rc.1+build.9".to_owned(),
-            abi_major: 1,
-            abi_minor: 0,
-        }
-    }
-
-    fn package() -> TestResult<FixtureProviderPackageV1> {
-        let family_schemas = [
-            FixtureFamilyV1::Positive,
-            FixtureFamilyV1::Denied,
-            FixtureFamilyV1::Malformed,
-            FixtureFamilyV1::ResourceExhaustion,
-            FixtureFamilyV1::DeletionRedaction,
-            FixtureFamilyV1::Downgrade,
-            FixtureFamilyV1::IndependentEvaluation,
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, family)| -> TestResult<ProviderFamilySchemaV1> {
-            Ok(ProviderFamilySchemaV1 {
-                family,
-                schema_descriptor: descriptor(
-                    &format!("schemas/{index}.cddl"),
-                    u8::try_from(index + 1)?,
-                ),
-            })
-        })
-        .collect::<TestResult<Vec<_>>>()?;
-        let mut package = FixtureProviderPackageV1 {
-            provider_key: provider_key(),
-            claim_layer: ClaimLayerV1::ArtifactIntegrity,
-            subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-            family_schemas,
-            licence_descriptor: descriptor("meta/license.txt", 8),
-            notices_descriptor: descriptor("meta/notices.txt", 9),
-            sbom_descriptor: descriptor("meta/sbom.cdx.json", 10),
-            source_provenance_descriptor: descriptor("meta/source.json", 11),
-            limitations_descriptor: descriptor("meta/limitations.md", 12),
-            package_digest: [0; 32],
-        };
-        package.package_digest = package.digest()?;
-        Ok(package)
-    }
-
-    fn registry(package_bytes: &[u8]) -> TestResult<FixtureProviderRegistryV1> {
-        let mut registry = FixtureProviderRegistryV1 {
-            providers: vec![FixtureProviderEntryV1 {
-                provider_key: provider_key(),
-                claim_layer: ClaimLayerV1::ArtifactIntegrity,
-                subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-                provider_package_descriptor: ArtifactDescriptorV1 {
-                    member_path: "providers/example.fpp1".to_owned(),
-                    media_type: "application/cbor".to_owned(),
-                    byte_length: u64::try_from(package_bytes.len())?,
-                    blake3_digest: *blake3::hash(package_bytes).as_bytes(),
-                },
-            }],
-            registry_digest: [0; 32],
-        };
-        registry.registry_digest = registry.digest()?;
-        Ok(registry)
-    }
-
-    #[test]
-    fn fpr1_and_fpp1_round_trip_and_bind_exact_package_bytes() -> TestResult {
-        let package = package()?;
-        let package_bytes = package.to_canonical_cbor()?;
-        let registry = registry(&package_bytes)?;
-        let registry_bytes = registry.to_canonical_cbor()?;
-
-        assert_eq!(
-            FixtureProviderPackageV1::from_canonical_cbor(&package_bytes),
-            Ok(package.clone())
-        );
-        assert_eq!(
-            FixtureProviderRegistryV1::from_canonical_cbor(&registry_bytes),
-            Ok(registry.clone())
-        );
-        assert_eq!(
-            package.validate_registry_binding(&registry.providers[0], &package_bytes),
-            Ok(())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn registry_rejects_unsorted_keys_and_tampered_digest() -> TestResult {
-        let package = package()?;
-        let package_bytes = package.to_canonical_cbor()?;
-        let mut unsorted_registry = registry(&package_bytes)?;
-        let mut later = unsorted_registry.providers[0].clone();
-        later.provider_key.provider_id = "z-provider".to_owned();
-        unsorted_registry.providers.insert(0, later);
-        assert_eq!(
-            unsorted_registry.validate(),
-            Err(ProviderContractErrorV1::NonCanonicalOrder)
-        );
-
-        let mut digest_mismatch = registry(&package_bytes)?;
-        digest_mismatch.registry_digest = digest(99);
-        assert_eq!(
-            digest_mismatch.validate(),
-            Err(ProviderContractErrorV1::DigestMismatch)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn package_rejects_incomplete_family_inventory_and_duplicate_metadata_paths() -> TestResult {
-        let mut missing_family = package()?;
-        missing_family.family_schemas.pop();
-        assert_eq!(
-            missing_family.validate(),
-            Err(ProviderContractErrorV1::FamilyInventoryInvalid)
-        );
-
-        let mut duplicate_metadata = package()?;
-        duplicate_metadata.notices_descriptor.member_path = "meta/license.txt".to_owned();
-        assert_eq!(
-            duplicate_metadata.validate(),
-            Err(ProviderContractErrorV1::NonCanonicalOrder)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn descriptor_and_identifier_boundaries_are_closed() -> TestResult {
-        let mut invalid_identifier = package()?;
-        invalid_identifier.provider_key.provider_id = "Provider".to_owned();
-        assert_eq!(
-            invalid_identifier.validate(),
-            Err(ProviderContractErrorV1::InvalidIdentifier)
-        );
-
-        let mut invalid_version = package()?;
-        invalid_version.provider_key.contract_version = "01.0.0".to_owned();
-        assert_eq!(
-            invalid_version.validate(),
-            Err(ProviderContractErrorV1::InvalidContractVersion)
-        );
-
-        let mut invalid = package()?;
-        invalid.licence_descriptor.member_path = "/absolute.cbor".to_owned();
-        assert_eq!(
-            invalid.validate(),
-            Err(ProviderContractErrorV1::InvalidMemberPath)
-        );
-        invalid.licence_descriptor.member_path = "relative.cbor".to_owned();
-        invalid.licence_descriptor.media_type = "Application/cbor".to_owned();
-        assert_eq!(
-            invalid.validate(),
-            Err(ProviderContractErrorV1::InvalidMediaType)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn self_digests_use_exact_field_arrays_and_length_prefixes() -> TestResult {
-        let package = package()?;
-        let package_fields = encode_bounded(&encode_package_fields(&package))?;
-        let mut package_preimage = b"PiglorOS.Conformance.ProviderPackage.v1\0".to_vec();
-        package_preimage.extend_from_slice(&u64::try_from(package_fields.len())?.to_be_bytes());
-        package_preimage.extend_from_slice(&package_fields);
-        assert_eq!(
-            package.digest()?,
-            *blake3::hash(&package_preimage).as_bytes()
-        );
-
-        let package_bytes = package.to_canonical_cbor()?;
-        let registry = registry(&package_bytes)?;
-        let registry_fields = encode_bounded(&encode_registry_fields(&registry))?;
-        let mut registry_preimage = b"PiglorOS.Conformance.ProviderRegistry.v1\0".to_vec();
-        registry_preimage.extend_from_slice(&u64::try_from(registry_fields.len())?.to_be_bytes());
-        registry_preimage.extend_from_slice(&registry_fields);
-        assert_eq!(
-            registry.digest()?,
-            *blake3::hash(&registry_preimage).as_bytes()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn cpf1_registry_binding_is_an_exact_two_field_value() -> TestResult {
-        let binding = FixtureProviderRegistryBindingV1 {
-            registry_artifact: descriptor(FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 41),
-            required_provider_keys: vec![provider_key()],
-        };
-        let bytes = binding.to_canonical_cbor()?;
-        assert_eq!(
-            FixtureProviderRegistryBindingV1::from_canonical_cbor(&bytes),
-            Ok(binding.clone())
-        );
-
-        let mut duplicate_keys = binding.clone();
-        duplicate_keys.required_provider_keys.push(provider_key());
-        assert_eq!(
-            duplicate_keys.validate(),
-            Err(ProviderContractErrorV1::NonCanonicalOrder)
-        );
-
-        let mut wrong_path = binding;
-        wrong_path.registry_artifact.member_path = "authority/registry.cbor".to_owned();
-        assert_eq!(
-            wrong_path.validate(),
-            Err(ProviderContractErrorV1::InvalidMemberPath)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn decoders_reject_wrong_magic_noncanonical_bytes_and_binding_mismatch() -> TestResult {
-        let package = package()?;
-        let package_bytes = package.to_canonical_cbor()?;
-        let mut wrong_magic = encode_package(&package);
-        let Value::Array(fields) = &mut wrong_magic else {
-            return Err("package codec is not an array".into());
-        };
-        let magic = fields
-            .first_mut()
-            .ok_or("package codec has no magic field")?;
-        *magic = text("FPP0");
-        let wrong_magic_bytes = encode_bounded(&wrong_magic)?;
-        assert_eq!(
-            FixtureProviderPackageV1::from_canonical_cbor(&wrong_magic_bytes),
-            Err(ProviderContractErrorV1::UnsupportedVersion)
-        );
-
-        let mut trailing = package_bytes.clone();
-        trailing.push(0);
-        assert_eq!(
-            FixtureProviderPackageV1::from_canonical_cbor(&trailing),
-            Err(ProviderContractErrorV1::InvalidEncoding)
-        );
-
-        let registry = registry(&package_bytes)?;
-        let mut changed = package_bytes;
-        changed[0] ^= 1;
-        assert_eq!(
-            package.validate_registry_binding(&registry.providers[0], &changed),
-            Err(ProviderContractErrorV1::PackageBindingMismatch)
-        );
-        Ok(())
-    }
+    })
 }

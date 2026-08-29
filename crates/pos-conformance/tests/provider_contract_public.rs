@@ -386,7 +386,18 @@ fn provider_keys_enforce_nonempty_identifiers_and_exact_semantic_versions() -> T
             Err(ProviderContractErrorV1::InvalidIdentifier)
         );
     }
-    for version in ["", "1", "1.0", "01.0.0", "1.0.0-", "1.0.0+"] {
+    for version in [
+        "",
+        "1",
+        "1.0",
+        "01.0.0",
+        "1.0.0-",
+        "1.0.0+",
+        "1.0.0-01",
+        "1.0.0-alpha..beta",
+        "1.0.0-alpha!",
+        "1.0.0+build!",
+    ] {
         let mut invalid = package()?;
         invalid.provider_key.contract_version = version.to_owned();
         assert_eq!(
@@ -724,4 +735,324 @@ fn decoders_reject_trailing_noncanonical_malformed_and_wrong_shape_cbor() -> Tes
         Err(ProviderContractErrorV1::InvalidEncoding)
     );
     Ok(())
+}
+
+fn assert_package_shape_rejections(package_bytes: &[u8]) -> TestResult {
+    let malformed_package_fields = [
+        (0, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (1, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (
+            3,
+            Value::Integer(256.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+        (
+            4,
+            Value::Integer(3.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+        (5, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (6, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (11, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+    ];
+    for (index, replacement, expected) in malformed_package_fields {
+        let malformed = mutate_record(package_bytes, |fields| {
+            fields[index] = replacement;
+            Ok(())
+        })?;
+        assert_eq!(
+            FixtureProviderPackageV1::from_canonical_cbor(&malformed),
+            Err(expected)
+        );
+    }
+
+    for (field, replacement, expected) in [
+        (0, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (1, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (
+            2,
+            Value::Integer(65_536_u64.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+        (
+            3,
+            Value::Integer(65_536_u64.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+    ] {
+        let malformed = mutate_record(package_bytes, |fields| {
+            let Value::Array(provider_key) = &mut fields[2] else {
+                return Err("provider key must be an array".into());
+            };
+            provider_key[field] = replacement;
+            Ok(())
+        })?;
+        assert_eq!(
+            FixtureProviderPackageV1::from_canonical_cbor(&malformed),
+            Err(expected)
+        );
+    }
+
+    for (field, replacement, expected) in [
+        (0, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (1, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+    ] {
+        let malformed_schema = mutate_record(package_bytes, |fields| {
+            let Value::Array(schemas) = &mut fields[5] else {
+                return Err("family schemas must be an array".into());
+            };
+            let Value::Array(schema) = &mut schemas[0] else {
+                return Err("family schema must be an array".into());
+            };
+            schema[field] = replacement;
+            Ok(())
+        })?;
+        assert_eq!(
+            FixtureProviderPackageV1::from_canonical_cbor(&malformed_schema),
+            Err(expected)
+        );
+    }
+    Ok(())
+}
+
+fn assert_descriptor_registry_and_binding_rejections(package_bytes: &[u8]) -> TestResult {
+    for (field, replacement) in [
+        (0, Value::Null),
+        (1, Value::Null),
+        (2, Value::Integer((-1).into())),
+        (3, Value::Null),
+    ] {
+        let malformed = mutate_record(package_bytes, |fields| {
+            let Value::Array(descriptor) = &mut fields[6] else {
+                return Err("licence descriptor must be an array".into());
+            };
+            descriptor[field] = replacement;
+            Ok(())
+        })?;
+        assert_eq!(
+            FixtureProviderPackageV1::from_canonical_cbor(&malformed),
+            Err(ProviderContractErrorV1::InvalidEncoding)
+        );
+    }
+
+    for descriptor_index in 7..=10 {
+        let malformed = mutate_record(package_bytes, |fields| {
+            fields[descriptor_index] = Value::Null;
+            Ok(())
+        })?;
+        assert_eq!(
+            FixtureProviderPackageV1::from_canonical_cbor(&malformed),
+            Err(ProviderContractErrorV1::InvalidEncoding)
+        );
+    }
+
+    let registry_bytes = registry(package_bytes)?.to_canonical_cbor()?;
+    let malformed_registry = mutate_record(&registry_bytes, |fields| {
+        fields[2] = Value::Null;
+        Ok(())
+    })?;
+    assert_eq!(
+        FixtureProviderRegistryV1::from_canonical_cbor(&malformed_registry),
+        Err(ProviderContractErrorV1::InvalidEncoding)
+    );
+    let oversized_registry = mutate_record(&registry_bytes, |fields| {
+        fields[2] = Value::Array(vec![Value::Null; 4097]);
+        Ok(())
+    })?;
+    assert_eq!(
+        FixtureProviderRegistryV1::from_canonical_cbor(&oversized_registry),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
+    assert_registry_entry_rejections(&registry_bytes)?;
+
+    let binding_bytes = registry_binding(&registry_bytes)?.to_canonical_cbor()?;
+    let malformed_binding = mutate_record(&binding_bytes, |fields| {
+        fields[1] = Value::Null;
+        Ok(())
+    })?;
+    assert_eq!(
+        FixtureProviderRegistryBindingV1::from_canonical_cbor(&malformed_binding),
+        Err(ProviderContractErrorV1::InvalidEncoding)
+    );
+    let oversized_binding = mutate_record(&binding_bytes, |fields| {
+        fields[1] = Value::Array(vec![Value::Null; 4097]);
+        Ok(())
+    })?;
+    assert_eq!(
+        FixtureProviderRegistryBindingV1::from_canonical_cbor(&oversized_binding),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
+    assert_required_provider_key_rejections(&binding_bytes)
+}
+
+fn assert_registry_entry_rejections(registry_bytes: &[u8]) -> TestResult {
+    for (field, replacement, expected) in [
+        (0, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (1, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+        (
+            2,
+            Value::Integer(65_536_u64.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+        (
+            3,
+            Value::Integer(65_536_u64.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+        (
+            4,
+            Value::Integer(256_u64.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+        (
+            5,
+            Value::Integer(3_u64.into()),
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ),
+        (6, Value::Null, ProviderContractErrorV1::InvalidEncoding),
+    ] {
+        let malformed = mutate_record(registry_bytes, |fields| {
+            let Value::Array(providers) = &mut fields[2] else {
+                return Err("provider registry entries must be an array".into());
+            };
+            let Value::Array(entry) = &mut providers[0] else {
+                return Err("provider registry entry must be an array".into());
+            };
+            entry[field] = replacement;
+            Ok(())
+        })?;
+        assert_eq!(
+            FixtureProviderRegistryV1::from_canonical_cbor(&malformed),
+            Err(expected)
+        );
+    }
+    Ok(())
+}
+
+fn assert_required_provider_key_rejections(binding_bytes: &[u8]) -> TestResult {
+    for field in 0..4 {
+        let malformed = mutate_record(binding_bytes, |fields| {
+            let Value::Array(required) = &mut fields[1] else {
+                return Err("required provider keys must be an array".into());
+            };
+            let Value::Array(key) = &mut required[0] else {
+                return Err("required provider key must be an array".into());
+            };
+            key[field] = Value::Null;
+            Ok(())
+        })?;
+        assert_eq!(
+            FixtureProviderRegistryBindingV1::from_canonical_cbor(&malformed),
+            Err(ProviderContractErrorV1::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+fn mutate_nested_record(package_bytes: &[u8], path: &[usize]) -> TestResult<Vec<u8>> {
+    mutate_record(package_bytes, |fields| {
+        let (field, parents) = path.split_last().ok_or("record path must not be empty")?;
+        let mut selected = fields;
+        for index in parents {
+            let Value::Array(nested) = selected
+                .get_mut(*index)
+                .ok_or("record path is out of bounds")?
+            else {
+                return Err("record path must select arrays".into());
+            };
+            selected = nested;
+        }
+        selected[*field] = Value::Map(Vec::new());
+        Ok(())
+    })
+}
+
+#[test]
+fn public_decoders_reject_wrong_types_at_every_provider_record_path() -> TestResult {
+    let package_bytes = package()?.to_canonical_cbor()?;
+    let mut package_paths = (0..12).map(|field| vec![field]).collect::<Vec<_>>();
+    package_paths.extend((0..4).map(|field| vec![2, field]));
+    package_paths.push(vec![5, 0]);
+    package_paths.extend((0..2).map(|field| vec![5, 0, field]));
+    package_paths.extend((0..4).map(|field| vec![5, 0, 1, field]));
+    for descriptor in 6..=10 {
+        package_paths.extend((0..4).map(|field| vec![descriptor, field]));
+    }
+    for path in package_paths {
+        let malformed = mutate_nested_record(&package_bytes, &path)?;
+        assert!(
+            FixtureProviderPackageV1::from_canonical_cbor(&malformed).is_err(),
+            "package field {path:?} unexpectedly decoded"
+        );
+    }
+
+    let registry_bytes = registry(&package_bytes)?.to_canonical_cbor()?;
+    let mut registry_paths = (0..4).map(|field| vec![field]).collect::<Vec<_>>();
+    registry_paths.push(vec![2, 0]);
+    registry_paths.extend((0..7).map(|field| vec![2, 0, field]));
+    registry_paths.extend((0..4).map(|field| vec![2, 0, 6, field]));
+    for path in registry_paths {
+        let malformed = mutate_nested_record(&registry_bytes, &path)?;
+        assert!(
+            FixtureProviderRegistryV1::from_canonical_cbor(&malformed).is_err(),
+            "registry field {path:?} unexpectedly decoded"
+        );
+    }
+
+    let binding_bytes = registry_binding(&registry_bytes)?.to_canonical_cbor()?;
+    let mut binding_paths = (0..2).map(|field| vec![field]).collect::<Vec<_>>();
+    binding_paths.extend((0..4).map(|field| vec![0, field]));
+    binding_paths.push(vec![1, 0]);
+    binding_paths.extend((0..4).map(|field| vec![1, 0, field]));
+    for path in binding_paths {
+        let malformed = mutate_nested_record(&binding_bytes, &path)?;
+        assert!(
+            FixtureProviderRegistryBindingV1::from_canonical_cbor(&malformed).is_err(),
+            "binding field {path:?} unexpectedly decoded"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_decoders_reject_every_provider_record_type_and_bound_violation() -> TestResult {
+    let package_bytes = package()?.to_canonical_cbor()?;
+    assert_package_shape_rejections(&package_bytes)?;
+    assert_descriptor_registry_and_binding_rejections(&package_bytes)
+}
+
+#[test]
+fn public_decoders_enforce_raw_cbor_size_depth_and_collection_caps() {
+    let oversized_record = vec![0_u8; 16 * 1024 * 1024 + 1];
+    assert_eq!(
+        FixtureProviderPackageV1::from_canonical_cbor(&oversized_record),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
+
+    let mut over_nested = vec![0x81; 33];
+    over_nested.push(0);
+    assert_eq!(
+        FixtureProviderPackageV1::from_canonical_cbor(&over_nested),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
+
+    for malformed in [
+        vec![],
+        vec![0x58],
+        vec![0x58, 0x01],
+        vec![0x41],
+        vec![0x61, 0xff],
+        vec![0x5f],
+        vec![0x5b, 0, 0, 0, 0, 0, 0, 0, 1],
+        vec![0x5b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        vec![0xfa, 0, 0, 0, 0],
+        vec![0x9a, 0, 0, 0x10, 0x01],
+        vec![0x9a, 0, 1, 0, 1],
+    ] {
+        assert!(matches!(
+            FixtureProviderPackageV1::from_canonical_cbor(&malformed),
+            Err(ProviderContractErrorV1::InvalidEncoding
+                | ProviderContractErrorV1::FieldOutOfBounds)
+        ));
+    }
 }

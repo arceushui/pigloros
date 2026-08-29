@@ -533,7 +533,7 @@ impl ConformanceProfileV1 {
     /// Returns a closed safe error when encoding, validation, or digest verification fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
         self.validate()
-            .and_then(|()| encode_bounded(&encode_profile(self, true)))
+            .and_then(|()| encode_value(&encode_profile(self)))
     }
 
     /// Validate and encode a Stable profile using an externally supplied root policy.
@@ -546,7 +546,7 @@ impl ConformanceProfileV1 {
         policy: &TrustedRootPolicyV1,
     ) -> Result<Vec<u8>, ConformanceContractError> {
         self.validate_with_trust_policy(policy)
-            .and_then(|()| encode_bounded(&encode_profile(self, true)))
+            .and_then(|()| encode_value(&encode_profile(self)))
     }
 
     /// Decode exact-length canonical CPF1 bytes and validate every contract invariant.
@@ -701,7 +701,7 @@ impl ConformanceProfileV1 {
     ) -> Result<Self, ConformanceContractError> {
         let next = self.transition_to(target, stable_evidence)?;
         if target == ProfileLifecycleV1::Stable {
-            next.validate_with_trust_policy(policy)?;
+            return next.validate_with_trust_policy(policy).map(|()| next);
         }
         Ok(next)
     }
@@ -894,7 +894,7 @@ impl EvaluatorRequestV1 {
     /// Returns a closed safe error when encoding, validation, or digest verification fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ConformanceContractError> {
         self.validate()
-            .and_then(|()| encode_bounded(&encode_request(self, true)))
+            .and_then(|()| encode_value(&encode_request(self, true)))
     }
 
     /// Decode and verify exact canonical evaluator-request bytes.
@@ -1013,11 +1013,13 @@ fn validate_fixture_claim(fixture: &FixtureDescriptorV1) -> Result<(), Conforman
 
 fn validate_selected_caps(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
     let caps = &profile.evaluator_protocol.hard_caps;
-    caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))?;
-    let encoded_value = encode_profile(profile, true);
-    encode_value(&encoded_value).and_then(|encoded| {
-        validate_selected_caps_encoded(profile, caps, &encoded_value, encoded.len())
-    })
+    caps.validate_case_count(u32::try_from(profile.fixtures.len()).unwrap_or(u32::MAX))
+        .and_then(|()| {
+            let encoded_value = encode_profile(profile);
+            encode_value(&encoded_value).and_then(|encoded| {
+                validate_selected_caps_encoded(profile, caps, &encoded_value, encoded.len())
+            })
+        })
 }
 
 fn validate_selected_caps_encoded(
@@ -1220,7 +1222,7 @@ fn validate_stable_implementation(
                 .modes
                 .iter()
                 .filter(|&&mode| {
-                    matches!(mode, ExecutionModeV1::Local | ExecutionModeV1::AirGapped)
+                    [ExecutionModeV1::Local, ExecutionModeV1::AirGapped].contains(&mode)
                 })
                 .map(move |mode| {
                     (
@@ -1255,7 +1257,7 @@ fn validate_stable_implementation(
                         .modes
                         .iter()
                         .filter(|mode| {
-                            matches!(mode, ExecutionModeV1::Local | ExecutionModeV1::AirGapped)
+                            [ExecutionModeV1::Local, ExecutionModeV1::AirGapped].contains(mode)
                         })
                         .map(move |mode| (fixture, *mode))
                 })
@@ -1410,43 +1412,61 @@ fn fixture_bundle_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
 }
 
 fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> bool {
-    if case.case_id != fixture.case_id
-        || case.fixture_digest != fixture.digest()
-        || case.claim_layer != fixture.claim_layer
-        || case.execution_profile_digest != fixture.execution_profile_digest
-        || case.outcome != CaseOutcomeStatusV1::Pass
-        || case.replay_claim != fixture.replay_claim
-        || case.redaction_state != fixture.redaction_state
-        || case.provenance_digest != fixture_provenance_digest(&fixture.provenance)
-    {
+    let case_binding = (
+        case.case_id.as_str(),
+        case.fixture_digest,
+        case.claim_layer,
+        case.execution_profile_digest,
+        case.outcome,
+        case.replay_claim,
+        case.redaction_state,
+        case.provenance_digest,
+    );
+    let fixture_binding = (
+        fixture.case_id.as_str(),
+        fixture.digest(),
+        fixture.claim_layer,
+        fixture.execution_profile_digest,
+        CaseOutcomeStatusV1::Pass,
+        fixture.replay_claim,
+        fixture.redaction_state,
+        fixture_provenance_digest(&fixture.provenance),
+    );
+    if case_binding != fixture_binding {
         return false;
     }
     match fixture.strict_oracle.kind {
-        StrictOracleKindV1::Output => match case.verification_outcome {
-            VerificationOutcomeV1::VerifiedExact => {
-                fixture.strict_oracle.output.as_ref().is_some_and(|output| {
-                    case.expected_digest == Some(output.blake3_digest)
-                        && case.actual_digest == Some(output.blake3_digest)
-                })
+        StrictOracleKindV1::Output => {
+            let Some(output) = fixture.strict_oracle.output.as_ref() else {
+                return false;
+            };
+            match case.verification_outcome {
+                VerificationOutcomeV1::VerifiedExact => {
+                    (case.expected_digest, case.actual_digest)
+                        == (Some(output.blake3_digest), Some(output.blake3_digest))
+                }
+                VerificationOutcomeV1::UnverifiableArtifactsMissing => {
+                    (case.expected_digest, case.actual_digest) == (None, None)
+                }
+                _ => false,
             }
-            VerificationOutcomeV1::UnverifiableArtifactsMissing => {
-                case.expected_digest.is_none() && case.actual_digest.is_none()
-            }
-            _ => false,
-        },
+        }
         StrictOracleKindV1::Failure => {
             case.verification_outcome == fixture.expected_verification_outcome
         }
         StrictOracleKindV1::Divergence => {
-            case.verification_outcome == VerificationOutcomeV1::Diverged
-                && fixture
-                    .strict_oracle
-                    .divergence
-                    .as_ref()
-                    .is_some_and(|divergence| {
-                        case.divergence_kind == Some(divergence.classification)
-                            && case.first_coordinate.as_ref() == Some(&divergence.first_coordinate)
-                    })
+            let Some(divergence) = fixture.strict_oracle.divergence.as_ref() else {
+                return false;
+            };
+            (
+                case.verification_outcome,
+                case.divergence_kind,
+                case.first_coordinate.as_deref(),
+            ) == (
+                VerificationOutcomeV1::Diverged,
+                Some(divergence.classification),
+                Some(divergence.first_coordinate.as_slice()),
+            )
         }
     }
 }
@@ -1722,9 +1742,6 @@ fn validate_fixture_downgrade(
     fixture: &FixtureDescriptorV1,
 ) -> Result<(), ConformanceContractError> {
     let is_downgrade = fixture.family == FixtureFamilyV1::Downgrade;
-    let has_all = fixture.trust_policy_snapshot_digest.is_some()
-        && fixture.release_admission_digest.is_some()
-        && fixture.transition.is_some();
     if !is_downgrade {
         if fixture.trust_policy_snapshot_digest.is_none()
             && fixture.release_admission_digest.is_none()
@@ -1734,7 +1751,11 @@ fn validate_fixture_downgrade(
         }
         return Err(ConformanceContractError::ProfileLifecycleInvalid);
     }
-    if !has_all
+    let Some(transition) = fixture.transition.as_ref() else {
+        return Err(ConformanceContractError::ProvenanceMissing);
+    };
+    if fixture.trust_policy_snapshot_digest.is_none()
+        || fixture.release_admission_digest.is_none()
         || fixture
             .trust_policy_snapshot_digest
             .is_some_and(|digest| zero_digest(&digest))
@@ -1744,9 +1765,6 @@ fn validate_fixture_downgrade(
     {
         return Err(ConformanceContractError::ProvenanceMissing);
     }
-    let Some(transition) = fixture.transition.as_ref() else {
-        return Err(ConformanceContractError::ProfileLifecycleInvalid);
-    };
     if !valid_fixture_provider_key(&transition.from)
         || !valid_fixture_provider_key(&transition.to)
         || transition.from == transition.to
@@ -1950,13 +1968,9 @@ fn contract_digest(domain: &[u8], value: &Value) -> [u8; 32] {
     *blake3::hash(&source).as_bytes()
 }
 
-fn encode_profile(profile: &ConformanceProfileV1, include_digest: bool) -> Value {
+fn encode_profile(profile: &ConformanceProfileV1) -> Value {
     let mut fields = profile_fields(profile);
-    fields.push(if include_digest {
-        digest(&profile.profile_digest)
-    } else {
-        Value::Null
-    });
+    fields.push(digest(&profile.profile_digest));
     Value::Array(fields)
 }
 
@@ -2301,13 +2315,19 @@ fn decode_provider_key(value: &Value) -> Result<FixtureProviderKeyV1, Conformanc
 fn decode_provider_registry_binding(
     value: &Value,
 ) -> Result<FixtureProviderRegistryBindingV1, ConformanceContractError> {
-    let fields = array(value, 2)?;
-    Ok(FixtureProviderRegistryBindingV1 {
-        registry_artifact: decode_artifact_descriptor(&fields[0])?,
-        required_provider_keys: array_values(&fields[1])?
-            .iter()
-            .map(decode_provider_key)
-            .collect::<Result<Vec<_>, _>>()?,
+    array(value, 2).and_then(|fields| {
+        decode_artifact_descriptor(&fields[0]).and_then(|registry_artifact| {
+            array_values(&fields[1]).and_then(|key_values| {
+                key_values
+                    .iter()
+                    .map(decode_provider_key)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|required_provider_keys| FixtureProviderRegistryBindingV1 {
+                        registry_artifact,
+                        required_provider_keys,
+                    })
+            })
+        })
     })
 }
 
@@ -2358,11 +2378,16 @@ fn decode_operational_safety(
 fn decode_namespaced_failure(
     value: &Value,
 ) -> Result<NamespacedFailureV1, ConformanceContractError> {
-    let fields = array(value, 3)?;
-    Ok(NamespacedFailureV1 {
-        owner_id: text_value(&fields[0])?,
-        contract_version: text_value(&fields[1])?,
-        code_id: text_value(&fields[2])?,
+    array(value, 3).and_then(|fields| {
+        text_value(&fields[0]).and_then(|owner_id| {
+            text_value(&fields[1]).and_then(|contract_version| {
+                text_value(&fields[2]).map(|code_id| NamespacedFailureV1 {
+                    owner_id,
+                    contract_version,
+                    code_id,
+                })
+            })
+        })
     })
 }
 
@@ -2402,11 +2427,11 @@ fn optional_transition(
     if matches!(value, Value::Null) {
         return Ok(None);
     }
-    let fields = array(value, 2)?;
-    Ok(Some(FixtureContractTransitionV1 {
-        from: decode_provider_key(&fields[0])?,
-        to: decode_provider_key(&fields[1])?,
-    }))
+    array(value, 2).and_then(|fields| {
+        decode_provider_key(&fields[0]).and_then(|from| {
+            decode_provider_key(&fields[1]).map(|to| Some(FixtureContractTransitionV1 { from, to }))
+        })
+    })
 }
 
 fn decode_capability_policy(value: &Value) -> Result<CapabilityPolicyV1, ConformanceContractError> {
@@ -2574,16 +2599,6 @@ fn encode_value_to_writer<W: std::io::Write>(
     writer: W,
 ) -> Result<(), ConformanceContractError> {
     ciborium::into_writer(value, writer).map_err(|_| ConformanceContractError::InvalidEncoding)
-}
-
-fn encode_bounded(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
-    encode_value(value).and_then(|bytes| {
-        if bytes.len() > MAX_PROFILE_BYTES {
-            Err(ConformanceContractError::FieldOutOfBounds)
-        } else {
-            Ok(bytes)
-        }
-    })
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
@@ -2965,6 +2980,7 @@ fn safe_error(value: SafeErrorCodeV1) -> Value {
     })
 }
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod current_wire_contract_tests {
     use super::*;
 
@@ -3121,7 +3137,7 @@ mod current_wire_contract_tests {
         let bytes = value.to_canonical_cbor()?;
         assert_eq!(ConformanceProfileV1::from_canonical_cbor(&bytes), Ok(value));
         assert_eq!(
-            array_values(&encode_profile(&profile(), true)).map(<[Value]>::len),
+            array_values(&encode_profile(&profile())).map(<[Value]>::len),
             Ok(18)
         );
         assert_eq!(
@@ -3144,7 +3160,7 @@ mod current_wire_contract_tests {
 
     #[test]
     fn public_decoder_rejects_malformed_current_record_lengths() -> TestResult {
-        let mut malformed_profile = encode_profile(&profile(), true);
+        let mut malformed_profile = encode_profile(&profile());
         let Value::Array(fields) = &mut malformed_profile else {
             return Err("profile codec is not an array".into());
         };
@@ -3155,7 +3171,7 @@ mod current_wire_contract_tests {
             Err(ConformanceContractError::InvalidEncoding)
         );
 
-        let mut malformed_fixture = encode_profile(&profile(), true);
+        let mut malformed_fixture = encode_profile(&profile());
         let Value::Array(fields) = &mut malformed_fixture else {
             return Err("profile codec is not an array".into());
         };

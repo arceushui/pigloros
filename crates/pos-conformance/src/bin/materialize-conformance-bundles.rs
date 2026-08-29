@@ -90,6 +90,8 @@ enum MaterializationError {
     DurabilitySyncFailed,
     #[error("staged archive digest mismatch")]
     ArchiveDigestMismatch,
+    #[error("destination is not addressed by the source inventory digest")]
+    SourceInventoryAddressMismatch,
 }
 
 #[derive(Clone, Copy)]
@@ -736,10 +738,30 @@ fn prepare_command(
     command: MaterializationCommand,
 ) -> Result<PreparedMaterializationCommand, Box<dyn Error>> {
     match command {
-        MaterializationCommand::Publish(output_root) => AtomicPublication::prepare(&output_root)
-            .map(PreparedMaterializationCommand::Publish)
-            .map_err(Into::into),
+        MaterializationCommand::Publish(output_root) => {
+            validate_source_inventory_address(&output_root)
+                .and_then(|()| AtomicPublication::prepare(&output_root))
+                .map(PreparedMaterializationCommand::Publish)
+                .map_err(Into::into)
+        }
         MaterializationCommand::Fingerprint => Ok(PreparedMaterializationCommand::Fingerprint),
+    }
+}
+
+fn validate_source_inventory_address(destination: &Path) -> Result<(), MaterializationError> {
+    let digest: [u8; 32] = Sha256::digest(include_bytes!(
+        "../../../../fixtures/conformance/SHA256SUMS"
+    ))
+    .into();
+    let expected = pos_conformance::hex_digest(&digest);
+    if destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == expected)
+    {
+        Ok(())
+    } else {
+        Err(MaterializationError::SourceInventoryAddressMismatch)
     }
 }
 
