@@ -1814,8 +1814,7 @@ fn open_at2<Fd: std::os::fd::AsFd>(
 
 #[cfg(target_os = "linux")]
 fn effective_uid() -> u32 {
-    // SAFETY: `geteuid` has no preconditions and only reads the current process credentials.
-    unsafe { libc::geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 #[cfg(target_os = "linux")]
@@ -1974,7 +1973,7 @@ fn remove_staging_tree(
 fn remove_directory_contents(directory: &OwnedFd) -> Result<(), MaterializationError> {
     Dir::read_from(directory)
         .map_err(map_cleanup_error)
-        .and_then(|entries| {
+        .and_then(|mut entries| {
             entries.try_for_each(|entry| {
                 entry
                     .map_err(map_cleanup_error)
