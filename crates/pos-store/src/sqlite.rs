@@ -12655,7 +12655,7 @@ pub(super) mod key_registry_coverage {
                 .execute_batch("DROP TABLE erasure_states"),
         );
         assert!(
-            validate_erasure_predecessor(&predecessor_query_error.conn, next_request, next,)
+            validate_erasure_predecessor(&predecessor_query_error.conn, next_request, &next,)
                 .is_err()
         );
 
@@ -12673,7 +12673,7 @@ pub(super) mod key_registry_coverage {
         assert!(validate_erasure_predecessor(
             &malformed_predecessor_metadata.conn,
             next_request,
-            next,
+            &next,
         )
         .is_err());
 
@@ -12689,7 +12689,7 @@ pub(super) mod key_registry_coverage {
         assert!(validate_erasure_predecessor(
             &malformed_predecessor_state.conn,
             next_request,
-            next,
+            &next,
         )
         .is_err());
     }
