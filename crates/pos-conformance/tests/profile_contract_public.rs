@@ -1060,6 +1060,7 @@ fn assert_public_profile_paths_rejected(
 
 #[test]
 fn public_profile_decoders_cover_nested_failure_shapes() -> Result<(), Box<dyn std::error::Error>> {
+    let text = |value: &str| Value::Text(value.to_owned());
     let uint = |value: u64| Value::Integer(value.into());
     let bytes = |seed: u8| Value::Bytes(vec![seed; 32]);
     let artifact = |path: Value, media_type: Value, length: Value, digest: Value| {

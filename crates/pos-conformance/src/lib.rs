@@ -18,6 +18,7 @@ use std::io::Cursor;
 
 mod bundle_contract;
 mod profile_contract;
+#[allow(clippy::redundant_pub_crate)]
 mod provider_contract;
 
 pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
