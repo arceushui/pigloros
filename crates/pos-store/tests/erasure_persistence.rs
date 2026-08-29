@@ -176,13 +176,9 @@ impl ErasurePersistencePortV1 for DeletePredecessorBeforeCommit {
                     connection
                         .execute(
                             "UPDATE erasure_states
-                             SET request_digest = ?1, state_cbor = ?2
-                             WHERE state_digest = ?3",
-                            rusqlite::params![
-                                reference(99).digest().as_slice(),
-                                replacement,
-                                previous.digest().as_slice()
-                            ],
+                             SET state_cbor = ?1
+                             WHERE state_digest = ?2",
+                            rusqlite::params![replacement, previous.digest().as_slice(),],
                         )
                         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
                 } else {
