@@ -4502,8 +4502,6 @@ fn parse_correlation_id(s: &str) -> Result<pos_core::CorrelationId, CoreError> {
     Ok(pos_core::CorrelationId::from_ulid(ulid))
 }
 
-use rusqlite::OptionalExtension;
-
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[cfg(test)]
