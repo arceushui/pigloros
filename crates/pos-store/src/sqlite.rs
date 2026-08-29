@@ -12561,7 +12561,7 @@ pub(super) mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn exercise_record_load_errors(request: ErasureReferenceV1, record_bytes: Vec<u8>) {
+    fn exercise_record_load_errors(request: ErasureReferenceV1, record_bytes: &[u8]) {
         let record_query_error = tests::new_store();
         fixture(
             record_query_error
@@ -12693,7 +12693,7 @@ pub(super) mod key_registry_coverage {
         let state_digest = record.state().state_digest();
         let record_bytes = fixture(record.to_canonical_cbor());
         exercise_state_resolution_errors(state_digest);
-        exercise_record_load_errors(request, record_bytes);
+        exercise_record_load_errors(request, &record_bytes);
         exercise_commit_errors(&record);
 
         let (next, predecessor) = erasure_record_with_predecessor();
