@@ -4281,6 +4281,7 @@ fn persist_erasure_state(
                 state_bytes,
             ],
         )
+        .map(|_| ())
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
     }
 }
@@ -4314,8 +4315,8 @@ fn validate_erasure_predecessor(
     let Some(previous) = record.state().previous_state() else {
         return Ok(());
     };
-    let (request_digest, previous_bytes) = load_erasure_state_row(conn, previous)?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let (request_digest, previous_bytes) =
+        load_erasure_state_row(conn, previous)?.ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let metadata_request: [u8; 32] = request_digest
         .try_into()
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
