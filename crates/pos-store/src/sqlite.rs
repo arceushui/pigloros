@@ -4362,7 +4362,7 @@ fn finish_erasure_transaction<T>(
             if conn.execute_batch("COMMIT").is_ok() {
                 Ok(value)
             } else {
-                let _ = conn.execute_batch("ROLLBACK");
+                drop(conn.execute_batch("ROLLBACK"));
                 Err(ErasureErrorV1::ReceiptCommitFailed)
             }
         }
