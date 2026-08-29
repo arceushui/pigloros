@@ -2067,6 +2067,13 @@ mod erasure_targeted_coverage_tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
+    fn complete_record_bytes() -> Vec<u8> {
+        tests::complete_record()
+            .and_then(|record| record.to_canonical_cbor())
+            .unwrap_or_else(|error| panic!("unexpected decoder fixture error: {error:?}"))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn awaiting_record(
         frozen: &ErasureCoordinatorRecordV1,
     ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
@@ -2168,6 +2175,27 @@ mod erasure_targeted_coverage_tests {
             Err(ErasureErrorV1::PolicyConflict)
         );
         Ok(())
+    }
+
+    #[test]
+    fn canonical_record_decoder_is_exercised_at_a_public_boundary() {
+        let bytes = complete_record_bytes();
+        assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).is_ok());
+
+        let mut noncanonical = bytes.clone();
+        noncanonical[7] = 0x18;
+        noncanonical.insert(8, 1);
+        assert_eq!(
+            ErasureCoordinatorRecordV1::from_canonical_cbor(&noncanonical),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert_eq!(
+            ErasureCoordinatorRecordV1::from_canonical_cbor(&trailing),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
     }
 }
 
