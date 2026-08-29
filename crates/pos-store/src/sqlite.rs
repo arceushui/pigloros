@@ -4238,10 +4238,12 @@ fn validate_erasure_record_slot(
     Ok(Some(existing.state().state_digest()))
 }
 
+type ErasureStateRow = (Vec<u8>, Vec<u8>);
+
 fn load_erasure_state_row(
     conn: &Connection,
     digest: ErasureReferenceV1,
-) -> Result<Option<(Vec<u8>, Vec<u8>)>, ErasureErrorV1> {
+) -> Result<Option<ErasureStateRow>, ErasureErrorV1> {
     conn.query_row(
         "SELECT request_digest, state_cbor
          FROM erasure_states WHERE state_digest = ?1",
@@ -4266,7 +4268,7 @@ fn persist_erasure_state(
     existing_state_digest: Option<ErasureReferenceV1>,
 ) -> Result<(), ErasureErrorV1> {
     if let Some((request_digest, stored_state)) = load_erasure_state_row(conn, state_digest)? {
-        validate_erasure_state_row(request, record, state_bytes, request_digest, stored_state)
+        validate_erasure_state_row(request, record, state_bytes, request_digest, &stored_state)
     } else {
         if existing_state_digest == Some(state_digest) {
             return Err(ErasureErrorV1::ProvenanceMissing);
@@ -4291,13 +4293,13 @@ fn validate_erasure_state_row(
     record: &ErasureCoordinatorRecordV1,
     state_bytes: &[u8],
     request_digest: Vec<u8>,
-    stored_state: Vec<u8>,
+    stored_state: &[u8],
 ) -> Result<(), ErasureErrorV1> {
     let metadata_request: [u8; 32] = request_digest
         .try_into()
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     let expected_request = ErasureReferenceV1::from_digest(metadata_request);
-    let decoded_state = pos_core::ErasureStateV1::from_canonical_cbor(&stored_state)?;
+    let decoded_state = pos_core::ErasureStateV1::from_canonical_cbor(stored_state)?;
     if stored_state != state_bytes
         || expected_request != request
         || !decoded_state.eq(record.state())
@@ -4359,9 +4361,8 @@ fn finish_erasure_transaction<T>(
         Ok(value) => {
             if conn.execute_batch("COMMIT").is_ok() {
                 Ok(value)
-            } else if conn.execute_batch("ROLLBACK").is_err() {
-                Err(ErasureErrorV1::ReceiptCommitFailed)
             } else {
+                let _ = conn.execute_batch("ROLLBACK");
                 Err(ErasureErrorV1::ReceiptCommitFailed)
             }
         }
