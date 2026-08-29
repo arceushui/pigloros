@@ -1026,7 +1026,7 @@ fn independent_verifier_rejects_each_manifest_shape_and_header_mutation() {
 }
 
 macro_rules! malformed_case {
-    ($name:ident, $bytes:expr) => {
+    ($name:ident, $bytes:expr_2021) => {
         #[test]
         fn $name() {
             assert!(verify_archive_independently(&$bytes).is_err());
