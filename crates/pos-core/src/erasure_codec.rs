@@ -833,15 +833,18 @@ pub(super) fn decode_limited(
     if bytes.len() > maximum {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
-    cbor_shape_is_bounded(bytes, maximum_array).and_then(|()| match ciborium::from_reader(bytes) {
-        Ok(value) => encode_canonical(&value).and_then(|canonical| {
-            if canonical == bytes {
-                Ok(value)
-            } else {
-                Err(ErasureErrorV1::InvalidEncoding)
-            }
-        }),
-        Err(_) => Err(ErasureErrorV1::InvalidEncoding),
+    cbor_shape_is_bounded(bytes, maximum_array).and_then(|()| {
+        ciborium::from_reader(bytes)
+            .map_err(|_| ErasureErrorV1::InvalidEncoding)
+            .and_then(|value| {
+                encode_canonical(&value).and_then(|canonical| {
+                    if canonical == bytes {
+                        Ok(value)
+                    } else {
+                        Err(ErasureErrorV1::InvalidEncoding)
+                    }
+                })
+            })
     })
 }
 pub(super) fn cbor_shape_is_bounded(
