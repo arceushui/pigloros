@@ -1203,7 +1203,7 @@ fn stage_erasure_record(
         return Err(ErasureErrorV1::ProvenanceMissing);
     } else {
         None
-    }
+    };
 
     let state_digest = record.state().state_digest();
     let state_bytes = record.state().to_canonical_cbor()?;
