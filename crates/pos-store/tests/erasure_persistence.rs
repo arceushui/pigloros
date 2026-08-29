@@ -175,9 +175,14 @@ impl ErasurePersistencePortV1 for DeletePredecessorBeforeCommit {
                     .to_canonical_cbor()?;
                     connection
                         .execute(
-                            "UPDATE erasure_states SET state_cbor = ?1
-                             WHERE state_digest = ?2",
-                            rusqlite::params![replacement, previous.digest().as_slice()],
+                            "UPDATE erasure_states
+                             SET request_digest = ?1, state_cbor = ?2
+                             WHERE state_digest = ?3",
+                            rusqlite::params![
+                                reference(99).digest().as_slice(),
+                                replacement,
+                                previous.digest().as_slice()
+                            ],
                         )
                         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
                 } else {
@@ -845,6 +850,41 @@ fn sqlite_erasure_persistence_fails_closed_for_malformed_state_bytes(
     assert_eq!(
         store.resolve_state(state_digest),
         Err(ErasureErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_persistence_rejects_state_bytes_under_the_wrong_digest(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let record = submitted_record()?;
+    let request = record.request().reference();
+    let state_digest = record.state().state_digest();
+    let replacement = ErasureStateV1::submitted(request, reference(8), reference(77))?;
+    let mut store = SqliteStore::open(path)?;
+    store.commit_record(record.clone())?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE erasure_states SET state_cbor = ?1 WHERE state_digest = ?2",
+        rusqlite::params![
+            replacement.to_canonical_cbor()?,
+            state_digest.digest().as_slice()
+        ],
+    )?;
+    drop(connection);
+
+    let mut store = SqliteStore::open(path)?;
+    assert_eq!(
+        store.commit_record(record),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }

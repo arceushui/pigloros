@@ -4266,7 +4266,7 @@ fn persist_erasure_state(
     existing_state_digest: Option<ErasureReferenceV1>,
 ) -> Result<(), ErasureErrorV1> {
     if let Some((request_digest, stored_state)) = load_erasure_state_row(conn, state_digest)? {
-        validate_erasure_state_row(request, record, state_bytes, request_digest, &stored_state)
+        validate_erasure_state_row(request, state_bytes, request_digest, &stored_state)
     } else {
         if existing_state_digest == Some(state_digest) {
             return Err(ErasureErrorV1::ProvenanceMissing);
@@ -4288,7 +4288,6 @@ fn persist_erasure_state(
 
 fn validate_erasure_state_row(
     request: ErasureReferenceV1,
-    record: &ErasureCoordinatorRecordV1,
     state_bytes: &[u8],
     request_digest: Vec<u8>,
     stored_state: &[u8],
@@ -4297,14 +4296,10 @@ fn validate_erasure_state_row(
         .try_into()
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     let expected_request = ErasureReferenceV1::from_digest(metadata_request);
-    let decoded_state = pos_core::ErasureStateV1::from_canonical_cbor(stored_state)?;
     if stored_state != state_bytes {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     if expected_request != request {
-        return Err(ErasureErrorV1::ProvenanceMissing);
-    }
-    if !decoded_state.eq(record.state()) {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     Ok(())
@@ -10854,6 +10849,23 @@ mod tests {
                 None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
             )
             .test_ok();
+    }
+
+    #[test]
+    fn erasure_transaction_finish_reports_commit_and_rollback_failures() {
+        let conn = Connection::open_in_memory().test_ok();
+        conn.execute_batch("BEGIN IMMEDIATE").test_ok();
+        conn.commit_hook(Some(|| true)).test_ok();
+        assert_eq!(
+            finish_erasure_transaction::<()>(&conn, Ok(())),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+        conn.commit_hook::<fn() -> bool>(None).test_ok();
+
+        assert_eq!(
+            finish_erasure_transaction::<()>(&conn, Err(ErasureErrorV1::PolicyConflict)),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
     }
 }
 

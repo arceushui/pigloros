@@ -5073,6 +5073,69 @@ mod erasure_coverage_tests {
         )?)
     }
 
+    fn encoded_authorized_state(
+        request: ErasureReferenceV1,
+        coordinator: ErasureReferenceV1,
+        previous: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<(ErasureReferenceV1, Vec<u8>), Box<dyn std::error::Error>> {
+        let mut fields = vec![
+            ciborium::value::Value::Text("ERS1".to_owned()),
+            ciborium::value::Value::Integer(1_u64.into()),
+            ciborium::value::Value::Bytes(request.digest().to_vec()),
+            ciborium::value::Value::Integer(1_u64.into()),
+            ciborium::value::Value::Null,
+            ciborium::value::Value::Bytes(coordinator.digest().to_vec()),
+            ciborium::value::Value::Array(Vec::new()),
+            ciborium::value::Value::Array(Vec::new()),
+            ciborium::value::Value::Integer(2_u64.into()),
+            ciborium::value::Value::Bytes(previous.digest().to_vec()),
+            ciborium::value::Value::Bytes(provenance.digest().to_vec()),
+        ];
+        let mut core_bytes = Vec::new();
+        ciborium::into_writer(&fields, &mut core_bytes)?;
+        let mut digest_input = b"ERS1\0".to_vec();
+        digest_input.extend_from_slice(&core_bytes);
+        let state_digest = ErasureReferenceV1::from_digest(*blake3::hash(&digest_input).as_bytes());
+        fields.push(ciborium::value::Value::Bytes(
+            state_digest.digest().to_vec(),
+        ));
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&fields, &mut encoded)?;
+        Ok((state_digest, encoded))
+    }
+
+    fn record_with_predecessor(
+        predecessor: ErasureReferenceV1,
+    ) -> Result<ErasureCoordinatorRecordV1, Box<dyn std::error::Error>> {
+        let submitted = record()?;
+        let (state_digest, state_bytes) = encoded_authorized_state(
+            submitted.request().reference(),
+            submitted.state().coordinator(),
+            predecessor,
+            reference(9),
+        )?;
+        let state = ErasureStateV1::from_canonical_cbor(&state_bytes)?;
+        debug_assert_eq!(state.state_digest(), state_digest);
+        let parts = ErasureCoordinatorRecordPartsV1 {
+            request: submitted.request().clone(),
+            state,
+            reserved_targets: Vec::new(),
+            targets: Vec::new(),
+            acknowledgements: Vec::new(),
+            receipt: None,
+            receipt_input: None,
+            authorize_provenance: Some(reference(9)),
+            freeze_provenance: None,
+            freeze_admission: None,
+            dispatch_provenance: None,
+        };
+        Ok(ErasureCoordinatorRecordV1::from_parts(
+            parts,
+            submitted.state().coordinator(),
+        )?)
+    }
+
     #[test]
     fn erasure_record_lookup_and_staging_fail_closed_for_missing_provenance(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5100,6 +5163,61 @@ mod erasure_coverage_tests {
         staged_states.insert(state_digest, vec![0]);
         assert_eq!(
             stage_erasure_record(&mut staged_records, &mut staged_states, &record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn erasure_staging_rejects_predecessors_with_wrong_identity_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let submitted = record()?;
+
+        let wrong_digest_key = reference(30);
+        let wrong_digest_state = ErasureStateV1::submitted(
+            submitted.request().reference(),
+            submitted.state().coordinator(),
+            reference(77),
+        )?;
+        let wrong_digest_record = record_with_predecessor(wrong_digest_key)?;
+        let mut records = BTreeMap::new();
+        let mut states = BTreeMap::new();
+        states.insert(wrong_digest_key, wrong_digest_state.to_canonical_cbor()?);
+        assert_eq!(
+            stage_erasure_record(&mut records, &mut states, &wrong_digest_record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let wrong_request_state = ErasureStateV1::submitted(
+            reference(99),
+            submitted.state().coordinator(),
+            reference(77),
+        )?;
+        let wrong_request_record = record_with_predecessor(wrong_request_state.state_digest())?;
+        states.clear();
+        states.insert(
+            wrong_request_state.state_digest(),
+            wrong_request_state.to_canonical_cbor()?,
+        );
+        assert_eq!(
+            stage_erasure_record(&mut records, &mut states, &wrong_request_record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let wrong_coordinator_state = ErasureStateV1::submitted(
+            submitted.request().reference(),
+            reference(77),
+            reference(77),
+        )?;
+        let wrong_coordinator_record =
+            record_with_predecessor(wrong_coordinator_state.state_digest())?;
+        states.clear();
+        states.insert(
+            wrong_coordinator_state.state_digest(),
+            wrong_coordinator_state.to_canonical_cbor()?,
+        );
+        assert_eq!(
+            stage_erasure_record(&mut records, &mut states, &wrong_coordinator_record),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())

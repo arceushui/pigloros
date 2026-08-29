@@ -4042,3 +4042,181 @@ fn coordinator_rejects_storage_and_lifecycle_seams() -> Result<(), ErasureErrorV
     );
     Ok(())
 }
+
+#[test]
+fn replacement_validation_covers_idempotent_and_monotonic_guards() -> Result<(), ErasureErrorV1> {
+    let submitted = record_after_submit()?;
+    assert_eq!(submitted.validate_replacement(&submitted), Ok(()));
+
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let authorized_state = submitted.state().transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut authorized_parts = record_parts(&submitted);
+    authorized_parts.state = authorized_state;
+    authorized_parts.authorize_provenance = Some(reference(9));
+    let authorized = ErasureCoordinatorRecordV1::from_parts(authorized_parts, reference(2))?;
+
+    let mut reserved_parts = record_parts(&authorized);
+    reserved_parts.reserved_targets = vec![target];
+    let reserved = ErasureCoordinatorRecordV1::from_parts(reserved_parts, reference(2))?;
+    assert_eq!(authorized.validate_replacement(&reserved), Ok(()));
+
+    let frozen = record_after_freeze(vec![target])?;
+    let mut intent_parts = record_parts(&frozen);
+    intent_parts.dispatch_provenance = Some(reference(10));
+    let intent = ErasureCoordinatorRecordV1::from_parts(intent_parts, reference(2))?;
+    assert_eq!(frozen.validate_replacement(&intent), Ok(()));
+
+    let dispatched_state = frozen.state().transition(change(
+        ErasureLifecycleV1::DestructionDispatched,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut dispatched_parts = record_parts(&frozen);
+    dispatched_parts.state = dispatched_state;
+    dispatched_parts.dispatch_provenance = Some(reference(10));
+    let dispatched = ErasureCoordinatorRecordV1::from_parts(dispatched_parts, reference(2))?;
+
+    let mut backward_state = frozen.state().clone();
+    backward_state.previous_state = Some(dispatched.state().state_digest());
+    backward_state.state_digest = reference_zero();
+    let backward_state = backward_state.with_digest()?;
+    let mut backward_parts = record_parts(&frozen);
+    backward_parts.state = backward_state;
+    assert_eq!(
+        dispatched.validate_replacement(&ErasureCoordinatorRecordV1::from_parts(
+            backward_parts,
+            reference(2),
+        )?),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let wrong_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let wrong_frozen_state = authorized.state().transition(change(
+        ErasureLifecycleV1::AccessFrozen,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut wrong_frozen_parts = record_parts(&authorized);
+    wrong_frozen_parts.state = wrong_frozen_state;
+    wrong_frozen_parts.targets = vec![wrong_target];
+    wrong_frozen_parts.freeze_provenance = Some(reference(9));
+    wrong_frozen_parts.freeze_admission = Some(ErasureFreezeAdmissionV1 {
+        freeze_position: 10,
+        provenance: reference(9),
+        target_closure: target_closure_digest(&[wrong_target]),
+    });
+    wrong_frozen_parts.reserved_targets.clear();
+    let wrong_frozen = ErasureCoordinatorRecordV1::from_parts(wrong_frozen_parts, reference(2))?;
+    assert_eq!(
+        authorized.validate_replacement(&wrong_frozen),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let different_target_state = frozen.state().transition(change(
+        ErasureLifecycleV1::DestructionDispatched,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut different_target_parts = record_parts(&frozen);
+    different_target_parts.state = different_target_state;
+    different_target_parts.targets = vec![wrong_target];
+    different_target_parts.freeze_admission = Some(ErasureFreezeAdmissionV1 {
+        freeze_position: 10,
+        provenance: reference(9),
+        target_closure: target_closure_digest(&[wrong_target]),
+    });
+    different_target_parts.dispatch_provenance = Some(reference(10));
+    let different_target =
+        ErasureCoordinatorRecordV1::from_parts(different_target_parts, reference(2))?;
+    assert_eq!(
+        frozen.validate_replacement(&different_target),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut acknowledged_parts = record_parts(&dispatched);
+    acknowledged_parts.acknowledgements = vec![acknowledgement];
+    let acknowledged = ErasureCoordinatorRecordV1::from_parts(acknowledged_parts, reference(2))?;
+    let awaiting_state = acknowledged.state().transition(change(
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut missing_ack_parts = record_parts(&acknowledged);
+    missing_ack_parts.state = awaiting_state;
+    missing_ack_parts.acknowledgements.clear();
+    let missing_ack = ErasureCoordinatorRecordV1::from_parts(missing_ack_parts, reference(2))?;
+    assert_eq!(
+        acknowledged.validate_replacement(&missing_ack),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn dispatch_retry_rejects_a_different_intent_provenance() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut port = test_port(true, vec![target]);
+    port.dispatch_error = Some(ErasureErrorV1::KeyDestructionFailed);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    assert_eq!(
+        coordinator.dispatch_destruction(reference(1), reference(9)),
+        Err(ErasureErrorV1::KeyDestructionFailed)
+    );
+    assert_eq!(
+        coordinator.dispatch_destruction(reference(1), reference(8)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn predecessor_validation_rejects_a_chain_that_cannot_reach_the_root() -> Result<(), ErasureErrorV1>
+{
+    let mut malformed = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    malformed.previous_state = Some(malformed.state_digest());
+    assert_eq!(
+        verify_predecessor_chain(
+            malformed.clone(),
+            &TestResolver {
+                states: vec![malformed],
+                unavailable: false,
+            },
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn canonical_record_decoder_rejects_a_noncanonical_integer() -> Result<(), ErasureErrorV1> {
+    let record = complete_record()?;
+    let mut bytes = record.to_canonical_cbor()?;
+    bytes[7] = 0x18;
+    bytes.insert(8, 1);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}

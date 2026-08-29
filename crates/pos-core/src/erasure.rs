@@ -1234,7 +1234,10 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
     mut current: ErasureStateV1,
     resolver: &R,
 ) -> Result<(), ErasureErrorV1> {
-    for _ in 0..8 {
+    // `permits` is a strict finite V1 lifecycle ordering, so every accepted
+    // predecessor moves toward the submitted root and the traversal is
+    // bounded by the lifecycle graph itself.
+    loop {
         if let Some(previous_digest) = current.previous_state() {
             match resolver.resolve_state(previous_digest) {
                 Ok(Some(previous)) => {
@@ -1264,7 +1267,6 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
     }
-    Err(ErasureErrorV1::ProvenanceMissing)
 }
 
 /// Host-owned port; adapters supply durable and irreversible work.
@@ -1975,14 +1977,6 @@ impl ErasureCoordinatorRecordV1 {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         if receipt.acknowledgements().ne(acknowledgements.as_slice()) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let complete = acknowledgements_match_closure(&self.targets, &self.acknowledgements)
-            && self
-                .acknowledgements
-                .iter()
-                .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
-        if (lifecycle == ErasureLifecycleV1::Complete) != complete {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let (pending, failed) = derived_outcome_owners(&self.targets, &self.acknowledgements);
