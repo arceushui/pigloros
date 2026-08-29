@@ -4044,7 +4044,8 @@ fn coordinator_rejects_storage_and_lifecycle_seams() -> Result<(), ErasureErrorV
 }
 
 #[test]
-fn replacement_validation_covers_idempotent_and_monotonic_guards() -> Result<(), ErasureErrorV1> {
+fn replacement_validation_accepts_idempotent_and_same_state_extensions(
+) -> Result<(), ErasureErrorV1> {
     let submitted = record_after_submit()?;
     assert_eq!(submitted.validate_replacement(&submitted), Ok(()));
 
@@ -4070,7 +4071,12 @@ fn replacement_validation_covers_idempotent_and_monotonic_guards() -> Result<(),
     intent_parts.dispatch_provenance = Some(reference(10));
     let intent = ErasureCoordinatorRecordV1::from_parts(intent_parts, reference(2))?;
     assert_eq!(frozen.validate_replacement(&intent), Ok(()));
+    Ok(())
+}
 
+fn dispatched_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let frozen = record_after_freeze(vec![target])?;
     let dispatched_state = frozen.state().transition(change(
         ErasureLifecycleV1::DestructionDispatched,
         Some(10),
@@ -4080,8 +4086,30 @@ fn replacement_validation_covers_idempotent_and_monotonic_guards() -> Result<(),
     let mut dispatched_parts = record_parts(&frozen);
     dispatched_parts.state = dispatched_state;
     dispatched_parts.dispatch_provenance = Some(reference(10));
-    let dispatched = ErasureCoordinatorRecordV1::from_parts(dispatched_parts, reference(2))?;
+    ErasureCoordinatorRecordV1::from_parts(dispatched_parts, reference(2))
+}
 
+#[test]
+fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
+) -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let submitted = record_after_submit()?;
+    let authorized_state = submitted.state().transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut authorized_parts = record_parts(&submitted);
+    authorized_parts.state = authorized_state;
+    authorized_parts.authorize_provenance = Some(reference(9));
+    let authorized = ErasureCoordinatorRecordV1::from_parts(authorized_parts, reference(2))?;
+    let mut reserved_parts = record_parts(&authorized);
+    reserved_parts.reserved_targets = vec![target];
+    let authorized_with_reservation =
+        ErasureCoordinatorRecordV1::from_parts(reserved_parts, reference(2))?;
+    let frozen = record_after_freeze(vec![target])?;
+    let dispatched = dispatched_record()?;
     let mut backward_state = frozen.state().clone();
     backward_state.previous_state = Some(dispatched.state().state_digest());
     backward_state.state_digest = reference_zero();
@@ -4097,13 +4125,13 @@ fn replacement_validation_covers_idempotent_and_monotonic_guards() -> Result<(),
     );
 
     let wrong_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let wrong_frozen_state = authorized.state().transition(change(
+    let wrong_frozen_state = authorized_with_reservation.state().transition(change(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let mut wrong_frozen_parts = record_parts(&authorized);
+    let mut wrong_frozen_parts = record_parts(&authorized_with_reservation);
     wrong_frozen_parts.state = wrong_frozen_state;
     wrong_frozen_parts.targets = vec![wrong_target];
     wrong_frozen_parts.freeze_provenance = Some(reference(9));
@@ -4115,7 +4143,7 @@ fn replacement_validation_covers_idempotent_and_monotonic_guards() -> Result<(),
     wrong_frozen_parts.reserved_targets.clear();
     let wrong_frozen = ErasureCoordinatorRecordV1::from_parts(wrong_frozen_parts, reference(2))?;
     assert_eq!(
-        authorized.validate_replacement(&wrong_frozen),
+        authorized_with_reservation.validate_replacement(&wrong_frozen),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
@@ -4140,8 +4168,24 @@ fn replacement_validation_covers_idempotent_and_monotonic_guards() -> Result<(),
         frozen.validate_replacement(&different_target),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
 
+#[test]
+fn replacement_validation_rejects_removed_acknowledgements() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let frozen = record_after_freeze(vec![target])?;
+    let dispatched_state = frozen.state().transition(change(
+        ErasureLifecycleV1::DestructionDispatched,
+        Some(10),
+        Vec::new(),
+        Vec::new(),
+    ))?;
     let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let mut dispatched_parts = record_parts(&frozen);
+    dispatched_parts.state = dispatched_state;
+    dispatched_parts.dispatch_provenance = Some(reference(10));
+    let dispatched = ErasureCoordinatorRecordV1::from_parts(dispatched_parts, reference(2))?;
     let mut acknowledged_parts = record_parts(&dispatched);
     acknowledged_parts.acknowledgements = vec![acknowledgement];
     let acknowledged = ErasureCoordinatorRecordV1::from_parts(acknowledged_parts, reference(2))?;
