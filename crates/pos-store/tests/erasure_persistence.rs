@@ -772,7 +772,7 @@ fn sqlite_erasure_persistence_fails_closed_for_malformed_record_bytes(
     let record = submitted_record()?;
     let request = record.request().reference();
     let mut store = SqliteStore::open(path)?;
-    store.commit_record(record.clone())?;
+    store.commit_record(record)?;
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
@@ -803,7 +803,7 @@ fn sqlite_erasure_persistence_fails_closed_for_malformed_state_bytes(
     let request = record.request().reference();
     let state_digest = record.state().state_digest();
     let mut store = SqliteStore::open(path)?;
-    store.commit_record(record.clone())?;
+    store.commit_record(record)?;
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
