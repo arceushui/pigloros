@@ -1279,15 +1279,7 @@ fn durable_record_freeze_reservation_and_admission_bindings_are_checked(
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let frozen = {
-        let frozen = record_after_freeze(vec![target])?;
-        let mut state = frozen.state.clone();
-        state.replay_claim = ErasureReplayClaimV1::StructuralOnly;
-        state.state_digest = reference_zero();
-        let mut parts = record_parts(&frozen);
-        parts.state = state.with_digest()?;
-        ErasureCoordinatorRecordV1::from_parts(parts, reference(2))?
-    };
+    let frozen = record_after_freeze(vec![target])?;
     let mut frozen_without_admission = record_parts(&frozen);
     frozen_without_admission.freeze_admission = None;
     assert_eq!(
@@ -4046,7 +4038,15 @@ fn durable_replacement_checks_each_monotonic_boundary() -> Result<(), ErasureErr
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let frozen = record_after_freeze(vec![target])?;
+    let frozen = {
+        let frozen = record_after_freeze(vec![target])?;
+        let mut state = frozen.state.clone();
+        state.replay_claim = ErasureReplayClaimV1::StructuralOnly;
+        state.state_digest = reference_zero();
+        let mut parts = record_parts(&frozen);
+        parts.state = state.with_digest()?;
+        ErasureCoordinatorRecordV1::from_parts(parts, reference(2))?
+    };
     let mut dispatch_intent_parts = record_parts(&frozen);
     dispatch_intent_parts.dispatch_provenance = Some(reference(10));
     let dispatch_intent =
