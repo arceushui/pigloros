@@ -61,13 +61,14 @@ pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
     ErasureArtifactTransitionV1, ErasureCoordinator, ErasureCoordinatorPortV1,
-    ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES, ERASURE_RECEIPT_MAX_BYTES,
-    ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
+    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
+    ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
+    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES,
+    ERASURE_RECEIPT_MAX_BYTES, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
 };
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};

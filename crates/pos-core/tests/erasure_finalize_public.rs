@@ -5,9 +5,10 @@ use pos_core::{
     ErasureAcknowledgementV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
     ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
     ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -140,7 +141,9 @@ impl ErasureCoordinatorPortV1 for PublicPort {
     fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
+}
 
+impl ErasurePersistencePortV1 for PublicPort {
     fn load_record(
         &self,
         request: ErasureReferenceV1,
@@ -153,16 +156,38 @@ impl ErasureCoordinatorPortV1 for PublicPort {
     }
 
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        if let Some(existing) = self
-            .records
-            .iter_mut()
-            .find(|existing| existing.request() == record.request())
-        {
-            *existing = record.clone();
-        } else {
-            self.records.push(record.clone());
+        self.commit_records(std::slice::from_ref(&record))
+    }
+
+    fn commit_records(
+        &mut self,
+        records: &[ErasureCoordinatorRecordV1],
+    ) -> Result<(), ErasureErrorV1> {
+        let mut staged_records = self.records.clone();
+        let mut staged_states = self.states.clone();
+        for record in records {
+            if let Some(existing) = staged_records
+                .iter()
+                .find(|existing| existing.request() == record.request())
+            {
+                if existing != record {
+                    existing.validate_replacement(record)?;
+                }
+            } else if record.state().previous_state().is_some() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            if let Some(existing) = staged_records
+                .iter_mut()
+                .find(|existing| existing.request() == record.request())
+            {
+                *existing = record.clone();
+            } else {
+                staged_records.push(record.clone());
+            }
+            staged_states.push(record.state().clone());
         }
-        self.states.push(record.state().clone());
+        self.records = staged_records;
+        self.states = staged_states;
         Ok(())
     }
 }

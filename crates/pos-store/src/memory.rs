@@ -5,7 +5,7 @@
 //! Multi-level fork chains are supported: a child of a child walks the chain recursively.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     time::Instant,
 };
 
@@ -42,7 +42,8 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, KeyRegistryStateV1, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, ErasureCoordinatorRecordV1, ErasureErrorV1, ErasurePersistencePortV1,
+    ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -150,6 +151,10 @@ pub struct MemoryStore {
     consent_authority_permit: Option<ConsentAppendPermit>,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
+    /// Canonical durable ERQ1/ERS1/ERC1 coordinator records.
+    erasure_records: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    /// Canonical ERS1 history needed to validate predecessor links after restart.
+    erasure_states: BTreeMap<ErasureReferenceV1, Vec<u8>>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -443,6 +448,8 @@ impl MemoryStore {
             geographic_cell_links: HashMap::new(),
             consent_authority_permit: None,
             key_registry: None,
+            erasure_records: BTreeMap::new(),
+            erasure_states: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1117,6 +1124,114 @@ impl Default for MemoryStore {
     fn default() -> Self {
         Self::with_default_components(Box::new(pos_crypto::chain::Blake3Hasher))
     }
+}
+
+impl ErasureStateResolverV1 for MemoryStore {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
+        self.erasure_states
+            .get(&digest)
+            .map(|bytes| pos_core::ErasureStateV1::from_canonical_cbor(bytes))
+            .transpose()
+    }
+}
+
+impl ErasurePersistencePortV1 for MemoryStore {
+    fn load_record(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
+        self.erasure_records
+            .get(&request)
+            .map(|bytes| {
+                ErasureCoordinatorRecordV1::from_canonical_cbor(bytes).and_then(|record| {
+                    if record.request().reference() == request {
+                        let state_digest = record.state().state_digest();
+                        let state_bytes = self
+                            .erasure_states
+                            .get(&state_digest)
+                            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                        let state = pos_core::ErasureStateV1::from_canonical_cbor(state_bytes)?;
+                        if state.eq(record.state()) {
+                            Ok(record)
+                        } else {
+                            Err(ErasureErrorV1::ProvenanceMissing)
+                        }
+                    } else {
+                        Err(ErasureErrorV1::ProvenanceMissing)
+                    }
+                })
+            })
+            .transpose()
+    }
+
+    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
+        self.commit_records(std::slice::from_ref(&record))
+    }
+
+    fn commit_records(
+        &mut self,
+        records: &[ErasureCoordinatorRecordV1],
+    ) -> Result<(), ErasureErrorV1> {
+        let mut staged_records = self.erasure_records.clone();
+        let mut staged_states = self.erasure_states.clone();
+        for record in records {
+            stage_erasure_record(&mut staged_records, &mut staged_states, record)?;
+        }
+        self.erasure_records = staged_records;
+        self.erasure_states = staged_states;
+        Ok(())
+    }
+}
+
+fn stage_erasure_record(
+    records: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    states: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    record: &ErasureCoordinatorRecordV1,
+) -> Result<(), ErasureErrorV1> {
+    let request = record.request().reference();
+    let record_bytes = record.to_canonical_cbor()?;
+    if let Some(existing_bytes) = records.get(&request) {
+        if existing_bytes.as_slice() != record_bytes.as_slice() {
+            let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(existing_bytes)?;
+            existing.validate_replacement(record)?;
+        }
+    } else if record.state().previous_state().is_some() {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+
+    let state_digest = record.state().state_digest();
+    let state_bytes = record.state().to_canonical_cbor()?;
+    if let Some(existing_bytes) = states.get(&state_digest) {
+        if existing_bytes.as_slice() != state_bytes.as_slice() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let existing = pos_core::ErasureStateV1::from_canonical_cbor(existing_bytes)?;
+        if existing.state_digest() != state_digest
+            || existing.request() != request
+            || existing.coordinator() != record.state().coordinator()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    } else if let Some(previous) = record.state().previous_state() {
+        let previous_bytes = states
+            .get(&previous)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let previous_state = pos_core::ErasureStateV1::from_canonical_cbor(previous_bytes)?;
+        if previous_state.state_digest() != previous
+            || previous_state.request() != request
+            || previous_state.coordinator() != record.state().coordinator()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        states.insert(state_digest, state_bytes);
+    } else {
+        states.insert(state_digest, state_bytes);
+    }
+    records.insert(request, record_bytes);
+    Ok(())
 }
 
 impl OwnTracksEnrollmentStore for MemoryStore {

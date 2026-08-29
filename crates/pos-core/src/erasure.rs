@@ -1,8 +1,8 @@
 //! ADR-060's payload-free ERQ1, ERS1, and ERC1 public contracts.
 //!
-//! This module deliberately excludes storage, key destruction, artifact work,
-//! backup inventory, and replay evaluation. Those operations belong to the
-//! adapters and follow-up tickets named by ADR-060.
+//! This module deliberately excludes storage implementations, key destruction,
+//! artifact work, backup inventory, and replay evaluation. Those operations
+//! belong to the adapters and follow-up tickets named by ADR-060.
 
 use std::cmp::Ordering;
 
@@ -10,11 +10,14 @@ const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
 const ERS1: &str = "ERS1";
 const ERC1: &str = "ERC1";
+const ERCR1: &str = "ERCR1";
 
 /// Largest encoded ERQ1 or ERS1 accepted by V1.
 pub const ERASURE_REQUEST_OR_STATE_MAX_BYTES: usize = 1024 * 1024;
 /// Largest encoded ERC1 accepted by V1.
 pub const ERASURE_RECEIPT_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Largest encoded durable ERQ1/ERS1/ERC1 coordinator record accepted by V1.
+pub const ERASURE_COORDINATOR_RECORD_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Largest selector or owner collection accepted by V1.
 pub const ERASURE_MAX_REFERENCES: usize = 4_096;
 /// Largest number of entries in each ERC1 inventory.
@@ -1127,6 +1130,53 @@ pub trait ErasureStateResolverV1 {
     ) -> Result<Option<ErasureStateV1>, ErasureErrorV1>;
 }
 
+/// Durable persistence port for the complete ERQ1/ERS1/ERC1 coordinator record.
+///
+/// This port contains only persistence. Authentication, target discovery,
+/// destruction dispatch, acknowledgement admission, and receipt trust remain
+/// host-owned operations on [`ErasureCoordinatorPortV1`]. Adapters must store
+/// canonical bytes and make an exact retry idempotent while rejecting a
+/// conflicting replacement.
+pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
+    /// Load the authoritative record for one request after a process restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed storage or encoding error when the record cannot be
+    /// read or does not satisfy the V1 contract.
+    fn load_record(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1>;
+
+    /// Atomically persist the next coordinator record.
+    ///
+    /// Exact byte-equivalent retries succeed. A different record must be a
+    /// valid next state (or a permitted same-state reservation/acknowledgement
+    /// extension); otherwise the adapter returns [`ErasureErrorV1::PolicyConflict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed storage, encoding, or conflict error.
+    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1>;
+
+    /// Atomically persist an ordered batch of coordinator records.
+    ///
+    /// The batch is committed as one storage transaction. It is used when a
+    /// single coordinator operation needs to record an intermediate recovery
+    /// state and its terminal receipt together. Implementations must validate
+    /// every record before making any externally visible change.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed storage, encoding, or conflict error and leaves the
+    /// durable state unchanged.
+    fn commit_records(
+        &mut self,
+        records: &[ErasureCoordinatorRecordV1],
+    ) -> Result<(), ErasureErrorV1>;
+}
+
 fn verify_predecessor_chain<R: ErasureStateResolverV1>(
     mut current: ErasureStateV1,
     resolver: &R,
@@ -1236,7 +1286,7 @@ pub trait ErasureCoordinator {
 }
 
 /// Host capability boundary used only for authentication and frozen target discovery.
-pub trait ErasureCoordinatorPortV1: ErasureStateResolverV1 {
+pub trait ErasureCoordinatorPortV1: ErasurePersistencePortV1 {
     /// Authenticate a request before the state machine records it.
     ///
     /// # Errors
@@ -1344,29 +1394,6 @@ pub trait ErasureCoordinatorPortV1: ErasureStateResolverV1 {
     /// Returns [`ErasureErrorV1::TrustSnapshotInvalid`] or a closed signature
     /// admission error when the evidence is not trusted.
     fn admit_receipt(&self, input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1>;
-    /// Load the durable coordinator record for a request.
-    ///
-    /// This is the authoritative source for lifecycle retries.  Returning
-    /// `None` means that no ERQ1 has been committed; it must not be used as a
-    /// reason to trust an in-memory cache after a restart.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed storage or provenance error.
-    fn load_record(
-        &self,
-        request: ErasureReferenceV1,
-    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1>;
-    /// Atomically commit the next durable coordinator record.
-    ///
-    /// Implementations must make an exact record retry idempotent and reject
-    /// conflicting replacement records.  The state machine treats this as
-    /// the commit boundary for lifecycle and terminal receipt changes.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed storage or conflicting-identity error.
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1>;
 }
 
 /// Host-authenticated evidence for the access-freeze boundary.
@@ -1394,9 +1421,12 @@ pub struct ErasureCoordinatorRecordPartsV1 {
     /// or its final coordinator commit is being retried.  It prevents a
     /// restart from rediscovering a different inventory closure.
     pub reserved_targets: Vec<ErasureRequiredTargetV1>,
-    /// The frozen required-target closure.
+    /// The frozen required-target closure. Each `(request, target)` tuple is
+    /// the deterministic identity of one destruction command; no payload is
+    /// persisted in the coordinator record.
     pub targets: Vec<ErasureRequiredTargetV1>,
-    /// Acknowledgements accepted for the frozen closure.
+    /// Acknowledgements accepted for the frozen closure and therefore the
+    /// durable command results.
     pub acknowledgements: Vec<ErasureAcknowledgementV1>,
     /// The committed terminal receipt, if any.
     pub receipt: Option<ErasureReceiptV1>,
@@ -1415,7 +1445,7 @@ pub struct ErasureCoordinatorRecordPartsV1 {
 /// Durable ERQ1/ERS1/ERC1 coordinator record.
 ///
 /// Hosts persist this complete record (or an equivalent representation) and
-/// return it from [`ErasureCoordinatorPortV1::load_record`].  The core state
+/// return it from [`ErasurePersistencePortV1::load_record`]. The core state
 /// machine keeps only a query cache; it never treats that cache as authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureCoordinatorRecordV1 {
@@ -1424,9 +1454,11 @@ pub struct ErasureCoordinatorRecordV1 {
     /// The latest digest-linked ERS1 state.
     state: ErasureStateV1,
     reserved_targets: Vec<ErasureRequiredTargetV1>,
-    /// The frozen required-target closure.
+    /// The frozen required-target closure. Each `(request, target)` tuple is
+    /// the deterministic identity of one destruction command.
     targets: Vec<ErasureRequiredTargetV1>,
-    /// Acknowledgements accepted for the frozen closure.
+    /// Acknowledgements accepted for the frozen closure and therefore the
+    /// durable command results.
     acknowledgements: Vec<ErasureAcknowledgementV1>,
     /// The committed terminal receipt, if any.
     receipt: Option<ErasureReceiptV1>,
@@ -1468,6 +1500,130 @@ impl ErasureCoordinatorRecordV1 {
             dispatch_provenance: parts.dispatch_provenance,
         };
         record.validate(coordinator).map(|()| record)
+    }
+
+    /// Encode the complete durable coordinator record as canonical CBOR.
+    ///
+    /// The record embeds the canonical ERQ1, ERS1, and (when terminal) ERC1
+    /// values. The terminal receipt is also the normalized receipt input, so
+    /// it is stored once and reconstructed on load.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the record is invalid or exceeds the V1
+    /// durable-record bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        self.validate(self.state.coordinator()).and_then(|()| {
+            encode_limited(&record_value(self), ERASURE_COORDINATOR_RECORD_MAX_BYTES)
+        })
+    }
+
+    /// Decode and validate one complete durable coordinator record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, oversized, or
+    /// internally inconsistent persisted bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+            ERASURE_MAX_INVENTORY_RESULTS,
+        )
+        .and_then(|value| exact_array(&value, 12).and_then(record_from_fields))
+    }
+
+    /// Validate a replacement against the currently persisted record.
+    ///
+    /// Same-byte retries are idempotent. The only same-state extensions are
+    /// the reserved target closure while `Authorized` and additional
+    /// acknowledgements while `AwaitingAcknowledgements`; all other changes
+    /// require the new ERS1 predecessor link to name this record's state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErasureErrorV1::PolicyConflict`] when the replacement is not
+    /// a permitted monotonic update.
+    pub fn validate_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
+        let coordinator = self.state.coordinator();
+        self.validate(coordinator)?;
+        next.validate(coordinator)?;
+        if self.request != next.request {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if self == next {
+            return Ok(());
+        }
+        if self.state.state_digest() == next.state.state_digest() {
+            if self.state.lifecycle() == ErasureLifecycleV1::Authorized
+                && next.state.lifecycle() == ErasureLifecycleV1::Authorized
+                && self.reserved_targets.is_empty()
+                && !next.reserved_targets.is_empty()
+            {
+                let mut without_reservation = next.clone();
+                without_reservation.reserved_targets.clear();
+                if without_reservation == *self {
+                    return Ok(());
+                }
+            }
+            if self.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
+                && next.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
+                && self.dispatch_provenance.is_none()
+                && next.dispatch_provenance.is_some()
+            {
+                let mut without_dispatch_intent = next.clone();
+                without_dispatch_intent.dispatch_provenance = None;
+                if without_dispatch_intent == *self {
+                    return Ok(());
+                }
+            }
+            if self.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
+                && next.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
+                && self.receipt.is_none()
+                && next.receipt.is_none()
+                && self
+                    .acknowledgements
+                    .iter()
+                    .all(|acknowledgement| next.acknowledgements.contains(acknowledgement))
+                && next.acknowledgements.len() > self.acknowledgements.len()
+            {
+                let mut without_new_acknowledgements = next.clone();
+                without_new_acknowledgements
+                    .acknowledgements
+                    .clone_from(&self.acknowledgements);
+                if without_new_acknowledgements == *self {
+                    return Ok(());
+                }
+            }
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if next.state.previous_state() != Some(self.state.state_digest())
+            || !self.state.lifecycle().permits(next.state.lifecycle())
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let targets_continue = next.targets == self.targets
+            || (self.state.lifecycle() == ErasureLifecycleV1::Authorized
+                && next.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
+                && next.targets == self.reserved_targets);
+        if !targets_continue
+            || !self
+                .acknowledgements
+                .iter()
+                .all(|acknowledgement| next.acknowledgements.contains(acknowledgement))
+            || (self.receipt.is_some() && self.receipt != next.receipt)
+            || (self.receipt_input.is_some() && self.receipt_input != next.receipt_input)
+            || (self.authorize_provenance.is_some()
+                && self.authorize_provenance != next.authorize_provenance)
+            || (self.freeze_provenance.is_some()
+                && self.freeze_provenance != next.freeze_provenance)
+            || (self.freeze_admission.is_some() && self.freeze_admission != next.freeze_admission)
+            || (self.dispatch_provenance.is_some()
+                && self.dispatch_provenance != next.dispatch_provenance)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(())
     }
 
     /// Return the authenticated ERQ1 request.
@@ -1556,6 +1712,9 @@ impl ErasureCoordinatorRecordV1 {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         if has_duplicate_by_target(&self.acknowledgements) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        if !strictly_increasing(&self.acknowledgements) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         if self
@@ -1651,24 +1810,27 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_provenance(&self, lifecycle: ErasureLifecycleV1) -> Result<(), ErasureErrorV1> {
-        let operation_provenance_count = [
-            self.authorize_provenance,
-            self.freeze_provenance,
-            self.dispatch_provenance,
-        ]
-        .into_iter()
-        .flatten()
-        .count();
-        let expected_operation_count = match lifecycle {
-            ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => 0,
-            ErasureLifecycleV1::Authorized => 1,
-            ErasureLifecycleV1::AccessFrozen => 2,
+        // Validate the exact provenance shape, not only its cardinality. A
+        // malformed record must not substitute dispatch evidence for the
+        // authorization or freeze evidence which precedes it.
+        let expected = match lifecycle {
+            ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected => (false, false, false),
+            ErasureLifecycleV1::Authorized => (true, false, false),
+            // An AccessFrozen record may carry a durable dispatch intent while
+            // the host operation is being retried. It is not yet a lifecycle
+            // transition, but its identity must survive restart.
+            ErasureLifecycleV1::AccessFrozen => (true, true, self.dispatch_provenance.is_some()),
             ErasureLifecycleV1::DestructionDispatched
             | ErasureLifecycleV1::AwaitingAcknowledgements
             | ErasureLifecycleV1::Complete
-            | ErasureLifecycleV1::PartialFailure => 3,
+            | ErasureLifecycleV1::PartialFailure => (true, true, true),
         };
-        if operation_provenance_count != expected_operation_count {
+        let actual = (
+            self.authorize_provenance.is_some(),
+            self.freeze_provenance.is_some(),
+            self.dispatch_provenance.is_some(),
+        );
+        if actual != expected {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         Ok(())
@@ -1801,6 +1963,20 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .validate(self.coordinator)
             .and_then(|()| self.port.commit_record(record.clone()))
             .map(|()| self.cache(record))
+    }
+    fn commit_records(
+        &mut self,
+        records: &[ErasureCoordinatorRecordV1],
+    ) -> Result<(), ErasureErrorV1> {
+        records
+            .iter()
+            .try_for_each(|record| record.validate(self.coordinator))?;
+        self.port.commit_records(records)?;
+        records
+            .iter()
+            .cloned()
+            .for_each(|record| self.cache(record));
+        Ok(())
     }
     /// Query an existing outcome without creating or advancing it.
     #[must_use]
@@ -2028,8 +2204,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Dispatch the frozen closure through the host-owned idempotent port.
     ///
     /// A caller cannot claim this lifecycle edge by supplying an ERS1
-    /// transition.  The host dispatch must succeed before the durable state is
-    /// committed.
+    /// transition. The dispatch intent is committed before the host call, so
+    /// a restart can retry the same target closure without losing its command
+    /// identity.
     ///
     /// # Errors
     ///
@@ -2055,6 +2232,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 };
             }
             if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            if record.dispatch_provenance.is_none() {
+                record.dispatch_provenance = Some(provenance);
+                self.commit(record.clone())?;
+            } else if record.dispatch_provenance != Some(provenance) {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
             self.port
@@ -2192,8 +2375,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     let awaiting_record = record.clone();
                     Self::prepare_finalization(self, request, &mut record, &input).and_then(
                         |(terminal_record, receipt)| {
-                            self.commit(awaiting_record)
-                                .and_then(|()| self.commit(terminal_record))
+                            self.commit_records(&[awaiting_record, terminal_record])
                                 .map(|()| receipt)
                         },
                     )
@@ -2377,8 +2559,9 @@ use codec::{
     has_duplicate, has_duplicate_by_target, invalid_owner_sets, inventories_exceed_bound,
     inventories_have_duplicate_targets, inventories_match_closure, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
-    receipt_value, reference_zero, request_from_fields, request_value, sort_inventories,
-    state_core_value, state_from_fields, state_value, weakest_inventory_claim,
+    receipt_value, record_from_fields, record_value, reference_zero, request_from_fields,
+    request_value, sort_inventories, state_core_value, state_from_fields, state_value,
+    weakest_inventory_claim,
 };
 
 #[cfg(test)]

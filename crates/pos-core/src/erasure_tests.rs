@@ -183,6 +183,9 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         }
         Ok(())
     }
+}
+
+impl ErasurePersistencePortV1 for TestCoordinatorPort {
     fn load_record(
         &self,
         request: ErasureReferenceV1,
@@ -197,27 +200,50 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
             .find(|record| record.request.reference() == request)
             .cloned())
     }
+
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        *self.commit_calls.borrow_mut() += 1;
-        if self
-            .commit_error_on_call
-            .is_some_and(|call| call == *self.commit_calls.borrow())
-        {
-            return Err(ErasureErrorV1::ReceiptCommitFailed);
+        self.commit_records(std::slice::from_ref(&record))
+    }
+
+    fn commit_records(
+        &mut self,
+        records: &[ErasureCoordinatorRecordV1],
+    ) -> Result<(), ErasureErrorV1> {
+        let mut staged_records = self.records.borrow().clone();
+        let mut staged_states = self.state_history.borrow().clone();
+        for record in records {
+            *self.commit_calls.borrow_mut() += 1;
+            if self
+                .commit_error_on_call
+                .is_some_and(|call| call == *self.commit_calls.borrow())
+            {
+                return Err(ErasureErrorV1::ReceiptCommitFailed);
+            }
+            if let Some(error) = self.commit_error {
+                return Err(error);
+            }
+            if let Some(existing) = staged_records
+                .iter()
+                .find(|existing| existing.request.reference() == record.request.reference())
+            {
+                if existing != record {
+                    existing.validate_replacement(record)?;
+                }
+            } else if record.state().previous_state().is_some() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            if let Some(existing) = staged_records
+                .iter_mut()
+                .find(|existing| existing.request.reference() == record.request.reference())
+            {
+                *existing = record.clone();
+            } else {
+                staged_records.push(record.clone());
+            }
+            staged_states.push(record.state().clone());
         }
-        if let Some(error) = self.commit_error {
-            return Err(error);
-        }
-        let mut records = self.records.borrow_mut();
-        self.state_history.borrow_mut().push(record.state().clone());
-        if let Some(existing) = records
-            .iter_mut()
-            .find(|existing| existing.request.reference() == record.request.reference())
-        {
-            *existing = record;
-        } else {
-            records.push(record);
-        }
+        self.records.replace(staged_records);
+        self.state_history.replace(staged_states);
         Ok(())
     }
 }
@@ -1749,6 +1775,83 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
 
+    Ok(())
+}
+
+#[test]
+fn dispatch_intent_is_persisted_before_host_dispatch() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut port = test_port(true, vec![target]);
+    port.dispatch_error = Some(ErasureErrorV1::KeyDestructionFailed);
+    let restart_port = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    assert_eq!(
+        coordinator.dispatch_destruction(reference(1), reference(9)),
+        Err(ErasureErrorV1::KeyDestructionFailed)
+    );
+    let persisted = restart_port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(
+        persisted.state().lifecycle(),
+        ErasureLifecycleV1::AccessFrozen
+    );
+    assert_eq!(persisted.dispatch_provenance(), Some(reference(9)));
+
+    let mut retry_port = restart_port;
+    retry_port.dispatch_error = None;
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(retry_port, reference(2));
+    assert_eq!(
+        restarted
+            .dispatch_destruction(reference(1), reference(9))?
+            .lifecycle(),
+        ErasureLifecycleV1::DestructionDispatched
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_record_envelope_round_trips_every_persisted_shape() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let submitted = record_after_submit()?;
+    let authorized_state = submitted.state().transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut authorized_parts = record_parts(&submitted);
+    authorized_parts.state = authorized_state;
+    authorized_parts.reserved_targets = vec![target];
+    authorized_parts.authorize_provenance = Some(reference(9));
+    let authorized = ErasureCoordinatorRecordV1::from_parts(authorized_parts, reference(2))?;
+    let records = [
+        submitted,
+        authorized,
+        record_after_freeze(vec![target])?,
+        record_after_acknowledgement()?,
+        complete_record()?,
+    ];
+    for record in records {
+        let bytes = record.to_canonical_cbor()?;
+        let decoded = ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes)?;
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.to_canonical_cbor()?, bytes);
+    }
     Ok(())
 }
 

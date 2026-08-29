@@ -5,7 +5,9 @@
 //! Fork is copy-on-write: only a metadata row is inserted at fork time (O(1)).
 //! Child reads stitch parent events up to `fork_seq` with child events.
 
-use rusqlite::{params, types::ToSql, Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{
+    params, types::ToSql, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+};
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
@@ -40,8 +42,10 @@ use pos_core::{
         AppendOrDuplicateOutcome, EventReadBounds, EventStore, PurgeOutcome, SeqRange,
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
-    ConsentAppendPermit, CoreError, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, CoreError, ErasureCoordinatorRecordV1, ErasureErrorV1,
+    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
+    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
+    OwnerIdV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -387,6 +391,8 @@ impl SqliteStore {
         };
         if initialize_schema {
             store.init_schema()?;
+        } else {
+            store.validate_erasure_schema()?;
         }
         store.validate_event_signature_schema()?;
         store.validate_event_sequence_invariant()?;
@@ -509,6 +515,16 @@ impl SqliteStore {
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  state_cbor BLOB NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS erasure_records (
+                 request_digest BLOB NOT NULL PRIMARY KEY CHECK (length(request_digest) = 32),
+                 state_digest BLOB NOT NULL CHECK (length(state_digest) = 32),
+                 record_cbor BLOB NOT NULL CHECK (length(record_cbor) <= 67108864)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_states (
+                 state_digest BLOB PRIMARY KEY CHECK (length(state_digest) = 32),
+                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                 state_cbor BLOB NOT NULL CHECK (length(state_cbor) <= 1048576)
+             );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
              CREATE TABLE IF NOT EXISTS append_identities (
                  dedup_key BLOB PRIMARY KEY CHECK (length(dedup_key) = 32),
@@ -598,7 +614,60 @@ impl SqliteStore {
                  PRIMARY KEY (consent_record_id, consent_revision)
              );",
             )
-            .map_err(|error| Self::storage_error(&error))
+            .map_err(|error| Self::storage_error(&error))?;
+        self.validate_erasure_schema()
+    }
+
+    fn validate_erasure_schema(&self) -> Result<(), CoreError> {
+        let tables = [
+            (
+                "erasure_records",
+                [
+                    "request_digest",
+                    "state_digest",
+                    "record_cbor",
+                    "length(request_digest)=32",
+                    "length(state_digest)=32",
+                    "length(record_cbor)<=67108864",
+                ],
+            ),
+            (
+                "erasure_states",
+                [
+                    "state_digest",
+                    "request_digest",
+                    "state_cbor",
+                    "length(state_digest)=32",
+                    "length(request_digest)=32",
+                    "length(state_cbor)<=1048576",
+                ],
+            ),
+        ];
+        for (table, markers) in tables {
+            let sql = self
+                .conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| Self::storage_error(&error))?
+                .ok_or_else(|| {
+                    CoreError::Storage(format!("SQLite schema is missing {table} table"))
+                })?;
+            let normalized = sql
+                .to_ascii_lowercase()
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            if markers.iter().any(|marker| !normalized.contains(*marker)) {
+                return Err(CoreError::Storage(format!(
+                    "SQLite {table} table has an incompatible schema"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn validate_event_signature_schema(&self) -> Result<(), CoreError> {
@@ -4006,6 +4075,259 @@ impl SqliteStore {
     }
 }
 
+impl ErasureStateResolverV1 for SqliteStore {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT request_digest, state_cbor
+                 FROM erasure_states WHERE state_digest = ?1",
+                params![digest.digest().as_slice()],
+                |row| {
+                    row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
+                        row.get::<_, Vec<u8>>(1)
+                            .map(|state_cbor| (request_digest, state_cbor))
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        bytes
+            .map(|(request_digest, bytes)| {
+                let request_digest: [u8; 32] = request_digest
+                    .try_into()
+                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+                pos_core::ErasureStateV1::from_canonical_cbor(&bytes).and_then(|state| {
+                    if state.state_digest() == digest
+                        && state.request() == ErasureReferenceV1::from_digest(request_digest)
+                    {
+                        Ok(state)
+                    } else {
+                        Err(ErasureErrorV1::ProvenanceMissing)
+                    }
+                })
+            })
+            .transpose()
+    }
+}
+
+impl ErasurePersistencePortV1 for SqliteStore {
+    fn load_record(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT state_digest, record_cbor
+                 FROM erasure_records WHERE request_digest = ?1",
+                params![request.digest().as_slice()],
+                |row| {
+                    row.get::<_, Vec<u8>>(0).and_then(|state_digest| {
+                        row.get::<_, Vec<u8>>(1)
+                            .map(|record_cbor| (state_digest, record_cbor))
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        bytes
+            .map(|(state_digest, bytes)| {
+                ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).and_then(|record| {
+                    if record.request().reference() == request {
+                        let metadata_digest: [u8; 32] = state_digest
+                            .try_into()
+                            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+                        let expected_digest = ErasureReferenceV1::from_digest(metadata_digest);
+                        if expected_digest != record.state().state_digest() {
+                            return Err(ErasureErrorV1::ProvenanceMissing);
+                        }
+                        match self.resolve_state(expected_digest)? {
+                            Some(state) if state.eq(record.state()) => Ok(record),
+                            _ => Err(ErasureErrorV1::ProvenanceMissing),
+                        }
+                    } else {
+                        Err(ErasureErrorV1::ProvenanceMissing)
+                    }
+                })
+            })
+            .transpose()
+    }
+
+    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
+        self.commit_records(std::slice::from_ref(&record))
+    }
+
+    fn commit_records(
+        &mut self,
+        records: &[ErasureCoordinatorRecordV1],
+    ) -> Result<(), ErasureErrorV1> {
+        let encoded = records
+            .iter()
+            .map(|record| {
+                record.to_canonical_cbor().and_then(|record_bytes| {
+                    record
+                        .state()
+                        .to_canonical_cbor()
+                        .map(|state_bytes| (record.clone(), record_bytes, state_bytes))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if encoded.is_empty() {
+            return Ok(());
+        }
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let result = encoded
+            .iter()
+            .try_for_each(|(record, record_bytes, state_bytes)| {
+                stage_erasure_record_sql(&self.conn, record, record_bytes, state_bytes)
+            });
+        finish_erasure_transaction(&self.conn, result)
+    }
+}
+
+fn stage_erasure_record_sql(
+    conn: &Connection,
+    record: &ErasureCoordinatorRecordV1,
+    record_bytes: &[u8],
+    state_bytes: &[u8],
+) -> Result<(), ErasureErrorV1> {
+    let request = record.request().reference();
+    let state_digest = record.state().state_digest();
+    let existing_bytes = conn
+        .query_row(
+            "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
+            params![request.digest().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let existing_state_digest = if let Some(existing_bytes) = existing_bytes {
+        let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(&existing_bytes)?;
+        if existing_bytes.as_slice() != record_bytes {
+            existing.validate_replacement(record)?;
+        }
+        Some(existing.state().state_digest())
+    } else {
+        if record.state().previous_state().is_some() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        None
+    };
+
+    let stored_state = conn
+        .query_row(
+            "SELECT request_digest, state_cbor
+             FROM erasure_states WHERE state_digest = ?1",
+            params![state_digest.digest().as_slice()],
+            |row| {
+                row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
+                    row.get::<_, Vec<u8>>(1)
+                        .map(|state_cbor| (request_digest, state_cbor))
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    if let Some((request_digest, stored_state)) = stored_state {
+        let metadata_request: [u8; 32] = request_digest
+            .try_into()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        let expected_request = ErasureReferenceV1::from_digest(metadata_request);
+        let decoded_state = pos_core::ErasureStateV1::from_canonical_cbor(&stored_state)?;
+        if stored_state != state_bytes
+            || expected_request != request
+            || !decoded_state.eq(record.state())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    } else {
+        if existing_state_digest == Some(state_digest) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if let Some(previous) = record.state().previous_state() {
+            let previous_state = conn
+                .query_row(
+                    "SELECT request_digest, state_cbor
+                     FROM erasure_states WHERE state_digest = ?1",
+                    params![previous.digest().as_slice()],
+                    |row| {
+                        row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
+                            row.get::<_, Vec<u8>>(1)
+                                .map(|state_cbor| (request_digest, state_cbor))
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let metadata_request: [u8; 32] = previous_state
+                .0
+                .try_into()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            let decoded_previous =
+                pos_core::ErasureStateV1::from_canonical_cbor(&previous_state.1)?;
+            if ErasureReferenceV1::from_digest(metadata_request) != request
+                || decoded_previous.state_digest() != previous
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        conn.execute(
+            "INSERT INTO erasure_states
+             (state_digest, request_digest, state_cbor) VALUES (?1, ?2, ?3)",
+            params![
+                state_digest.digest().as_slice(),
+                request.digest().as_slice(),
+                state_bytes,
+            ],
+        )
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    }
+    conn.execute(
+        "INSERT INTO erasure_records
+         (request_digest, state_digest, record_cbor) VALUES (?1, ?2, ?3)
+         ON CONFLICT(request_digest) DO UPDATE SET
+           state_digest = excluded.state_digest,
+           record_cbor = excluded.record_cbor",
+        params![
+            request.digest().as_slice(),
+            state_digest.digest().as_slice(),
+            record_bytes,
+        ],
+    )
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    Ok(())
+}
+
+fn finish_erasure_transaction<T>(
+    conn: &Connection,
+    result: Result<T, ErasureErrorV1>,
+) -> Result<T, ErasureErrorV1> {
+    match result {
+        Ok(value) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(value),
+            Err(_) => {
+                if conn.execute_batch("ROLLBACK").is_err() {
+                    return Err(ErasureErrorV1::ReceiptCommitFailed);
+                }
+                Err(ErasureErrorV1::ReceiptCommitFailed)
+            }
+        },
+        Err(error) => {
+            if conn.execute_batch("ROLLBACK").is_err() {
+                return Err(ErasureErrorV1::ReceiptCommitFailed);
+            }
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 fn begin_immediate_sql() -> &'static str {
     if FAIL_BEGIN_IMMEDIATE.with(std::cell::Cell::get) {
@@ -6647,6 +6969,28 @@ mod tests {
 
         let result = SqliteStore::open(file.path().to_str().test_ok());
         let _ = result.err().test_ok();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_rejects_incompatible_erasure_persistence_schema() {
+        for schema in [
+            "CREATE TABLE erasure_records (request_digest BLOB PRIMARY KEY);",
+            "CREATE TABLE erasure_states (state_digest BLOB PRIMARY KEY);",
+        ] {
+            let file = tempfile::NamedTempFile::new().test_ok();
+            {
+                let conn = Connection::open(file.path()).test_ok();
+                conn.execute(schema, []).test_ok();
+            }
+            let error = SqliteStore::open(file.path().to_str().test_ok())
+                .err()
+                .test_ok();
+            assert!(matches!(
+                error,
+                CoreError::Storage(message) if message.contains("incompatible schema")
+            ));
+        }
     }
 
     #[test]

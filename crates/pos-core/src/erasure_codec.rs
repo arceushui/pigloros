@@ -4,7 +4,7 @@ use super::{
     ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
-    ErasureStateV1, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES, ERC1, ERQ1, ERS1,
+    ErasureStateV1, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES, ERC1, ERCR1, ERQ1, ERS1,
     VERSION,
 };
 use ciborium::value::Value;
@@ -295,6 +295,85 @@ pub(super) fn receipt_from_fields(fields: &[Value]) -> Result<ErasureReceiptV1, 
     }
     Ok(expected)
 }
+pub(super) fn record_value(record: &super::ErasureCoordinatorRecordV1) -> Value {
+    Value::Array(vec![
+        text(ERCR1),
+        uint(VERSION),
+        request_value(&record.request.0),
+        state_value(&record.state),
+        targets_value(&record.reserved_targets),
+        targets_value(&record.targets),
+        Value::Array(
+            record
+                .acknowledgements
+                .iter()
+                .copied()
+                .map(acknowledgement_value)
+                .collect(),
+        ),
+        record
+            .receipt
+            .as_ref()
+            .map_or(Value::Null, |receipt| receipt_value(&receipt.0)),
+        optional_digest(record.authorize_provenance),
+        optional_digest(record.freeze_provenance),
+        record.freeze_admission.map_or(Value::Null, |admission| {
+            Value::Array(vec![
+                uint(admission.freeze_position),
+                digest(admission.provenance),
+                digest(admission.target_closure),
+            ])
+        }),
+        optional_digest(record.dispatch_provenance),
+    ])
+}
+
+pub(super) fn record_from_fields(
+    fields: &[Value],
+) -> Result<super::ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    header(fields, ERCR1)?;
+    let request = exact_array(&fields[2], 12).and_then(request_from_fields)?;
+    let state = exact_array(&fields[3], 12).and_then(state_from_fields)?;
+    let reserved_targets = targets_from_value(&fields[4])?;
+    let targets = targets_from_value(&fields[5])?;
+    let acknowledgements = acknowledgements_from_value(&fields[6])?;
+    let receipt = match &fields[7] {
+        Value::Null => None,
+        value => Some(receipt_from_fields(exact_array(value, 19)?)?),
+    };
+    let authorize_provenance = optional_bytes32(&fields[8])?;
+    let freeze_provenance = optional_bytes32(&fields[9])?;
+    let freeze_admission = match &fields[10] {
+        Value::Null => None,
+        value => {
+            let admission = exact_array(value, 3)?;
+            Some(super::ErasureFreezeAdmissionV1 {
+                freeze_position: unsigned(&admission[0])?,
+                provenance: bytes32(&admission[1])?,
+                target_closure: bytes32(&admission[2])?,
+            })
+        }
+    };
+    let dispatch_provenance = optional_bytes32(&fields[11])?;
+    let receipt_input = receipt.as_ref().map(|value| value.0.clone());
+    super::ErasureCoordinatorRecordV1::from_parts(
+        super::ErasureCoordinatorRecordPartsV1 {
+            request,
+            state: state.clone(),
+            reserved_targets,
+            targets,
+            acknowledgements,
+            receipt,
+            receipt_input,
+            authorize_provenance,
+            freeze_provenance,
+            freeze_admission,
+            dispatch_provenance,
+        },
+        state.coordinator(),
+    )
+}
+
 pub(super) fn receipt_proof(
     fields: &[Value],
 ) -> Result<
