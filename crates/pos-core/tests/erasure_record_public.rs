@@ -61,6 +61,7 @@ fn malformed_record_bytes() -> Vec<Vec<u8>> {
         (5, Value::Null),
         (6, Value::Null),
         (7, Value::Array(Vec::new())),
+        (7, Value::Array(vec![Value::Null; 19])),
         (8, Value::Text("invalid".to_owned())),
         (9, Value::Text("invalid".to_owned())),
         (10, Value::Array(Vec::new())),
@@ -91,10 +92,21 @@ fn malformed_record_bytes() -> Vec<Vec<u8>> {
 #[test]
 fn public_record_decoder_rejects_each_malformed_field() {
     let malformed = malformed_record_bytes();
-    assert_eq!(malformed.len(), 14);
+    assert_eq!(malformed.len(), 15);
     for bytes in malformed {
         assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).is_err());
     }
+}
+
+#[test]
+fn public_record_decoder_rejects_noncanonical_encoding() {
+    let mut noncanonical = submitted_record_bytes();
+    noncanonical[7] = 0x18;
+    noncanonical.insert(8, 1);
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_canonical_cbor(&noncanonical),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
 }
 
 #[test]
