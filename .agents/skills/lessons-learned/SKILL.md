@@ -22,6 +22,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Stage only task files and re-check mutation boundaries.** Before cleanup, rebasing, or an external write, confirm live ownership, current state, and exact targets immediately before the mutation; never delete an active worktree or overwrite a shared record from a stale inventory.
 
+- **Reconcile a shared PR immediately before pushing.** Concurrent workers can land equivalent or overlapping fixes while a rebase or hook is running. Fetch the PR branch, compare the merge base and commits, rebase onto its current tip, and drop patches already present. Never force-push a shared branch to replace a concurrent update.
+
 ## Code edits
 
 - **Use the repository edit tool for multi-line changes.** `sed` and inline rewrite scripts can corrupt source when a pattern or snapshot is stale. Prefer `apply_patch`, keep the change narrow, and inspect the diff immediately.
@@ -45,6 +47,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 - **Run every applicable quality gate after each code change.** Include review fixes and restart gates from the new commit. Run the documented local format, test, lint, and coverage checks; only when the documented coverage instrumentation exhausts local memory may the unchanged hosted coverage gate serve as the fallback, with thresholds intact and logs inspected.
 
 - **Choose Rust constructs deliberately when coverage evidence matters.** Equivalent macros and control-flow forms can create different LLVM regions; prefer the idiomatic form that keeps behavior clear and measurable.
+
+- **Do not trade error semantics for coverage.** Converting a fallible public or codec API into an unconditional abort merely to remove a coverage region weakens diagnostics and changes the contract. Preserve the `Result` boundary, then cover its success and error behavior through the public seam.
 
 ## Redmine
 
@@ -94,6 +98,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Always request independent code review after completing code changes, before starting new work.** Use the `code-review` skill with a fixed point, review Standards and Spec fit separately, address findings in a separate round, and re-review the resulting exact head. A conflict-free PR or passing subset of checks is not merge readiness.
 
+- **Review the complete PR diff after rebases.** A review of only the newest commit can miss regressions introduced by earlier commits or by conflict resolution. Compare the final PR head with the latest `main`, and record the exact reviewed head.
+
 ## CI / GitHub Actions
 
 - **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that `cargo test --workspace --locked -- --include-ignored` in the `test` job actually executes it. The `--include-ignored` flag is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
@@ -101,6 +107,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 - **GitHub Actions workflow `name:` must be lowercase-with-hyphens.** All workflow YAML files under `.github/workflows/` must use the same naming convention: lowercase words separated by hyphens (e.g. `name: ci`, `name: cargo-deny`, `name: deploy`, `name: trunk-check`). No PascalCase (`Deploy`, `Trunk Check`), no ALLCAPS. This keeps the Actions sidebar predictable and sortable.
 
 - **Treat hosted CI as an independent environment probe.** Permission, non-root process identity, ordering, cache, target, and runner behavior can differ from a root local checkout. Overlap independent review with hosted latency, but do not substitute either evidence stream for the other.
+
+- **Treat coverage summaries as evidence, not intent.** Adding tests or seeing a smaller diff does not prove a per-file region target was met. Download and inspect the hosted coverage artifact for the exact final PR head, including every requested file, before reporting coverage complete.
 
 - **Separate status evidence from diagnostic evidence.** Batch or reduce GitHub polling; if REST quota is exhausted, use an exact-head GraphQL check rollup to preserve status, but do not change code or classify a failure until the authoritative hosted job log is available.
 
