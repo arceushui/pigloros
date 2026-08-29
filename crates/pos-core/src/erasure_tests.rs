@@ -4235,17 +4235,16 @@ fn dispatch_retry_rejects_a_different_intent_provenance() -> Result<(), ErasureE
 }
 
 #[test]
-fn predecessor_validation_rejects_a_chain_that_cannot_reach_the_root() -> Result<(), ErasureErrorV1>
-{
-    let mut malformed = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
-    malformed.previous_state = Some(malformed.state_digest());
+fn predecessor_validation_rejects_an_exhausted_chain_budget() -> Result<(), ErasureErrorV1> {
+    let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     assert_eq!(
-        verify_predecessor_chain(
-            malformed.clone(),
+        verify_predecessor_chain_bounded(
+            state,
             &TestResolver {
-                states: vec![malformed],
+                states: Vec::new(),
                 unavailable: false,
             },
+            0,
         ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );

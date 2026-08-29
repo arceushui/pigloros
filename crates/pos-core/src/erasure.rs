@@ -1231,13 +1231,18 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
 }
 
 fn verify_predecessor_chain<R: ErasureStateResolverV1>(
-    mut current: ErasureStateV1,
+    current: ErasureStateV1,
     resolver: &R,
 ) -> Result<(), ErasureErrorV1> {
-    // `permits` is a strict finite V1 lifecycle ordering, so every accepted
-    // predecessor moves toward the submitted root and the traversal is
-    // bounded by the lifecycle graph itself.
-    loop {
+    verify_predecessor_chain_bounded(current, resolver, 8)
+}
+
+fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1>(
+    mut current: ErasureStateV1,
+    resolver: &R,
+    maximum_depth: usize,
+) -> Result<(), ErasureErrorV1> {
+    for _ in 0..maximum_depth {
         if let Some(previous_digest) = current.previous_state() {
             match resolver.resolve_state(previous_digest) {
                 Ok(Some(previous)) => {
@@ -1267,6 +1272,7 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
     }
+    Err(ErasureErrorV1::ProvenanceMissing)
 }
 
 /// Host-owned port; adapters supply durable and irreversible work.
