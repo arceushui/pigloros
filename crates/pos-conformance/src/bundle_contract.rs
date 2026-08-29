@@ -622,8 +622,11 @@ fn decode_manifest(value: &Value) -> Result<BundleManifestV1, BundleContractErro
             let x = array(v, 6)?;
             Ok(BundleExpectedResultV1 {
                 case_id: text(&x[0])?.to_owned(),
-                claim_layer: crate::ClaimLayerV1::from_wire_code(uint(&x[1])?)
-                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?,
+                claim_layer: crate::ClaimLayerV1::from_wire_code(
+                    u8::try_from(uint(&x[1])?)
+                        .map_err(|_| BundleContractErrorV1::ArchiveEncodingInvalid)?,
+                )
+                .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?,
                 execution_profile_digest: digest(&x[2])?,
                 mode: decode_mode(&x[3])?,
                 member_path: text(&x[4])?.to_owned(),
@@ -680,13 +683,13 @@ fn decode_role(value: &Value) -> Result<BundleMemberRoleV1, BundleContractErrorV
 /// # Errors
 ///
 /// Returns a closed bundle error for malformed bytes or any failed archive-contract invariant.
-pub fn verify_archive_independently(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
-    if u64::try_from(bytes.len()).map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
+pub fn verify_archive_independently(archive_bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+    if u64::try_from(archive_bytes.len()).map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?
         > MAX_CONFORMANCE_BUNDLE_BYTES_V1
     {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
-    let value = decode(bytes)?;
+    let value = decode(archive_bytes)?;
     let fields = array(&value, 4)?;
     let manifest = array(&fields[0], 6)?;
     if text(&manifest[0])? != CONFORMANCE_BUNDLE_MAGIC_V1
@@ -1530,7 +1533,7 @@ fn archive_value(b: &ConformanceBundleV1) -> Value {
                 .collect(),
         ),
         Value::Bytes(b.signer_public_key.as_bytes().to_vec()),
-        Value::Bytes(b.signature.to_bytes().to_vec()),
+        Value::Bytes(b.signature.as_bytes().to_vec()),
     ])
 }
 /// Derive a deterministic archive path for one fixture-owned member.
