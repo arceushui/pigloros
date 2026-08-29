@@ -717,6 +717,39 @@ impl ErasureStateV1 {
     pub const fn previous_state(&self) -> Option<ErasureReferenceV1> {
         self.previous_state
     }
+    /// Verify that `previous` is the exact monotonic predecessor of this state.
+    ///
+    /// The check binds the request and coordinator identities, the lifecycle
+    /// edge, the access-freeze position, the replay-claim weakening, and the
+    /// content-addressed predecessor digest. Storage adapters use this same
+    /// rule before accepting a durable state transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when the predecessor is
+    /// absent, mismatched, or violates the forward-only state contract.
+    pub fn validate_predecessor(&self, previous: &Self) -> Result<(), ErasureErrorV1> {
+        let Some(previous_digest) = self.previous_state else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        };
+        let predecessor_is_valid = [
+            previous.state_digest() == previous_digest,
+            previous.request() == self.request(),
+            previous.coordinator() == self.coordinator(),
+            previous.lifecycle().permits(self.lifecycle()),
+            freeze_is_monotonic(previous.freeze_position(), self.freeze_position()),
+            previous
+                .replay_claim()
+                .preserves_or_weakens(self.replay_claim()),
+        ]
+        .into_iter()
+        .all(|valid| valid);
+        if predecessor_is_valid {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
     /// Return owners whose required target has not positively acknowledged.
     #[must_use]
     pub fn pending_owners(&self) -> &[ErasureReferenceV1] {
@@ -1246,21 +1279,7 @@ fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1>(
         if let Some(previous_digest) = current.previous_state() {
             match resolver.resolve_state(previous_digest) {
                 Ok(Some(previous)) => {
-                    let predecessor_is_valid = [
-                        previous.state_digest().eq(&previous_digest),
-                        previous.request() == current.request(),
-                        previous.coordinator() == current.coordinator(),
-                        previous.lifecycle().permits(current.lifecycle()),
-                        freeze_is_monotonic(previous.freeze_position(), current.freeze_position()),
-                        previous
-                            .replay_claim()
-                            .preserves_or_weakens(current.replay_claim()),
-                    ]
-                    .into_iter()
-                    .all(|valid| valid);
-                    if !predecessor_is_valid {
-                        return Err(ErasureErrorV1::ProvenanceMissing);
-                    }
+                    current.validate_predecessor(&previous)?;
                     current = previous;
                 }
                 Ok(None) => return Err(ErasureErrorV1::ProvenanceMissing),

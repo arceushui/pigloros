@@ -4271,6 +4271,68 @@ fn predecessor_validation_rejects_an_exhausted_chain_budget() -> Result<(), Eras
 }
 
 #[test]
+fn state_predecessor_validation_enforces_the_shared_transition_contract(
+) -> Result<(), ErasureErrorV1> {
+    let previous = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    let current = previous.transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    current.validate_predecessor(&previous)?;
+    assert_eq!(
+        previous.validate_predecessor(&previous),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_digest = previous.clone();
+    wrong_digest.state_digest = reference(99);
+    assert_eq!(
+        current.validate_predecessor(&wrong_digest),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_request = previous.clone();
+    wrong_request.request = reference(99);
+    assert_eq!(
+        current.validate_predecessor(&wrong_request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_coordinator = previous.clone();
+    wrong_coordinator.coordinator = reference(99);
+    assert_eq!(
+        current.validate_predecessor(&wrong_coordinator),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_lifecycle = previous.clone();
+    wrong_lifecycle.lifecycle = ErasureLifecycleV1::AccessFrozen;
+    assert_eq!(
+        current.validate_predecessor(&wrong_lifecycle),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_freeze = previous.clone();
+    wrong_freeze.freeze_position = Some(11);
+    assert_eq!(
+        current.validate_predecessor(&wrong_freeze),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_claim = previous.clone();
+    wrong_claim.replay_claim = ErasureReplayClaimV1::StructuralOnly;
+    let mut exact_current = current;
+    exact_current.replay_claim = ErasureReplayClaimV1::Exact;
+    assert_eq!(
+        exact_current.validate_predecessor(&wrong_claim),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn canonical_record_decoder_rejects_a_noncanonical_integer() -> Result<(), ErasureErrorV1> {
     let record = complete_record()?;
     let mut bytes = record.to_canonical_cbor()?;

@@ -1213,15 +1213,7 @@ fn stage_erasure_record(
             .get(&previous)
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         let previous_state = pos_core::ErasureStateV1::from_canonical_cbor(previous_bytes)?;
-        if previous_state.state_digest() != previous {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        if previous_state.request() != request {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        if previous_state.coordinator() != record.state().coordinator() {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
+        record.state().validate_predecessor(&previous_state)?;
         states.insert(state_digest, state_bytes);
     } else {
         states.insert(state_digest, state_bytes);

@@ -4322,10 +4322,7 @@ fn validate_erasure_predecessor(
     if ErasureReferenceV1::from_digest(metadata_request) != request {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
-    if decoded_previous.state_digest() != previous {
-        return Err(ErasureErrorV1::ProvenanceMissing);
-    }
-    Ok(())
+    record.state().validate_predecessor(&decoded_previous)
 }
 
 fn insert_erasure_record(
