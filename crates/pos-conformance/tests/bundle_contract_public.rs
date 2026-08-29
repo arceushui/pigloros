@@ -28,17 +28,38 @@ fn materializer_process_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn digest(seed: u8) -> [u8; 32] {
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+const CURRENT_SCHEMA_BYTES: [&[u8]; 7] = [
+    b"positive-schema",
+    b"denied-schema",
+    b"malformed-schema",
+    b"resource-schema",
+    b"deletion-schema",
+    b"downgrade-schema",
+    b"independent-schema",
+];
+const LICENCE_BYTES: &[u8] = b"MIT\n";
+const NOTICE_BYTES: &[u8] = b"public notice\n";
+const SBOM_BYTES: &[u8] = br#"{"bomFormat":"CycloneDX"}"#;
+const PROVENANCE_BYTES: &[u8] = br#"{"source":"public"}"#;
+const LIMITATIONS_BYTES: &[u8] = b"# Limitations\n";
+const NORMATIVE_BYTES: &[u8] = b"normative contract";
+const MATRIX_BYTES: &[u8] = b"execution matrix";
+const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
+const PAYLOAD_BYTES: &[u8] = b"public fixture payload";
+
+const fn digest(seed: u8) -> [u8; 32] {
     [seed; 32]
 }
 
-fn artifact(path: &str, media_type: &str, bytes: &[u8]) -> ArtifactDescriptorV1 {
-    ArtifactDescriptorV1 {
+fn artifact(path: &str, media_type: &str, bytes: &[u8]) -> TestResult<ArtifactDescriptorV1> {
+    Ok(ArtifactDescriptorV1 {
         member_path: path.to_owned(),
         media_type: media_type.to_owned(),
-        byte_length: u64::try_from(bytes.len()).expect("test artifact length fits in u64"),
+        byte_length: u64::try_from(bytes.len())?,
         blake3_digest: *blake3::hash(bytes).as_bytes(),
-    }
+    })
 }
 
 fn provider_key() -> FixtureProviderKeyV1 {
@@ -56,16 +77,14 @@ struct CurrentBundleInputs {
     expected: Vec<BundleExpectedResultV1>,
 }
 
-fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
-    let schema_bytes = [
-        b"positive-schema".as_slice(),
-        b"denied-schema".as_slice(),
-        b"malformed-schema".as_slice(),
-        b"resource-schema".as_slice(),
-        b"deletion-schema".as_slice(),
-        b"downgrade-schema".as_slice(),
-        b"independent-schema".as_slice(),
-    ];
+struct ProviderContractInputs {
+    family_schemas: Vec<ProviderFamilySchemaV1>,
+    package_path: &'static str,
+    package_bytes: Vec<u8>,
+    registry_bytes: Vec<u8>,
+}
+
+fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
     let families = [
         FixtureFamilyV1::Positive,
         FixtureFamilyV1::Denied,
@@ -77,43 +96,44 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
     ];
     let family_schemas = families
         .into_iter()
-        .zip(schema_bytes)
+        .zip(CURRENT_SCHEMA_BYTES)
         .enumerate()
-        .map(|(index, (family, bytes))| ProviderFamilySchemaV1 {
-            family,
-            schema_descriptor: artifact(
-                &format!("support/schemas/{index}.schema.json"),
-                "application/schema+json",
-                bytes,
-            ),
+        .map(|(index, (family, bytes))| {
+            Ok(ProviderFamilySchemaV1 {
+                family,
+                schema_descriptor: artifact(
+                    &format!("support/schemas/{index}.schema.json"),
+                    "application/schema+json",
+                    bytes,
+                )?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<TestResult<Vec<_>>>()?;
 
-    let licence = b"MIT\n".as_slice();
-    let notice = b"public notice\n".as_slice();
-    let sbom = br#"{"bomFormat":"CycloneDX"}"#.as_slice();
-    let provenance = br#"{"source":"public"}"#.as_slice();
-    let limitations = b"# Limitations\n".as_slice();
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key(),
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         family_schemas: family_schemas.clone(),
-        licence_descriptor: artifact("support/LICENSE", "text/plain", licence),
-        notices_descriptor: artifact("support/NOTICE", "text/plain", notice),
-        sbom_descriptor: artifact("support/sbom.json", "application/json", sbom),
+        licence_descriptor: artifact("support/LICENSE", "text/plain", LICENCE_BYTES)?,
+        notices_descriptor: artifact("support/NOTICE", "text/plain", NOTICE_BYTES)?,
+        sbom_descriptor: artifact("support/sbom.json", "application/json", SBOM_BYTES)?,
         source_provenance_descriptor: artifact(
             "support/provenance.json",
             "application/json",
-            provenance,
-        ),
-        limitations_descriptor: artifact("support/limitations.md", "text/markdown", limitations),
+            PROVENANCE_BYTES,
+        )?,
+        limitations_descriptor: artifact(
+            "support/limitations.md",
+            "text/markdown",
+            LIMITATIONS_BYTES,
+        )?,
         package_digest: [0; 32],
     };
-    package.package_digest = package.digest().expect("valid package digest");
-    let package_bytes = package.to_canonical_cbor().expect("valid FPP1");
+    package.package_digest = package.digest()?;
+    let package_bytes = package.to_canonical_cbor()?;
     let package_path = "authority/providers/example.cbor";
-    let package_descriptor = artifact(package_path, "application/cbor", &package_bytes);
+    let package_descriptor = artifact(package_path, "application/cbor", &package_bytes)?;
 
     let entry = FixtureProviderEntryV1 {
         provider_key: provider_key(),
@@ -125,23 +145,29 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
         providers: vec![entry],
         registry_digest: [0; 32],
     };
-    registry.registry_digest = registry.digest().expect("valid registry digest");
-    let registry_bytes = registry.to_canonical_cbor().expect("valid FPR1");
+    registry.registry_digest = registry.digest()?;
+    let registry_bytes = registry.to_canonical_cbor()?;
 
+    Ok(ProviderContractInputs {
+        family_schemas,
+        package_path,
+        package_bytes,
+        registry_bytes,
+    })
+}
+
+fn current_fixture(family_schemas: &[ProviderFamilySchemaV1]) -> TestResult<FixtureDescriptorV1> {
+    let positive_schema = family_schemas
+        .first()
+        .ok_or("positive family schema is absent")?
+        .schema_descriptor
+        .clone();
     let execution = digest(31);
-    let payload_bytes = b"public fixture payload".as_slice();
-    let payload = artifact(
-        "fixtures/positive/input.bin",
-        "application/octet-stream",
-        payload_bytes,
-    );
     let expected_path = expected_result_member_path(
         "example-positive",
         ClaimLayerV1::ArtifactIntegrity,
         &execution,
     );
-    let expected_bytes = br#"{"status":"pending"}"#.as_slice();
-    let expected_descriptor = artifact(&expected_path, "application/json", expected_bytes);
     let failure = NamespacedFailureV1 {
         owner_id: "pigloros.core".to_owned(),
         contract_version: "1.0.0".to_owned(),
@@ -156,9 +182,17 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         execution_profile_digest: execution,
         modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
-        schema: family_schemas[0].schema_descriptor.clone(),
-        payload,
-        auxiliary: vec![expected_descriptor],
+        schema: positive_schema,
+        payload: artifact(
+            "fixtures/positive/input.bin",
+            "application/octet-stream",
+            PAYLOAD_BYTES,
+        )?,
+        auxiliary: vec![artifact(
+            &expected_path,
+            "application/json",
+            EXPECTED_BYTES,
+        )?],
         strict_oracle: StrictOracleV1 {
             kind: StrictOracleKindV1::Failure,
             output: None,
@@ -188,37 +222,41 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
         release_admission_digest: None,
         provenance: FixtureProvenanceV1 {
             licence_id: "MIT".to_owned(),
-            notices_digest: *blake3::hash(notice).as_bytes(),
-            sbom_digest: *blake3::hash(sbom).as_bytes(),
-            source_digest: *blake3::hash(provenance).as_bytes(),
+            notices_digest: *blake3::hash(NOTICE_BYTES).as_bytes(),
+            sbom_digest: *blake3::hash(SBOM_BYTES).as_bytes(),
+            source_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
             build_digest: digest(41),
             publication_review_digest: digest(42),
-            limitations_digest: *blake3::hash(limitations).as_bytes(),
+            limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
         },
         transition: None,
         fixture_digest: [0; 32],
     };
     fixture.fixture_digest = fixture.digest();
+    Ok(fixture)
+}
 
-    let normative = b"normative contract".as_slice();
-    let matrix = b"execution matrix".as_slice();
+fn current_profile(
+    fixture: FixtureDescriptorV1,
+    registry_bytes: &[u8],
+) -> TestResult<ConformanceProfileV1> {
     let mut profile = ConformanceProfileV1 {
         profile_id: "pigloros.current.example".to_owned(),
         semantic_version: "1.0.0".to_owned(),
         lifecycle: ProfileLifecycleV1::Draft,
-        normative_spec_digest: *blake3::hash(normative).as_bytes(),
-        execution_matrix_digest: *blake3::hash(matrix).as_bytes(),
-        execution_profile_digests: vec![execution],
+        normative_spec_digest: *blake3::hash(NORMATIVE_BYTES).as_bytes(),
+        execution_matrix_digest: *blake3::hash(MATRIX_BYTES).as_bytes(),
+        execution_profile_digests: vec![fixture.execution_profile_digest],
         fixture_provider_registry: FixtureProviderRegistryBindingV1 {
             registry_artifact: artifact(
                 FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
                 "application/cbor",
-                &registry_bytes,
-            ),
+                registry_bytes,
+            )?,
             required_provider_keys: vec![provider_key()],
         },
         fixtures: vec![fixture],
-        allowed_divergences: Vec::<AllowedDivergenceV1>::new(),
+        allowed_divergences: Vec::new(),
         evaluator_protocol: EvaluatorProtocolV1 {
             protocol_id: "pigloros.evaluator.v1".to_owned(),
             protocol_digest: digest(51),
@@ -228,7 +266,7 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
                 max_profile_bytes: 16 * 1024 * 1024,
                 max_cases: 64,
                 max_bundle_members: 256,
-                max_member_path_bytes: 512,
+                max_member_path_bytes: 256,
                 max_member_bytes: 64 * 1024 * 1024,
                 max_total_bundle_bytes: 1024 * 1024 * 1024,
                 max_compression_expansion: 100,
@@ -245,16 +283,35 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
             requirements_digest: digest(55),
         },
         fixture_contract_policy_digest: digest(56),
-        limitations_digest: *blake3::hash(limitations).as_bytes(),
-        provenance_digest: *blake3::hash(provenance).as_bytes(),
+        limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
+        provenance_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
         previous_profile_digest: None,
         stable_evidence: Vec::new(),
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();
+    Ok(profile)
+}
+
+fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> {
+    let ProviderContractInputs {
+        family_schemas,
+        package_path,
+        package_bytes,
+        registry_bytes,
+    } = current_provider_contract_inputs()?;
+
+    let fixture = current_fixture(&family_schemas)?;
+    let execution = fixture.execution_profile_digest;
+    let expected_path = expected_result_member_path(
+        "example-positive",
+        ClaimLayerV1::ArtifactIntegrity,
+        &execution,
+    );
+    let profile = current_profile(fixture, &registry_bytes)?;
 
     let expected_member =
-        BundleMemberV1::expected_result(expected_path.clone(), expected_bytes.to_vec());
+        BundleMemberV1::expected_result(expected_path.clone(), EXPECTED_BYTES.to_vec());
     let expected = vec![BundleExpectedResultV1 {
         case_id: "example-positive".to_owned(),
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
@@ -265,7 +322,7 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
     }];
     let mut members = family_schemas
         .iter()
-        .zip(schema_bytes)
+        .zip(CURRENT_SCHEMA_BYTES)
         .map(|(schema, bytes)| {
             BundleMemberV1::supporting(
                 schema.schema_descriptor.member_path.clone(),
@@ -275,63 +332,64 @@ fn current_bundle_inputs(mode: BundleModeV1) -> CurrentBundleInputs {
         })
         .collect::<Vec<_>>();
     members.extend([
-        BundleMemberV1::fixture_input("fixtures/positive/input.bin", payload_bytes.to_vec()),
+        BundleMemberV1::fixture_input("fixtures/positive/input.bin", PAYLOAD_BYTES.to_vec()),
         expected_member,
         BundleMemberV1::supporting(
             "support/normative-requirements.md",
-            normative.to_vec(),
+            NORMATIVE_BYTES.to_vec(),
             BundleMemberRoleV1::NormativeSpecification,
         ),
         BundleMemberV1::supporting(
             "support/LICENSE",
-            licence.to_vec(),
+            LICENCE_BYTES.to_vec(),
             BundleMemberRoleV1::Licence,
         ),
         BundleMemberV1::supporting(
             "support/NOTICE",
-            notice.to_vec(),
+            NOTICE_BYTES.to_vec(),
             BundleMemberRoleV1::Notice,
         ),
-        BundleMemberV1::supporting("support/sbom.json", sbom.to_vec(), BundleMemberRoleV1::Sbom),
+        BundleMemberV1::supporting(
+            "support/sbom.json",
+            SBOM_BYTES.to_vec(),
+            BundleMemberRoleV1::Sbom,
+        ),
         BundleMemberV1::supporting(
             "support/provenance.json",
-            provenance.to_vec(),
+            PROVENANCE_BYTES.to_vec(),
             BundleMemberRoleV1::Provenance,
         ),
         BundleMemberV1::supporting(
             "support/limitations.md",
-            limitations.to_vec(),
+            LIMITATIONS_BYTES.to_vec(),
             BundleMemberRoleV1::Limitations,
         ),
         BundleMemberV1::authority_inventory(b"authority inventory".to_vec()),
-        BundleMemberV1::execution_matrix(matrix.to_vec()),
+        BundleMemberV1::execution_matrix(MATRIX_BYTES.to_vec()),
         BundleMemberV1::fixture_provider_package(package_path, package_bytes),
         BundleMemberV1::fixture_provider_registry(registry_bytes),
     ]);
-    CurrentBundleInputs {
+    Ok(CurrentBundleInputs {
         profile,
         members,
         expected,
-    }
+    })
 }
 
-fn signed_current_bundle(mode: BundleModeV1) -> ConformanceBundleV1 {
-    let inputs = current_bundle_inputs(mode);
+fn signed_current_bundle(mode: BundleModeV1) -> TestResult<ConformanceBundleV1> {
+    let inputs = current_bundle_inputs(mode)?;
     ConformanceBundleV1::materialize(&inputs.profile, mode, inputs.members, inputs.expected)
         .and_then(|bundle| bundle.sign(&SigningKey::from_bytes(&[7; 32])))
-        .expect("current public bundle is valid")
+        .map_err(Into::into)
 }
 
-fn encode_value(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
     Ok(bytes)
 }
 
-fn contract_digest(
-    domain: &[u8],
-    fields: &[Value],
-) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> {
     let bytes = encode_value(&Value::Array(fields.to_vec()))?;
     let mut preimage = Vec::with_capacity(domain.len() + 9 + bytes.len());
     preimage.extend_from_slice(domain);
@@ -341,7 +399,7 @@ fn contract_digest(
     Ok(*blake3::hash(&preimage).as_bytes())
 }
 
-fn resign_archive(value: &mut Value) -> Result<(), Box<dyn std::error::Error>> {
+fn resign_archive(value: &mut Value) -> TestResult {
     let Value::Array(archive) = value else {
         return Err("archive is not an array".into());
     };
@@ -352,10 +410,27 @@ fn resign_archive(value: &mut Value) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn mutate_profile_archive(
-    mutate: impl FnOnce(&mut Vec<Value>),
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local);
+fn array_field<'a>(
+    fields: &'a mut [Value],
+    index: usize,
+    name: &str,
+) -> TestResult<&'a mut Vec<Value>> {
+    match fields.get_mut(index) {
+        Some(Value::Array(values)) => Ok(values),
+        _ => Err(format!("{name} is not an array").into()),
+    }
+}
+
+fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &str) -> TestResult {
+    let slot = fields
+        .get_mut(index)
+        .ok_or_else(|| format!("{name} is absent"))?;
+    *slot = value;
+    Ok(())
+}
+
+fn mutate_profile_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
+    let bundle = signed_current_bundle(BundleModeV1::Local)?;
     let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
     let Value::Array(archive_fields) = &mut archive else {
         return Err("archive is not an array".into());
@@ -379,7 +454,7 @@ fn mutate_profile_archive(
     let Value::Array(profile_fields) = &mut profile else {
         return Err("profile is not an array".into());
     };
-    mutate(profile_fields);
+    mutate(profile_fields)?;
     if let Some(Value::Array(fixtures)) = profile_fields.get_mut(9) {
         for fixture in fixtures {
             let Value::Array(fields) = fixture else {
@@ -426,20 +501,18 @@ fn mutate_profile_archive(
     encode_value(&archive)
 }
 
-fn mutate_archive(
-    mutate: impl FnOnce(&mut Vec<Value>),
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let bundle = signed_current_bundle(BundleModeV1::Local);
+fn mutate_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
+    let bundle = signed_current_bundle(BundleModeV1::Local)?;
     let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
     let Value::Array(fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
-    mutate(fields);
+    mutate(fields)?;
     resign_archive(&mut archive)?;
     encode_value(&archive)
 }
 
-fn temporary_root(label: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn temporary_root(label: &str) -> TestResult<PathBuf> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -454,7 +527,7 @@ impl Drop for TemporaryOutput {
     }
 }
 
-fn release_archives(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn release_archives(root: &Path) -> TestResult<Vec<PathBuf>> {
     let mut pending = vec![root.to_path_buf()];
     let mut archives = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -464,7 +537,7 @@ fn release_archives(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Err
                 pending.push(path);
             } else if path
                 .extension()
-                .is_some_and(|extension| extension == "cfb1")
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("cfb1"))
             {
                 archives.push(path);
             }
@@ -475,10 +548,9 @@ fn release_archives(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Err
 }
 
 #[test]
-fn current_signed_bundle_round_trips_through_typed_and_independent_verifiers(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn current_signed_bundle_round_trips_through_typed_and_independent_verifiers() -> TestResult {
     for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
-        let bundle = signed_current_bundle(mode);
+        let bundle = signed_current_bundle(mode)?;
         bundle.validate()?;
         let manifest = bundle.manifest_bytes()?;
         assert!(!manifest.is_empty());
@@ -487,7 +559,9 @@ fn current_signed_bundle_round_trips_through_typed_and_independent_verifiers(
         assert_eq!(ConformanceBundleV1::from_canonical_cbor(&archive)?, bundle);
         verify_archive_independently(&archive)?;
         let filename = bundle.release_filename()?;
-        assert!(filename.ends_with(".cfb1"));
+        assert!(Path::new(&filename)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cfb1")));
         assert_eq!(bundle.archive_digest()?, *blake3::hash(&archive).as_bytes());
         verify_archive_release_filename(&archive, &filename)?;
     }
@@ -495,29 +569,25 @@ fn current_signed_bundle_round_trips_through_typed_and_independent_verifiers(
 }
 
 #[test]
-fn current_bundle_pair_requires_profile_parity() -> Result<(), Box<dyn std::error::Error>> {
-    let local = signed_current_bundle(BundleModeV1::Local);
-    let air_gapped = signed_current_bundle(BundleModeV1::AirGapped);
-    let pair = ConformanceBundlePairV1 {
-        local: local.clone(),
-        air_gapped: air_gapped.clone(),
-    };
+fn current_bundle_pair_requires_profile_parity() -> TestResult {
+    let local = signed_current_bundle(BundleModeV1::Local)?;
+    let air_gapped = signed_current_bundle(BundleModeV1::AirGapped)?;
+    let pair = ConformanceBundlePairV1 { local, air_gapped };
     assert_eq!(pair.validate(), Ok(()));
 
     let mut mismatched = pair;
     mismatched.air_gapped.manifest.profile_digest[0] ^= 1;
     assert!(matches!(
         mismatched.validate(),
-        Err(BundleContractErrorV1::ProfileInvalid)
-            | Err(BundleContractErrorV1::SignatureInvalid)
-            | Err(BundleContractErrorV1::ModeParityMismatch)
+        Err(BundleContractErrorV1::ProfileInvalid
+            | BundleContractErrorV1::SignatureInvalid
+            | BundleContractErrorV1::ModeParityMismatch)
     ));
     Ok(())
 }
 
 #[test]
-fn public_materializer_and_verifier_binaries_round_trip_current_archives(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> TestResult {
     let _guard = materializer_process_guard();
     let root = temporary_root("conformance-cli")?;
     let _cleanup = TemporaryOutput(root.clone());
@@ -553,8 +623,7 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives(
 }
 
 #[test]
-fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> TestResult {
     let _guard = materializer_process_guard();
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
@@ -591,8 +660,8 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail(
 }
 
 #[test]
-fn typed_bundle_validation_rejects_manifest_and_member_tampering() {
-    let original = signed_current_bundle(BundleModeV1::Local);
+fn typed_bundle_validation_rejects_manifest_and_member_tampering() -> TestResult {
+    let original = signed_current_bundle(BundleModeV1::Local)?;
 
     let mut wrong_magic = original.clone();
     wrong_magic.manifest.magic = "BAD1".to_owned();
@@ -635,11 +704,12 @@ fn typed_bundle_validation_rejects_manifest_and_member_tampering() {
         changed_descriptor.validate(),
         Err(BundleContractErrorV1::MemberDigestMismatch)
     );
+    Ok(())
 }
 
 #[test]
-fn typed_bundle_validation_rejects_profile_expected_and_signature_tampering() {
-    let original = signed_current_bundle(BundleModeV1::Local);
+fn typed_bundle_validation_rejects_profile_expected_and_signature_tampering() -> TestResult {
+    let original = signed_current_bundle(BundleModeV1::Local)?;
 
     let mut profile_digest = original.clone();
     profile_digest.manifest.profile_digest[0] ^= 1;
@@ -682,18 +752,19 @@ fn typed_bundle_validation_rejects_profile_expected_and_signature_tampering() {
         wrong_key.validate(),
         Err(BundleContractErrorV1::SignatureInvalid)
     );
+    Ok(())
 }
 
 #[test]
-fn typed_bundle_rejects_undeclared_provider_package_member() {
-    let mut bundle = signed_current_bundle(BundleModeV1::Local);
+fn typed_bundle_rejects_undeclared_provider_package_member() -> TestResult {
+    let mut bundle = signed_current_bundle(BundleModeV1::Local)?;
     let member = BundleMemberV1::fixture_provider_package(
         "authority/providers/undeclared.cbor",
         b"undeclared".to_vec(),
     );
     let descriptor = BundleMemberDescriptorV1 {
         path: member.path.clone(),
-        size_bytes: u64::try_from(member.bytes.len()).expect("test member length fits"),
+        size_bytes: u64::try_from(member.bytes.len())?,
         digest: member.digest,
         role: member.role,
     };
@@ -707,11 +778,12 @@ fn typed_bundle_rejects_undeclared_provider_package_member() {
         bundle.validate(),
         Err(BundleContractErrorV1::UndeclaredMember)
     );
+    Ok(())
 }
 
 #[test]
-fn materialize_requires_draft_profile_and_complete_expected_binding() {
-    let mut stable = current_bundle_inputs(BundleModeV1::Local);
+fn materialize_requires_draft_profile_and_complete_expected_binding() -> TestResult {
+    let mut stable = current_bundle_inputs(BundleModeV1::Local)?;
     stable.profile.lifecycle = ProfileLifecycleV1::Candidate;
     stable.profile.profile_digest = stable.profile.digest();
     assert_eq!(
@@ -724,7 +796,7 @@ fn materialize_requires_draft_profile_and_complete_expected_binding() {
         Err(BundleContractErrorV1::LifecycleInvalid)
     );
 
-    let missing = current_bundle_inputs(BundleModeV1::Local);
+    let missing = current_bundle_inputs(BundleModeV1::Local)?;
     assert_eq!(
         ConformanceBundleV1::materialize(
             &missing.profile,
@@ -734,98 +806,130 @@ fn materialize_requires_draft_profile_and_complete_expected_binding() {
         ),
         Err(BundleContractErrorV1::ExpectedResultMismatch)
     );
+    Ok(())
+}
+
+fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
+        0 => replace_value(profile, 0, Value::Text("BAD1".to_owned()), "profile magic"),
+        1 => replace_value(profile, 1, Value::Integer(2_u64.into()), "profile version"),
+        2 => replace_value(
+            profile,
+            2,
+            Value::Text("Invalid Profile".to_owned()),
+            "profile identifier",
+        ),
+        3 => replace_value(
+            profile,
+            3,
+            Value::Text("01.0.0".to_owned()),
+            "profile version",
+        ),
+        4 => replace_value(
+            profile,
+            4,
+            Value::Integer(1_u64.into()),
+            "profile lifecycle",
+        ),
+        5 => replace_value(profile, 7, Value::Array(Vec::new()), "profile executions"),
+        6 => replace_value(
+            array_field(profile, 8, "provider binding")?,
+            1,
+            Value::Array(Vec::new()),
+            "required providers",
+        ),
+        7..=19 => mutate_fixture_fields(array_field(profile, 9, "fixtures")?, mutation),
+        20 => replace_value(
+            profile,
+            16,
+            Value::Bytes(vec![1; 31]),
+            "fixture contract policy digest",
+        ),
+        21 => replace_value(
+            array_field(profile, 11, "evaluator protocol")?,
+            0,
+            Value::Text(String::new()),
+            "protocol identifier",
+        ),
+        22 => replace_value(
+            array_field(
+                array_field(profile, 11, "evaluator protocol")?,
+                4,
+                "evaluator hard caps",
+            )?,
+            0,
+            Value::Integer(0_u64.into()),
+            "profile byte cap",
+        ),
+        23 => replace_value(
+            array_field(profile, 12, "independence requirements")?,
+            0,
+            Value::Null,
+            "technical independence requirement",
+        ),
+        _ => Err(format!("unsupported profile mutation {mutation}").into()),
+    }
+}
+
+fn mutate_fixture_fields(fixtures: &mut [Value], mutation: usize) -> TestResult {
+    let fixture = array_field(fixtures, 0, "fixture")?;
+    match mutation {
+        7 => replace_value(
+            fixture,
+            2,
+            Value::Integer(7_u64.into()),
+            "fixture claim layer",
+        ),
+        8 => replace_value(fixture, 3, Value::Integer(7_u64.into()), "fixture family"),
+        9 => replace_value(
+            array_field(fixture, 4, "fixture provider")?,
+            0,
+            Value::Text("INVALID".to_owned()),
+            "provider identifier",
+        ),
+        10 => replace_value(fixture, 5, Value::Integer(3_u64.into()), "subject adapter"),
+        11 => replace_value(fixture, 7, Value::Array(Vec::new()), "fixture modes"),
+        12 => replace_value(
+            array_field(fixture, 11, "strict oracle")?,
+            0,
+            Value::Integer(3_u64.into()),
+            "strict oracle kind",
+        ),
+        13 => replace_value(
+            array_field(fixture, 16, "deterministic budget")?,
+            0,
+            Value::Integer(0_u64.into()),
+            "memory budget",
+        ),
+        14 => replace_value(
+            array_field(fixture, 17, "operational safety")?,
+            0,
+            Value::Integer(0_u64.into()),
+            "watchdog",
+        ),
+        15 => replace_value(fixture, 18, Value::Null, "capability policy"),
+        16 => replace_value(
+            fixture,
+            12,
+            Value::Integer(6_u64.into()),
+            "verification outcome",
+        ),
+        17 => replace_value(fixture, 14, Value::Integer(5_u64.into()), "replay claim"),
+        18 => replace_value(fixture, 15, Value::Integer(4_u64.into()), "redaction state"),
+        19 => replace_value(
+            array_field(fixture, 21, "fixture provenance")?,
+            0,
+            Value::Text(String::new()),
+            "licence identifier",
+        ),
+        _ => Err(format!("unsupported fixture mutation {mutation}").into()),
+    }
 }
 
 #[test]
-fn independent_verifier_rejects_each_current_profile_contract_mutation(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn independent_verifier_rejects_each_current_profile_contract_mutation() -> TestResult {
     for mutation in 0..24 {
-        let archive = mutate_profile_archive(|profile| match mutation {
-            0 => profile[0] = Value::Text("BAD1".to_owned()),
-            1 => profile[1] = Value::Integer(2_u64.into()),
-            2 => profile[2] = Value::Text("Invalid Profile".to_owned()),
-            3 => profile[3] = Value::Text("01.0.0".to_owned()),
-            4 => profile[4] = Value::Integer(1_u64.into()),
-            5 => profile[7] = Value::Array(Vec::new()),
-            6 => {
-                let Value::Array(binding) = &mut profile[8] else {
-                    panic!("binding is an array")
-                };
-                binding[1] = Value::Array(Vec::new());
-            }
-            7..=19 => {
-                let Value::Array(fixtures) = &mut profile[9] else {
-                    panic!("fixtures are an array")
-                };
-                let Value::Array(fixture) = &mut fixtures[0] else {
-                    panic!("fixture is an array")
-                };
-                match mutation {
-                    7 => fixture[2] = Value::Integer(7_u64.into()),
-                    8 => fixture[3] = Value::Integer(7_u64.into()),
-                    9 => {
-                        let Value::Array(provider) = &mut fixture[4] else {
-                            panic!("provider is an array")
-                        };
-                        provider[0] = Value::Text("INVALID".to_owned());
-                    }
-                    10 => fixture[5] = Value::Integer(3_u64.into()),
-                    11 => fixture[7] = Value::Array(Vec::new()),
-                    12 => {
-                        let Value::Array(oracle) = &mut fixture[11] else {
-                            panic!("oracle is an array")
-                        };
-                        oracle[0] = Value::Integer(3_u64.into());
-                    }
-                    13 => {
-                        let Value::Array(budget) = &mut fixture[16] else {
-                            panic!("budget is an array")
-                        };
-                        budget[0] = Value::Integer(0_u64.into());
-                    }
-                    14 => {
-                        let Value::Array(safety) = &mut fixture[17] else {
-                            panic!("safety is an array")
-                        };
-                        safety[0] = Value::Integer(0_u64.into());
-                    }
-                    15 => fixture[18] = Value::Null,
-                    16 => fixture[12] = Value::Integer(6_u64.into()),
-                    17 => fixture[14] = Value::Integer(5_u64.into()),
-                    18 => fixture[15] = Value::Integer(4_u64.into()),
-                    19 => {
-                        let Value::Array(provenance) = &mut fixture[21] else {
-                            panic!("provenance is an array")
-                        };
-                        provenance[0] = Value::Text(String::new());
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            20 => profile[16] = Value::Bytes(vec![1; 31]),
-            21 => {
-                let Value::Array(protocol) = &mut profile[11] else {
-                    panic!("protocol is an array")
-                };
-                protocol[0] = Value::Text(String::new());
-            }
-            22 => {
-                let Value::Array(protocol) = &mut profile[11] else {
-                    panic!("protocol is an array")
-                };
-                let Value::Array(caps) = &mut protocol[4] else {
-                    panic!("caps are an array")
-                };
-                caps[0] = Value::Integer(0_u64.into());
-            }
-            23 => {
-                let Value::Array(independence) = &mut profile[12] else {
-                    panic!("independence is an array")
-                };
-                independence[0] = Value::Null;
-            }
-            _ => unreachable!(),
-        })?;
+        let archive = mutate_profile_archive(|profile| mutate_profile_fields(profile, mutation))?;
         assert!(
             verify_archive_independently(&archive).is_err(),
             "profile mutation {mutation} unexpectedly verified"
@@ -834,72 +938,93 @@ fn independent_verifier_rejects_each_current_profile_contract_mutation(
     Ok(())
 }
 
+fn mutate_archive_fields(archive: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
+        0 => replace_value(
+            array_field(archive, 0, "manifest")?,
+            0,
+            Value::Text("BAD1".to_owned()),
+            "manifest magic",
+        ),
+        1 => replace_value(
+            array_field(archive, 0, "manifest")?,
+            1,
+            Value::Integer(1_u64.into()),
+            "manifest lifecycle",
+        ),
+        2 => replace_value(
+            array_field(archive, 0, "manifest")?,
+            2,
+            Value::Integer(2_u64.into()),
+            "manifest mode",
+        ),
+        3 => {
+            array_field(
+                array_field(archive, 0, "manifest")?,
+                4,
+                "member descriptors",
+            )?
+            .swap(0, 1);
+            Ok(())
+        }
+        4 => replace_value(
+            array_field(
+                array_field(
+                    array_field(archive, 0, "manifest")?,
+                    4,
+                    "member descriptors",
+                )?,
+                0,
+                "member descriptor",
+            )?,
+            1,
+            Value::Integer(0_u64.into()),
+            "member length",
+        ),
+        5 => replace_value(
+            array_field(
+                array_field(
+                    array_field(archive, 0, "manifest")?,
+                    4,
+                    "member descriptors",
+                )?,
+                0,
+                "member descriptor",
+            )?,
+            2,
+            Value::Bytes(vec![9; 32]),
+            "member digest",
+        ),
+        6 => {
+            array_field(array_field(archive, 0, "manifest")?, 5, "expected results")?.clear();
+            Ok(())
+        }
+        7 => replace_value(
+            array_field(
+                array_field(array_field(archive, 0, "manifest")?, 5, "expected results")?,
+                0,
+                "expected result",
+            )?,
+            3,
+            Value::Integer(1_u64.into()),
+            "expected result mode",
+        ),
+        8 => {
+            array_field(archive, 1, "archive members")?.swap(0, 1);
+            Ok(())
+        }
+        9 => {
+            array_field(archive, 1, "archive members")?.pop();
+            Ok(())
+        }
+        _ => Err(format!("unsupported archive mutation {mutation}").into()),
+    }
+}
+
 #[test]
-fn independent_verifier_rejects_manifest_member_and_expected_mutations(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn independent_verifier_rejects_manifest_member_and_expected_mutations() -> TestResult {
     for mutation in 0..10 {
-        let archive = mutate_archive(|archive| {
-            let Value::Array(manifest) = &mut archive[0] else {
-                panic!("manifest is an array")
-            };
-            match mutation {
-                0 => manifest[0] = Value::Text("BAD1".to_owned()),
-                1 => manifest[1] = Value::Integer(1_u64.into()),
-                2 => manifest[2] = Value::Integer(2_u64.into()),
-                3 => {
-                    let Value::Array(descriptors) = &mut manifest[4] else {
-                        panic!("descriptors are an array")
-                    };
-                    descriptors.swap(0, 1);
-                }
-                4 => {
-                    let Value::Array(descriptors) = &mut manifest[4] else {
-                        panic!("descriptors are an array")
-                    };
-                    let Value::Array(descriptor) = &mut descriptors[0] else {
-                        panic!("descriptor is an array")
-                    };
-                    descriptor[1] = Value::Integer(0_u64.into());
-                }
-                5 => {
-                    let Value::Array(descriptors) = &mut manifest[4] else {
-                        panic!("descriptors are an array")
-                    };
-                    let Value::Array(descriptor) = &mut descriptors[0] else {
-                        panic!("descriptor is an array")
-                    };
-                    descriptor[2] = Value::Bytes(vec![9; 32]);
-                }
-                6 => {
-                    let Value::Array(expected) = &mut manifest[5] else {
-                        panic!("expected records are an array")
-                    };
-                    expected.clear();
-                }
-                7 => {
-                    let Value::Array(expected) = &mut manifest[5] else {
-                        panic!("expected records are an array")
-                    };
-                    let Value::Array(record) = &mut expected[0] else {
-                        panic!("expected record is an array")
-                    };
-                    record[3] = Value::Integer(1_u64.into());
-                }
-                8 => {
-                    let Value::Array(members) = &mut archive[1] else {
-                        panic!("members are an array")
-                    };
-                    members.swap(0, 1);
-                }
-                9 => {
-                    let Value::Array(members) = &mut archive[1] else {
-                        panic!("members are an array")
-                    };
-                    members.pop();
-                }
-                _ => unreachable!(),
-            }
-        })?;
+        let archive = mutate_archive(|archive| mutate_archive_fields(archive, mutation))?;
         assert!(
             verify_archive_independently(&archive).is_err(),
             "archive mutation {mutation} unexpectedly verified"
@@ -909,9 +1034,8 @@ fn independent_verifier_rejects_manifest_member_and_expected_mutations(
 }
 
 #[test]
-fn independent_verifier_rejects_valid_archive_with_wrong_release_filename(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let archive = signed_current_bundle(BundleModeV1::Local).to_canonical_cbor()?;
+fn independent_verifier_rejects_valid_archive_with_wrong_release_filename() -> TestResult {
+    let archive = signed_current_bundle(BundleModeV1::Local)?.to_canonical_cbor()?;
     assert_eq!(
         verify_archive_release_filename(
             &archive,
@@ -973,9 +1097,9 @@ fn independent_verifier_rejects_noncanonical_or_incomplete_archives() {
     let malformed = [0x84, 0x80, 0x80, 0x40, 0x40];
     assert!(matches!(
         verify_archive_independently(&malformed),
-        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-            | Err(BundleContractErrorV1::LifecycleInvalid)
-            | Err(BundleContractErrorV1::MemberMissing)
+        Err(BundleContractErrorV1::ArchiveEncodingInvalid
+            | BundleContractErrorV1::LifecycleInvalid
+            | BundleContractErrorV1::MemberMissing)
     ));
 }
 
@@ -988,7 +1112,7 @@ fn release_filename_requires_a_verified_archive_before_digest_comparison() {
     );
 }
 
-fn malformed_archive(manifest: Vec<Value>) -> Vec<u8> {
+fn malformed_archive(manifest: Vec<Value>) -> TestResult<Vec<u8>> {
     let value = Value::Array(vec![
         Value::Array(manifest),
         Value::Array(Vec::new()),
@@ -996,12 +1120,12 @@ fn malformed_archive(manifest: Vec<Value>) -> Vec<u8> {
         Value::Bytes(vec![0; 64]),
     ]);
     let mut bytes = Vec::new();
-    ciborium::into_writer(&value, &mut bytes).expect("test CBOR encodes");
-    bytes
+    ciborium::into_writer(&value, &mut bytes)?;
+    Ok(bytes)
 }
 
 #[test]
-fn independent_verifier_rejects_each_manifest_shape_and_header_mutation() {
+fn independent_verifier_rejects_each_manifest_shape_and_header_mutation() -> TestResult {
     let cases = [
         vec![],
         vec![Value::Text("CFB0".into())],
@@ -1021,31 +1145,34 @@ fn independent_verifier_rejects_each_manifest_shape_and_header_mutation() {
         ],
     ];
     for manifest in cases {
-        assert!(verify_archive_independently(&malformed_archive(manifest)).is_err());
+        assert!(verify_archive_independently(&malformed_archive(manifest)?).is_err());
     }
+    Ok(())
 }
 
 macro_rules! malformed_case {
     ($name:ident, $bytes:expr_2021) => {
         #[test]
-        fn $name() {
-            assert!(verify_archive_independently(&$bytes).is_err());
+        fn $name() -> TestResult {
+            let bytes = $bytes;
+            assert!(verify_archive_independently(bytes.as_ref()).is_err());
+            Ok(())
         }
     };
 }
 
 malformed_case!(rejects_empty_archive, Vec::<u8>::new());
-malformed_case!(rejects_non_cbor_archive, vec![0xff]);
-malformed_case!(rejects_indefinite_archive, vec![0x9f, 0xff]);
-malformed_case!(rejects_wrong_top_level_length, vec![0x83, 0x80, 0x80, 0x40]);
+malformed_case!(rejects_non_cbor_archive, &[0xff]);
+malformed_case!(rejects_indefinite_archive, &[0x9f, 0xff]);
+malformed_case!(rejects_wrong_top_level_length, &[0x83, 0x80, 0x80, 0x40]);
 malformed_case!(
     rejects_noncanonical_integer,
-    vec![0x84, 0x80, 0x80, 0x58, 0x20]
+    &[0x84, 0x80, 0x80, 0x58, 0x20]
 );
-malformed_case!(rejects_empty_manifest, malformed_archive(Vec::new()));
+malformed_case!(rejects_empty_manifest, malformed_archive(Vec::new())?);
 malformed_case!(
     rejects_one_field_manifest,
-    malformed_archive(vec![Value::Text("CFB1".into())])
+    malformed_archive(vec![Value::Text("CFB1".into())])?
 );
 malformed_case!(
     rejects_wrong_magic,
@@ -1056,7 +1183,7 @@ malformed_case!(
         Value::Bytes(vec![1; 32]),
         Value::Array(vec![]),
         Value::Array(vec![])
-    ])
+    ])?
 );
 malformed_case!(
     rejects_candidate_lifecycle,
@@ -1067,7 +1194,7 @@ malformed_case!(
         Value::Bytes(vec![1; 32]),
         Value::Array(vec![]),
         Value::Array(vec![])
-    ])
+    ])?
 );
 malformed_case!(
     rejects_unknown_mode,
@@ -1078,7 +1205,7 @@ malformed_case!(
         Value::Bytes(vec![1; 32]),
         Value::Array(vec![]),
         Value::Array(vec![])
-    ])
+    ])?
 );
 
 #[test]
