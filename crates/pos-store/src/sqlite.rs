@@ -12445,12 +12445,6 @@ pub(super) mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn expect_err<T, E>(value: Result<T, E>) {
-        assert!(value.is_err(), "expected a rejected coverage value");
-        std::mem::drop(value);
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn erasure_record() -> ErasureCoordinatorRecordV1 {
         let request = fixture(pos_core::ErasureRequestV1::new(
             pos_core::ErasureRequestInputV1 {
@@ -12537,14 +12531,16 @@ pub(super) mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn exercise_state_resolution_errors(state_digest: ErasureReferenceV1) {
+    #[test]
+    fn erasure_state_resolution_error_regions_are_instrumented() {
+        let state_digest = erasure_record().state().state_digest();
         let state_query_error = tests::new_store();
         fixture(
             state_query_error
                 .conn
                 .execute_batch("DROP TABLE erasure_states"),
         );
-        expect_err(state_query_error.resolve_state(state_digest));
+        assert!(state_query_error.resolve_state(state_digest).is_err());
 
         let malformed_state_metadata = tests::new_store();
         fixture(
@@ -12557,18 +12553,24 @@ pub(super) mod key_registry_coverage {
              (state_digest, request_digest, state_cbor) VALUES (?1, X'01', X'01')",
             params![state_digest.digest().as_slice()],
         ));
-        expect_err(malformed_state_metadata.resolve_state(state_digest));
+        assert!(malformed_state_metadata
+            .resolve_state(state_digest)
+            .is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn exercise_record_load_errors(request: ErasureReferenceV1, record_bytes: &[u8]) {
+    #[test]
+    fn erasure_record_load_error_regions_are_instrumented() {
+        let record = erasure_record();
+        let request = record.request().reference();
+        let record_bytes = fixture(record.to_canonical_cbor());
         let record_query_error = tests::new_store();
         fixture(
             record_query_error
                 .conn
                 .execute_batch("DROP TABLE erasure_records"),
         );
-        expect_err(record_query_error.load_record(request));
+        assert!(record_query_error.load_record(request).is_err());
 
         let malformed_record_metadata = tests::new_store();
         fixture(
@@ -12581,16 +12583,18 @@ pub(super) mod key_registry_coverage {
              (request_digest, state_digest, record_cbor) VALUES (?1, X'01', ?2)",
             params![request.digest().as_slice(), record_bytes],
         ));
-        expect_err(malformed_record_metadata.load_record(request));
+        assert!(malformed_record_metadata.load_record(request).is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn exercise_commit_errors(record: &ErasureCoordinatorRecordV1) {
+    #[test]
+    fn erasure_commit_error_regions_are_instrumented() {
+        let record = erasure_record();
         let mut begin_error = tests::new_store();
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
         let begin_result = begin_error.commit_record(record.clone());
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
-        expect_err(begin_result);
+        assert!(begin_result.is_err());
 
         let mut slot_query_error = tests::new_store();
         fixture(
@@ -12598,7 +12602,7 @@ pub(super) mod key_registry_coverage {
                 .conn
                 .execute_batch("DROP TABLE erasure_records"),
         );
-        expect_err(slot_query_error.commit_record(record.clone()));
+        assert!(slot_query_error.commit_record(record.clone()).is_err());
 
         let request = record.request().reference();
         let mut malformed_existing_record = tests::new_store();
@@ -12607,7 +12611,9 @@ pub(super) mod key_registry_coverage {
             "UPDATE erasure_records SET record_cbor = X'01' WHERE request_digest = ?1",
             params![request.digest().as_slice()],
         ));
-        expect_err(malformed_existing_record.commit_record(record.clone()));
+        assert!(malformed_existing_record
+            .commit_record(record.clone())
+            .is_err());
 
         let mut state_row_query_error = tests::new_store();
         fixture(
@@ -12615,7 +12621,7 @@ pub(super) mod key_registry_coverage {
                 .conn
                 .execute_batch("DROP TABLE erasure_states"),
         );
-        expect_err(state_row_query_error.commit_record(record.clone()));
+        assert!(state_row_query_error.commit_record(record.clone()).is_err());
 
         let state_digest = record.state().state_digest();
         let mut malformed_state_metadata_on_commit = tests::new_store();
@@ -12629,14 +12635,15 @@ pub(super) mod key_registry_coverage {
             "UPDATE erasure_states SET request_digest = X'01' WHERE state_digest = ?1",
             params![state_digest.digest().as_slice()],
         ));
-        expect_err(malformed_state_metadata_on_commit.commit_record(record.clone()));
+        assert!(malformed_state_metadata_on_commit
+            .commit_record(record)
+            .is_err());
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn exercise_predecessor_errors(
-        next: &ErasureCoordinatorRecordV1,
-        predecessor: &pos_core::ErasureStateV1,
-    ) {
+    #[test]
+    fn erasure_predecessor_error_regions_are_instrumented() {
+        let (next, predecessor) = erasure_record_with_predecessor();
         let next_request = next.request().reference();
         let predecessor_digest = predecessor.state_digest();
         let predecessor_bytes = fixture(predecessor.to_canonical_cbor());
@@ -12647,11 +12654,10 @@ pub(super) mod key_registry_coverage {
                 .conn
                 .execute_batch("DROP TABLE erasure_states"),
         );
-        expect_err(validate_erasure_predecessor(
-            &predecessor_query_error.conn,
-            next_request,
-            next,
-        ));
+        assert!(
+            validate_erasure_predecessor(&predecessor_query_error.conn, next_request, next,)
+                .is_err()
+        );
 
         let malformed_predecessor_metadata = tests::new_store();
         fixture(
@@ -12664,11 +12670,12 @@ pub(super) mod key_registry_coverage {
              (state_digest, request_digest, state_cbor) VALUES (?1, X'01', ?2)",
             params![predecessor_digest.digest().as_slice(), predecessor_bytes],
         ));
-        expect_err(validate_erasure_predecessor(
+        assert!(validate_erasure_predecessor(
             &malformed_predecessor_metadata.conn,
             next_request,
             next,
-        ));
+        )
+        .is_err());
 
         let malformed_predecessor_state = tests::new_store();
         fixture(malformed_predecessor_state.conn.execute(
@@ -12679,24 +12686,11 @@ pub(super) mod key_registry_coverage {
                 next_request.digest().as_slice()
             ],
         ));
-        expect_err(validate_erasure_predecessor(
+        assert!(validate_erasure_predecessor(
             &malformed_predecessor_state.conn,
             next_request,
             next,
-        ));
-    }
-
-    #[test]
-    fn erasure_persistence_error_regions_are_instrumented() {
-        let record = erasure_record();
-        let request = record.request().reference();
-        let state_digest = record.state().state_digest();
-        let record_bytes = fixture(record.to_canonical_cbor());
-        exercise_state_resolution_errors(state_digest);
-        exercise_record_load_errors(request, &record_bytes);
-        exercise_commit_errors(&record);
-
-        let (next, predecessor) = erasure_record_with_predecessor();
-        exercise_predecessor_errors(&next, &predecessor);
+        )
+        .is_err());
     }
 }
