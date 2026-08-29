@@ -1030,7 +1030,9 @@ fn decode_subject_adapter(value: &Value) -> Result<SubjectAdapterKindV1, Provide
 mod tests {
     use super::*;
 
-    fn digest(seed: u8) -> [u8; 32] {
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const fn digest(seed: u8) -> [u8; 32] {
         [seed; 32]
     }
 
@@ -1052,7 +1054,7 @@ mod tests {
         }
     }
 
-    fn package() -> FixtureProviderPackageV1 {
+    fn package() -> TestResult<FixtureProviderPackageV1> {
         let family_schemas = [
             FixtureFamilyV1::Positive,
             FixtureFamilyV1::Denied,
@@ -1064,14 +1066,16 @@ mod tests {
         ]
         .into_iter()
         .enumerate()
-        .map(|(index, family)| ProviderFamilySchemaV1 {
-            family,
-            schema_descriptor: descriptor(
-                &format!("schemas/{index}.cddl"),
-                u8::try_from(index + 1).expect("seven fixed schema seeds"),
-            ),
+        .map(|(index, family)| -> TestResult<ProviderFamilySchemaV1> {
+            Ok(ProviderFamilySchemaV1 {
+                family,
+                schema_descriptor: descriptor(
+                    &format!("schemas/{index}.cddl"),
+                    u8::try_from(index + 1)?,
+                ),
+            })
         })
-        .collect();
+        .collect::<TestResult<Vec<_>>>()?;
         let mut package = FixtureProviderPackageV1 {
             provider_key: provider_key(),
             claim_layer: ClaimLayerV1::ArtifactIntegrity,
@@ -1084,11 +1088,11 @@ mod tests {
             limitations_descriptor: descriptor("meta/limitations.md", 12),
             package_digest: [0; 32],
         };
-        package.package_digest = package.digest().expect("package digest");
-        package
+        package.package_digest = package.digest()?;
+        Ok(package)
     }
 
-    fn registry(package_bytes: &[u8]) -> FixtureProviderRegistryV1 {
+    fn registry(package_bytes: &[u8]) -> TestResult<FixtureProviderRegistryV1> {
         let mut registry = FixtureProviderRegistryV1 {
             providers: vec![FixtureProviderEntryV1 {
                 provider_key: provider_key(),
@@ -1097,22 +1101,22 @@ mod tests {
                 provider_package_descriptor: ArtifactDescriptorV1 {
                     member_path: "providers/example.fpp1".to_owned(),
                     media_type: "application/cbor".to_owned(),
-                    byte_length: u64::try_from(package_bytes.len()).expect("length"),
+                    byte_length: u64::try_from(package_bytes.len())?,
                     blake3_digest: *blake3::hash(package_bytes).as_bytes(),
                 },
             }],
             registry_digest: [0; 32],
         };
-        registry.registry_digest = registry.digest().expect("registry digest");
-        registry
+        registry.registry_digest = registry.digest()?;
+        Ok(registry)
     }
 
     #[test]
-    fn fpr1_and_fpp1_round_trip_and_bind_exact_package_bytes() {
-        let package = package();
-        let package_bytes = package.to_canonical_cbor().expect("valid FPP1");
-        let registry = registry(&package_bytes);
-        let registry_bytes = registry.to_canonical_cbor().expect("valid FPR1");
+    fn fpr1_and_fpp1_round_trip_and_bind_exact_package_bytes() -> TestResult {
+        let package = package()?;
+        let package_bytes = package.to_canonical_cbor()?;
+        let registry = registry(&package_bytes)?;
+        let registry_bytes = registry.to_canonical_cbor()?;
 
         assert_eq!(
             FixtureProviderPackageV1::from_canonical_cbor(&package_bytes),
@@ -1126,13 +1130,14 @@ mod tests {
             package.validate_registry_binding(&registry.providers[0], &package_bytes),
             Ok(())
         );
+        Ok(())
     }
 
     #[test]
-    fn registry_rejects_unsorted_keys_and_tampered_digest() {
-        let package = package();
-        let package_bytes = package.to_canonical_cbor().expect("valid FPP1");
-        let mut unsorted_registry = registry(&package_bytes);
+    fn registry_rejects_unsorted_keys_and_tampered_digest() -> TestResult {
+        let package = package()?;
+        let package_bytes = package.to_canonical_cbor()?;
+        let mut unsorted_registry = registry(&package_bytes)?;
         let mut later = unsorted_registry.providers[0].clone();
         later.provider_key.provider_id = "z-provider".to_owned();
         unsorted_registry.providers.insert(0, later);
@@ -1141,48 +1146,50 @@ mod tests {
             Err(ProviderContractErrorV1::NonCanonicalOrder)
         );
 
-        let mut digest_mismatch = registry(&package_bytes);
+        let mut digest_mismatch = registry(&package_bytes)?;
         digest_mismatch.registry_digest = digest(99);
         assert_eq!(
             digest_mismatch.validate(),
             Err(ProviderContractErrorV1::DigestMismatch)
         );
+        Ok(())
     }
 
     #[test]
-    fn package_rejects_incomplete_family_inventory_and_duplicate_metadata_paths() {
-        let mut missing_family = package();
+    fn package_rejects_incomplete_family_inventory_and_duplicate_metadata_paths() -> TestResult {
+        let mut missing_family = package()?;
         missing_family.family_schemas.pop();
         assert_eq!(
             missing_family.validate(),
             Err(ProviderContractErrorV1::FamilyInventoryInvalid)
         );
 
-        let mut duplicate_metadata = package();
+        let mut duplicate_metadata = package()?;
         duplicate_metadata.notices_descriptor.member_path = "meta/license.txt".to_owned();
         assert_eq!(
             duplicate_metadata.validate(),
             Err(ProviderContractErrorV1::NonCanonicalOrder)
         );
+        Ok(())
     }
 
     #[test]
-    fn descriptor_and_identifier_boundaries_are_closed() {
-        let mut invalid_identifier = package();
+    fn descriptor_and_identifier_boundaries_are_closed() -> TestResult {
+        let mut invalid_identifier = package()?;
         invalid_identifier.provider_key.provider_id = "Provider".to_owned();
         assert_eq!(
             invalid_identifier.validate(),
             Err(ProviderContractErrorV1::InvalidIdentifier)
         );
 
-        let mut invalid_version = package();
+        let mut invalid_version = package()?;
         invalid_version.provider_key.contract_version = "01.0.0".to_owned();
         assert_eq!(
             invalid_version.validate(),
             Err(ProviderContractErrorV1::InvalidContractVersion)
         );
 
-        let mut invalid = package();
+        let mut invalid = package()?;
         invalid.licence_descriptor.member_path = "/absolute.cbor".to_owned();
         assert_eq!(
             invalid.validate(),
@@ -1194,47 +1201,41 @@ mod tests {
             invalid.validate(),
             Err(ProviderContractErrorV1::InvalidMediaType)
         );
+        Ok(())
     }
 
     #[test]
-    fn self_digests_use_exact_field_arrays_and_length_prefixes() {
-        let package = package();
-        let package_fields = encode_bounded(&encode_package_fields(&package)).expect("fields");
+    fn self_digests_use_exact_field_arrays_and_length_prefixes() -> TestResult {
+        let package = package()?;
+        let package_fields = encode_bounded(&encode_package_fields(&package))?;
         let mut package_preimage = b"PiglorOS.Conformance.ProviderPackage.v1\0".to_vec();
-        package_preimage.extend_from_slice(
-            &u64::try_from(package_fields.len())
-                .expect("length")
-                .to_be_bytes(),
-        );
+        package_preimage.extend_from_slice(&u64::try_from(package_fields.len())?.to_be_bytes());
         package_preimage.extend_from_slice(&package_fields);
         assert_eq!(
-            package.digest().expect("package digest"),
+            package.digest()?,
             *blake3::hash(&package_preimage).as_bytes()
         );
 
-        let package_bytes = package.to_canonical_cbor().expect("valid package");
-        let registry = registry(&package_bytes);
-        let registry_fields = encode_bounded(&encode_registry_fields(&registry)).expect("fields");
+        let package_bytes = package.to_canonical_cbor()?;
+        let registry = registry(&package_bytes)?;
+        let registry_fields = encode_bounded(&encode_registry_fields(&registry))?;
         let mut registry_preimage = b"PiglorOS.Conformance.ProviderRegistry.v1\0".to_vec();
-        registry_preimage.extend_from_slice(
-            &u64::try_from(registry_fields.len())
-                .expect("length")
-                .to_be_bytes(),
-        );
+        registry_preimage.extend_from_slice(&u64::try_from(registry_fields.len())?.to_be_bytes());
         registry_preimage.extend_from_slice(&registry_fields);
         assert_eq!(
-            registry.digest().expect("registry digest"),
+            registry.digest()?,
             *blake3::hash(&registry_preimage).as_bytes()
         );
+        Ok(())
     }
 
     #[test]
-    fn cpf1_registry_binding_is_an_exact_two_field_value() {
+    fn cpf1_registry_binding_is_an_exact_two_field_value() -> TestResult {
         let binding = FixtureProviderRegistryBindingV1 {
             registry_artifact: descriptor(FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 41),
             required_provider_keys: vec![provider_key()],
         };
-        let bytes = binding.to_canonical_cbor().expect("valid binding");
+        let bytes = binding.to_canonical_cbor()?;
         assert_eq!(
             FixtureProviderRegistryBindingV1::from_canonical_cbor(&bytes),
             Ok(binding.clone())
@@ -1253,17 +1254,22 @@ mod tests {
             wrong_path.validate(),
             Err(ProviderContractErrorV1::InvalidMemberPath)
         );
+        Ok(())
     }
 
     #[test]
-    fn decoders_reject_wrong_magic_noncanonical_bytes_and_binding_mismatch() {
-        let package = package();
-        let package_bytes = package.to_canonical_cbor().expect("valid FPP1");
+    fn decoders_reject_wrong_magic_noncanonical_bytes_and_binding_mismatch() -> TestResult {
+        let package = package()?;
+        let package_bytes = package.to_canonical_cbor()?;
         let mut wrong_magic = encode_package(&package);
-        if let Value::Array(fields) = &mut wrong_magic {
-            fields[0] = text("FPP0");
-        }
-        let wrong_magic_bytes = encode_bounded(&wrong_magic).expect("encode wrong magic");
+        let Value::Array(fields) = &mut wrong_magic else {
+            return Err("package codec is not an array".into());
+        };
+        let magic = fields
+            .first_mut()
+            .ok_or("package codec has no magic field")?;
+        *magic = text("FPP0");
+        let wrong_magic_bytes = encode_bounded(&wrong_magic)?;
         assert_eq!(
             FixtureProviderPackageV1::from_canonical_cbor(&wrong_magic_bytes),
             Err(ProviderContractErrorV1::UnsupportedVersion)
@@ -1276,12 +1282,13 @@ mod tests {
             Err(ProviderContractErrorV1::InvalidEncoding)
         );
 
-        let registry = registry(&package_bytes);
+        let registry = registry(&package_bytes)?;
         let mut changed = package_bytes;
         changed[0] ^= 1;
         assert_eq!(
             package.validate_registry_binding(&registry.providers[0], &changed),
             Err(ProviderContractErrorV1::PackageBindingMismatch)
         );
+        Ok(())
     }
 }
