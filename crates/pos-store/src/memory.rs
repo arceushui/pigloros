@@ -5037,7 +5037,7 @@ mod erasure_coverage_tests {
         ErasureReferenceV1::from_digest([value; 32])
     }
 
-    fn record() -> ErasureCoordinatorRecordV1 {
+    fn record() -> Result<ErasureCoordinatorRecordV1, Box<dyn std::error::Error>> {
         let request = ErasureRequestV1::new(ErasureRequestInputV1 {
             request: reference(1),
             subject: reference(2),
@@ -5049,11 +5049,9 @@ mod erasure_coverage_tests {
             request_position: 10,
             horizon_position: 20,
             provenance: reference(7),
-        })
-        .expect("valid erasure request fixture");
-        let state = ErasureStateV1::submitted(request.reference(), reference(8), reference(9))
-            .expect("valid erasure state fixture");
-        ErasureCoordinatorRecordV1::from_parts(
+        })?;
+        let state = ErasureStateV1::submitted(request.reference(), reference(8), reference(9))?;
+        Ok(ErasureCoordinatorRecordV1::from_parts(
             ErasureCoordinatorRecordPartsV1 {
                 request,
                 state,
@@ -5068,18 +5066,16 @@ mod erasure_coverage_tests {
                 dispatch_provenance: None,
             },
             reference(8),
-        )
-        .expect("valid erasure record fixture")
+        )?)
     }
 
     #[test]
-    fn erasure_record_lookup_and_staging_fail_closed_for_missing_provenance() {
-        let record = record();
+    fn erasure_record_lookup_and_staging_fail_closed_for_missing_provenance(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let record = record()?;
         let request = record.request().reference();
         let state_digest = record.state().state_digest();
-        let bytes = record
-            .to_canonical_cbor()
-            .expect("valid erasure record encoding");
+        let bytes = record.to_canonical_cbor()?;
         let mut store = MemoryStore::new();
 
         store.erasure_records.insert(reference(9), bytes.clone());
@@ -5096,13 +5092,13 @@ mod erasure_coverage_tests {
 
         let mut staged_records = BTreeMap::new();
         let mut staged_states = BTreeMap::new();
-        stage_erasure_record(&mut staged_records, &mut staged_states, &record)
-            .expect("initial erasure record staging");
+        stage_erasure_record(&mut staged_records, &mut staged_states, &record)?;
         staged_states.insert(state_digest, vec![0]);
         assert_eq!(
             stage_erasure_record(&mut staged_records, &mut staged_states, &record),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
+        Ok(())
     }
 }
 
