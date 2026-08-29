@@ -324,34 +324,41 @@ fn run_full_lifecycle<S: ErasurePersistencePortV1>(
     let first_ack = acknowledgement(first, 60);
     coordinator.acknowledge(reference(1), second_ack)?;
     coordinator.acknowledge(reference(1), first_ack)?;
-    let receipt = coordinator.finalize(
-        reference(1),
-        ErasureReceiptInputV1 {
-            request: reference(99),
-            terminal_state: reference(98),
-            coordinator: reference(97),
-            lifecycle: ErasureLifecycleV1::Complete,
-            freeze_position: 0,
-            acknowledgements: vec![first_ack, second_ack],
-            required_targets: vec![second, first],
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            inventories: ErasureReceiptInventoriesV1 {
-                artifacts: vec![inventory(second), inventory(first)],
-                keys: Vec::new(),
-                replicas: Vec::new(),
-                backups: Vec::new(),
-            },
-            replay_claim: ErasureReplayClaimV1::Exact,
-            policy: reference(70),
-            trust: reference(71),
-            provenance: reference(72),
-            issue_position: 11,
-            signature: reference(73),
-            receipt_digest: reference(74),
-        },
-    )?;
+    let receipt = coordinator.finalize(reference(1), full_receipt_input(first, second))?;
     Ok((shared, receipt))
+}
+
+fn full_receipt_input(
+    first: ErasureRequiredTargetV1,
+    second: ErasureRequiredTargetV1,
+) -> ErasureReceiptInputV1 {
+    ErasureReceiptInputV1 {
+        request: reference(99),
+        terminal_state: reference(98),
+        coordinator: reference(97),
+        lifecycle: ErasureLifecycleV1::Complete,
+        freeze_position: 0,
+        acknowledgements: vec![acknowledgement(first, 60), acknowledgement(second, 61)],
+        required_targets: vec![second, first],
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            // Keep the caller input intentionally noncanonical. The state
+            // machine must normalize it before persisting and comparing a
+            // retry after SQLite rehydration.
+            artifacts: vec![inventory(second), inventory(first)],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(70),
+        trust: reference(71),
+        provenance: reference(72),
+        issue_position: 11,
+        signature: reference(73),
+        receipt_digest: reference(74),
+    }
 }
 
 fn run_partial_lifecycle<S: ErasurePersistencePortV1>(
@@ -776,6 +783,34 @@ fn sqlite_erasure_lifecycle_and_receipt_survive_reopen() -> Result<(), Box<dyn s
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(record.receipt(), Some(&receipt));
     assert_eq!(record.state().lifecycle(), ErasureLifecycleV1::Complete);
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_terminal_retry_survives_reopen_with_noncanonical_inventory_order(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (store, receipt) = run_full_lifecycle(SqliteStore::open(path)?)?;
+    drop(store);
+
+    let reopened = Rc::new(RefCell::new(SqliteStore::open(path)?));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        CoordinatorHost {
+            store: Rc::clone(&reopened),
+            targets: vec![target(10), target(20)],
+        },
+        reference(30),
+    );
+
+    assert_eq!(
+        coordinator.finalize(reference(1), full_receipt_input(target(10), target(20)))?,
+        receipt
+    );
     Ok(())
 }
 

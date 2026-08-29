@@ -1544,7 +1544,7 @@ pub struct ErasureCoordinatorRecordV1 {
     acknowledgements: Vec<ErasureAcknowledgementV1>,
     /// The committed terminal receipt, if any.
     receipt: Option<ErasureReceiptV1>,
-    /// Exact caller-supplied terminal input used for idempotent retries.
+    /// Canonical normalized terminal input used for idempotent retries.
     receipt_input: Option<ErasureReceiptInputV1>,
     authorize_provenance: Option<ErasureReferenceV1>,
     freeze_provenance: Option<ErasureReferenceV1>,
@@ -2848,6 +2848,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         input.acknowledgements.clone_from(&record.acknowledgements);
         input.pending_owners = record.state.pending_owners().to_vec();
         input.failed_owners = record.state.failed_owners().to_vec();
+        sort_inventories(&mut input.inventories);
         input.replay_claim = weakest_inventory_claim(&input.inventories);
         input.receipt_digest = reference_zero();
         Ok(input)
