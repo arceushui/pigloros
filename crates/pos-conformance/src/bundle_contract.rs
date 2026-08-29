@@ -458,34 +458,7 @@ fn validate_provider_members(
         package
             .validate_registry_binding(entry, &p.bytes)
             .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-        for schema in &package.family_schemas {
-            descriptor_member(
-                members,
-                &schema.schema_descriptor,
-                BundleMemberRoleV1::Schema,
-            )?;
-        }
-        descriptor_member(
-            members,
-            &package.licence_descriptor,
-            BundleMemberRoleV1::Licence,
-        )?;
-        descriptor_member(
-            members,
-            &package.notices_descriptor,
-            BundleMemberRoleV1::Notice,
-        )?;
-        descriptor_member(members, &package.sbom_descriptor, BundleMemberRoleV1::Sbom)?;
-        descriptor_member(
-            members,
-            &package.source_provenance_descriptor,
-            BundleMemberRoleV1::Provenance,
-        )?;
-        descriptor_member(
-            members,
-            &package.limitations_descriptor,
-            BundleMemberRoleV1::Limitations,
-        )?;
+        validate_provider_support_members(members, &package)?;
         if !binding.required_provider_keys.contains(&entry.provider_key) {
             continue;
         }
@@ -509,6 +482,42 @@ fn validate_provider_members(
     }
     Ok(())
 }
+
+fn validate_provider_support_members(
+    members: &[BundleMemberV1],
+    package: &FixtureProviderPackageV1,
+) -> Result<(), BundleContractErrorV1> {
+    for schema in &package.family_schemas {
+        descriptor_member(
+            members,
+            &schema.schema_descriptor,
+            BundleMemberRoleV1::Schema,
+        )?;
+    }
+    descriptor_member(
+        members,
+        &package.licence_descriptor,
+        BundleMemberRoleV1::Licence,
+    )?;
+    descriptor_member(
+        members,
+        &package.notices_descriptor,
+        BundleMemberRoleV1::Notice,
+    )?;
+    descriptor_member(members, &package.sbom_descriptor, BundleMemberRoleV1::Sbom)?;
+    descriptor_member(
+        members,
+        &package.source_provenance_descriptor,
+        BundleMemberRoleV1::Provenance,
+    )?;
+    descriptor_member(
+        members,
+        &package.limitations_descriptor,
+        BundleMemberRoleV1::Limitations,
+    )?;
+    Ok(())
+}
+
 fn validate_fixture_members(
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
@@ -541,17 +550,18 @@ fn validate_fixture_members(
         let expected_member = one(members, BundleMemberRoleV1::ExpectedResult, &e.member_path)?;
         let expected_size = u64::try_from(expected_member.bytes.len())
             .map_err(|_| BundleContractErrorV1::MemberOutOfBounds)?;
+        let expected_digest = e.digest;
         let a = fixture
             .auxiliary
             .iter()
             .find(|a| {
                 a.member_path == e.member_path
-                    && a.blake3_digest == e.digest
+                    && a.blake3_digest == expected_digest
                     && a.byte_length == expected_size
             })
             .ok_or(BundleContractErrorV1::ExpectedResultMismatch)?;
         let m = descriptor_member(members, a, BundleMemberRoleV1::ExpectedResult)?;
-        if m.digest != e.digest {
+        if m.digest != expected_digest {
             return Err(BundleContractErrorV1::ExpectedResultMismatch);
         }
     }
@@ -910,10 +920,11 @@ fn raw_member<'a>(
     let mut result = None;
     for member in members {
         let fields = array(member, 3)?;
-        if text(&fields[0])? == path && uint(&fields[2])? == role {
-            if result.replace(fields).is_some() {
-                return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-            }
+        if text(&fields[0])? == path
+            && uint(&fields[2])? == role
+            && result.replace(fields).is_some()
+        {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         }
     }
     result.ok_or(BundleContractErrorV1::MemberMissing)
@@ -1324,9 +1335,9 @@ fn raw_semver(value: &str) -> bool {
         None => (core_pre, ""),
     };
     let mut parts = core.split('.');
-    parts.next().is_some_and(|part| raw_numeric_semver(part))
-        && parts.next().is_some_and(|part| raw_numeric_semver(part))
-        && parts.next().is_some_and(|part| raw_numeric_semver(part))
+    parts.next().is_some_and(raw_numeric_semver)
+        && parts.next().is_some_and(raw_numeric_semver)
+        && parts.next().is_some_and(raw_numeric_semver)
         && parts.next().is_none()
         && raw_semver_identifiers(pre, true)
         && raw_semver_identifiers(build, false)
@@ -1402,12 +1413,7 @@ pub fn verify_archive_release_filename(
     filename: &str,
 ) -> Result<(), BundleContractErrorV1> {
     verify_archive_independently(bytes)?;
-    if filename
-        == format!(
-            "{}.cfb1",
-            crate::hex_digest(&*blake3::hash(bytes).as_bytes())
-        )
-    {
+    if filename == format!("{}.cfb1", crate::hex_digest(blake3::hash(bytes).as_bytes())) {
         Ok(())
     } else {
         Err(BundleContractErrorV1::ReleaseFilenameInvalid)

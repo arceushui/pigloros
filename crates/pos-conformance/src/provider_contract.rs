@@ -565,13 +565,14 @@ fn member_path(value: &str) -> bool {
 
 fn media_type(value: &str) -> bool {
     let bytes = value.as_bytes();
+    let has_one_separator = value
+        .split_once('/')
+        .is_some_and(|(top, sub)| !top.is_empty() && !sub.is_empty() && !sub.contains('/'));
     value.len() >= 3
         && value.len() <= MAX_MEDIA_TYPE_BYTES
         && value.is_ascii()
         && bytes.iter().all(|byte| !byte.is_ascii_uppercase())
-        && bytes.iter().filter(|byte| **byte == b'/').count() == 1
-        && !value.starts_with('/')
-        && !value.ends_with('/')
+        && has_one_separator
         && bytes.iter().all(|byte| {
             byte.is_ascii_lowercase()
                 || byte.is_ascii_digit()
@@ -604,7 +605,7 @@ fn encode_registry_fields(registry: &FixtureProviderRegistryV1) -> Value {
     Value::Array(registry_fields(registry))
 }
 
-pub(crate) fn encode_registry_binding(value: &FixtureProviderRegistryBindingV1) -> Value {
+pub fn encode_registry_binding(value: &FixtureProviderRegistryBindingV1) -> Value {
     Value::Array(vec![
         encode_artifact_descriptor(&value.registry_artifact),
         Value::Array(
@@ -675,7 +676,7 @@ fn encode_provider_entry(value: &FixtureProviderEntryV1) -> Value {
     ])
 }
 
-pub(crate) fn encode_provider_key(value: &FixtureProviderKeyV1) -> Value {
+pub fn encode_provider_key(value: &FixtureProviderKeyV1) -> Value {
     Value::Array(vec![
         text(&value.provider_id),
         text(&value.contract_version),
@@ -691,7 +692,7 @@ fn encode_family_schema(value: &ProviderFamilySchemaV1) -> Value {
     ])
 }
 
-pub(crate) fn encode_artifact_descriptor(value: &ArtifactDescriptorV1) -> Value {
+pub fn encode_artifact_descriptor(value: &ArtifactDescriptorV1) -> Value {
     Value::Array(vec![
         text(&value.member_path),
         text(&value.media_type),
@@ -723,7 +724,7 @@ fn decode_registry(value: &Value) -> Result<FixtureProviderRegistryV1, ProviderC
     })
 }
 
-pub(crate) fn decode_registry_binding(
+pub fn decode_registry_binding(
     value: &Value,
 ) -> Result<FixtureProviderRegistryBindingV1, ProviderContractErrorV1> {
     let fields = array(value, 2)?;
@@ -789,9 +790,7 @@ fn decode_provider_entry(value: &Value) -> Result<FixtureProviderEntryV1, Provid
     })
 }
 
-pub(crate) fn decode_provider_key(
-    value: &Value,
-) -> Result<FixtureProviderKeyV1, ProviderContractErrorV1> {
+pub fn decode_provider_key(value: &Value) -> Result<FixtureProviderKeyV1, ProviderContractErrorV1> {
     let fields = array(value, 4)?;
     text_value(&fields[0]).and_then(|provider_id| {
         text_value(&fields[1]).and_then(|contract_version| {
@@ -823,7 +822,7 @@ fn decode_family_schema(value: &Value) -> Result<ProviderFamilySchemaV1, Provide
     })
 }
 
-pub(crate) fn decode_artifact_descriptor(
+pub fn decode_artifact_descriptor(
     value: &Value,
 ) -> Result<ArtifactDescriptorV1, ProviderContractErrorV1> {
     let fields = array(value, 4)?;
@@ -932,13 +931,12 @@ fn preflight_cbor(bytes: &[u8]) -> Result<(), ProviderContractErrorV1> {
     }
 
     let mut index = 0;
-    item(bytes, &mut index, 0).and_then(|()| {
-        if index == bytes.len() {
-            Ok(())
-        } else {
-            Err(ProviderContractErrorV1::InvalidEncoding)
-        }
-    })
+    item(bytes, &mut index, 0)?;
+    if index == bytes.len() {
+        Ok(())
+    } else {
+        Err(ProviderContractErrorV1::InvalidEncoding)
+    }
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], ProviderContractErrorV1> {

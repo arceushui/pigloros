@@ -21,6 +21,13 @@ pub const CONFORMANCE_PROFILE_MAGIC_V1: &str = "CPF1";
 /// Magic for the public evaluator request record.
 pub const EVALUATOR_REQUEST_MAGIC_V1: &str = "EVR1";
 type CaseOutcomeV1 = ProfileCaseOutcomeV1;
+type FixtureSortKey<'a> = (
+    (&'a str, &'a str, u16, u16),
+    FixtureFamilyV1,
+    &'a str,
+    [u8; 32],
+    &'a [ExecutionModeV1],
+);
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXECUTION_PROFILES: usize = 64;
 const MAX_FIXTURES: usize = 65_536;
@@ -1592,7 +1599,7 @@ fn validate_deterministic_budget(
     }
 }
 
-fn validate_operational_safety(
+const fn validate_operational_safety(
     safety: &OperationalSafetyV1,
 ) -> Result<(), ConformanceContractError> {
     if safety.watchdog_ms == 0 {
@@ -1906,15 +1913,7 @@ fn valid_fixture_provider_key(value: &FixtureProviderKeyV1) -> bool {
     valid_identifier(&value.provider_id) && contract_version(&value.contract_version)
 }
 
-fn fixture_key(
-    value: &FixtureDescriptorV1,
-) -> (
-    (&str, &str, u16, u16),
-    FixtureFamilyV1,
-    &str,
-    [u8; 32],
-    &[ExecutionModeV1],
-) {
+fn fixture_key(value: &FixtureDescriptorV1) -> FixtureSortKey<'_> {
     (
         provider_key_fields(&value.provider_key),
         value.family,
