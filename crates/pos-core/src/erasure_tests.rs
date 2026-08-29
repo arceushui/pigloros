@@ -4270,10 +4270,10 @@ fn finalization_persists_the_atomic_batch_across_restart() -> Result<(), Erasure
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let terminal_state = awaiting.state.transition({
+    let terminal_state = awaiting.transition({
         let mut transition = change(
             ErasureLifecycleV1::Complete,
-            awaiting.state.freeze_position(),
+            awaiting.freeze_position(),
             Vec::new(),
             Vec::new(),
         );
