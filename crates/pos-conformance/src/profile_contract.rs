@@ -8,7 +8,7 @@ use crate::{
     ArtifactDescriptorV1, CaseOutcomeStatusV1, ClaimLayerV1, ConformanceReportV1,
     DivergenceMismatchKindV1, ExecutionModeV1, FixtureFamilyV1, FixtureProviderKeyV1,
     FixtureProviderRegistryBindingV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1, VerificationOutcomeV1,
+    ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
 use pos_core::{CanonicalBytes, PublicKey, Signature};
@@ -2539,6 +2539,32 @@ fn encode_independence(value: &IndependenceEvidenceV1) -> Value {
     ])
 }
 
+fn encode_case(value: &CaseOutcomeV1) -> Value {
+    Value::Array(vec![
+        text(&value.case_id),
+        digest(&value.fixture_digest),
+        digest(&value.execution_profile_digest),
+        mode(value.mode),
+        claim_layer(value.claim_layer),
+        case_outcome(value.outcome),
+        verification_outcome(value.verification_outcome),
+        optional(value.divergence_kind.map(divergence_mismatch)),
+        optional(
+            value
+                .first_coordinate
+                .as_ref()
+                .map(|coordinate| Value::Bytes(coordinate.clone())),
+        ),
+        optional(value.expected_digest.as_ref().map(digest)),
+        optional(value.actual_digest.as_ref().map(digest)),
+        optional(value.expected_error.map(safe_error)),
+        optional(value.actual_error.map(safe_error)),
+        replay_claim(value.replay_claim),
+        redaction(value.redaction_state),
+        digest(&value.provenance_digest),
+    ])
+}
+
 fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
     let mut bytes = Vec::new();
     encode_value_to_writer(value, &mut bytes).map(|()| bytes)
@@ -2824,6 +2850,15 @@ fn decode_family(value: &Value) -> Result<FixtureFamilyV1, ConformanceContractEr
         _ => Err(ConformanceContractError::InvalidEncoding),
     }
 }
+fn case_outcome(value: CaseOutcomeStatusV1) -> Value {
+    uint(match value {
+        CaseOutcomeStatusV1::Pass => 0,
+        CaseOutcomeStatusV1::Fail => 1,
+        CaseOutcomeStatusV1::Skip => 2,
+        CaseOutcomeStatusV1::Unavailable => 3,
+        CaseOutcomeStatusV1::NotApplicable => 4,
+    })
+}
 fn verification_outcome(value: VerificationOutcomeV1) -> Value {
     uint(match value {
         VerificationOutcomeV1::VerifiedExact => 0,
@@ -2911,6 +2946,24 @@ fn decode_redaction(value: &Value) -> Result<RedactionStateV1, ConformanceContra
         3 => Ok(RedactionStateV1::EvidenceMissing),
         _ => Err(ConformanceContractError::InvalidEncoding),
     }
+}
+fn safe_error(value: SafeErrorCodeV1) -> Value {
+    uint(match value {
+        SafeErrorCodeV1::InvalidEncoding => 0,
+        SafeErrorCodeV1::UnsupportedVersion => 1,
+        SafeErrorCodeV1::FieldOutOfBounds => 2,
+        SafeErrorCodeV1::NonCanonicalOrder => 3,
+        SafeErrorCodeV1::DigestMismatch => 4,
+        SafeErrorCodeV1::SignatureInvalid => 5,
+        SafeErrorCodeV1::TrustRootUnknown => 6,
+        SafeErrorCodeV1::TrustSnapshotRollback => 7,
+        SafeErrorCodeV1::ArtifactRevoked => 8,
+        SafeErrorCodeV1::ClosureIncomplete => 9,
+        SafeErrorCodeV1::ProfileClassMismatch => 10,
+        SafeErrorCodeV1::ProfileUnsupported => 11,
+        SafeErrorCodeV1::ProvenanceMissing => 12,
+        SafeErrorCodeV1::ResourceLimitExceeded => 13,
+    })
 }
 #[cfg(test)]
 mod current_wire_contract_tests {
