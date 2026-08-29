@@ -605,7 +605,7 @@ fn encode_registry_fields(registry: &FixtureProviderRegistryV1) -> Value {
     Value::Array(registry_fields(registry))
 }
 
-pub(super) fn encode_registry_binding(value: &FixtureProviderRegistryBindingV1) -> Value {
+fn encode_registry_binding(value: &FixtureProviderRegistryBindingV1) -> Value {
     Value::Array(vec![
         encode_artifact_descriptor(&value.registry_artifact),
         Value::Array(
@@ -676,7 +676,7 @@ fn encode_provider_entry(value: &FixtureProviderEntryV1) -> Value {
     ])
 }
 
-pub(super) fn encode_provider_key(value: &FixtureProviderKeyV1) -> Value {
+fn encode_provider_key(value: &FixtureProviderKeyV1) -> Value {
     Value::Array(vec![
         text(&value.provider_id),
         text(&value.contract_version),
@@ -692,7 +692,7 @@ fn encode_family_schema(value: &ProviderFamilySchemaV1) -> Value {
     ])
 }
 
-pub(super) fn encode_artifact_descriptor(value: &ArtifactDescriptorV1) -> Value {
+fn encode_artifact_descriptor(value: &ArtifactDescriptorV1) -> Value {
     Value::Array(vec![
         text(&value.member_path),
         text(&value.media_type),
@@ -724,7 +724,7 @@ fn decode_registry(value: &Value) -> Result<FixtureProviderRegistryV1, ProviderC
     })
 }
 
-pub(super) fn decode_registry_binding(
+fn decode_registry_binding(
     value: &Value,
 ) -> Result<FixtureProviderRegistryBindingV1, ProviderContractErrorV1> {
     let fields = array(value, 2)?;
@@ -790,9 +790,7 @@ fn decode_provider_entry(value: &Value) -> Result<FixtureProviderEntryV1, Provid
     })
 }
 
-pub(super) fn decode_provider_key(
-    value: &Value,
-) -> Result<FixtureProviderKeyV1, ProviderContractErrorV1> {
+fn decode_provider_key(value: &Value) -> Result<FixtureProviderKeyV1, ProviderContractErrorV1> {
     let fields = array(value, 4)?;
     text_value(&fields[0]).and_then(|provider_id| {
         text_value(&fields[1]).and_then(|contract_version| {
@@ -824,7 +822,7 @@ fn decode_family_schema(value: &Value) -> Result<ProviderFamilySchemaV1, Provide
     })
 }
 
-pub(super) fn decode_artifact_descriptor(
+fn decode_artifact_descriptor(
     value: &Value,
 ) -> Result<ArtifactDescriptorV1, ProviderContractErrorV1> {
     let fields = array(value, 4)?;
@@ -1134,12 +1132,12 @@ mod tests {
     fn registry_rejects_unsorted_keys_and_tampered_digest() {
         let package = package();
         let package_bytes = package.to_canonical_cbor().expect("valid FPP1");
-        let mut registry = registry(&package_bytes);
-        let mut later = registry.providers[0].clone();
+        let mut unsorted_registry = registry(&package_bytes);
+        let mut later = unsorted_registry.providers[0].clone();
         later.provider_key.provider_id = "z-provider".to_owned();
-        registry.providers.insert(0, later);
+        unsorted_registry.providers.insert(0, later);
         assert_eq!(
-            registry.validate(),
+            unsorted_registry.validate(),
             Err(ProviderContractErrorV1::NonCanonicalOrder)
         );
 
