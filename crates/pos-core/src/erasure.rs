@@ -2561,7 +2561,7 @@ use codec::{
     inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
     receipt_value, record_from_fields, record_value, reference_zero, request_from_fields,
     request_value, sort_inventories, state_core_value, state_from_fields, state_value,
-    weakest_inventory_claim,
+    strictly_increasing, weakest_inventory_claim,
 };
 
 #[cfg(test)]
