@@ -125,7 +125,7 @@ impl ErasureCoordinatorPortV1 for PublicPort {
     fn dispatch_destruction(
         &self,
         _request: ErasureReferenceV1,
-        _targets: &[ErasureRequiredTargetV1],
+        _commands: &[pos_core::ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }

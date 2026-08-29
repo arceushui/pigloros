@@ -4145,10 +4145,8 @@ impl ErasurePersistencePortV1 for SqliteStore {
                         if expected_digest != record.state().state_digest() {
                             return Err(ErasureErrorV1::ProvenanceMissing);
                         }
-                        match self.resolve_state(expected_digest)? {
-                            Some(state) if state.eq(record.state()) => Ok(record),
-                            _ => Err(ErasureErrorV1::ProvenanceMissing),
-                        }
+                        self.resolve_state(expected_digest)?
+                            .map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| Ok(record))
                     } else {
                         Err(ErasureErrorV1::ProvenanceMissing)
                     }
@@ -4300,10 +4298,13 @@ fn validate_erasure_state_row(
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     let expected_request = ErasureReferenceV1::from_digest(metadata_request);
     let decoded_state = pos_core::ErasureStateV1::from_canonical_cbor(stored_state)?;
-    if stored_state != state_bytes
-        || expected_request != request
-        || !decoded_state.eq(record.state())
-    {
+    if stored_state != state_bytes {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    if expected_request != request {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    if !decoded_state.eq(record.state()) {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     Ok(())
@@ -4323,9 +4324,10 @@ fn validate_erasure_predecessor(
         .try_into()
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
     let decoded_previous = pos_core::ErasureStateV1::from_canonical_cbor(&previous_bytes)?;
-    if ErasureReferenceV1::from_digest(metadata_request) != request
-        || decoded_previous.state_digest() != previous
-    {
+    if ErasureReferenceV1::from_digest(metadata_request) != request {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    if decoded_previous.state_digest() != previous {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     Ok(())

@@ -132,6 +132,75 @@ struct CoordinatorHost<S> {
     targets: Vec<ErasureRequiredTargetV1>,
 }
 
+#[cfg(feature = "sqlite")]
+struct DeletePredecessorBeforeCommit {
+    store: SqliteStore,
+    path: String,
+    commit_calls: usize,
+    delete_on_call: usize,
+    replace_predecessor: bool,
+}
+
+#[cfg(feature = "sqlite")]
+impl ErasureStateResolverV1 for DeletePredecessorBeforeCommit {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        self.store.resolve_state(digest)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl ErasurePersistencePortV1 for DeletePredecessorBeforeCommit {
+    fn load_record(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
+        self.store.load_record(request)
+    }
+
+    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
+        self.commit_calls += 1;
+        if self.commit_calls == self.delete_on_call {
+            if let Some(previous) = record.state().previous_state() {
+                let connection = rusqlite::Connection::open(&self.path)
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                if self.replace_predecessor {
+                    let replacement = ErasureStateV1::submitted(
+                        record.request().reference(),
+                        record.state().coordinator(),
+                        reference(77),
+                    )?
+                    .to_canonical_cbor()?;
+                    connection
+                        .execute(
+                            "UPDATE erasure_states SET state_cbor = ?1
+                             WHERE state_digest = ?2",
+                            rusqlite::params![replacement, previous.digest().as_slice()],
+                        )
+                        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                } else {
+                    connection
+                        .execute(
+                            "DELETE FROM erasure_states WHERE state_digest = ?1",
+                            rusqlite::params![previous.digest().as_slice()],
+                        )
+                        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                }
+            }
+        }
+        self.store.commit_record(record)
+    }
+
+    fn commit_records(
+        &mut self,
+        records: &[ErasureCoordinatorRecordV1],
+    ) -> Result<(), ErasureErrorV1> {
+        self.store.commit_records(records)
+    }
+}
+
 impl<S: ErasurePersistencePortV1> ErasureStateResolverV1 for CoordinatorHost<S> {
     fn resolve_state(
         &self,
@@ -198,7 +267,7 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
     fn dispatch_destruction(
         &self,
         _request: ErasureReferenceV1,
-        _targets: &[ErasureRequiredTargetV1],
+        _commands: &[pos_core::ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
@@ -337,6 +406,76 @@ fn assert_public_contract<S: ErasurePersistencePortV1>(
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_persistence_rejects_a_missing_predecessor_during_commit(
+) -> Result<(), ErasureErrorV1> {
+    let database =
+        tempfile::NamedTempFile::new().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::ReceiptCommitFailed)?
+        .to_owned();
+    let target = target(10);
+    let shared = Rc::new(RefCell::new(DeletePredecessorBeforeCommit {
+        store: SqliteStore::open(&path).map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?,
+        path,
+        commit_calls: 0,
+        delete_on_call: 4,
+        replace_predecessor: false,
+    }));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        CoordinatorHost {
+            store: Rc::clone(&shared),
+            targets: vec![target],
+        },
+        reference(30),
+    );
+    coordinator.submit(request()?, reference(7))?;
+    coordinator.authorize(reference(1), reference(8))?;
+    assert_eq!(
+        coordinator.freeze_inventory(reference(1), transition()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_persistence_rejects_a_mismatched_predecessor_during_commit(
+) -> Result<(), ErasureErrorV1> {
+    let database =
+        tempfile::NamedTempFile::new().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::ReceiptCommitFailed)?
+        .to_owned();
+    let target = target(10);
+    let shared = Rc::new(RefCell::new(DeletePredecessorBeforeCommit {
+        store: SqliteStore::open(&path).map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?,
+        path,
+        commit_calls: 0,
+        delete_on_call: 4,
+        replace_predecessor: true,
+    }));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        CoordinatorHost {
+            store: Rc::clone(&shared),
+            targets: vec![target],
+        },
+        reference(30),
+    );
+    coordinator.submit(request()?, reference(7))?;
+    coordinator.authorize(reference(1), reference(8))?;
+    assert_eq!(
+        coordinator.freeze_inventory(reference(1), transition()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
 #[test]
 fn memory_erasure_persistence_exposes_the_public_contract() -> Result<(), ErasureErrorV1> {
     assert_public_contract(&mut MemoryStore::new())
@@ -398,6 +537,28 @@ fn memory_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
     );
     assert_eq!(store.load_record(reference(1))?, None);
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    Ok(())
+}
+
+#[test]
+fn memory_erasure_persistence_rejects_a_conflicting_terminal_retry() -> Result<(), ErasureErrorV1> {
+    let (shared, _) = run_full_lifecycle(MemoryStore::new())?;
+    let record = shared
+        .borrow()
+        .load_record(reference(1))?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let mut parts = record_parts(&record);
+    let input = parts
+        .receipt_input
+        .as_mut()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    input.signature = reference(99);
+    parts.receipt = Some(ErasureReceiptV1::new(input.clone())?);
+    let conflicting = ErasureCoordinatorRecordV1::from_parts(parts, reference(30))?;
+    assert_eq!(
+        shared.borrow_mut().commit_record(conflicting),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     Ok(())
 }
 
@@ -541,6 +702,66 @@ fn sqlite_erasure_lifecycle_and_receipt_survive_reopen() -> Result<(), Box<dyn s
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_erasure_persistence_rejects_a_record_under_the_wrong_request_key(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let record = submitted_record()?;
+    let request = record.request().reference();
+    let alternate_request = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(99),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 10,
+        horizon_position: 20,
+        provenance: reference(7),
+    })?;
+    let alternate_state =
+        ErasureStateV1::submitted(alternate_request.reference(), reference(8), reference(77))?;
+    let alternate = ErasureCoordinatorRecordV1::from_parts(
+        ErasureCoordinatorRecordPartsV1 {
+            request: alternate_request,
+            state: alternate_state,
+            reserved_targets: Vec::new(),
+            targets: Vec::new(),
+            acknowledgements: Vec::new(),
+            receipt: None,
+            receipt_input: None,
+            authorize_provenance: None,
+            freeze_provenance: None,
+            freeze_admission: None,
+            dispatch_provenance: None,
+        },
+        reference(8),
+    )?;
+
+    let mut store = SqliteStore::open(path)?;
+    store.commit_record(record)?;
+    drop(store);
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "UPDATE erasure_records SET record_cbor = ?1 WHERE request_digest = ?2",
+        rusqlite::params![alternate.to_canonical_cbor()?, request.digest().as_slice()],
+    )?;
+    drop(connection);
+
+    let store = SqliteStore::open(path)?;
+    assert_eq!(
+        store.load_record(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_erasure_persistence_fails_closed_for_malformed_record_bytes(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
@@ -551,7 +772,7 @@ fn sqlite_erasure_persistence_fails_closed_for_malformed_record_bytes(
     let record = submitted_record()?;
     let request = record.request().reference();
     let mut store = SqliteStore::open(path)?;
-    store.commit_record(record)?;
+    store.commit_record(record.clone())?;
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
@@ -582,7 +803,7 @@ fn sqlite_erasure_persistence_fails_closed_for_malformed_state_bytes(
     let request = record.request().reference();
     let state_digest = record.state().state_digest();
     let mut store = SqliteStore::open(path)?;
-    store.commit_record(record)?;
+    store.commit_record(record.clone())?;
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
@@ -617,7 +838,7 @@ fn sqlite_erasure_persistence_fails_closed_for_mismatched_metadata(
     let request = record.request().reference();
     let state_digest = record.state().state_digest();
     let mut store = SqliteStore::open(path)?;
-    store.commit_record(record)?;
+    store.commit_record(record.clone())?;
     drop(store);
 
     let connection = rusqlite::Connection::open(path)?;
@@ -637,14 +858,50 @@ fn sqlite_erasure_persistence_fails_closed_for_mismatched_metadata(
     )?;
     drop(connection);
 
-    let store = SqliteStore::open(path)?;
+    let mut store = SqliteStore::open(path)?;
     assert_eq!(
         store.load_record(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        store.commit_record(record),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
         store.resolve_state(state_digest),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_persistence_rejects_recommit_after_state_row_deletion(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let record = submitted_record()?;
+    let request = record.request().reference();
+    let state_digest = record.state().state_digest();
+    let mut store = SqliteStore::open(path)?;
+    store.commit_record(record.clone())?;
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "DELETE FROM erasure_states WHERE state_digest = ?1",
+        rusqlite::params![state_digest.digest().as_slice()],
+    )?;
+    drop(connection);
+
+    let mut store = SqliteStore::open(path)?;
+    assert_eq!(
+        store.commit_record(record),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(store.load_record(request)?, None);
     Ok(())
 }

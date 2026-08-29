@@ -1133,7 +1133,15 @@ impl ErasureStateResolverV1 for MemoryStore {
     ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
         self.erasure_states
             .get(&digest)
-            .map(|bytes| pos_core::ErasureStateV1::from_canonical_cbor(bytes))
+            .map(|bytes| {
+                pos_core::ErasureStateV1::from_canonical_cbor(bytes).and_then(|state| {
+                    if state.state_digest() == digest {
+                        Ok(state)
+                    } else {
+                        Err(ErasureErrorV1::ProvenanceMissing)
+                    }
+                })
+            })
             .transpose()
     }
 }
@@ -1149,16 +1157,8 @@ impl ErasurePersistencePortV1 for MemoryStore {
                 ErasureCoordinatorRecordV1::from_canonical_cbor(bytes).and_then(|record| {
                     if record.request().reference() == request {
                         let state_digest = record.state().state_digest();
-                        let state_bytes = self
-                            .erasure_states
-                            .get(&state_digest)
-                            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-                        let state = pos_core::ErasureStateV1::from_canonical_cbor(state_bytes)?;
-                        if state.eq(record.state()) {
-                            Ok(record)
-                        } else {
-                            Err(ErasureErrorV1::ProvenanceMissing)
-                        }
+                        self.resolve_state(state_digest)?
+                            .map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| Ok(record))
                     } else {
                         Err(ErasureErrorV1::ProvenanceMissing)
                     }
@@ -1206,13 +1206,6 @@ fn stage_erasure_record(
     let state_bytes = record.state().to_canonical_cbor()?;
     if let Some(existing_bytes) = states.get(&state_digest) {
         if existing_bytes.as_slice() != state_bytes.as_slice() {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        let existing = pos_core::ErasureStateV1::from_canonical_cbor(existing_bytes)?;
-        if existing.state_digest() != state_digest
-            || existing.request() != request
-            || existing.coordinator() != record.state().coordinator()
-        {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
     } else if let Some(previous) = record.state().previous_state() {
@@ -5033,6 +5026,87 @@ mod tests {
 }
 
 #[cfg(test)]
+mod erasure_coverage_tests {
+    use super::*;
+    use pos_core::{
+        ErasureCoordinatorRecordPartsV1, ErasureRequestInputV1, ErasureRequestV1, ErasureScopeV1,
+        ErasureStateV1,
+    };
+
+    const fn reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    fn record() -> ErasureCoordinatorRecordV1 {
+        let request = ErasureRequestV1::new(ErasureRequestInputV1 {
+            request: reference(1),
+            subject: reference(2),
+            scope: ErasureScopeV1::PrivateSubjectData,
+            selectors: vec![reference(3)],
+            requester: reference(4),
+            authorization: reference(5),
+            policy: reference(6),
+            request_position: 10,
+            horizon_position: 20,
+            provenance: reference(7),
+        })
+        .expect("valid erasure request fixture");
+        let state = ErasureStateV1::submitted(request.reference(), reference(8), reference(9))
+            .expect("valid erasure state fixture");
+        ErasureCoordinatorRecordV1::from_parts(
+            ErasureCoordinatorRecordPartsV1 {
+                request,
+                state,
+                reserved_targets: Vec::new(),
+                targets: Vec::new(),
+                acknowledgements: Vec::new(),
+                receipt: None,
+                receipt_input: None,
+                authorize_provenance: None,
+                freeze_provenance: None,
+                freeze_admission: None,
+                dispatch_provenance: None,
+            },
+            reference(8),
+        )
+        .expect("valid erasure record fixture")
+    }
+
+    #[test]
+    fn erasure_record_lookup_and_staging_fail_closed_for_missing_provenance() {
+        let record = record();
+        let request = record.request().reference();
+        let state_digest = record.state().state_digest();
+        let bytes = record
+            .to_canonical_cbor()
+            .expect("valid erasure record encoding");
+        let mut store = MemoryStore::new();
+
+        store.erasure_records.insert(reference(9), bytes.clone());
+        assert_eq!(
+            store.load_record(reference(9)),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        store.erasure_records.insert(request, bytes);
+        assert_eq!(
+            store.load_record(request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut staged_records = BTreeMap::new();
+        let mut staged_states = BTreeMap::new();
+        stage_erasure_record(&mut staged_records, &mut staged_states, &record)
+            .expect("initial erasure record staging");
+        staged_states.insert(state_digest, vec![0]);
+        assert_eq!(
+            stage_erasure_record(&mut staged_records, &mut staged_states, &record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+}
+
+#[cfg(test)]
 mod coverage_entrypoints {
     use super::*;
     use pos_core::{ConsentAuthority, KeyIdentityV1, KeyRegistrationV1, KeyRoleV1, PublicKey};
@@ -5286,5 +5360,22 @@ mod coverage_entrypoints {
             ok(store.remove_append_identities_bounded(identity_scope, std::num::NonZeroUsize::MIN));
         assert!(!second.more_may_remain);
         assert_eq!(ok(store.pending_append_identity_cleanup()), None);
+    }
+
+    #[test]
+    fn erasure_state_resolver_rejects_a_state_under_the_wrong_digest_key() {
+        let state = ok(pos_core::ErasureStateV1::submitted(
+            pos_core::ErasureReferenceV1::from_digest([1; 32]),
+            pos_core::ErasureReferenceV1::from_digest([2; 32]),
+            pos_core::ErasureReferenceV1::from_digest([3; 32]),
+        ));
+        let bytes = ok(state.to_canonical_cbor());
+        let wrong_key = pos_core::ErasureReferenceV1::from_digest([9; 32]);
+        let mut store = MemoryStore::new();
+        store.erasure_states.insert(wrong_key, bytes);
+        assert_eq!(
+            store.resolve_state(wrong_key),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 }

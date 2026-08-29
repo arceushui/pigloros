@@ -8,7 +8,6 @@ use super::{
     VERSION,
 };
 use ciborium::value::Value;
-use std::io::Cursor;
 
 pub(super) fn request_value(input: &ErasureRequestInputV1) -> Value {
     Value::Array(vec![
@@ -834,23 +833,15 @@ pub(super) fn decode_limited(
     if bytes.len() > maximum {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
-    cbor_shape_is_bounded(bytes, maximum_array).and_then(|()| {
-        let mut cursor = Cursor::new(bytes);
-        match ciborium::from_reader(&mut cursor) {
-            Ok(value) => {
-                if cursor.position() != bytes.len() as u64 {
-                    return Err(ErasureErrorV1::InvalidEncoding);
-                }
-                encode_canonical(&value).and_then(|canonical| {
-                    if canonical == bytes {
-                        Ok(value)
-                    } else {
-                        Err(ErasureErrorV1::InvalidEncoding)
-                    }
-                })
+    cbor_shape_is_bounded(bytes, maximum_array).and_then(|()| match ciborium::from_reader(bytes) {
+        Ok(value) => encode_canonical(&value).and_then(|canonical| {
+            if canonical == bytes {
+                Ok(value)
+            } else {
+                Err(ErasureErrorV1::InvalidEncoding)
             }
-            Err(_) => Err(ErasureErrorV1::InvalidEncoding),
-        }
+        }),
+        Err(_) => Err(ErasureErrorV1::InvalidEncoding),
     })
 }
 pub(super) fn cbor_shape_is_bounded(
