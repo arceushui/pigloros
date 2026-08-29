@@ -355,7 +355,11 @@ pub(super) fn record_from_fields(
         }
     };
     let dispatch_provenance = optional_bytes32(&fields[11])?;
-    let receipt_input = receipt.as_ref().map(|value| value.0.clone());
+    let receipt_input = receipt.as_ref().map(|value| {
+        let mut input = value.0.clone();
+        input.receipt_digest = reference_zero();
+        input
+    });
     super::ErasureCoordinatorRecordV1::from_parts(
         super::ErasureCoordinatorRecordPartsV1 {
             request,
