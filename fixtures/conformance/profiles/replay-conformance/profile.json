@@ -2,6 +2,7 @@
   "profile_id": "pigloros.w8.replay-conformance.1.0.0",
   "claim_layer": "replay-conformance",
   "wire_code": 1,
+  "subject_adapter": "exported-artifact",
   "fixture_root": "replay-conformance",
   "fixtures": [
     {

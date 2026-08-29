@@ -8,6 +8,14 @@ downgrade, and independent evaluation. The 49 records are layer-specific;
 there is no shared generic fixture record. They contain no implementation-
 private state, credentials, or signing material.
 
+The seven profile manifests form the materializer's typed layer catalog. Each
+manifest is the single semantic source for its profile identity, paired
+claim-layer name and wire code, public subject adapter, fixture root, and
+fixture identities. The build derives Rust's byte-embedding table directly
+from those manifests; the materializer then parses and cross-checks identities
+from the profile, input, and expected-result records instead of maintaining a
+second fixture or layer inventory in source code.
+
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be

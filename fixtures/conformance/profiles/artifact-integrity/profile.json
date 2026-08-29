@@ -2,6 +2,7 @@
   "profile_id": "pigloros.w8.artifact-integrity.1.0.0",
   "claim_layer": "artifact-integrity",
   "wire_code": 0,
+  "subject_adapter": "exported-artifact",
   "fixture_root": "artifact-integrity",
   "fixtures": [
     {

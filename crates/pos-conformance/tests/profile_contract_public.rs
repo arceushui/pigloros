@@ -544,6 +544,17 @@ fn public_profile_digest_normalizes_stable_lifecycle_to_selected_identity() {
 }
 
 #[test]
+fn public_draft_profile_requires_the_mandatory_fixture_inventory() {
+    let mut profile = knowledge_non_interference_profile();
+    profile.fixtures.clear();
+    profile.profile_digest = profile.digest();
+    assert_eq!(
+        profile.validate(),
+        Err(ConformanceContractError::ExpectedResultMissing)
+    );
+}
+
+#[test]
 fn public_profile_matrix_binding_is_explicit_and_fail_closed(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let profile = knowledge_non_interference_profile();

@@ -2,6 +2,7 @@
   "profile_id": "pigloros.w8.plugin-conformance.1.0.0",
   "claim_layer": "plugin-conformance",
   "wire_code": 4,
+  "subject_adapter": "public-plugin-protocol",
   "fixture_root": "plugin-conformance",
   "fixtures": [
     {

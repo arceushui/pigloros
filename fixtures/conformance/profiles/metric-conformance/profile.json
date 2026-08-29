@@ -2,6 +2,7 @@
   "profile_id": "pigloros.w8.metric-conformance.1.0.0",
   "claim_layer": "metric-conformance",
   "wire_code": 5,
+  "subject_adapter": "exported-artifact",
   "fixture_root": "metric-conformance",
   "fixtures": [
     {

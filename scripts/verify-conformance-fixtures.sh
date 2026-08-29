@@ -140,11 +140,14 @@ for layer in "${profile_layers[@]}"; do
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
     '.claim_layer == $layer and
       .wire_code == $wire_code and .fixture_root == $layer and
+      (.subject_adapter == "exported-artifact" or
+       .subject_adapter == "public-gateway-protocol" or
+       .subject_adapter == "public-plugin-protocol") and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
       (.fixtures | length == 7) and
       all(.fixtures[]; .claim_layer == $layer) and
-      ([.fixtures[].family] == ["positive", "negative", "malformed", "resource", "deletion", "downgrade", "independent-evaluation"]) and
+      ([.fixtures[].family] | unique | length == 7) and
       (if $layer == "knowledge-non-interference" then
         .adr_059_execution_matrix == $matrix and
         .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and

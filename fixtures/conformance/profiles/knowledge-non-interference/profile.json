@@ -2,6 +2,7 @@
   "profile_id": "pigloros.w8.knowledge-non-interference.1.0.0",
   "claim_layer": "knowledge-non-interference",
   "wire_code": 2,
+  "subject_adapter": "exported-artifact",
   "fixture_root": "knowledge-non-interference",
   "fixtures": [
     {

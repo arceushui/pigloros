@@ -2,6 +2,7 @@
   "profile_id": "pigloros.w8.gateway-client-conformance.1.0.0",
   "claim_layer": "gateway-client-conformance",
   "wire_code": 3,
+  "subject_adapter": "public-gateway-protocol",
   "fixture_root": "gateway-client-conformance",
   "fixtures": [
     {

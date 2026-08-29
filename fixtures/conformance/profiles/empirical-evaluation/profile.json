@@ -2,6 +2,7 @@
   "profile_id": "pigloros.w8.empirical-evaluation.1.0.0",
   "claim_layer": "empirical-evaluation",
   "wire_code": 6,
+  "subject_adapter": "exported-artifact",
   "fixture_root": "empirical-evaluation",
   "fixtures": [
     {

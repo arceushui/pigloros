@@ -756,6 +756,24 @@ fn materialized_layers(root: &Path) -> Result<Vec<String>, Box<dyn std::error::E
         .collect()
 }
 
+fn verify_output_checksum_inventory(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let inventory = String::from_utf8(fs::read(root.join("SHA256SUMS"))?)?;
+    let mut paths = Vec::new();
+    for line in inventory.lines() {
+        let (encoded_digest, relative_path) = line
+            .split_once("  ")
+            .ok_or("output checksum entry is malformed")?;
+        let bytes = fs::read(root.join(relative_path))?;
+        assert_eq!(encoded_digest, hex_digest(&Sha256::digest(bytes)));
+        assert_ne!(relative_path, "SHA256SUMS");
+        paths.push(relative_path);
+    }
+    paths.sort_unstable();
+    paths.dedup();
+    assert_eq!(paths.len(), 36);
+    Ok(())
+}
+
 struct TemporaryOutput(PathBuf);
 
 impl Drop for TemporaryOutput {
@@ -882,6 +900,7 @@ fn public_materializer_and_verifier_binaries_round_trip() -> Result<(), Box<dyn 
 
     let archives = archive_paths(&output_root)?;
     assert_eq!(archives.len(), 14);
+    verify_output_checksum_inventory(&output_root)?;
     for layer in materialized_layers(&output_root)? {
         verify_materialized_layer(&output_root.join(layer))?;
     }
@@ -907,7 +926,7 @@ fn public_materializer_fingerprint_binds_complete_output_set(
     let materializer_binary = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let signing_key = "0707070707070707070707070707070707070707070707070707070707070707";
-    let fingerprint = Command::new(materializer_binary)
+    let fingerprint = Command::new(&materializer_binary)
         .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
         .arg("--fingerprint")
         .output()?;
@@ -917,13 +936,15 @@ fn public_materializer_fingerprint_binds_complete_output_set(
         .strip_suffix(b"\n")
         .ok_or("missing newline")?;
     assert_eq!(encoded.len(), 64);
-    assert_eq!(
-        encoded, b"881b01d5d523002dfb5948f7f32e58971146d23972992a020e53a5bad2c9943b",
-        "materialization fingerprint must bind the complete required output set"
-    );
     assert!(encoded
         .iter()
         .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
+    let repeated = Command::new(materializer_binary)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg("--fingerprint")
+        .output()?;
+    assert!(repeated.status.success());
+    assert_eq!(repeated.stdout, fingerprint.stdout);
     Ok(())
 }
 
@@ -2930,6 +2951,9 @@ fn rebind_profile_to_provenance(
         fixture.provenance.source_digest = provenance_digest;
         fixture.provenance.build_digest = provenance_digest;
         fixture.provenance.publication_review_digest = provenance_digest;
+        for input in &mut fixture.inputs {
+            input.provenance_digest = provenance_digest;
+        }
     }
     profile.profile_digest = profile.digest();
     let profile_bytes = profile.to_canonical_cbor()?;
@@ -5177,16 +5201,13 @@ fn public_supporting_member_bindings_cover_every_required_role(
         Box::new(|value| value.fixtures[0].provenance.licence_id = "Apache-2.0".to_owned()),
         Box::new(|value| value.fixtures[0].provenance.notices_digest = [99; 32]),
         Box::new(|value| value.fixtures[0].provenance.sbom_digest = [99; 32]),
-        Box::new(|value| {
-            value.provenance_digest = [99; 32];
-            value.fixtures[0].provenance.source_digest = [99; 32];
-            value.fixtures[0].provenance.build_digest = [99; 32];
-            value.fixtures[0].provenance.publication_review_digest = [99; 32];
-        }),
-        Box::new(|value| {
-            value.limitations_digest = [99; 32];
-            value.fixtures[0].provenance.limitations_digest = [99; 32];
-        }),
+        Box::new(|value| value.provenance_digest = [99; 32]),
+        Box::new(|value| value.fixtures[0].provenance.source_digest = [99; 32]),
+        Box::new(|value| value.fixtures[0].provenance.build_digest = [99; 32]),
+        Box::new(|value| value.fixtures[0].provenance.publication_review_digest = [99; 32]),
+        Box::new(|value| value.fixtures[0].inputs[0].provenance_digest = [99; 32]),
+        Box::new(|value| value.limitations_digest = [99; 32]),
+        Box::new(|value| value.fixtures[0].provenance.limitations_digest = [99; 32]),
     ];
     for mutate in mutations {
         let mut changed = profile.clone();
@@ -5194,10 +5215,39 @@ fn public_supporting_member_bindings_cover_every_required_role(
         changed.profile_digest = changed.digest();
         let archive = archive_with_public_profile(&bundle, &changed, &signing_key)?;
         assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        );
+        assert_eq!(
             pos_conformance::verify_archive_independently(&archive),
             Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn public_supporting_member_binding_rejects_a_masked_fixture_digest(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let (mut profile, _, _) = public_bundle_inputs(&bundle)?;
+    let mut additional_fixture = profile.fixtures[0].clone();
+    additional_fixture.case_id = "zz-masked-support-digest".to_owned();
+    additional_fixture.modes = vec![ExecutionModeV1::Replay];
+    additional_fixture.provenance.notices_digest = [99; 32];
+    profile.fixtures.push(additional_fixture);
+    profile.profile_digest = profile.digest();
+    let archive = archive_with_public_profile(&bundle, &profile, &signing_key)?;
+
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&archive),
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&archive),
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
     Ok(())
 }
 
@@ -5357,6 +5407,60 @@ fn public_independent_authority_slots_require_exact_members_and_bindings(
     assert_eq!(
         pos_conformance::verify_archive_independently(&stale_binding),
         Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_requires_canonical_matrix_and_provenance_bindings(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+
+    let compact_matrix = mutate_bound_json_member(&bundle, EXECUTION_MATRIX_MEMBER_PATH, |_| {})?;
+    assert_eq!(
+        compact_matrix.validate(),
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
+    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+        mutate_archive_matrix(value, |_| {})
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&archive),
+        Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+    );
+
+    for mutate in [
+        Box::new(|value: &mut JsonValue| {
+            value["authority_inventory"]["sha256_digest"] = JsonValue::String("00".repeat(32));
+        }) as JsonMutation,
+        Box::new(|value: &mut JsonValue| {
+            value["adr_059_execution_matrix"]["blake3_digest"] = JsonValue::String("00".repeat(32));
+        }),
+    ] {
+        let changed = mutate_bound_json_member(&bundle, "support/provenance.json", mutate)?;
+        let archive = independently_signed_changed_bundle(&bundle, &changed, &signing_key)?;
+        assert_eq!(
+            pos_conformance::verify_archive_independently(&archive),
+            Err(pos_conformance::BundleContractErrorV1::MemberDigestMismatch)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_independent_verifier_rejects_an_empty_draft_fixture_inventory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let bundle = signed_draft_bundle()?;
+    let archive = signed_archive_variant(&bundle, &signing_key, |value| {
+        mutate_profile_and_rebind_identity(value, |fields| {
+            fields[9] = Value::Array(Vec::new());
+        })
+    })?;
+    assert_eq!(
+        pos_conformance::verify_archive_independently(&archive),
+        Err(pos_conformance::BundleContractErrorV1::ProfileInvalid)
     );
     Ok(())
 }

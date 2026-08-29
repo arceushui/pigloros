@@ -13,6 +13,9 @@ use pos_conformance::{
 use rustix::fs::{self, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
 #[cfg(target_os = "linux")]
 use rustix::io::Errno;
+use serde::Deserialize;
+use sha2::{Digest as Sha2Digest, Sha256};
+use std::collections::BTreeSet;
 use std::error::Error;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
@@ -32,6 +35,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error as ThisError;
 
 const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
+const OUTPUT_CHECKSUM_INVENTORY_PATH: &str = "SHA256SUMS";
 #[derive(Clone, Copy)]
 struct FixtureContext {
     claim_layer: ClaimLayerV1,
@@ -85,190 +89,230 @@ enum MaterializationError {
     ArchiveDigestMismatch,
 }
 
-type CanonicalFixtureBytes = (&'static [u8], &'static [u8]);
-
-macro_rules! fixture_sources {
-    ($layer:literal) => {
-        &[
-            (
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/inputs/",
-                    $layer,
-                    "/positive.json"
-                )),
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/expected/",
-                    $layer,
-                    "/positive.json"
-                )),
-            ),
-            (
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/inputs/",
-                    $layer,
-                    "/negative.json"
-                )),
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/expected/",
-                    $layer,
-                    "/negative.json"
-                )),
-            ),
-            (
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/inputs/",
-                    $layer,
-                    "/malformed.json"
-                )),
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/expected/",
-                    $layer,
-                    "/malformed.json"
-                )),
-            ),
-            (
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/inputs/",
-                    $layer,
-                    "/resource.json"
-                )),
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/expected/",
-                    $layer,
-                    "/resource.json"
-                )),
-            ),
-            (
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/inputs/",
-                    $layer,
-                    "/deletion.json"
-                )),
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/expected/",
-                    $layer,
-                    "/deletion.json"
-                )),
-            ),
-            (
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/inputs/",
-                    $layer,
-                    "/downgrade.json"
-                )),
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/expected/",
-                    $layer,
-                    "/downgrade.json"
-                )),
-            ),
-            (
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/inputs/",
-                    $layer,
-                    "/independent-evaluation.json"
-                )),
-                include_bytes!(concat!(
-                    "../../../../fixtures/conformance/expected/",
-                    $layer,
-                    "/independent-evaluation.json"
-                )),
-            ),
-        ]
-    };
+#[derive(Clone, Copy)]
+struct FixtureSource {
+    input: &'static [u8],
+    expected: &'static [u8],
 }
 
-struct LayerSpec {
+struct LayerSource {
+    profile_record: &'static [u8],
+    fixtures: &'static [FixtureSource],
+}
+
+include!(concat!(env!("OUT_DIR"), "/conformance_fixture_catalog.rs"));
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogClaimLayer {
+    ArtifactIntegrity,
+    ReplayConformance,
+    KnowledgeNonInterference,
+    GatewayClientConformance,
+    PluginConformance,
+    MetricConformance,
+    EmpiricalEvaluation,
+}
+
+impl CatalogClaimLayer {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ArtifactIntegrity => "artifact-integrity",
+            Self::ReplayConformance => "replay-conformance",
+            Self::KnowledgeNonInterference => "knowledge-non-interference",
+            Self::GatewayClientConformance => "gateway-client-conformance",
+            Self::PluginConformance => "plugin-conformance",
+            Self::MetricConformance => "metric-conformance",
+            Self::EmpiricalEvaluation => "empirical-evaluation",
+        }
+    }
+
+    const fn domain_layer(self, wire_code: u8) -> Result<ClaimLayerV1, &'static str> {
+        match (self, wire_code) {
+            (Self::ArtifactIntegrity, 0) => Ok(ClaimLayerV1::ArtifactIntegrity),
+            (Self::ReplayConformance, 1) => Ok(ClaimLayerV1::ReplayConformance),
+            (Self::KnowledgeNonInterference, 2) => Ok(ClaimLayerV1::KnowledgeNonInterference),
+            (Self::GatewayClientConformance, 3) => Ok(ClaimLayerV1::GatewayClientConformance),
+            (Self::PluginConformance, 4) => Ok(ClaimLayerV1::PluginConformance),
+            (Self::MetricConformance, 5) => Ok(ClaimLayerV1::MetricConformance),
+            (Self::EmpiricalEvaluation, 6) => Ok(ClaimLayerV1::EmpiricalEvaluation),
+            _ => Err("typed layer catalog claim layer and wire code disagree"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogFixtureFamily {
+    Positive,
+    Negative,
+    Malformed,
+    Resource,
+    Deletion,
+    Downgrade,
+    IndependentEvaluation,
+}
+
+impl CatalogFixtureFamily {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Positive => "positive",
+            Self::Negative => "negative",
+            Self::Malformed => "malformed",
+            Self::Resource => "resource",
+            Self::Deletion => "deletion",
+            Self::Downgrade => "downgrade",
+            Self::IndependentEvaluation => "independent-evaluation",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ProfileCatalogRecord {
+    profile_id: String,
+    claim_layer: CatalogClaimLayer,
+    wire_code: u8,
+    subject_adapter: String,
+    fixture_root: CatalogClaimLayer,
+    fixtures: Vec<ProfileFixtureRecord>,
+}
+
+#[derive(Deserialize)]
+struct ProfileFixtureRecord {
+    case_id: String,
+    claim_layer: CatalogClaimLayer,
+    family: CatalogFixtureFamily,
+    input: String,
+    expected: String,
+}
+
+#[derive(Deserialize, Eq, PartialEq)]
+struct FixtureAssetIdentity {
+    claim_layer: CatalogClaimLayer,
+    case_id: String,
+    family: CatalogFixtureFamily,
+}
+
+struct CatalogFixture {
+    record: ProfileFixtureRecord,
+    input: &'static [u8],
+    expected: &'static [u8],
+}
+
+struct LayerCatalogEntry {
     claim_layer: ClaimLayerV1,
     name: &'static str,
-    profile_id: &'static str,
+    profile_id: String,
     subject_adapter: SubjectAdapterKindV1,
     profile_record: &'static [u8],
-    fixture_bytes: &'static [CanonicalFixtureBytes; 7],
+    fixtures: Vec<CatalogFixture>,
 }
 
-const LAYER_SPECS: [LayerSpec; 7] = [
-    LayerSpec {
-        claim_layer: ClaimLayerV1::ArtifactIntegrity,
-        name: "artifact-integrity",
-        profile_id: "pigloros.w8.artifact-integrity.1.0.0",
-        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: include_bytes!(
-            "../../../../fixtures/conformance/profiles/artifact-integrity/profile.json"
-        ),
-        fixture_bytes: fixture_sources!("artifact-integrity"),
-    },
-    LayerSpec {
-        claim_layer: ClaimLayerV1::ReplayConformance,
-        name: "replay-conformance",
-        profile_id: "pigloros.w8.replay-conformance.1.0.0",
-        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: include_bytes!(
-            "../../../../fixtures/conformance/profiles/replay-conformance/profile.json"
-        ),
-        fixture_bytes: fixture_sources!("replay-conformance"),
-    },
-    LayerSpec {
-        claim_layer: ClaimLayerV1::KnowledgeNonInterference,
-        name: "knowledge-non-interference",
-        profile_id: "pigloros.w8.knowledge-non-interference.1.0.0",
-        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: include_bytes!(
-            "../../../../fixtures/conformance/profiles/knowledge-non-interference/profile.json"
-        ),
-        fixture_bytes: fixture_sources!("knowledge-non-interference"),
-    },
-    LayerSpec {
-        claim_layer: ClaimLayerV1::GatewayClientConformance,
-        name: "gateway-client-conformance",
-        profile_id: "pigloros.w8.gateway-client-conformance.1.0.0",
-        subject_adapter: SubjectAdapterKindV1::PublicGatewayProtocol,
-        profile_record: include_bytes!(
-            "../../../../fixtures/conformance/profiles/gateway-client-conformance/profile.json"
-        ),
-        fixture_bytes: fixture_sources!("gateway-client-conformance"),
-    },
-    LayerSpec {
-        claim_layer: ClaimLayerV1::PluginConformance,
-        name: "plugin-conformance",
-        profile_id: "pigloros.w8.plugin-conformance.1.0.0",
-        subject_adapter: SubjectAdapterKindV1::PublicPluginProtocol,
-        profile_record: include_bytes!(
-            "../../../../fixtures/conformance/profiles/plugin-conformance/profile.json"
-        ),
-        fixture_bytes: fixture_sources!("plugin-conformance"),
-    },
-    LayerSpec {
-        claim_layer: ClaimLayerV1::MetricConformance,
-        name: "metric-conformance",
-        profile_id: "pigloros.w8.metric-conformance.1.0.0",
-        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: include_bytes!(
-            "../../../../fixtures/conformance/profiles/metric-conformance/profile.json"
-        ),
-        fixture_bytes: fixture_sources!("metric-conformance"),
-    },
-    LayerSpec {
-        claim_layer: ClaimLayerV1::EmpiricalEvaluation,
-        name: "empirical-evaluation",
-        profile_id: "pigloros.w8.empirical-evaluation.1.0.0",
-        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        profile_record: include_bytes!(
-            "../../../../fixtures/conformance/profiles/empirical-evaluation/profile.json"
-        ),
-        fixture_bytes: fixture_sources!("empirical-evaluation"),
-    },
-];
+fn layer_catalog() -> Result<Vec<LayerCatalogEntry>, Box<dyn Error>> {
+    let entries = LAYER_SOURCES
+        .iter()
+        .map(catalog_entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    let claim_layers = entries
+        .iter()
+        .map(|entry| entry.claim_layer)
+        .collect::<BTreeSet<_>>();
+    let names = entries
+        .iter()
+        .map(|entry| entry.name)
+        .collect::<BTreeSet<_>>();
+    if entries.len() == 7 && claim_layers.len() == entries.len() && names.len() == entries.len() {
+        Ok(entries)
+    } else {
+        Err("typed layer catalog must contain seven unique entries".into())
+    }
+}
 
-const fn layer_spec(claim_layer: ClaimLayerV1) -> &'static LayerSpec {
-    match claim_layer {
-        ClaimLayerV1::ArtifactIntegrity => &LAYER_SPECS[0],
-        ClaimLayerV1::ReplayConformance => &LAYER_SPECS[1],
-        ClaimLayerV1::KnowledgeNonInterference => &LAYER_SPECS[2],
-        ClaimLayerV1::GatewayClientConformance => &LAYER_SPECS[3],
-        ClaimLayerV1::PluginConformance => &LAYER_SPECS[4],
-        ClaimLayerV1::MetricConformance => &LAYER_SPECS[5],
-        ClaimLayerV1::EmpiricalEvaluation => &LAYER_SPECS[6],
+fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Error>> {
+    let record: ProfileCatalogRecord = serde_json::from_slice(source.profile_record)?;
+    let claim_layer = record.claim_layer.domain_layer(record.wire_code)?;
+    if record.profile_id.is_empty()
+        || record.fixture_root != record.claim_layer
+        || record.fixtures.len() != source.fixtures.len()
+    {
+        return Err("invalid typed layer catalog entry".into());
+    }
+    let fixtures = source
+        .fixtures
+        .iter()
+        .map(|fixture_source| catalog_fixture(&record, fixture_source))
+        .collect::<Result<Vec<_>, _>>()?;
+    let fixture_families = fixtures
+        .iter()
+        .map(|fixture| fixture.record.family)
+        .collect::<BTreeSet<_>>();
+    if fixture_families.len() != source.fixtures.len() {
+        return Err("typed fixture catalog contains duplicate families".into());
+    }
+    Ok(LayerCatalogEntry {
+        claim_layer,
+        name: record.claim_layer.name(),
+        profile_id: record.profile_id,
+        subject_adapter: subject_adapter_from_name(&record.subject_adapter)?,
+        profile_record: source.profile_record,
+        fixtures,
+    })
+}
+
+fn catalog_fixture(
+    profile: &ProfileCatalogRecord,
+    source: &FixtureSource,
+) -> Result<CatalogFixture, Box<dyn Error>> {
+    let input_identity: FixtureAssetIdentity = serde_json::from_slice(source.input)?;
+    let expected_identity: FixtureAssetIdentity = serde_json::from_slice(source.expected)?;
+    if input_identity != expected_identity {
+        return Err("typed fixture input and expected identities disagree".into());
+    }
+    let matches = profile
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.case_id == input_identity.case_id)
+        .collect::<Vec<_>>();
+    let [record] = matches.as_slice() else {
+        return Err("typed fixture catalog must declare every family exactly once".into());
+    };
+    let expected_input = format!(
+        "inputs/{}/{}.json",
+        profile.fixture_root.name(),
+        input_identity.family.name()
+    );
+    let expected_result = format!(
+        "expected/{}/{}.json",
+        profile.fixture_root.name(),
+        input_identity.family.name()
+    );
+    if record.claim_layer != profile.claim_layer
+        || record.claim_layer != input_identity.claim_layer
+        || record.family != input_identity.family
+        || record.input != expected_input
+        || record.expected != expected_result
+    {
+        return Err("typed fixture catalog path or claim layer is invalid".into());
+    }
+    Ok(CatalogFixture {
+        record: ProfileFixtureRecord {
+            case_id: record.case_id.clone(),
+            claim_layer: record.claim_layer,
+            family: record.family,
+            input: record.input.clone(),
+            expected: record.expected.clone(),
+        },
+        input: source.input,
+        expected: source.expected,
+    })
+}
+
+fn subject_adapter_from_name(name: &str) -> Result<SubjectAdapterKindV1, Box<dyn Error>> {
+    match name {
+        "exported-artifact" => Ok(SubjectAdapterKindV1::ExportedArtifact),
+        "public-gateway-protocol" => Ok(SubjectAdapterKindV1::PublicGatewayProtocol),
+        "public-plugin-protocol" => Ok(SubjectAdapterKindV1::PublicPluginProtocol),
+        _ => Err("typed layer catalog subject adapter is invalid".into()),
     }
 }
 
@@ -332,7 +376,8 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
         signing_key,
         inventory_bytes,
     };
-    LAYER_SPECS
+    let catalog = layer_catalog()?;
+    catalog
         .iter()
         .try_fold(Vec::new(), |mut outputs, spec| {
             materialize_profile(&context, spec).map(|files| {
@@ -341,7 +386,8 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
             })
         })
         .map(|mut outputs| {
-            outputs.push(materialization_metadata());
+            outputs.push(materialization_metadata(&catalog));
+            outputs.push(output_checksum_inventory(&outputs));
             outputs
         })
 }
@@ -392,9 +438,9 @@ fn signing_key_from_encoded(
 
 fn materialize_profile(
     context: &MaterializationContext<'_>,
-    layer: &LayerSpec,
+    layer: &LayerCatalogEntry,
 ) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
-    let mut profile = profile_for_claim_layer(layer.claim_layer);
+    let mut profile = profile_from_catalog(layer);
     profile.lifecycle = ProfileLifecycleV1::Draft;
     profile.profile_digest = profile.digest();
     let prefix = format!("{}/draft", layer.name);
@@ -402,24 +448,27 @@ fn materialize_profile(
         .to_canonical_cbor()
         .map_err(Into::into)
         .and_then(|profile_bytes| {
-            signed_bundle(context, &profile, BundleModeV1::Local).and_then(|local| {
-                signed_bundle(context, &profile, BundleModeV1::AirGapped).and_then(|air_gapped| {
-                    let pair = ConformanceBundlePairV1 { local, air_gapped };
-                    pair.validate().map_err(Into::into).and_then(|()| {
-                        materialized_profile_outputs(&profile, &prefix, profile_bytes, &pair)
-                    })
-                })
+            signed_bundle(context, layer, &profile, BundleModeV1::Local).and_then(|local| {
+                signed_bundle(context, layer, &profile, BundleModeV1::AirGapped).and_then(
+                    |air_gapped| {
+                        let pair = ConformanceBundlePairV1 { local, air_gapped };
+                        pair.validate().map_err(Into::into).and_then(|()| {
+                            materialized_profile_outputs(&profile, &prefix, profile_bytes, &pair)
+                        })
+                    },
+                )
             })
         })
 }
 
 fn signed_bundle(
     context: &MaterializationContext<'_>,
+    layer: &LayerCatalogEntry,
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
 ) -> Result<ConformanceBundleV1, Box<dyn Error>> {
     let (members, expected_results) =
-        bundle_inputs_from_profile(profile, mode, context.inventory_bytes);
+        bundle_inputs_from_profile(layer, profile, mode, context.inventory_bytes)?;
     ConformanceBundleV1::materialize(profile, mode, members, expected_results)
         .and_then(|bundle| bundle.sign(context.signing_key))
         .map_err(Into::into)
@@ -500,11 +549,8 @@ fn materialized_bundle_files(
         )
 }
 
-fn materialization_metadata() -> MaterializedFile {
-    let layer_names = LAYER_SPECS
-        .iter()
-        .map(|layer| layer.name)
-        .collect::<Vec<_>>();
+fn materialization_metadata(catalog: &[LayerCatalogEntry]) -> MaterializedFile {
+    let layer_names = catalog.iter().map(|layer| layer.name).collect::<Vec<_>>();
     MaterializedFile {
         relative_path: MATERIALIZATION_METADATA_PATH.to_owned(),
         bytes: serde_json::json!({
@@ -519,8 +565,22 @@ fn materialization_metadata() -> MaterializedFile {
     }
 }
 
-const fn profile_record_bytes(claim_layer: ClaimLayerV1) -> &'static [u8] {
-    layer_spec(claim_layer).profile_record
+fn output_checksum_inventory(files: &[MaterializedFile]) -> MaterializedFile {
+    let mut ordered = files.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut inventory = String::new();
+    for file in ordered {
+        let digest: [u8; 32] = Sha256::digest(&file.bytes).into();
+        inventory.push_str(&pos_conformance::hex_digest(&digest));
+        inventory.push_str("  ");
+        inventory.push_str(&file.relative_path);
+        inventory.push('\n');
+    }
+    MaterializedFile {
+        relative_path: OUTPUT_CHECKSUM_INVENTORY_PATH.to_owned(),
+        bytes: inventory.into_bytes(),
+        archive_release_filename: None,
+    }
 }
 
 fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> FixtureContext {
@@ -558,11 +618,15 @@ fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> Fi
     }
 }
 
-fn fixtures_for_layer(context: &FixtureContext) -> Vec<FixtureDescriptorV1> {
-    let mut fixtures = Vec::with_capacity(FixtureFamily::ALL.len() * 2);
-    for family in FixtureFamily::ALL {
+fn fixtures_for_layer(
+    layer: &LayerCatalogEntry,
+    context: &FixtureContext,
+) -> Vec<FixtureDescriptorV1> {
+    let mut fixtures = Vec::with_capacity(layer.fixtures.len() * 2);
+    for fixture in &layer.fixtures {
         let local = fixture_descriptor_from_record(
-            family,
+            layer,
+            fixture,
             context,
             context.local_execution_profile_digest,
             pos_conformance::ExecutionModeV1::Local,
@@ -583,16 +647,9 @@ fn fixtures_for_layer(context: &FixtureContext) -> Vec<FixtureDescriptorV1> {
     fixtures
 }
 
-fn profile_for_claim_layer(claim_layer: ClaimLayerV1) -> ConformanceProfileV1 {
-    profile_from_record(claim_layer, profile_record_bytes(claim_layer))
-}
-
-fn profile_from_record(
-    claim_layer: ClaimLayerV1,
-    profile_record_bytes: &[u8],
-) -> ConformanceProfileV1 {
-    let context = fixture_context(profile_record_bytes, claim_layer);
-    let fixtures = fixtures_for_layer(&context);
+fn profile_from_catalog(layer: &LayerCatalogEntry) -> ConformanceProfileV1 {
+    let context = fixture_context(layer.profile_record, layer.claim_layer);
+    let fixtures = fixtures_for_layer(layer, &context);
     let mut execution_profile_digests = vec![
         context.local_execution_profile_digest,
         context.air_gapped_execution_profile_digest,
@@ -603,7 +660,7 @@ fn profile_from_record(
     ))
     .as_bytes();
     let mut profile = ConformanceProfileV1 {
-        profile_id: profile_id(claim_layer).to_owned(),
+        profile_id: layer.profile_id.clone(),
         semantic_version: "1.0.0".to_owned(),
         lifecycle: ProfileLifecycleV1::Draft,
         normative_spec_digest: context.normative_spec_digest,
@@ -619,14 +676,14 @@ fn profile_from_record(
             organizational_independence_required: false,
             trust_policy_snapshot_digest: labeled_digest(
                 "PiglorOS.TrustPolicySnapshot.v1",
-                profile_record_bytes,
+                layer.profile_record,
             ),
             requirements_digest: labeled_digest(
                 "PiglorOS.IndependenceRequirements.v1",
-                profile_record_bytes,
+                layer.profile_record,
             ),
         },
-        compatibility_digest: labeled_digest("PiglorOS.Compatibility.v1", profile_record_bytes),
+        compatibility_digest: labeled_digest("PiglorOS.Compatibility.v1", layer.profile_record),
         limitations_digest: context.limitations_digest,
         provenance_digest: context.provenance_digest,
         previous_profile_digest: None,
@@ -637,35 +694,25 @@ fn profile_from_record(
     profile
 }
 
-const fn profile_id(claim_layer: ClaimLayerV1) -> &'static str {
-    layer_spec(claim_layer).profile_id
-}
-
-const fn subject_adapter(claim_layer: ClaimLayerV1) -> SubjectAdapterKindV1 {
-    layer_spec(claim_layer).subject_adapter
-}
-
 fn fixture_descriptor_from_record(
-    family: FixtureFamily,
+    layer: &LayerCatalogEntry,
+    fixture: &CatalogFixture,
     context: &FixtureContext,
     execution_profile_digest: [u8; 32],
     mode: pos_conformance::ExecutionModeV1,
 ) -> FixtureDescriptorV1 {
-    let layer_name = layer_spec(context.claim_layer).name;
-    let family_name = family.name();
-    let case_id = format!("{layer_name}-{family_name}");
-    let input_path = format!("inputs/{layer_name}/{family_name}.json");
-    let (input, expected) = layer_spec(context.claim_layer).fixture_bytes[family.index()];
-    let fixture_record = format!(
-        "{{\"case_id\":\"{case_id}\",\"claim_layer\":\"{layer_name}\",\"expected\":\"expected/{layer_name}/{family_name}.json\",\"family\":\"{family_name}\",\"input\":\"{input_path}\"}}"
-    );
+    let case_id = fixture.record.case_id.clone();
+    let input_path = fixture.record.input.clone();
+    let fixture_record = serde_json::json!({
+        "case_id": &fixture.record.case_id,
+        "claim_layer": fixture.record.claim_layer.name(),
+        "expected": &fixture.record.expected,
+        "family": fixture.record.family.name(),
+        "input": &fixture.record.input,
+    })
+    .to_string();
     let fixture_record_digest =
         labeled_digest("PiglorOS.CPF1FixtureRecord.v1", fixture_record.as_bytes());
-    let draft_provenance_material = [
-        context.profile_record_digest.as_slice(),
-        fixture_record_digest.as_slice(),
-    ]
-    .concat();
     FixtureDescriptorV1 {
         case_id,
         mandatory: true,
@@ -673,16 +720,16 @@ fn fixture_descriptor_from_record(
         execution_profile_digest,
         public_schema_digest: context.schema_digest,
         modes: vec![mode],
-        subject_adapter: subject_adapter(context.claim_layer),
+        subject_adapter: layer.subject_adapter,
         inputs: vec![FixtureInputMemberV1 {
             member_id: input_path,
-            size_bytes: input.len() as u64,
-            digest: *blake3::hash(input).as_bytes(),
+            size_bytes: fixture.input.len() as u64,
+            digest: *blake3::hash(fixture.input).as_bytes(),
             provenance_digest: context.provenance_digest,
         }],
         expected: ExpectedResultV1::CanonicalBytes {
-            digest: *blake3::hash(expected).as_bytes(),
-            bytes: expected.to_vec(),
+            digest: *blake3::hash(fixture.expected).as_bytes(),
+            bytes: fixture.expected.to_vec(),
         },
         expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
         expected_verification_error: Some(SafeErrorCodeV1::ProvenanceMissing),
@@ -706,18 +753,9 @@ fn fixture_descriptor_from_record(
             licence_id: "MIT".to_owned(),
             notices_digest: context.notice_digest,
             sbom_digest: context.sbom_digest,
-            source_digest: labeled_digest(
-                "PiglorOS.DraftSourceMetadata.v1",
-                &draft_provenance_material,
-            ),
-            build_digest: labeled_digest(
-                "PiglorOS.DraftBuildMetadata.v1",
-                &draft_provenance_material,
-            ),
-            publication_review_digest: labeled_digest(
-                "PiglorOS.DraftPublicationReviewMetadata.v1",
-                &draft_provenance_material,
-            ),
+            source_digest: context.provenance_digest,
+            build_digest: context.provenance_digest,
+            publication_review_digest: context.provenance_digest,
             limitations_digest: context.limitations_digest,
         },
         compatibility_digest: labeled_digest(
@@ -728,63 +766,6 @@ fn fixture_descriptor_from_record(
             ]
             .concat(),
         ),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FixtureFamily {
-    Positive,
-    Negative,
-    Malformed,
-    Resource,
-    Deletion,
-    Downgrade,
-    IndependentEvaluation,
-}
-
-impl FixtureFamily {
-    const ALL: [Self; 7] = [
-        Self::Positive,
-        Self::Negative,
-        Self::Malformed,
-        Self::Resource,
-        Self::Deletion,
-        Self::Downgrade,
-        Self::IndependentEvaluation,
-    ];
-
-    const SORTED: [Self; 7] = [
-        Self::Deletion,
-        Self::Downgrade,
-        Self::IndependentEvaluation,
-        Self::Malformed,
-        Self::Negative,
-        Self::Positive,
-        Self::Resource,
-    ];
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Positive => "positive",
-            Self::Negative => "negative",
-            Self::Malformed => "malformed",
-            Self::Resource => "resource",
-            Self::Deletion => "deletion",
-            Self::Downgrade => "downgrade",
-            Self::IndependentEvaluation => "independent-evaluation",
-        }
-    }
-
-    const fn index(self) -> usize {
-        match self {
-            Self::Positive => 0,
-            Self::Negative => 1,
-            Self::Malformed => 2,
-            Self::Resource => 3,
-            Self::Deletion => 4,
-            Self::Downgrade => 5,
-            Self::IndependentEvaluation => 6,
-        }
     }
 }
 
@@ -824,24 +805,27 @@ fn evaluator_protocol(profile_record_digest: [u8; 32]) -> EvaluatorProtocolV1 {
 }
 
 fn bundle_inputs_from_profile(
+    layer: &LayerCatalogEntry,
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
     inventory_bytes: &[u8],
-) -> (Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>) {
+) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
     let execution_mode = match mode {
         BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
         BundleModeV1::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
     };
     let mut members = Vec::new();
     let mut expected_results = Vec::new();
-    for (fixture_index, fixture) in profile
+    for fixture in profile
         .fixtures
         .iter()
         .filter(|fixture| fixture.modes.contains(&execution_mode))
-        .enumerate()
     {
-        let (input, expected) = layer_spec(fixture.claim_layer).fixture_bytes
-            [FixtureFamily::SORTED[fixture_index].index()];
+        let source = layer
+            .fixtures
+            .iter()
+            .find(|source| source.record.case_id == fixture.case_id)
+            .ok_or("profile fixture is absent from the typed layer catalog")?;
         for member in &fixture.inputs {
             members.push(BundleMemberV1::fixture_input(
                 fixture_input_member_path(
@@ -850,7 +834,7 @@ fn bundle_inputs_from_profile(
                     &fixture.execution_profile_digest,
                     &member.member_id,
                 ),
-                input.to_vec(),
+                source.input.to_vec(),
             ));
         }
         let path = expected_result_member_path(
@@ -858,7 +842,7 @@ fn bundle_inputs_from_profile(
             fixture.claim_layer,
             &fixture.execution_profile_digest,
         );
-        let member = BundleMemberV1::expected_result(path.clone(), expected.to_vec());
+        let member = BundleMemberV1::expected_result(path.clone(), source.expected.to_vec());
         expected_results.push(BundleExpectedResultV1 {
             case_id: fixture.case_id.clone(),
             claim_layer: fixture.claim_layer,
@@ -870,7 +854,7 @@ fn bundle_inputs_from_profile(
         members.push(member);
     }
     append_supporting_members(&mut members, inventory_bytes);
-    (members, expected_results)
+    Ok((members, expected_results))
 }
 
 fn append_supporting_members(members: &mut Vec<BundleMemberV1>, inventory_bytes: &[u8]) {

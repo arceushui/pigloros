@@ -918,9 +918,7 @@ fn validate_profile(
         .and_then(|()| validate_selected_caps(profile))
         .and_then(|()| validate_allowed_divergences(&profile.allowed_divergences))
         .and_then(|()| match profile.lifecycle {
-            ProfileLifecycleV1::Candidate | ProfileLifecycleV1::Stable
-                if profile.fixtures.is_empty() =>
-            {
+            _ if profile.fixtures.is_empty() => {
                 Err(ConformanceContractError::ExpectedResultMissing)
             }
             ProfileLifecycleV1::Stable => {

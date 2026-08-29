@@ -98,12 +98,10 @@ static EXPECTED_AUTHORITY_INVENTORY: LazyLock<Result<JsonValue, serde_json::Erro
             "../../../fixtures/conformance/expected-authority/inventory.json"
         ))
     });
+const EXPECTED_EXECUTION_MATRIX_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
 static EXPECTED_EXECUTION_MATRIX: LazyLock<Result<JsonValue, serde_json::Error>> =
-    LazyLock::new(|| {
-        serde_json::from_slice(include_bytes!(
-            "../../../fixtures/conformance/matrix/execution-matrix.json"
-        ))
-    });
+    LazyLock::new(|| serde_json::from_slice(EXPECTED_EXECUTION_MATRIX_BYTES));
 const EXECUTION_MATRIX_PREDICATE_KEYS: [&str; 4] = ["fixture_id", "AuthEq", "PublicEq", "OpEq"];
 const AUTHORITY_FIXTURE_IDS: [&str; 11] = [
     "RPL-001", "PRF-001", "PRF-002", "DIV-001", "INV-001", "INV-002", "INV-003", "RES-001",
@@ -1143,65 +1141,68 @@ fn independent_verify_supporting_members(
         if matching.len() != 1 || matching[0].path != path || matching[0].bytes.is_empty() {
             return Err(BundleContractErrorV1::MemberMissing);
         }
-        let expected_digests = independent_support_digests(profile, support_role);
-        if !expected_digests.contains(&matching[0].digest) {
+        if !independent_support_digest_is_exhaustive(profile, support_role, matching[0].digest) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
     Ok(())
 }
 
-fn independent_support_digests(profile: &IndependentCpf1, role: SupportRole) -> BTreeSet<[u8; 32]> {
-    let mut digests = BTreeSet::new();
+fn independent_support_digest_is_exhaustive(
+    profile: &IndependentCpf1,
+    role: SupportRole,
+    member_digest: [u8; 32],
+) -> bool {
     match role {
-        SupportRole::NormativeSpecification => {
-            digests.insert(profile.normative_spec_digest);
-        }
-        SupportRole::Schema => {
-            digests.extend(profile.public_schema_digests.iter().copied());
-            for fixture in &profile.fixtures {
-                digests.insert(fixture.public_schema_digest);
-            }
-        }
-        SupportRole::Licence => {
-            for fixture in &profile.fixtures {
-                let mut bytes = fixture.provenance.licence_id.as_bytes().to_vec();
-                bytes.push(b'\n');
-                digests.insert(*blake3::hash(&bytes).as_bytes());
-            }
-        }
-        SupportRole::Notice => {
-            for fixture in &profile.fixtures {
-                digests.insert(fixture.provenance.notices_digest);
-            }
-        }
-        SupportRole::Sbom => {
-            for fixture in &profile.fixtures {
-                digests.insert(fixture.provenance.sbom_digest);
-            }
-        }
+        SupportRole::NormativeSpecification => profile.normative_spec_digest == member_digest,
+        SupportRole::Schema => profile
+            .public_schema_digests
+            .iter()
+            .all(|digest| *digest == member_digest),
+        SupportRole::Licence => profile.fixtures.iter().all(|fixture| {
+            let mut bytes = fixture.provenance.licence_id.as_bytes().to_vec();
+            bytes.push(b'\n');
+            *blake3::hash(&bytes).as_bytes() == member_digest
+        }),
+        SupportRole::Notice => profile
+            .fixtures
+            .iter()
+            .all(|fixture| fixture.provenance.notices_digest == member_digest),
+        SupportRole::Sbom => profile
+            .fixtures
+            .iter()
+            .all(|fixture| fixture.provenance.sbom_digest == member_digest),
         SupportRole::Provenance => {
-            digests.insert(profile.provenance_digest);
-            for fixture in &profile.fixtures {
-                digests.insert(fixture.provenance.source_digest);
-                digests.insert(fixture.provenance.build_digest);
-                digests.insert(fixture.provenance.publication_review_digest);
-            }
+            profile.provenance_digest == member_digest
+                && profile.fixtures.iter().all(|fixture| {
+                    fixture.provenance.source_digest == member_digest
+                        && fixture.provenance.build_digest == member_digest
+                        && fixture.provenance.publication_review_digest == member_digest
+                        && fixture
+                            .inputs
+                            .iter()
+                            .all(|input| input.provenance_digest == member_digest)
+                })
         }
         SupportRole::Limitations => {
-            digests.insert(profile.limitations_digest);
-            for fixture in &profile.fixtures {
-                digests.insert(fixture.provenance.limitations_digest);
-            }
+            profile.limitations_digest == member_digest
+                && profile
+                    .fixtures
+                    .iter()
+                    .all(|fixture| fixture.provenance.limitations_digest == member_digest)
         }
     }
-    digests
 }
 
 fn independent_verify_authority_members(
     members: &[IndependentMember<'_>],
     profile: &IndependentCpf1,
 ) -> Result<(), BundleContractErrorV1> {
+    let provenance = independent_required_member(
+        members,
+        BundleMemberRoleV1::Provenance,
+        "support/provenance.json",
+    )?;
     let inventory = independent_required_member(
         members,
         BundleMemberRoleV1::AuthorityInventory,
@@ -1212,13 +1213,60 @@ fn independent_verify_authority_members(
         BundleMemberRoleV1::ExecutionMatrix,
         EXECUTION_MATRIX_MEMBER_PATH,
     )?;
+    let provenance_json = parse_authority_json(provenance.bytes)?;
     let inventory_json = parse_authority_json(inventory.bytes)?;
     let matrix_json = parse_authority_json(matrix.bytes)?;
-    if profile.execution_matrix_digest != *blake3::hash(matrix.bytes).as_bytes() {
+    if provenance.digest != profile.provenance_digest
+        || matrix.bytes != EXPECTED_EXECUTION_MATRIX_BYTES
+        || profile.execution_matrix_digest != *blake3::hash(matrix.bytes).as_bytes()
+    {
         return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
-    independent_validate_authority_inventory(&inventory_json)
+    independent_validate_provenance_bindings(&provenance_json, inventory.bytes, matrix.bytes)
+        .and_then(|()| independent_validate_authority_inventory(&inventory_json))
         .and_then(|()| independent_validate_execution_matrix(&matrix_json))
+}
+
+fn independent_validate_provenance_bindings(
+    provenance: &JsonValue,
+    inventory_bytes: &[u8],
+    matrix_bytes: &[u8],
+) -> Result<(), BundleContractErrorV1> {
+    let inventory = provenance.get("authority_inventory");
+    let matrix = provenance.get("adr_059_execution_matrix");
+    let actual_inventory_digest: [u8; 32] = Sha256::digest(inventory_bytes).into();
+    let valid = inventory.zip(matrix).is_some_and(|(inventory, matrix)| {
+        inventory.get("path").and_then(JsonValue::as_str)
+            == Some("expected-authority/inventory.json")
+            && inventory
+                .get("digest_algorithm")
+                .and_then(JsonValue::as_str)
+                == Some("SHA-256")
+            && inventory.get("status").and_then(JsonValue::as_str) == Some("Draft")
+            && independent_json_digest(inventory, "sha256_digest") == Some(actual_inventory_digest)
+            && matrix.get("path").and_then(JsonValue::as_str)
+                == Some("matrix/execution-matrix.json")
+            && matrix.get("digest_algorithm").and_then(JsonValue::as_str) == Some("BLAKE3-256")
+            && matrix.get("status").and_then(JsonValue::as_str) == Some("Draft")
+            && matrix
+                .get("executed_case_count")
+                .and_then(JsonValue::as_u64)
+                == Some(0)
+            && independent_json_digest(matrix, "blake3_digest")
+                == Some(*blake3::hash(matrix_bytes).as_bytes())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::MemberDigestMismatch)
+    }
+}
+
+fn independent_json_digest(value: &JsonValue, field: &str) -> Option<[u8; 32]> {
+    value
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .and_then(crate::decode_hex_digest)
 }
 
 fn independent_validate_authority_inventory(
@@ -1226,8 +1274,8 @@ fn independent_validate_authority_inventory(
 ) -> Result<(), BundleContractErrorV1> {
     // This deliberately does not call `validate_authority_inventory`: archive
     // verification has an independent authority for the accepted Draft
-    // inventory. JSON-value equality retains the complete contract while
-    // accepting harmless JSON whitespace and member-order differences.
+    // inventory. JSON-value equality retains the complete inventory contract;
+    // provenance separately binds the exact inventory bytes.
     if EXPECTED_AUTHORITY_INVENTORY
         .as_ref()
         .is_ok_and(|expected| inventory == expected)
@@ -1241,8 +1289,7 @@ fn independent_validate_authority_inventory(
 fn independent_validate_execution_matrix(matrix: &JsonValue) -> Result<(), BundleContractErrorV1> {
     // This deliberately does not call `validate_execution_matrix`: archive
     // verification has an independent authority for the accepted Draft matrix.
-    // JSON-value equality retains the complete contract while accepting harmless
-    // JSON whitespace and member-order differences.
+    // Exact canonical bytes are checked before this semantic cross-check.
     if EXPECTED_EXECUTION_MATRIX
         .as_ref()
         .is_ok_and(|expected| matrix == expected)
@@ -1306,6 +1353,7 @@ struct IndependentCpf1Input {
     member_id: String,
     size: u64,
     digest: [u8; 32],
+    provenance_digest: [u8; 32],
 }
 
 struct IndependentCpf1Provenance {
@@ -1323,7 +1371,6 @@ struct IndependentCpf1Fixture {
     mandatory: bool,
     claim_layer: u64,
     execution_profile_digest: [u8; 32],
-    public_schema_digest: [u8; 32],
     modes: Vec<u64>,
     inputs: Vec<IndependentCpf1Input>,
     expected_bytes: Vec<u8>,
@@ -1495,6 +1542,9 @@ fn independent_verify_cpf1_fixtures(
     public_schemas: &[[u8; 32]],
 ) -> Result<Vec<IndependentCpf1Fixture>, BundleContractErrorV1> {
     let fixtures = independent_profile_array_bounded(value)?;
+    if fixtures.is_empty() {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
     let mut previous = None;
     let mut verified = Vec::with_capacity(fixtures.len());
     for fixture in fixtures {
@@ -1559,7 +1609,6 @@ fn independent_verify_cpf1_fixture(
         mandatory,
         claim_layer,
         execution_profile_digest: execution_profile,
-        public_schema_digest: public_schema,
         modes,
         inputs,
         expected_bytes,
@@ -1594,6 +1643,7 @@ fn independent_verify_cpf1_fixture_inputs(
             member_id: member_id.clone(),
             size,
             digest,
+            provenance_digest,
         });
         previous = Some(member_id);
     }
@@ -2862,7 +2912,7 @@ fn validate_supporting_members(
         if matching.len() != 1 || matching[0].bytes.is_empty() {
             return Err(BundleContractErrorV1::MemberMissing);
         }
-        if !required_support_digests(profile, support_role).contains(&matching[0].digest) {
+        if !support_digest_is_exhaustive(profile, support_role, matching[0].digest) {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
@@ -2912,6 +2962,9 @@ fn validate_authority_members(
     }
     if inventory_lifecycle != "Draft" {
         return Err(BundleContractErrorV1::LifecycleInvalid);
+    }
+    if matrix.bytes.as_slice() != EXPECTED_EXECUTION_MATRIX_BYTES {
+        return Err(BundleContractErrorV1::MemberDigestMismatch);
     }
     validate_provenance_authority_binding(&provenance)?;
     validate_execution_matrix(&matrix_json)?;
@@ -3226,67 +3279,49 @@ fn json_string_array<'a>(
         .collect()
 }
 
-fn required_support_digests(
+fn support_digest_is_exhaustive(
     profile: &ConformanceProfileV1,
     role: SupportRole,
-) -> BTreeSet<[u8; 32]> {
-    let mut digests = BTreeSet::new();
+    member_digest: [u8; 32],
+) -> bool {
     match role {
-        SupportRole::NormativeSpecification => {
-            digests.insert(profile.normative_spec_digest);
-        }
-        SupportRole::Schema => {
-            digests.extend(profile.public_schema_digests.iter().copied());
-            digests.extend(
-                profile
-                    .fixtures
-                    .iter()
-                    .map(|fixture| fixture.public_schema_digest),
-            );
-        }
-        SupportRole::Licence => {
-            digests.extend(profile.fixtures.iter().map(|fixture| {
-                let identity = format!("{}\n", fixture.provenance.licence_id);
-                *blake3::hash(identity.as_bytes()).as_bytes()
-            }));
-        }
-        SupportRole::Notice => {
-            digests.extend(
-                profile
-                    .fixtures
-                    .iter()
-                    .map(|fixture| fixture.provenance.notices_digest),
-            );
-        }
-        SupportRole::Sbom => {
-            digests.extend(
-                profile
-                    .fixtures
-                    .iter()
-                    .map(|fixture| fixture.provenance.sbom_digest),
-            );
-        }
+        SupportRole::NormativeSpecification => profile.normative_spec_digest == member_digest,
+        SupportRole::Schema => profile
+            .public_schema_digests
+            .iter()
+            .all(|digest| *digest == member_digest),
+        SupportRole::Licence => profile.fixtures.iter().all(|fixture| {
+            let identity = format!("{}\n", fixture.provenance.licence_id);
+            *blake3::hash(identity.as_bytes()).as_bytes() == member_digest
+        }),
+        SupportRole::Notice => profile
+            .fixtures
+            .iter()
+            .all(|fixture| fixture.provenance.notices_digest == member_digest),
+        SupportRole::Sbom => profile
+            .fixtures
+            .iter()
+            .all(|fixture| fixture.provenance.sbom_digest == member_digest),
         SupportRole::Provenance => {
-            digests.insert(profile.provenance_digest);
-            digests.extend(profile.fixtures.iter().flat_map(|fixture| {
-                [
-                    fixture.provenance.source_digest,
-                    fixture.provenance.build_digest,
-                    fixture.provenance.publication_review_digest,
-                ]
-            }));
+            profile.provenance_digest == member_digest
+                && profile.fixtures.iter().all(|fixture| {
+                    fixture.provenance.source_digest == member_digest
+                        && fixture.provenance.build_digest == member_digest
+                        && fixture.provenance.publication_review_digest == member_digest
+                        && fixture
+                            .inputs
+                            .iter()
+                            .all(|input| input.provenance_digest == member_digest)
+                })
         }
         SupportRole::Limitations => {
-            digests.insert(profile.limitations_digest);
-            digests.extend(
-                profile
+            profile.limitations_digest == member_digest
+                && profile
                     .fixtures
                     .iter()
-                    .map(|fixture| fixture.provenance.limitations_digest),
-            );
+                    .all(|fixture| fixture.provenance.limitations_digest == member_digest)
         }
     }
-    digests
 }
 
 fn validate_selected_bundle_caps(

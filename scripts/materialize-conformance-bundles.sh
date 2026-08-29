@@ -65,6 +65,7 @@ mapfile -t archive_files < <(
   find "${output_root}" -type f -name '*.cfb1' -print | sort
 )
 metadata_file="${output_root}/MATERIALIZATION-METADATA.json"
+output_checksums="${output_root}/SHA256SUMS"
 jq -e '
   .format == 1 and
   (.lifecycles | type == "array" and length > 0) and
@@ -77,7 +78,7 @@ mode_count="$(jq -r '.modes | length' "${metadata_file}")"
 expected_profile_count=$((layer_count * lifecycle_count))
 expected_manifest_count=$((expected_profile_count * mode_count))
 expected_archive_count=$((expected_profile_count * mode_count))
-expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count + 1))
+expected_file_count=$((expected_profile_count + expected_manifest_count + expected_archive_count + 2))
 if ((
   ${#profile_files[@]} != expected_profile_count ||
   ${#manifest_files[@]} != expected_manifest_count ||
@@ -87,6 +88,7 @@ if ((
   echo "expected ${expected_profile_count} profiles, ${expected_manifest_count} manifests, and ${expected_archive_count} archives; found ${#profile_files[@]} profiles, ${#manifest_files[@]} manifests, ${#archive_files[@]} archives, and ${#materialized_files[@]} total files" >&2
   exit 1
 fi
+(cd "${output_root}" && sha256sum --check --strict "$(basename "${output_checksums}")")
 if ((${#archive_files[@]} == 0)); then
   echo "materialization produced no archives" >&2
   exit 1

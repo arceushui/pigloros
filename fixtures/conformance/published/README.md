@@ -20,8 +20,10 @@ the immutable CFB1 bytes.
 
 GitHub Actions artifacts are a temporary transport copy and are not the
 retention authority. Candidate publication and any release-retention policy
-are owned by the #198 governance workflow. The source and output SHA256SUMS
-files make the Draft handoff verifiable without turning it into a release.
+are owned by the #198 governance workflow. The source inventory and each
+materialized tree's output `SHA256SUMS` make the Draft handoff verifiable
+without turning it into a release. The output inventory covers every other
+file in the materialized tree and therefore does not recursively list itself.
 
 The bundled SBOM is scoped to this data-only publication. It deliberately
 does not claim to enumerate the CI runner, Rust workspace, or materializer
