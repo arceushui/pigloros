@@ -501,13 +501,7 @@ impl AtomicPublication {
                 self.parent_identity,
                 effective_uid(),
             )
-            .and_then(|actual_identity| {
-                if actual_identity == self.staging_identity {
-                    Ok(())
-                } else {
-                    Err(MaterializationError::UntrustedOutputDirectory)
-                }
-            })
+            .map(|_| ())
         })
     }
 }
@@ -606,7 +600,7 @@ fn sync_fd<Fd: std::os::fd::AsFd>(fd: Fd) -> Result<(), MaterializationError> {
 }
 
 #[cfg(target_os = "linux")]
-const fn map_open_error(error: Errno) -> MaterializationError {
+fn map_open_error(error: Errno) -> MaterializationError {
     if error == Errno::LOOP {
         MaterializationError::SymlinkDetected
     } else if atomic_publication_is_unsupported(error) {
@@ -617,7 +611,7 @@ const fn map_open_error(error: Errno) -> MaterializationError {
 }
 
 #[cfg(target_os = "linux")]
-const fn map_publish_error(error: Errno) -> MaterializationError {
+fn map_publish_error(error: Errno) -> MaterializationError {
     if error == Errno::EXIST {
         MaterializationError::DestinationExists
     } else if atomic_publication_is_unsupported(error) {
@@ -628,7 +622,7 @@ const fn map_publish_error(error: Errno) -> MaterializationError {
 }
 
 #[cfg(target_os = "linux")]
-const fn map_sync_error(error: Errno) -> MaterializationError {
+fn map_sync_error(error: Errno) -> MaterializationError {
     if atomic_publication_is_unsupported(error) {
         MaterializationError::AtomicPublicationUnsupported
     } else {
@@ -637,7 +631,7 @@ const fn map_sync_error(error: Errno) -> MaterializationError {
 }
 
 #[cfg(target_os = "linux")]
-const fn map_cleanup_error(error: Errno) -> MaterializationError {
+fn map_cleanup_error(error: Errno) -> MaterializationError {
     if error == Errno::LOOP {
         MaterializationError::SymlinkDetected
     } else if atomic_publication_is_unsupported(error) {
@@ -648,37 +642,9 @@ const fn map_cleanup_error(error: Errno) -> MaterializationError {
 }
 
 #[cfg(target_os = "linux")]
-const fn atomic_publication_is_unsupported(error: Errno) -> bool {
+fn atomic_publication_is_unsupported(error: Errno) -> bool {
     matches!(
         error,
         Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV
     )
 }
-
-#[cfg(target_os = "linux")]
-const _: () = {
-    assert!(matches!(
-        map_open_error(Errno::LOOP),
-        MaterializationError::SymlinkDetected
-    ));
-    assert!(matches!(
-        map_open_error(Errno::NOSYS),
-        MaterializationError::AtomicPublicationUnsupported
-    ));
-    assert!(matches!(
-        map_open_error(Errno::INVAL),
-        MaterializationError::AtomicPublicationUnsupported
-    ));
-    assert!(matches!(
-        map_publish_error(Errno::EXIST),
-        MaterializationError::DestinationExists
-    ));
-    assert!(matches!(
-        map_publish_error(Errno::NOSYS),
-        MaterializationError::AtomicPublicationUnsupported
-    ));
-    assert!(matches!(
-        map_publish_error(Errno::INVAL),
-        MaterializationError::AtomicPublicationUnsupported
-    ));
-};

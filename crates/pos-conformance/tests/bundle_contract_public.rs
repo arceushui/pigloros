@@ -41,6 +41,8 @@ enum StagingMutation {
     ReplaceIdentity,
     RelaxPermissions,
     InjectSymlink,
+    InjectSocket,
+    BlockFutureDirectory,
 }
 
 #[cfg(target_os = "linux")]
@@ -139,6 +141,14 @@ fn mutate_live_staging(
         }
         StagingMutation::InjectSymlink => symlink("/dev/null", staging.join("injected-link"))
             .and_then(|()| fs::create_dir(&destination)),
+        StagingMutation::InjectSocket => {
+            std::os::unix::net::UnixListener::bind(staging.join("injected-socket"))
+                .map(drop)
+                .and_then(|()| fs::create_dir(&destination))
+        }
+        StagingMutation::BlockFutureDirectory => {
+            symlink("/dev/null", staging.join("empirical-evaluation"))
+        }
     };
     let resume_result = signal_process(&child, "CONT");
     if let Err(error) = mutation_result {
@@ -2755,6 +2765,16 @@ fn public_materializer_rejects_live_staging_replacement_and_contamination() -> T
         materializer.as_os_str(),
         key,
         StagingMutation::InjectSymlink,
+    )?;
+    assert!(stderr.contains("SymlinkDetected"));
+
+    let stderr = mutate_live_staging(materializer.as_os_str(), key, StagingMutation::InjectSocket)?;
+    assert!(stderr.contains("UntrustedOutputDirectory"));
+
+    let stderr = mutate_live_staging(
+        materializer.as_os_str(),
+        key,
+        StagingMutation::BlockFutureDirectory,
     )?;
     assert!(stderr.contains("SymlinkDetected"));
     Ok(())

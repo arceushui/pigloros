@@ -1528,7 +1528,8 @@ impl VerificationResultV1 {
     /// # Errors
     /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::verification_result_digest(self).map_err(strict_cbor_core_error)
+        strict_codec::verification_result_digest(self)
+            .map_err(|error| strict_cbor_core_error(&error))
     }
 }
 
@@ -1558,11 +1559,11 @@ impl DivergenceReportV1 {
     /// # Errors
     /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::divergence_report_digest(self).map_err(strict_cbor_core_error)
+        strict_codec::divergence_report_digest(self).map_err(|error| strict_cbor_core_error(&error))
     }
 }
 
-fn strict_cbor_core_error(error: strict_codec::StrictCborError) -> pos_core::CoreError {
+fn strict_cbor_core_error(error: &strict_codec::StrictCborError) -> pos_core::CoreError {
     pos_core::CoreError::Serialization(error.to_string())
 }
 
@@ -1710,12 +1711,12 @@ pub mod strict_codec {
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
         verification_result_digest(&result).and_then(|expected_digest| {
-            if result.result_digest != expected_digest {
+            if result.result_digest == expected_digest {
+                validate_verification_result(&result).map(|()| result)
+            } else {
                 Err(StrictCborError::InvalidField {
                     field: "verification_result_digest".to_owned(),
                 })
-            } else {
-                validate_verification_result(&result).map(|()| result)
             }
         })
     }
@@ -1926,12 +1927,12 @@ pub mod strict_codec {
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
         divergence_report_digest(&report).and_then(|expected_digest| {
-            if report.report_digest != expected_digest {
+            if report.report_digest == expected_digest {
+                validate_divergence_report(&report).map(|()| report)
+            } else {
                 Err(StrictCborError::InvalidField {
                     field: "divergence_report_digest".to_owned(),
                 })
-            } else {
-                validate_divergence_report(&report).map(|()| report)
             }
         })
     }
