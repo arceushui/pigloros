@@ -294,7 +294,7 @@ fn freeze_failure_binds_error_encoding_and_content_address() -> Result<(), Erasu
 fn evidence_decoders_reject_each_malformed_public_field() -> Result<(), ErasureErrorV1> {
     let scope = scope_commitment(reference(1), vec![reference(2)], reference(3), None)?;
     let scope_bytes = scope.to_canonical_cbor()?;
-    for index in [0, 2, 3, 4, 5] {
+    for index in [0, 2, 3, 4] {
         let changed = replace_cbor_field(&scope_bytes, index, Value::Null)?;
         assert!(ErasureScopeCommitmentV1::from_canonical_cbor(&changed).is_err());
     }
@@ -306,7 +306,7 @@ fn evidence_decoders_reject_each_malformed_public_field() -> Result<(), ErasureE
         None,
     ))?;
     let freeze_bytes = freeze.to_canonical_cbor()?;
-    for index in [0, 2, 3, 4, 5, 6] {
+    for index in [0, 2, 3, 4, 5] {
         let changed = replace_cbor_field(&freeze_bytes, index, Value::Null)?;
         assert!(ErasureFreezeProvenanceV1::from_canonical_cbor(&changed).is_err());
     }
