@@ -451,20 +451,20 @@ fn signed_current_bundle(mode: BundleModeV1) -> TestResult<ConformanceBundleV1> 
 }
 
 fn signed_bundle_with_authority(
-    matrix_bytes: Vec<u8>,
-    inventory_bytes: Vec<u8>,
+    matrix_bytes: &[u8],
+    inventory_bytes: &[u8],
 ) -> TestResult<Vec<u8>> {
     let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
-    inputs.profile.execution_matrix_digest = *blake3::hash(&matrix_bytes).as_bytes();
+    inputs.profile.execution_matrix_digest = *blake3::hash(matrix_bytes).as_bytes();
     inputs.profile.profile_digest = inputs.profile.digest();
     for member in &mut inputs.members {
         let replacement = match member.role {
-            BundleMemberRoleV1::ExecutionMatrix => Some(&matrix_bytes),
-            BundleMemberRoleV1::AuthorityInventory => Some(&inventory_bytes),
+            BundleMemberRoleV1::ExecutionMatrix => Some(matrix_bytes),
+            BundleMemberRoleV1::AuthorityInventory => Some(inventory_bytes),
             _ => None,
         };
         if let Some(bytes) = replacement {
-            member.bytes.clone_from(bytes);
+            member.bytes = bytes.to_vec();
             member.digest = *blake3::hash(bytes).as_bytes();
         }
     }
@@ -3372,10 +3372,8 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
 
     let mut matrix: serde_json::Value = serde_json::from_slice(MATRIX_BYTES)?;
     matrix["case_count"] = serde_json::Value::from(191);
-    let invalid_matrix = signed_bundle_with_authority(
-        serde_json::to_vec_pretty(&matrix)?,
-        AUTHORITY_INVENTORY_BYTES.to_vec(),
-    )?;
+    let matrix_bytes = serde_json::to_vec_pretty(&matrix)?;
+    let invalid_matrix = signed_bundle_with_authority(&matrix_bytes, AUTHORITY_INVENTORY_BYTES)?;
     assert_eq!(
         verify_archive_independently(&invalid_matrix),
         Err(BundleContractErrorV1::ProfileInvalid)
@@ -3384,10 +3382,8 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
     let mut inventory: serde_json::Value = serde_json::from_slice(AUTHORITY_INVENTORY_BYTES)?;
     inventory["entries"][0]["materialization_status"] =
         serde_json::Value::String("materialized".to_owned());
-    let invalid_inventory = signed_bundle_with_authority(
-        MATRIX_BYTES.to_vec(),
-        serde_json::to_vec_pretty(&inventory)?,
-    )?;
+    let inventory_bytes = serde_json::to_vec_pretty(&inventory)?;
+    let invalid_inventory = signed_bundle_with_authority(MATRIX_BYTES, &inventory_bytes)?;
     assert_eq!(
         verify_archive_independently(&invalid_inventory),
         Err(BundleContractErrorV1::ProfileInvalid)
