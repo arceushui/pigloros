@@ -23,7 +23,7 @@ use pos_core::{
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
-    ErasureSupportingRecordsV1,
+    ErasureSupportingRecordsV1, ERASURE_MAX_TARGETS,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -205,10 +205,24 @@ fn administrative_resolution(
 
 fn atomic_admission(
     request: ErasureReferenceV1,
-    mut targets: Vec<ErasureRequiredTargetV1>,
+    targets: Vec<ErasureRequiredTargetV1>,
     mismatched_closure: bool,
     lineage_rule: Option<ErasureReferenceV1>,
 ) -> Result<ErasureAtomicFreezeAdmissionV1, ErasureErrorV1> {
+    ErasureAtomicFreezeAdmissionV1::new(atomic_admission_input(
+        request,
+        targets,
+        mismatched_closure,
+        lineage_rule,
+    )?)
+}
+
+fn atomic_admission_input(
+    request: ErasureReferenceV1,
+    mut targets: Vec<ErasureRequiredTargetV1>,
+    mismatched_closure: bool,
+    lineage_rule: Option<ErasureReferenceV1>,
+) -> Result<ErasureAtomicFreezeAdmissionInputV1, ErasureErrorV1> {
     targets.sort_unstable();
     let mut obligations = targets
         .iter()
@@ -231,7 +245,7 @@ fn atomic_admission(
         policy: reference(6),
         trust: reference(94),
     })?;
-    ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+    Ok(ErasureAtomicFreezeAdmissionInputV1 {
         targets: targets.clone(),
         scope: ErasureScopeCommitmentInputV1 {
             request,
@@ -248,6 +262,25 @@ fn atomic_admission(
         freeze_position: 10,
         host_evidence: reference(90),
     })
+}
+
+fn bind_atomic_obligations(
+    mut input: ErasureAtomicFreezeAdmissionInputV1,
+) -> Result<ErasureAtomicFreezeAdmissionInputV1, ErasureErrorV1> {
+    input
+        .obligations
+        .sort_unstable_by_key(ErasureObligationV1::reference);
+    input.obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request: input.scope.request,
+        obligations: input
+            .obligations
+            .iter()
+            .map(ErasureObligationV1::reference)
+            .collect(),
+        policy: reference(6),
+        trust: reference(94),
+    })?;
+    Ok(input)
 }
 
 fn corrected_record_for(
@@ -784,7 +817,7 @@ fn durable_record_scope_and_lifecycle_shapes_reject_each_public_near_miss(
     assert_invalid_parts(duplicate_targets);
 
     let mut oversized_targets = record_parts(&frozen_record);
-    oversized_targets.targets = vec![target(10); 257];
+    oversized_targets.targets = vec![target(10); ERASURE_MAX_TARGETS + 1];
     assert_invalid_parts(oversized_targets);
 
     let first = acknowledgement_for(
@@ -1277,6 +1310,114 @@ fn atomic_freeze_binds_closure_scope_evidence_and_position() -> Result<(), Erasu
         Err(ErasureErrorV1::PolicyConflict)
     );
 
+    Ok(())
+}
+
+fn assert_atomic_scope_invalid(input: ErasureAtomicFreezeAdmissionInputV1) {
+    assert_eq!(
+        ErasureAtomicFreezeAdmissionV1::new(input),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+}
+
+#[test]
+fn atomic_freeze_rejects_inconsistent_closure_identity() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let first_target = target(10);
+    let second_target = target(20);
+    let base = atomic_admission_input(request, vec![first_target, second_target], false, None)?;
+    assert!(ErasureAtomicFreezeAdmissionV1::new(base.clone()).is_ok());
+
+    let mut empty_targets = base.clone();
+    empty_targets.targets.clear();
+    assert_atomic_scope_invalid(empty_targets);
+
+    let mut unsorted_targets = base.clone();
+    unsorted_targets.targets.reverse();
+    assert_atomic_scope_invalid(unsorted_targets);
+
+    let mut mismatched_request = base.clone();
+    mismatched_request.scope.request = reference(99);
+    assert_atomic_scope_invalid(mismatched_request);
+
+    let mut zero_closure = base.clone();
+    zero_closure.scope.target_closure = reference(0);
+    assert_atomic_scope_invalid(zero_closure);
+
+    let mut wrong_obligation_order = base.clone();
+    wrong_obligation_order.obligations.reverse();
+    assert_atomic_scope_invalid(wrong_obligation_order);
+    Ok(())
+}
+
+#[test]
+fn atomic_freeze_rejects_unbound_obligations() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let first_target = target(10);
+    let base = atomic_admission_input(request, vec![first_target, target(20)], false, None)?;
+    let outside_obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target: target(30),
+        owner: reference(33),
+        command_identity: destruction_command_reference(request, target(30)),
+    })?;
+    let mut outside_target = base.clone();
+    outside_target.obligations = vec![outside_obligation];
+    let outside_target = bind_atomic_obligations(outside_target)?;
+    assert_atomic_scope_invalid(outside_target);
+
+    let wrong_command = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target: first_target,
+        owner: first_target.replica_id,
+        command_identity: reference(99),
+    })?;
+    let mut wrong_command_input = base.clone();
+    wrong_command_input.obligations = vec![wrong_command];
+    let wrong_command_input = bind_atomic_obligations(wrong_command_input)?;
+    assert_atomic_scope_invalid(wrong_command_input);
+    Ok(())
+}
+
+#[test]
+fn atomic_freeze_rejects_duplicate_obligation_coordinates() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let first_target = target(10);
+    let base = atomic_admission_input(request, vec![first_target, target(20)], false, None)?;
+    let duplicate_target_obligations = [first_target.replica_id, reference(99)]
+        .into_iter()
+        .map(|owner| {
+            ErasureObligationV1::new(ErasureObligationInputV1 {
+                category: ErasureInventoryCategoryV1::Artifact,
+                target: first_target,
+                owner,
+                command_identity: destruction_command_reference(request, first_target),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut duplicate_target = base.clone();
+    duplicate_target.obligations = duplicate_target_obligations;
+    let duplicate_target = bind_atomic_obligations(duplicate_target)?;
+    assert_atomic_scope_invalid(duplicate_target);
+
+    let duplicate_command_owner = [
+        ErasureInventoryCategoryV1::Artifact,
+        ErasureInventoryCategoryV1::Key,
+    ]
+    .into_iter()
+    .map(|category| {
+        ErasureObligationV1::new(ErasureObligationInputV1 {
+            category,
+            target: first_target,
+            owner: first_target.replica_id,
+            command_identity: destruction_command_reference(request, first_target),
+        })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    let mut duplicate_command = base;
+    duplicate_command.obligations = duplicate_command_owner;
+    let duplicate_command = bind_atomic_obligations(duplicate_command)?;
+    assert_atomic_scope_invalid(duplicate_command);
     Ok(())
 }
 

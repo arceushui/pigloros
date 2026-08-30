@@ -22,9 +22,8 @@ use pos_core::{
     ErasureScopeExtensionInputV1, ErasureScopeExtensionLedgerInputV1,
     ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
     ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
-    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
-    ERASURE_RETRY_ADMISSION_MAX_BYTES,
+    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_OBLIGATIONS,
+    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RETRY_ADMISSION_MAX_BYTES,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -538,6 +537,89 @@ fn supporting_records_validate_lineage_chain_and_ledger_snapshots() -> Result<()
     Ok(())
 }
 
+#[test]
+fn scope_ledgers_reject_each_inconsistent_public_chain_shape() {
+    for input in [
+        ErasureScopeExtensionLedgerInputV1 {
+            scope_commitment: reference(1),
+            extensions: Vec::new(),
+            head: Some(reference(2)),
+        },
+        ErasureScopeExtensionLedgerInputV1 {
+            scope_commitment: reference(1),
+            extensions: vec![reference(2)],
+            head: None,
+        },
+        ErasureScopeExtensionLedgerInputV1 {
+            scope_commitment: reference(1),
+            extensions: vec![reference(2)],
+            head: Some(reference(3)),
+        },
+        ErasureScopeExtensionLedgerInputV1 {
+            scope_commitment: reference(1),
+            extensions: vec![reference(2), reference(2)],
+            head: Some(reference(2)),
+        },
+    ] {
+        assert_eq!(
+            ErasureScopeExtensionLedgerV1::new(input),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+}
+
+#[test]
+fn supporting_records_reject_duplicate_lineage_forks() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(2)],
+        target_closure: reference(3),
+        lineage_rule: Some(reference(4)),
+    })?;
+    let first = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        fork: reference(5),
+        lineage_rule: reference(4),
+        predecessor_extension: None,
+        admission_provenance: reference(6),
+    })?;
+    let second = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        fork: reference(5),
+        lineage_rule: reference(4),
+        predecessor_extension: Some(first.reference()),
+        admission_provenance: reference(7),
+    })?;
+    let ledgers = [
+        Vec::new(),
+        vec![first.reference()],
+        vec![first.reference(), second.reference()],
+    ]
+    .into_iter()
+    .map(|extensions| {
+        let head = extensions.last().copied();
+        ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+            scope_commitment: scope.reference(),
+            extensions,
+            head,
+        })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            scope_commitment: Some(scope),
+            scope_extensions: vec![first, second],
+            scope_extension_ledgers: ledgers,
+            ..ErasureSupportingRecordsInputV1::default()
+        }),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
 fn complete_receipt(
     request: ErasureReferenceV1,
     provenance: ErasureReferenceV1,
@@ -566,6 +648,28 @@ fn complete_receipt(
         signature: reference(43),
         receipt_digest: reference(0),
     })
+}
+
+#[test]
+fn receipt_validates_the_exact_frozen_obligation_identity() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let receipt = complete_receipt(request, reference(42))?;
+    assert_eq!(
+        receipt.validate_frozen_obligations(&[]),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let different_identity = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target: required_target(),
+        owner: reference(36),
+        command_identity: reference(99),
+    })?;
+    assert_eq!(
+        receipt.validate_frozen_obligations(&[different_identity]),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
 }
 
 fn initial_admission(
@@ -899,10 +1003,8 @@ fn retry_admission_rejects_invalid_ordinals_deadlines_and_obligation_sets() {
     );
 
     let mut oversized_obligations = retry_input();
-    oversized_obligations.unresolved_obligations =
-        vec![reference(20); ERASURE_MAX_INVENTORY_RESULTS + 1];
-    oversized_obligations.command_identities =
-        vec![reference(21); ERASURE_MAX_INVENTORY_RESULTS + 1];
+    oversized_obligations.unresolved_obligations = vec![reference(20); ERASURE_MAX_OBLIGATIONS + 1];
+    oversized_obligations.command_identities = vec![reference(21); ERASURE_MAX_OBLIGATIONS + 1];
     assert_eq!(
         ErasureRetryAdmissionV1::new(oversized_obligations),
         Err(ErasureErrorV1::ScopeInvalid)
@@ -1668,6 +1770,18 @@ fn supporting_ledger_bounds_each_attempt_scoped_collection() -> Result<(), Erasu
     };
     assert_eq!(
         ErasureSupportingRecordsV1::new(resolutions),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let acknowledgements = ErasureSupportingRecordsInputV1 {
+        acknowledgement_provenance: vec![
+            input.acknowledgement_provenance[0];
+            ERASURE_MAX_OBLIGATIONS + 1
+        ],
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(acknowledgements),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
