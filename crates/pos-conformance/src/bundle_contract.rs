@@ -21,9 +21,16 @@ use crate::{
 pub const CONFORMANCE_BUNDLE_MAGIC_V1: &str = "CFB1";
 pub const MAX_CONFORMANCE_BUNDLE_BYTES_V1: u64 = 1024 * 1024 * 1024;
 const MAX_CONFORMANCE_MEMBER_BYTES_V1: u64 = 64 * 1024 * 1024;
+const MAX_CONFORMANCE_TEXT_BYTES_V1: u64 = 512;
 const MAX_CONFORMANCE_ITEMS_V1: u64 = 65_536;
 const MAX_CONFORMANCE_NESTING_V1: u8 = 32;
 const PROFILE_PATH: &str = "profile/CPF1.cbor";
+const NORMATIVE_SPEC_PATH: &str = "support/normative-requirements.md";
+const EXECUTION_MATRIX_PATH: &str = "authority/execution-matrix.json";
+const AUTHORITY_INVENTORY_PATH: &str = "authority/expected-authority-inventory.json";
+const PROFILE_SCHEMA_PATH: &str = "support/schema-cpf1-v1.cddl";
+const LIMITATIONS_PATH: &str = "support/limitations.md";
+const PROVENANCE_PATH: &str = "support/provenance.json";
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum BundleContractErrorV1 {
@@ -371,7 +378,10 @@ impl ConformanceBundleV1 {
         })
     }
     fn validate_unsigned(&self) -> Result<(), BundleContractErrorV1> {
+        let maximum_items = usize::try_from(MAX_CONFORMANCE_ITEMS_V1).unwrap_or(usize::MAX);
         if self.members.len() != self.manifest.members.len()
+            || self.members.len() > maximum_items
+            || self.manifest.expected_results.len() > maximum_items
             || self
                 .members
                 .iter()
@@ -398,6 +408,9 @@ impl ConformanceBundleV1 {
                             return Err(BundleContractErrorV1::ProfileInvalid);
                         }
                         validate_member_descriptors(&self.members, &self.manifest.members)
+                            .and_then(|()| {
+                                validate_profile_support_members(&profile, &self.members)
+                            })
                             .and_then(|()| validate_provider_members(&profile, &self.members))
                             .and_then(|()| {
                                 validate_fixture_members(
@@ -407,10 +420,158 @@ impl ConformanceBundleV1 {
                                     &self.manifest.expected_results,
                                 )
                             })
+                            .and_then(|()| {
+                                validate_member_closure(
+                                    &profile,
+                                    &self.members,
+                                    &self.manifest.expected_results,
+                                )
+                            })
                     })
             },
         )
     }
+}
+
+fn validate_profile_support_members(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    let bindings = [
+        (
+            NORMATIVE_SPEC_PATH,
+            BundleMemberRoleV1::NormativeSpecification,
+            profile.normative_spec_digest,
+        ),
+        (
+            EXECUTION_MATRIX_PATH,
+            BundleMemberRoleV1::ExecutionMatrix,
+            profile.execution_matrix_digest,
+        ),
+        (
+            LIMITATIONS_PATH,
+            BundleMemberRoleV1::Limitations,
+            profile.limitations_digest,
+        ),
+        (
+            PROVENANCE_PATH,
+            BundleMemberRoleV1::Provenance,
+            profile.provenance_digest,
+        ),
+        (
+            PROFILE_SCHEMA_PATH,
+            BundleMemberRoleV1::Schema,
+            profile.fixture_contract_policy_digest,
+        ),
+    ];
+    bindings
+        .into_iter()
+        .try_for_each(|(path, role, digest)| {
+            member_by_role_and_path(members, role, path).and_then(|member| {
+                if member.digest == digest {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                }
+            })
+        })
+        .and_then(|()| {
+            member_by_role_and_path(
+                members,
+                BundleMemberRoleV1::AuthorityInventory,
+                AUTHORITY_INVENTORY_PATH,
+            )
+            .map(|_| ())
+        })
+}
+
+fn validate_member_closure(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+    expected: &[BundleExpectedResultV1],
+) -> Result<(), BundleContractErrorV1> {
+    let mut declared = [
+        PROFILE_PATH,
+        NORMATIVE_SPEC_PATH,
+        EXECUTION_MATRIX_PATH,
+        AUTHORITY_INVENTORY_PATH,
+        PROFILE_SCHEMA_PATH,
+        LIMITATIONS_PATH,
+        PROVENANCE_PATH,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    declared.insert(
+        profile
+            .fixture_provider_registry
+            .registry_artifact
+            .member_path
+            .clone(),
+    );
+    for fixture in &profile.fixtures {
+        declared.insert(fixture.schema.member_path.clone());
+        declared.insert(fixture.payload.member_path.clone());
+        declared.extend(
+            fixture
+                .auxiliary
+                .iter()
+                .map(|artifact| artifact.member_path.clone()),
+        );
+        if let Some(output) = &fixture.strict_oracle.output {
+            declared.insert(output.member_path.clone());
+        }
+    }
+    declared.extend(expected.iter().map(|result| result.member_path.clone()));
+    declare_provider_members(members, &mut declared)?;
+    if members.len() == declared.len()
+        && members.iter().all(|member| declared.contains(&member.path))
+    {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::UndeclaredMember)
+    }
+}
+
+fn declare_provider_members(
+    members: &[BundleMemberV1],
+    declared: &mut BTreeSet<String>,
+) -> Result<(), BundleContractErrorV1> {
+    let registry_member = member_by_role_and_path(
+        members,
+        BundleMemberRoleV1::FixtureProviderRegistry,
+        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    )?;
+    let registry = FixtureProviderRegistryV1::from_canonical_cbor(&registry_member.bytes)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    for entry in registry.providers {
+        declared.insert(entry.provider_package_descriptor.member_path.clone());
+        let package_member = descriptor_member(
+            members,
+            &entry.provider_package_descriptor,
+            BundleMemberRoleV1::FixtureProviderPackage,
+        )?;
+        let package = FixtureProviderPackageV1::from_canonical_cbor(&package_member.bytes)
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        declared.extend(
+            package
+                .family_schemas
+                .iter()
+                .map(|schema| schema.schema_descriptor.member_path.clone()),
+        );
+        declared.extend(
+            [
+                &package.licence_descriptor,
+                &package.notices_descriptor,
+                &package.sbom_descriptor,
+                &package.source_provenance_descriptor,
+                &package.limitations_descriptor,
+            ]
+            .into_iter()
+            .map(|descriptor| descriptor.member_path.clone()),
+        );
+    }
+    Ok(())
 }
 
 fn validate_member_descriptors(
@@ -1058,8 +1219,10 @@ fn raw_archive_profile(
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
     let profile_digest = raw_profile_digest(manifest, profile_fields)?;
+    raw_profile_support_members(profile_fields, members)?;
     let registry = raw_registry_and_packages(profile_fields, members, mode)?;
     let expected_results = raw_expected_results(&manifest[5], profile_fields, members, mode)?;
+    raw_member_closure(profile_fields, &manifest[5], members)?;
     Ok(RawReleaseArchiveSummary {
         profile_digest,
         claim_layer,
@@ -1069,6 +1232,101 @@ fn raw_archive_profile(
         required_providers: registry.required_providers,
         expected_results,
     })
+}
+
+fn raw_profile_support_members(
+    profile: &[Value],
+    members: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    let bindings = [
+        (NORMATIVE_SPEC_PATH, 3, 5),
+        (EXECUTION_MATRIX_PATH, 11, 6),
+        (PROFILE_SCHEMA_PATH, 4, 13),
+        (LIMITATIONS_PATH, 9, 14),
+        (PROVENANCE_PATH, 8, 15),
+    ];
+    for (path, role, profile_field) in bindings {
+        let member = raw_member(members, path, role)?;
+        let member_digest = *blake3::hash(bytes(&member[1])?).as_bytes();
+        if member_digest != digest::<32>(&profile[profile_field])? {
+            return Err(BundleContractErrorV1::MemberDigestMismatch);
+        }
+    }
+    raw_member(members, AUTHORITY_INVENTORY_PATH, 10).map(|_| ())
+}
+
+fn raw_member_closure(
+    profile: &[Value],
+    expected: &Value,
+    members: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    let mut declared = [
+        PROFILE_PATH,
+        NORMATIVE_SPEC_PATH,
+        EXECUTION_MATRIX_PATH,
+        AUTHORITY_INVENTORY_PATH,
+        PROFILE_SCHEMA_PATH,
+        LIMITATIONS_PATH,
+        PROVENANCE_PATH,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    let binding = array(&profile[8], 2)?;
+    declared.insert(raw_descriptor_path(&binding[0])?.to_owned());
+    for fixture in array_values(&profile[9])? {
+        let fields = array(fixture, 24)?;
+        declared.insert(raw_descriptor_path(&fields[8])?.to_owned());
+        declared.insert(raw_descriptor_path(&fields[9])?.to_owned());
+        for auxiliary in array_values(&fields[10])? {
+            declared.insert(raw_descriptor_path(auxiliary)?.to_owned());
+        }
+        let oracle = array(&fields[11], 4)?;
+        if uint(&oracle[0])? == 0 {
+            declared.insert(raw_descriptor_path(&oracle[1])?.to_owned());
+        }
+    }
+    for record in array_values(expected)? {
+        declared.insert(text(&array(record, 6)?[4])?.to_owned());
+    }
+    raw_declare_provider_members(members, &mut declared)?;
+    let member_paths = members
+        .iter()
+        .map(|member| text(&array(member, 3)?[0]).map(str::to_owned))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if member_paths.len() == members.len() && member_paths == declared {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::UndeclaredMember)
+    }
+}
+
+fn raw_declare_provider_members(
+    members: &[Value],
+    declared: &mut BTreeSet<String>,
+) -> Result<(), BundleContractErrorV1> {
+    let registry_member = raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12)?;
+    let registry = decode(bytes(&registry_member[1])?)?;
+    let registry_fields = array(&registry, 4)?;
+    for provider in array_values(&registry_fields[2])? {
+        let provider_fields = array(provider, 7)?;
+        let package_path = raw_descriptor_path(&provider_fields[6])?;
+        declared.insert(package_path.to_owned());
+        let package_member = raw_member(members, package_path, 13)?;
+        let package = decode(bytes(&package_member[1])?)?;
+        let package_fields = array(&package, 12)?;
+        for schema in array_values(&package_fields[5])? {
+            declared.insert(raw_descriptor_path(&array(schema, 2)?[1])?.to_owned());
+        }
+        for descriptor in &package_fields[6..=10] {
+            declared.insert(raw_descriptor_path(descriptor)?.to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn raw_descriptor_path(value: &Value) -> Result<&str, BundleContractErrorV1> {
+    text(&array(value, 4)?[0])
 }
 
 fn raw_profile_digest(
@@ -2540,7 +2798,9 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
             0 | 1 => Ok(()),
             7 if matches!(initial & 0x1f, 20..=22) => Ok(()),
             2 | 3 => {
-                if major == 2 && length > MAX_CONFORMANCE_MEMBER_BYTES_V1 {
+                if (major == 2 && length > MAX_CONFORMANCE_MEMBER_BYTES_V1)
+                    || (major == 3 && length > MAX_CONFORMANCE_TEXT_BYTES_V1)
+                {
                     return Err(BundleContractErrorV1::MemberOutOfBounds);
                 }
                 let count = usize::try_from(length).unwrap_or(usize::MAX);

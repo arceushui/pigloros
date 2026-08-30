@@ -967,10 +967,10 @@ fn profile_from_catalog(
                 layer.profile_record,
             ),
         },
-        fixture_contract_policy_digest: labeled_digest(
-            "PiglorOS.FixtureContractPolicy.v1",
-            layer.profile_record,
-        ),
+        fixture_contract_policy_digest: *blake3::hash(include_bytes!(
+            "../../../../fixtures/conformance/support/schema-cpf1-v1.cddl"
+        ))
+        .as_bytes(),
         limitations_digest: context.limitations_digest,
         provenance_digest: context.provenance_digest,
         previous_profile_digest: None,

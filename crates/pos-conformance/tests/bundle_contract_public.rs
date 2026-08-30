@@ -48,6 +48,7 @@ const PROVENANCE_BYTES: &[u8] = br#"{"source":"public"}"#;
 const LIMITATIONS_BYTES: &[u8] = b"# Limitations\n";
 const NORMATIVE_BYTES: &[u8] = b"normative contract";
 const MATRIX_BYTES: &[u8] = b"execution matrix";
+const PROFILE_SCHEMA_BYTES: &[u8] = b"cpf1 schema";
 const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
 const PAYLOAD_BYTES: &[u8] = b"public fixture payload";
 
@@ -313,7 +314,7 @@ fn current_profile(
             trust_policy_snapshot_digest: digest(54),
             requirements_digest: digest(55),
         },
-        fixture_contract_policy_digest: digest(56),
+        fixture_contract_policy_digest: *blake3::hash(PROFILE_SCHEMA_BYTES).as_bytes(),
         limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
         provenance_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
         previous_profile_digest: None,
@@ -403,6 +404,11 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
             "support/limitations.md",
             LIMITATIONS_BYTES.to_vec(),
             BundleMemberRoleV1::Limitations,
+        ),
+        BundleMemberV1::supporting(
+            "support/schema-cpf1-v1.cddl",
+            PROFILE_SCHEMA_BYTES.to_vec(),
+            BundleMemberRoleV1::Schema,
         ),
         BundleMemberV1::authority_inventory(b"authority inventory".to_vec()),
         BundleMemberV1::execution_matrix(MATRIX_BYTES.to_vec()),
@@ -1735,6 +1741,57 @@ fn typed_bundle_rejects_undeclared_provider_package_member() -> TestResult {
     assert_eq!(
         bundle.validate(),
         Err(BundleContractErrorV1::UndeclaredMember)
+    );
+    Ok(())
+}
+
+#[test]
+fn typed_bundle_rejects_undeclared_non_provider_member() -> TestResult {
+    let mut bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let member = BundleMemberV1::supporting(
+        "support/undeclared-notice.txt",
+        b"undeclared".to_vec(),
+        BundleMemberRoleV1::Notice,
+    );
+    bundle.manifest.members.push(BundleMemberDescriptorV1 {
+        path: member.path.clone(),
+        size_bytes: u64::try_from(member.bytes.len())?,
+        digest: member.digest,
+        role: member.role,
+    });
+    bundle.members.push(member);
+    bundle
+        .members
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    bundle.manifest.members.sort();
+    assert_eq!(
+        bundle.validate(),
+        Err(BundleContractErrorV1::UndeclaredMember)
+    );
+    Ok(())
+}
+
+#[test]
+fn typed_bundle_binds_profile_authority_digests_to_members() -> TestResult {
+    let mut bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let member = bundle
+        .members
+        .iter_mut()
+        .find(|member| member.path == "support/normative-requirements.md")
+        .ok_or("normative specification member is absent")?;
+    member.bytes.push(b'!');
+    member.digest = *blake3::hash(&member.bytes).as_bytes();
+    let descriptor = bundle
+        .manifest
+        .members
+        .iter_mut()
+        .find(|descriptor| descriptor.path == member.path)
+        .ok_or("normative specification descriptor is absent")?;
+    descriptor.size_bytes = u64::try_from(member.bytes.len())?;
+    descriptor.digest = member.digest;
+    assert_eq!(
+        bundle.validate(),
+        Err(BundleContractErrorV1::MemberDigestMismatch)
     );
     Ok(())
 }
@@ -3825,6 +3882,12 @@ fn independent_verifier_preflights_resource_bounds_before_decoding() {
     let oversized_byte_string = [0x5a, 0x04, 0x00, 0x00, 0x01];
     assert_eq!(
         verify_archive_independently(&oversized_byte_string),
+        Err(BundleContractErrorV1::MemberOutOfBounds)
+    );
+
+    let oversized_text_string = [0x7a, 0x00, 0x00, 0x02, 0x01];
+    assert_eq!(
+        verify_archive_independently(&oversized_text_string),
         Err(BundleContractErrorV1::MemberOutOfBounds)
     );
 
