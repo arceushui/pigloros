@@ -12583,7 +12583,8 @@ pub(super) mod key_registry_coverage {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn erasure_state_resolution_error_regions_are_instrumented() {
-        let state_digest = erasure_record().state().state_digest();
+        let record = erasure_record();
+        let state_digest = record.state().state_digest();
         let state_query_error = tests::new_store();
         fixture(
             state_query_error
@@ -12606,6 +12607,22 @@ pub(super) mod key_registry_coverage {
         assert!(malformed_state_metadata
             .resolve_state(state_digest)
             .is_err());
+
+        let mismatched_state_digest = erasure_reference(90);
+        let mismatched_state = tests::new_store();
+        fixture(mismatched_state.conn.execute(
+            "INSERT INTO erasure_states
+             (state_digest, request_digest, state_cbor) VALUES (?1, ?2, ?3)",
+            params![
+                mismatched_state_digest.digest().as_slice(),
+                record.request().reference().digest().as_slice(),
+                fixture(record.state().to_canonical_cbor())
+            ],
+        ));
+        assert_eq!(
+            mismatched_state.resolve_state(mismatched_state_digest),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -12634,6 +12651,26 @@ pub(super) mod key_registry_coverage {
             params![request.digest().as_slice(), record_bytes],
         ));
         assert!(malformed_record_metadata.load_record(request).is_err());
+
+        for (stored_request, stored_state) in [
+            (request, erasure_reference(90)),
+            (erasure_reference(91), record.state().state_digest()),
+        ] {
+            let mismatched_record = tests::new_store();
+            fixture(mismatched_record.conn.execute(
+                "INSERT INTO erasure_records
+                 (request_digest, state_digest, record_cbor) VALUES (?1, ?2, ?3)",
+                params![
+                    stored_request.digest().as_slice(),
+                    stored_state.digest().as_slice(),
+                    record_bytes.as_slice()
+                ],
+            ));
+            assert_eq!(
+                mismatched_record.load_record(stored_request),
+                Err(ErasureErrorV1::ProvenanceMissing)
+            );
+        }
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -12688,6 +12725,39 @@ pub(super) mod key_registry_coverage {
         assert!(malformed_state_metadata_on_commit
             .commit_record(record)
             .is_err());
+
+        let record = erasure_record();
+        let state_digest = record.state().state_digest();
+        let mut missing_state = tests::new_store();
+        fixture(missing_state.commit_record(record.clone()));
+        fixture(missing_state.conn.execute(
+            "DELETE FROM erasure_states WHERE state_digest = ?1",
+            params![state_digest.digest().as_slice()],
+        ));
+        assert_eq!(
+            missing_state.commit_record(record.clone()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        for (request_digest, state_cbor) in [
+            (record.request().reference().digest().to_vec(), vec![0_u8]),
+            (
+                erasure_reference(92).digest().to_vec(),
+                fixture(record.state().to_canonical_cbor()),
+            ),
+        ] {
+            let mut corrupt_state = tests::new_store();
+            fixture(corrupt_state.commit_record(record.clone()));
+            fixture(corrupt_state.conn.execute(
+                "UPDATE erasure_states
+                 SET request_digest = ?1, state_cbor = ?2 WHERE state_digest = ?3",
+                params![request_digest, state_cbor, state_digest.digest().as_slice()],
+            ));
+            assert_eq!(
+                corrupt_state.commit_record(record.clone()),
+                Err(ErasureErrorV1::ProvenanceMissing)
+            );
+        }
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -12752,6 +12822,21 @@ pub(super) mod key_registry_coverage {
             &next,
         )
         .is_err());
+
+        let mismatched_predecessor_request = tests::new_store();
+        fixture(mismatched_predecessor_request.conn.execute(
+            "INSERT INTO erasure_states
+             (state_digest, request_digest, state_cbor) VALUES (?1, ?2, ?3)",
+            params![
+                predecessor_digest.digest().as_slice(),
+                erasure_reference(90).digest().as_slice(),
+                predecessor_bytes.as_slice()
+            ],
+        ));
+        assert_eq!(
+            validate_erasure_predecessor(&mismatched_predecessor_request.conn, next_request, &next,),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
 
         let malformed_predecessor_state = tests::new_store();
         fixture(malformed_predecessor_state.conn.execute(

@@ -5309,4 +5309,105 @@ mod coverage_entrypoints {
         assert!(!second.more_may_remain);
         assert_eq!(ok(store.pending_append_identity_cleanup()), None);
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn erasure_reference(value: u8) -> ErasureReferenceV1 {
+        ErasureReferenceV1::from_digest([value; 32])
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn erasure_record() -> ErasureCoordinatorRecordV1 {
+        let request = ok(pos_core::ErasureRequestV1::new(
+            pos_core::ErasureRequestInputV1 {
+                request: erasure_reference(1),
+                subject: erasure_reference(2),
+                scope: pos_core::ErasureScopeV1::PrivateSubjectData,
+                selectors: vec![erasure_reference(3)],
+                requester: erasure_reference(4),
+                authorization: erasure_reference(5),
+                policy: erasure_reference(6),
+                request_position: 10,
+                horizon_position: 20,
+                provenance: erasure_reference(7),
+            },
+        ));
+        let state = ok(pos_core::ErasureStateV1::submitted(
+            request.reference(),
+            erasure_reference(8),
+            erasure_reference(9),
+        ));
+        ok(ErasureCoordinatorRecordV1::from_parts(
+            pos_core::ErasureCoordinatorRecordPartsV1 {
+                request,
+                state,
+                reserved_targets: Vec::new(),
+                targets: Vec::new(),
+                acknowledgements: Vec::new(),
+                receipt: None,
+                receipt_input: None,
+                authorize_provenance: None,
+                freeze_provenance: None,
+                freeze_admission: None,
+                dispatch_provenance: None,
+                supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
+            },
+            erasure_reference(8),
+        ))
+    }
+
+    #[test]
+    fn memory_erasure_corruption_boundaries_are_instrumented() {
+        let record = erasure_record();
+        let request = record.request().reference();
+        let state_digest = record.state().state_digest();
+        let state_bytes = ok(record.state().to_canonical_cbor());
+        let record_bytes = ok(record.to_canonical_cbor());
+
+        let mismatched_state_digest = erasure_reference(90);
+        let mut mismatched_state = MemoryStore::new();
+        mismatched_state
+            .erasure_states
+            .insert(mismatched_state_digest, state_bytes);
+        assert_eq!(
+            mismatched_state.resolve_state(mismatched_state_digest),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mismatched_request = erasure_reference(91);
+        let mut mismatched_record = MemoryStore::new();
+        mismatched_record
+            .erasure_records
+            .insert(mismatched_request, record_bytes.clone());
+        assert_eq!(
+            mismatched_record.load_record(mismatched_request),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut corrupt_state = MemoryStore::new();
+        corrupt_state
+            .erasure_states
+            .insert(state_digest, vec![0_u8]);
+        assert_eq!(
+            corrupt_state.commit_record(record.clone()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut missing_state = MemoryStore::new();
+        missing_state.erasure_records.insert(request, record_bytes);
+        assert_eq!(
+            missing_state.commit_record(record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+
+    #[test]
+    fn memory_admin_operations_reject_geographic_timelines() {
+        let mut store = MemoryStore::new();
+        let timeline = ok(store.create_timeline("coverage-geographic-admin"));
+        store.geographic_timelines.insert(timeline.id());
+        assert!(matches!(
+            store.delete_timeline(timeline.id()),
+            Err(CoreError::TimelineNotFound(id)) if id == timeline.id()
+        ));
+    }
 }

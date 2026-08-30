@@ -8,7 +8,8 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
     ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
-    ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureFreezeAdmissionV1,
+    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeAdmissionV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
     ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
     ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
@@ -119,6 +120,93 @@ fn record_with_supporting_provenance() -> Result<ErasureCoordinatorRecordV1, Era
         },
         reference(8),
     )
+}
+
+fn rejected_and_corrected_records() -> Result<
+    (
+        ErasureCoordinatorRecordV1,
+        ErasureCoordinatorRecordV1,
+        ErasureCoordinatorRecordV1,
+    ),
+    ErasureErrorV1,
+> {
+    let source = Rc::new(RefCell::new(MemoryStore::new()));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        CoordinatorHost {
+            store: Rc::clone(&source),
+            targets: Vec::new(),
+        },
+        reference(8),
+    );
+    let request = request()?;
+    let request_digest = request.reference();
+    coordinator.submit(request, reference(7))?;
+    let submitted = source
+        .borrow()
+        .load_record(request_digest)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    coordinator.reject(reference(1), reference(30))?;
+    let predecessor = source
+        .borrow()
+        .load_record(request_digest)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: predecessor.request().reference(),
+        rejected_terminal_state: predecessor.state().state_digest(),
+        correction_reason: reference(31),
+        authorization_provenance: reference(32),
+    })?;
+    let request = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(40),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 11,
+        horizon_position: 20,
+        provenance: correction.reference(),
+    })?;
+    let state = ErasureStateV1::submitted(request.reference(), reference(8), reference(33))?;
+    let supporting_records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        correction_provenance: Some(correction),
+        ..ErasureSupportingRecordsInputV1::default()
+    })?;
+    let corrected = ErasureCoordinatorRecordV1::from_parts(
+        ErasureCoordinatorRecordPartsV1 {
+            request,
+            state,
+            reserved_targets: Vec::new(),
+            targets: Vec::new(),
+            acknowledgements: Vec::new(),
+            receipt: None,
+            receipt_input: None,
+            authorize_provenance: None,
+            freeze_provenance: None,
+            freeze_admission: None,
+            dispatch_provenance: None,
+            supporting_records,
+        },
+        reference(8),
+    )?;
+    Ok((submitted, predecessor, corrected))
+}
+
+fn assert_correction_chain<S: ErasurePersistencePortV1>(
+    mut store: S,
+) -> Result<(), ErasureErrorV1> {
+    let (submitted, predecessor, corrected) = rejected_and_corrected_records()?;
+    let corrected_request = corrected.request().reference();
+    assert_eq!(
+        store.commit_record(corrected.clone()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    store.commit_record(submitted)?;
+    store.commit_record(predecessor)?;
+    store.commit_record(corrected.clone())?;
+    assert_eq!(store.load_record(corrected_request)?, Some(corrected));
+    Ok(())
 }
 
 fn with_replacement_receipt(
@@ -487,6 +575,11 @@ fn memory_erasure_persistence_recovers_supporting_records() -> Result<(), Erasur
 }
 
 #[test]
+fn memory_erasure_persistence_validates_correction_predecessors() -> Result<(), ErasureErrorV1> {
+    assert_correction_chain(MemoryStore::new())
+}
+
+#[test]
 fn memory_erasure_persistence_commits_canonical_acknowledgement_and_receipt_state(
 ) -> Result<(), ErasureErrorV1> {
     let (store, receipt) = run_full_lifecycle(MemoryStore::new())?;
@@ -640,6 +733,13 @@ fn sqlite_erasure_persistence_matches_memory_contract() -> Result<(), ErasureErr
     let mut store =
         SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
     assert_public_contract(&mut store)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_persistence_validates_correction_predecessors() -> Result<(), ErasureErrorV1> {
+    let store = SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    assert_correction_chain(store)
 }
 
 #[cfg(feature = "sqlite")]
