@@ -1169,6 +1169,35 @@ fn public_request_validation_rejects_each_closed_invalid_field(
 }
 
 #[test]
+fn public_request_rejects_invalid_selected_profile_authorities() -> TestResult {
+    let profile = profile_for_digest();
+    let request = request_for_profile(&profile)?;
+
+    let mut invalid_profile = profile.clone();
+    invalid_profile.evaluator_protocol.protocol_id.clear();
+    invalid_profile.profile_digest = invalid_profile.digest();
+    assert_eq!(
+        request.validate_against_profile(&invalid_profile),
+        Err(ConformanceContractError::ProvenanceMissing)
+    );
+
+    let mut invalid_caps = profile.evaluator_protocol.hard_caps;
+    invalid_caps.max_cases = 0;
+    assert_eq!(
+        request.validate_with_hard_caps(&invalid_caps),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+
+    let mut invalid_protocol = profile.evaluator_protocol;
+    invalid_protocol.protocol_id.clear();
+    assert_eq!(
+        request.validate_with_protocol(&invalid_protocol),
+        Err(ConformanceContractError::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_fixture_oracles_cover_failure_divergence_and_claim_rejection(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let profile = profile_for_digest();
