@@ -4131,11 +4131,9 @@ impl ErasureCoordinatorRecordV1 {
         self.supporting_records
             .retry_admissions()
             .iter()
-            .filter(|admission| {
-                admission.reference() == provenance.attempt()
-                    && admission.policy() == provenance.policy()
-                    && admission.trust() == provenance.trust()
-            })
+            .filter(|admission| admission.reference() == provenance.attempt())
+            .filter(|admission| admission.policy() == provenance.policy())
+            .filter(|admission| admission.trust() == provenance.trust())
             .any(|admission| {
                 admission
                     .unresolved_obligations()
