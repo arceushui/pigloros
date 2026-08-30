@@ -287,7 +287,7 @@ struct SupportArtifactDeclaration {
     provider_package: bool,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, serde::Deserialize)]
+#[derive(Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum SupportArtifactRole {
     NormativeSpecification,
@@ -1928,30 +1928,21 @@ fn emit_materialization_assets(
         )?;
     }
     generated.push_str("];\n");
-    let provider_roles = [
-        SupportArtifactRole::Licence,
-        SupportArtifactRole::Notice,
-        SupportArtifactRole::Sbom,
-        SupportArtifactRole::Provenance,
-        SupportArtifactRole::Limitations,
+    let provider_paths = [
+        "support/LICENSE",
+        "support/NOTICE",
+        "support/sbom.json",
+        "support/source-provenance.json",
+        "support/limitations.md",
     ];
-    if support
-        .artifacts
+    let provider_support = provider_paths
         .iter()
-        .filter(|artifact| artifact.provider_package)
-        .count()
-        != provider_roles.len()
-    {
-        return Err(invalid_data("provider package support set is not closed").into());
-    }
-    let provider_support = provider_roles
-        .iter()
-        .map(|role| {
+        .map(|path| {
             support
                 .artifacts
                 .iter()
-                .find(|artifact| artifact.provider_package && artifact.role == *role)
-                .ok_or_else(|| invalid_data("provider package support roles are incomplete"))
+                .find(|artifact| artifact.provider_package && artifact.path == *path)
+                .ok_or_else(|| invalid_data("provider package descriptor support is incomplete"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     writeln!(
