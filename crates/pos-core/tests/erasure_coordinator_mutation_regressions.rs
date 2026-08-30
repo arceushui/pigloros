@@ -373,6 +373,14 @@ struct PortState {
     dispatch_error: Option<ErasureErrorV1>,
     acknowledgement_error: Option<ErasureErrorV1>,
     receipt_error: Option<ErasureErrorV1>,
+    load_error: Option<ErasureErrorV1>,
+    commit_error: Option<ErasureErrorV1>,
+    scope_extension_error: Option<ErasureErrorV1>,
+    scope_cas_error: Option<ErasureErrorV1>,
+    administrative_resolution_error: Option<ErasureErrorV1>,
+    administrative_cas_error: Option<ErasureErrorV1>,
+    freeze_admission_request: Option<ErasureReferenceV1>,
+    freeze_rejection_authorization: Option<ErasureReferenceV1>,
 }
 
 struct SharedPort {
@@ -399,6 +407,9 @@ impl ErasurePersistencePortV1 for SharedPort {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
+        if let Some(error) = self.state.borrow().load_error {
+            return Err(error);
+        }
         Ok(self
             .state
             .borrow()
@@ -416,6 +427,9 @@ impl ErasurePersistencePortV1 for SharedPort {
         &mut self,
         records: &[ErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
+        if let Some(error) = self.state.borrow().commit_error {
+            return Err(error);
+        }
         let mut state = self.state.borrow_mut();
         let mut staged_records = state.records.clone();
         let mut staged_states = state.states.clone();
@@ -454,6 +468,9 @@ impl ErasurePersistencePortV1 for SharedPort {
         expected_ledger: ErasureReferenceV1,
         record: ErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
+        if let Some(error) = self.state.borrow().scope_cas_error {
+            return Err(error);
+        }
         if self
             .load_record(request)?
             .and_then(|current| current.scope_extension_ledger())
@@ -470,6 +487,9 @@ impl ErasurePersistencePortV1 for SharedPort {
         expected_head: Option<ErasureReferenceV1>,
         record: ErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
+        if let Some(error) = self.state.borrow().administrative_cas_error {
+            return Err(error);
+        }
         if self
             .load_record(request)?
             .and_then(|current| current.administrative_resolution_head())
@@ -512,7 +532,9 @@ impl ErasureCoordinatorPortV1 for SharedPort {
         if let Some(error) = state.freeze_rejection {
             return ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
                 request,
-                authorization_provenance: reference(9),
+                authorization_provenance: state
+                    .freeze_rejection_authorization
+                    .unwrap_or(reference(9)),
                 evidence: reference(90),
                 error,
             })
@@ -526,7 +548,7 @@ impl ErasureCoordinatorPortV1 for SharedPort {
             return Err(error);
         }
         atomic_admission(
-            request,
+            state.freeze_admission_request.unwrap_or(request),
             state.targets.clone(),
             state.mismatched_freeze_closure,
             state.lineage_rule,
@@ -564,13 +586,19 @@ impl ErasureCoordinatorPortV1 for SharedPort {
         &self,
         _extension: &pos_core::ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        self.state
+            .borrow()
+            .scope_extension_error
+            .map_or(Ok(()), Err)
     }
     fn admit_administrative_resolution(
         &self,
         _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        self.state
+            .borrow()
+            .administrative_resolution_error
+            .map_or(Ok(()), Err)
     }
 }
 
@@ -596,6 +624,14 @@ fn submitted_fixture(targets: Vec<ErasureRequiredTargetV1>) -> Result<Fixture, E
         dispatch_error: None,
         acknowledgement_error: None,
         receipt_error: None,
+        load_error: None,
+        commit_error: None,
+        scope_extension_error: None,
+        scope_cas_error: None,
+        administrative_resolution_error: None,
+        administrative_cas_error: None,
+        freeze_admission_request: None,
+        freeze_rejection_authorization: None,
     }));
     let mut machine = Machine::new(
         SharedPort {
@@ -1676,6 +1712,33 @@ fn freeze_preserves_closed_port_errors_without_persisting_a_rejection() -> Resul
 }
 
 #[test]
+fn freeze_rejects_host_evidence_bound_to_another_request_or_authorization(
+) -> Result<(), ErasureErrorV1> {
+    let mut wrong_request = authorized_fixture(vec![target(10)])?;
+    wrong_request.state.borrow_mut().freeze_admission_request = Some(reference(99));
+    assert_eq!(
+        wrong_request
+            .machine
+            .freeze_inventory(wrong_request.request, freeze_transition()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut wrong_authorization = authorized_fixture(vec![target(10)])?;
+    {
+        let mut state = wrong_authorization.state.borrow_mut();
+        state.freeze_rejection = Some(ErasureErrorV1::ScopeInvalid);
+        state.freeze_rejection_authorization = Some(reference(99));
+    }
+    assert_eq!(
+        wrong_authorization
+            .machine
+            .freeze_inventory(wrong_authorization.request, freeze_transition()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn freeze_retry_is_idempotent_only_for_the_freeze_transition() -> Result<(), ErasureErrorV1> {
     let mut fixture = frozen_fixture(vec![target(10)])?;
     assert_eq!(
@@ -1729,6 +1792,32 @@ fn dispatch_attempt_requires_the_current_request_ordinal_and_receipt() -> Result
             .machine
             .dispatch_attempt(partial.request, &wrong_source),
         Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn dispatch_attempt_retries_exact_admission_and_rejects_another_closure(
+) -> Result<(), ErasureErrorV1> {
+    let frozen_target = target(10);
+    let mut fixture = frozen_fixture(vec![frozen_target])?;
+    let admission = retry_admission(fixture.request, frozen_target, 0, None, 20)?;
+    fixture
+        .machine
+        .dispatch_attempt(fixture.request, &admission)?;
+    assert_eq!(
+        fixture
+            .machine
+            .dispatch_attempt(fixture.request, &admission)?
+            .lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+
+    let mut another = frozen_fixture(vec![frozen_target])?;
+    let outside = retry_admission(another.request, target(20), 0, None, 20)?;
+    assert_eq!(
+        another.machine.dispatch_attempt(another.request, &outside),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }
@@ -1846,6 +1935,87 @@ fn finalization_allows_partial_failure_after_the_attempt_deadline() -> Result<()
             )?
             .lifecycle(),
         ErasureLifecycleV1::PartialFailure
+    );
+    Ok(())
+}
+
+#[test]
+fn finalization_requires_deadline_or_administrative_closure() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let mut early = frozen_fixture(vec![target])?;
+    let admission = retry_admission(early.request, target, 0, None, 20)?;
+    early.machine.dispatch_attempt(early.request, &admission)?;
+    let negative = acknowledgement_for(
+        early.request,
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Negative,
+        reference(96),
+    )?;
+    early.machine.acknowledge(early.request, negative)?;
+    assert_eq!(
+        early.machine.finalize(
+            early.request,
+            receipt_input(
+                early.request,
+                target,
+                negative,
+                ErasureLifecycleV1::PartialFailure,
+                10,
+            ),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let record = latest_record(&early.state, early.request)?;
+    let resolution = administrative_resolution(&record)?;
+    early
+        .machine
+        .resolve_administratively(early.request, resolution)?;
+    assert_eq!(
+        early
+            .machine
+            .finalize(
+                early.request,
+                receipt_input(
+                    early.request,
+                    target,
+                    negative,
+                    ErasureLifecycleV1::PartialFailure,
+                    10,
+                ),
+            )?
+            .lifecycle(),
+        ErasureLifecycleV1::PartialFailure
+    );
+    Ok(())
+}
+
+#[test]
+fn finalization_rejects_inventory_outside_the_frozen_obligations() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let mut fixture = awaiting_fixture(vec![target])?;
+    let acknowledgement = acknowledgement_for(
+        fixture.request,
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+        reference(95),
+    )?;
+    fixture
+        .machine
+        .acknowledge(fixture.request, acknowledgement)?;
+    let mut input = receipt_input(
+        fixture.request,
+        target,
+        acknowledgement,
+        ErasureLifecycleV1::Complete,
+        11,
+    );
+    input.inventories.artifacts[0].target = target(20);
+    assert_eq!(
+        fixture.machine.finalize(fixture.request, input),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }
@@ -1969,6 +2139,90 @@ fn coordinator_cas_methods_advance_and_retry_exact_evidence() -> Result<(), Eras
 }
 
 #[test]
+fn coordinator_propagates_durable_and_cas_port_failures() -> Result<(), ErasureErrorV1> {
+    let mut unavailable = submitted_fixture(vec![target(10)])?;
+    unavailable.state.borrow_mut().load_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        unavailable
+            .machine
+            .authorize(unavailable.request, reference(9)),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut uncommitted = submitted_fixture(vec![target(10)])?;
+    uncommitted.state.borrow_mut().commit_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        uncommitted
+            .machine
+            .authorize(uncommitted.request, reference(9)),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut extension_fixture = authorized_fixture(vec![target(10)])?;
+    extension_fixture.state.borrow_mut().lineage_rule = Some(reference(55));
+    extension_fixture
+        .machine
+        .freeze_inventory(extension_fixture.request, freeze_transition())?;
+    let record = latest_record(&extension_fixture.state, extension_fixture.request)?;
+    let scope = record
+        .supporting_records()
+        .scope_commitment()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: extension_fixture.request,
+        scope_commitment: scope.reference(),
+        fork: reference(56),
+        lineage_rule: reference(55),
+        predecessor_extension: None,
+        admission_provenance: reference(57),
+    })?;
+    extension_fixture.state.borrow_mut().scope_extension_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        extension_fixture
+            .machine
+            .append_scope_extension(extension_fixture.request, extension),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    extension_fixture.state.borrow_mut().scope_extension_error = None;
+    extension_fixture.state.borrow_mut().scope_cas_error = Some(ErasureErrorV1::PolicyConflict);
+    assert_eq!(
+        extension_fixture
+            .machine
+            .append_scope_extension(extension_fixture.request, extension),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut resolution_fixture = frozen_fixture(vec![target(10)])?;
+    let record = latest_record(&resolution_fixture.state, resolution_fixture.request)?;
+    let resolution = administrative_resolution(&record)?;
+    resolution_fixture
+        .state
+        .borrow_mut()
+        .administrative_resolution_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        resolution_fixture
+            .machine
+            .resolve_administratively(resolution_fixture.request, resolution.clone()),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    resolution_fixture
+        .state
+        .borrow_mut()
+        .administrative_resolution_error = None;
+    resolution_fixture
+        .state
+        .borrow_mut()
+        .administrative_cas_error = Some(ErasureErrorV1::PolicyConflict);
+    assert_eq!(
+        resolution_fixture
+            .machine
+            .resolve_administratively(resolution_fixture.request, resolution),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
 fn coordinator_trait_forwards_public_lifecycle_operations() -> Result<(), ErasureErrorV1> {
     let mut submitted = submitted_fixture(vec![target(10)])?;
     let second_request = request_with(reference(40), reference(41))?;
@@ -2020,8 +2274,43 @@ fn coordinator_trait_submits_and_retries_a_corrected_request() -> Result<(), Era
         corrected.clone(),
         correction.clone(),
     )?;
-    let retry = ErasureCoordinator::submit_corrected(&mut fixture.machine, corrected, correction)?;
+    let retry =
+        ErasureCoordinator::submit_corrected(&mut fixture.machine, corrected, correction.clone())?;
     assert_eq!(retry.request(), corrected_reference);
     assert_eq!(retry.lifecycle(), ErasureLifecycleV1::Submitted);
+
+    let conflicting = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: corrected_reference,
+        subject: reference(99),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 9,
+        horizon_position: 10,
+        provenance: correction.reference(),
+    })?;
+    assert_eq!(
+        fixture
+            .machine
+            .submit_corrected(conflicting, correction.clone()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let wrong_provenance = request_with(reference(41), reference(42))?;
+    assert_eq!(
+        fixture
+            .machine
+            .submit_corrected(wrong_provenance, correction.clone()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    fixture.state.borrow_mut().load_error = Some(ErasureErrorV1::Unauthorized);
+    let unavailable = request_with(reference(42), correction.reference())?;
+    assert_eq!(
+        fixture.machine.submit_corrected(unavailable, correction),
+        Err(ErasureErrorV1::Unauthorized)
+    );
     Ok(())
 }
