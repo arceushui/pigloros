@@ -1564,7 +1564,7 @@ fn raw_fixture_oracle_relationships(
     Ok(())
 }
 
-fn raw_fixture_claim_relationship(
+const fn raw_fixture_claim_relationship(
     fixture: &RawFixtureSummary,
 ) -> Result<(), BundleContractErrorV1> {
     if fixture.replay == 4
@@ -2074,9 +2074,8 @@ fn raw_fixture_provider_bindings(
             let provider = providers
                 .iter()
                 .find(|candidate| {
-                    candidate.key == fixture.provider
-                        && candidate.claim_layer == fixture.claim_layer
-                        && candidate.adapter == fixture.adapter
+                    (&candidate.key, candidate.claim_layer, candidate.adapter)
+                        == (&fixture.provider, fixture.claim_layer, fixture.adapter)
                 })
                 .ok_or(BundleContractErrorV1::ProfileInvalid)?;
             raw_fixture_schema_binding(fixture, provider)
