@@ -755,7 +755,7 @@ fn run_partial_lifecycle<S: ErasurePersistencePortV1>(
             policy: reference(70),
             trust: reference(71),
             provenance: reference(72),
-            issue_position: 11,
+            issue_position: 20,
             signature: reference(73),
             receipt_digest: reference(74),
         },
@@ -882,7 +882,7 @@ fn memory_erasure_persistence_commits_intermediate_and_partial_receipt_atomicall
         ErasureLifecycleV1::PartialFailure
     );
     assert_eq!(record.receipt(), Some(&receipt));
-    assert_eq!(record.state().pending_owners(), &[reference(12)]);
+    assert_eq!(record.state().pending_owners(), &[reference(90)]);
     Ok(())
 }
 
