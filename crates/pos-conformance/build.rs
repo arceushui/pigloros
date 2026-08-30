@@ -1755,12 +1755,19 @@ fn emit_draft_authority(
              profile_id: &'static str,\n\
              semantic_version: &'static str,\n\
              network_allowed: bool,\n\
+             capability_ids: &'static [&'static str],\n\
              reproducibility_classes: &'static [u64],\n\
          }}\n\
          const DRAFT_EXECUTION_PROFILES: [DraftExecutionProfileSource; {}] = [",
         declaration.execution_profiles.len()
     )?;
     for profile in &declaration.execution_profiles {
+        let capabilities = profile
+            .capability_ids
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let classes = profile
             .reproducibility_classes
             .iter()
@@ -1771,10 +1778,11 @@ fn emit_draft_authority(
             .join(", ");
         writeln!(
             generated,
-            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, reproducibility_classes: &[{}] }},",
+            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}] }},",
             profile.profile_id,
             profile.semantic_version,
             profile.network_allowed,
+            capabilities,
             classes,
         )?;
     }
