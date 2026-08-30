@@ -1420,11 +1420,16 @@ fn divergence_key(value: &AllowedDivergenceV1) -> (DivergenceMismatchKindV1, &[u
     (value.classification, &value.first_coordinate)
 }
 
+fn encode_digest_value(value: &Value) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).map_or_else(|_| std::process::abort(), |()| bytes)
+}
+
 fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
     // A digest must never be computed over fallback bytes. The public digest
     // APIs cannot return an encoding error, so an impossible in-memory encoding
     // failure terminates rather than manufacturing a different identity.
-    let bytes = crate::strict_codec::encode_value_infallible(value);
+    let bytes = encode_digest_value(value);
     let mut source = Vec::with_capacity(domain.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
     source.push(0);
@@ -1433,7 +1438,7 @@ fn digest_bytes(domain: &[u8], value: &Value) -> [u8; 32] {
 }
 
 fn contract_digest(domain: &[u8], value: &Value) -> [u8; 32] {
-    let bytes = crate::strict_codec::encode_value_infallible(value);
+    let bytes = encode_digest_value(value);
     let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes();
     let mut source = Vec::with_capacity(domain.len() + length.len() + bytes.len() + 1);
     source.extend_from_slice(domain);
