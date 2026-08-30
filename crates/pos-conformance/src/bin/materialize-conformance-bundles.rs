@@ -118,56 +118,6 @@ const EXECUTION_MODES: [pos_conformance::ExecutionModeV1; 2] = [
 // deployment trust root and is used solely to make Draft evidence reproducible.
 const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DraftAuthorityDeclaration {
-    #[serde(rename = "magic")]
-    _magic: String,
-    #[serde(rename = "version")]
-    _version: u64,
-    #[serde(rename = "lifecycle")]
-    _lifecycle: String,
-    #[serde(rename = "authority_kind")]
-    _authority_kind: String,
-    trust_policy_id: String,
-    trust_policy_epoch: u64,
-    effective_timeline_position: u64,
-    offline_valid_through: String,
-    fixture_authority_key_id: String,
-    #[serde(rename = "fixture_authority_public_key_hex")]
-    _fixture_authority_public_key_hex: String,
-    execution_profiles: Vec<DraftExecutionProfileDeclaration>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DraftExecutionProfileDeclaration {
-    profile_id: String,
-    semantic_version: String,
-    network_allowed: bool,
-    capability_ids: Vec<String>,
-    reproducibility_classes: Vec<DraftReproducibilityClass>,
-}
-
-#[derive(Clone, Copy, serde::Deserialize)]
-enum DraftReproducibilityClass {
-    ProfileRecomputation,
-    CrossProfileConformance,
-}
-
-impl DraftReproducibilityClass {
-    fn value(self) -> Value {
-        match self {
-            Self::ProfileRecomputation => Value::Integer(1_u64.into()),
-            Self::CrossProfileConformance => Value::Integer(2_u64.into()),
-        }
-    }
-}
-
-fn draft_authority() -> Result<DraftAuthorityDeclaration, Box<dyn Error>> {
-    serde_json::from_slice(MATERIALIZATION_DRAFT_AUTHORITY_DECLARATION_BYTES).map_err(Into::into)
-}
-
 fn authority_signing_key(expected_public_key: [u8; 32]) -> Result<SigningKey, Box<dyn Error>> {
     let key = SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES);
     if key.verifying_key().to_bytes() == expected_public_key {
@@ -185,9 +135,7 @@ fn cbor_bytes(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, Box<dyn Error>> {
-    let authority = draft_authority()?;
-    let declaration = authority
-        .execution_profiles
+    let declaration = DRAFT_EXECUTION_PROFILES
         .iter()
         .find(|candidate| candidate.profile_id == profile.name())
         .ok_or("Draft authority omits an execution profile")?;
@@ -195,21 +143,20 @@ fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, 
         .reproducibility_classes
         .iter()
         .copied()
-        .map(DraftReproducibilityClass::value)
+        .map(|code| Value::Integer(code.into()))
         .collect::<Vec<_>>();
     let fields = vec![
         Value::Text("EPF1".to_owned()),
         Value::Integer(1_u64.into()),
-        Value::Text(declaration.profile_id.clone()),
-        Value::Text(declaration.semantic_version.clone()),
+        Value::Text(declaration.profile_id.to_owned()),
+        Value::Text(declaration.semantic_version.to_owned()),
         Value::Array(reproducibility_classes),
         Value::Bool(declaration.network_allowed),
         Value::Array(
             declaration
                 .capability_ids
                 .iter()
-                .cloned()
-                .map(Value::Text)
+                .map(|capability| Value::Text((*capability).to_owned()))
                 .collect(),
         ),
         Value::Text("fixture-scheduler-v1".to_owned()),
@@ -229,20 +176,19 @@ fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, 
 }
 
 fn trust_policy_snapshot_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
-    let authority = draft_authority()?;
     let key = authority_signing_key(DRAFT_AUTHORITY_PUBLIC_KEY_BYTES)?;
     let fields = vec![
         Value::Text("TPS1".to_owned()),
         Value::Integer(1_u64.into()),
-        Value::Text(authority.trust_policy_id),
-        Value::Integer(authority.trust_policy_epoch.into()),
-        Value::Integer(authority.effective_timeline_position.into()),
-        Value::Text(authority.fixture_authority_key_id),
+        Value::Text(DRAFT_AUTHORITY_TRUST_POLICY_ID.to_owned()),
+        Value::Integer(DRAFT_AUTHORITY_TRUST_POLICY_EPOCH.into()),
+        Value::Integer(DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION.into()),
+        Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
         Value::Bytes(DRAFT_AUTHORITY_PUBLIC_KEY_BYTES.to_vec()),
         Value::Array(Vec::new()),
         Value::Array(Vec::new()),
         Value::Array(Vec::new()),
-        Value::Text(authority.offline_valid_through),
+        Value::Text(DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH.to_owned()),
         Value::Null,
     ];
     cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
@@ -272,7 +218,6 @@ fn release_admission_bytes(
     from: &FixtureProviderKeyV1,
     to: &FixtureProviderKeyV1,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let authority = draft_authority()?;
     let key = authority_signing_key(DRAFT_AUTHORITY_PUBLIC_KEY_BYTES)?;
     let fields = vec![
         Value::Text("RAD1".to_owned()),
@@ -284,7 +229,7 @@ fn release_admission_bytes(
         provider_key_value(from),
         provider_key_value(to),
         Value::Bool(false),
-        Value::Text(authority.fixture_authority_key_id),
+        Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
     ];
     cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
         let mut signed_fields = fields;
@@ -1319,10 +1264,7 @@ fn bundle_inputs_from_profile(
     inventory_bytes: &[u8],
     providers: &ProviderCatalog,
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
-    let execution_mode = match mode {
-        BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
-        BundleModeV1::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
-    };
+    let execution_mode = execution_mode(mode);
     let mut members = Vec::new();
     let mut expected_results = Vec::new();
     for source in &layer.fixtures {
@@ -1497,10 +1439,7 @@ fn append_draft_release_admissions(
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
 ) -> Result<(), Box<dyn Error>> {
-    let execution_mode = match mode {
-        BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
-        BundleModeV1::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
-    };
+    let execution_mode = execution_mode(mode);
     profile
         .fixtures
         .iter()
@@ -1537,6 +1476,13 @@ fn append_draft_release_admissions(
                 })
             })
         })
+}
+
+const fn execution_mode(mode: BundleModeV1) -> pos_conformance::ExecutionModeV1 {
+    match mode {
+        BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
+        BundleModeV1::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
+    }
 }
 
 fn verify_public_archive(

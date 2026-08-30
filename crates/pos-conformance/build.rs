@@ -329,10 +329,19 @@ struct DraftExecutionProfile {
     reproducibility_classes: Vec<DraftReproducibilityClass>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, Copy, Eq, PartialEq, serde::Deserialize)]
 enum DraftReproducibilityClass {
     ProfileRecomputation,
     CrossProfileConformance,
+}
+
+impl DraftReproducibilityClass {
+    const fn wire_code(self) -> u64 {
+        match self {
+            Self::ProfileRecomputation => 1,
+            Self::CrossProfileConformance => 2,
+        }
+    }
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -1315,7 +1324,9 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
     Ok(generated)
 }
 
-fn draft_authority_public_key(snapshots: &SourceSnapshots) -> Result<[u8; 32], io::Error> {
+fn draft_authority(
+    snapshots: &SourceSnapshots,
+) -> Result<(DraftAuthorityDeclaration, [u8; 32]), io::Error> {
     let relative = "support/draft-execution-authority.json";
     let bytes = snapshots.bytes(relative, "Draft authority declaration")?;
     let declaration: DraftAuthorityDeclaration =
@@ -1324,13 +1335,23 @@ fn draft_authority_public_key(snapshots: &SourceSnapshots) -> Result<[u8; 32], i
                 "Draft authority declaration is invalid at {relative}: {error}"
             ))
         })?;
-    let profiles_are_valid = declaration.execution_profiles.len() == 2
+    let declared_profile_ids = declaration
+        .execution_profiles
+        .iter()
+        .map(|profile| profile.profile_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let profiles_are_valid = declared_profile_ids
+        == BTreeSet::from(["deterministic-air-gapped-v1", "deterministic-local-v1"])
         && declaration.execution_profiles.iter().all(|profile| {
             !profile.profile_id.is_empty()
                 && !profile.semantic_version.is_empty()
                 && !profile.network_allowed
                 && profile.capability_ids.is_empty()
-                && !profile.reproducibility_classes.is_empty()
+                && profile.reproducibility_classes
+                    == [
+                        DraftReproducibilityClass::ProfileRecomputation,
+                        DraftReproducibilityClass::CrossProfileConformance,
+                    ]
         });
     if declaration.magic != "DFA1"
         || declaration.version != 1
@@ -1358,11 +1379,65 @@ fn draft_authority_public_key(snapshots: &SourceSnapshots) -> Result<[u8; 32], i
         key[index] = u8::from_str_radix(pair, 16)
             .map_err(|_| invalid_data("Draft authority public key contains a non-hex digit"))?;
     }
-    Ok(key)
+    Ok((declaration, key))
 }
 
-fn emit_draft_authority(key: [u8; 32]) -> String {
-    format!("const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n")
+fn emit_draft_authority(
+    declaration: &DraftAuthorityDeclaration,
+    key: [u8; 32],
+) -> Result<String, std::fmt::Error> {
+    let mut generated = format!(
+        "const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n\
+         const DRAFT_AUTHORITY_TRUST_POLICY_ID: &str = {:?};\n\
+         const DRAFT_AUTHORITY_TRUST_POLICY_EPOCH: u64 = {};\n\
+         const DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION: u64 = {};\n\
+         const DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH: &str = {:?};\n\
+         const DRAFT_AUTHORITY_KEY_ID: &str = {:?};\n",
+        declaration.trust_policy_id,
+        declaration.trust_policy_epoch,
+        declaration.effective_timeline_position,
+        declaration.offline_valid_through,
+        declaration.fixture_authority_key_id,
+    );
+    writeln!(
+        generated,
+        "struct DraftExecutionProfileSource {{\n\
+             profile_id: &'static str,\n\
+             semantic_version: &'static str,\n\
+             network_allowed: bool,\n\
+             capability_ids: &'static [&'static str],\n\
+             reproducibility_classes: &'static [u64],\n\
+         }}\n\
+         const DRAFT_EXECUTION_PROFILES: [DraftExecutionProfileSource; {}] = [",
+        declaration.execution_profiles.len()
+    )?;
+    for profile in &declaration.execution_profiles {
+        let capabilities = profile
+            .capability_ids
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let classes = profile
+            .reproducibility_classes
+            .iter()
+            .copied()
+            .map(DraftReproducibilityClass::wire_code)
+            .map(|code| code.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            generated,
+            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}] }},",
+            profile.profile_id,
+            profile.semantic_version,
+            profile.network_allowed,
+            capabilities,
+            classes,
+        )?;
+    }
+    generated.push_str("];\n");
+    Ok(generated)
 }
 
 fn emit_byte_constant(
@@ -1397,13 +1472,15 @@ fn emit_bundle_contract_assets(snapshots: &SourceSnapshots) -> Result<String, Bo
 
 fn emit_materialization_assets(
     snapshots: &SourceSnapshots,
+    draft_authority: &DraftAuthorityDeclaration,
     key: [u8; 32],
     source_inventory_digest: [u8; 32],
 ) -> Result<String, Box<dyn Error>> {
-    let mut generated = format!(
-        "const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n\
-         const SOURCE_INVENTORY_DIGEST: [u8; 32] = {source_inventory_digest:?};\n"
-    );
+    let mut generated = emit_draft_authority(draft_authority, key)?;
+    writeln!(
+        generated,
+        "const SOURCE_INVENTORY_DIGEST: [u8; 32] = {source_inventory_digest:?};"
+    )?;
     for (name, relative) in [
         (
             "MATERIALIZATION_AUTHORITY_INVENTORY_BYTES",
@@ -1480,7 +1557,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let snapshots = source_snapshots(&root)?;
     let profiles = discover_profiles(&root, &snapshots)?;
     let source_inventory_digest = verify_source_inventory(&snapshots, &profiles)?;
-    let draft_authority_key = draft_authority_public_key(&snapshots)?;
+    let (draft_authority, draft_authority_key) = draft_authority(&snapshots)?;
     emit_rerun_directives(&root, &snapshots);
     let out_dir = PathBuf::from(
         env::var_os("OUT_DIR").ok_or_else(|| invalid_data("OUT_DIR is unavailable"))?,
@@ -1491,7 +1568,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     std::fs::write(
         out_dir.join("draft_authority.rs"),
-        emit_draft_authority(draft_authority_key),
+        emit_draft_authority(&draft_authority, draft_authority_key)?,
     )?;
     std::fs::write(
         out_dir.join("bundle_contract_assets.rs"),
@@ -1499,7 +1576,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     std::fs::write(
         out_dir.join("materialization_assets.rs"),
-        emit_materialization_assets(&snapshots, draft_authority_key, source_inventory_digest)?,
+        emit_materialization_assets(
+            &snapshots,
+            &draft_authority,
+            draft_authority_key,
+            source_inventory_digest,
+        )?,
     )?;
     Ok(())
 }

@@ -15,6 +15,9 @@ use thiserror::Error;
 use crate::{
     ArtifactDescriptorV1, ConformanceProfileV1, ExecutionModeV1, FixtureFamilyV1,
     FixtureProviderPackageV1, FixtureProviderRegistryV1, ProfileLifecycleV1,
+    DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
+    DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH, DRAFT_AUTHORITY_TRUST_POLICY_EPOCH,
+    DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
     FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 
@@ -39,47 +42,6 @@ const PUBLICATION_REVIEW_PATH: &str = "support/publication-review.json";
 const NOTICE_PATH: &str = "support/NOTICE";
 const SBOM_PATH: &str = "support/sbom.json";
 include!(concat!(env!("OUT_DIR"), "/bundle_contract_assets.rs"));
-
-#[derive(serde::Deserialize)]
-struct DraftAuthorityContract {
-    trust_policy_id: String,
-    trust_policy_epoch: u64,
-    effective_timeline_position: u64,
-    offline_valid_through: String,
-    fixture_authority_key_id: String,
-    execution_profiles: Vec<DraftExecutionProfileContract>,
-}
-
-#[derive(serde::Deserialize)]
-struct DraftExecutionProfileContract {
-    profile_id: String,
-    semantic_version: String,
-    network_allowed: bool,
-    capability_ids: Vec<String>,
-    reproducibility_classes: Vec<DraftReproducibilityClass>,
-}
-
-#[derive(Clone, Copy, serde::Deserialize)]
-enum DraftReproducibilityClass {
-    ProfileRecomputation,
-    CrossProfileConformance,
-}
-
-impl DraftReproducibilityClass {
-    fn value(self) -> Value {
-        match self {
-            Self::ProfileRecomputation => Value::Integer(1_u64.into()),
-            Self::CrossProfileConformance => Value::Integer(2_u64.into()),
-        }
-    }
-}
-
-fn draft_authority_contract() -> DraftAuthorityContract {
-    // build.rs validates this exact embedded declaration before this module is
-    // compiled; abort rather than accepting fallback authority metadata.
-    serde_json::from_slice(DRAFT_AUTHORITY_DECLARATION_BYTES_V1)
-        .unwrap_or_else(|_| std::process::abort())
-}
 
 fn draft_authority_verifying_key() -> Result<ed25519_dalek::VerifyingKey, BundleContractErrorV1> {
     ed25519_dalek::VerifyingKey::from_bytes(&crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES)
@@ -638,10 +600,9 @@ fn validate_execution_authority_members(
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     execution_profiles.and_then(|execution_profiles| {
-        let declared_profiles = draft_authority_contract()
-            .execution_profiles
-            .into_iter()
-            .map(|profile| profile.profile_id)
+        let declared_profiles = DRAFT_EXECUTION_PROFILES
+            .iter()
+            .map(|profile| profile.profile_id.to_owned())
             .collect::<BTreeSet<_>>();
         let execution_digests = execution_profiles
             .values()
@@ -716,21 +677,20 @@ fn validate_execution_profile_fields(
             Ok(budget),
             Ok(profile_digest),
         ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
-            let declaration = draft_authority_contract()
-                .execution_profiles
-                .into_iter()
+            let declaration = DRAFT_EXECUTION_PROFILES
+                .iter()
                 .find(|candidate| candidate.profile_id == profile_id)
                 .ok_or(BundleContractErrorV1::ProfileInvalid)?;
             let classes = declaration
                 .reproducibility_classes
                 .iter()
                 .copied()
-                .map(DraftReproducibilityClass::value)
+                .map(|code| Value::Integer(code.into()))
                 .collect::<Vec<_>>();
             let capabilities = declaration
                 .capability_ids
-                .into_iter()
-                .map(Value::Text)
+                .iter()
+                .map(|capability| Value::Text((*capability).to_owned()))
                 .collect::<Vec<_>>();
             if magic == "EPF1"
                 && version == 1
@@ -785,7 +745,6 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
             Ok(expiry),
             Ok(signature),
         ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
-            let authority = draft_authority_contract();
             let approved_key = crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES;
             draft_authority_verifying_key()
                 .and_then(|verifying_key| {
@@ -796,15 +755,15 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
                 .and_then(|()| {
                     if magic == "TPS1"
                         && version == 1
-                        && policy_id == authority.trust_policy_id
-                        && epoch == authority.trust_policy_epoch
-                        && position == authority.effective_timeline_position
-                        && key_id == authority.fixture_authority_key_id
+                        && policy_id == DRAFT_AUTHORITY_TRUST_POLICY_ID
+                        && epoch == DRAFT_AUTHORITY_TRUST_POLICY_EPOCH
+                        && position == DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION
+                        && key_id == DRAFT_AUTHORITY_KEY_ID
                         && key == approved_key
                         && fields[7] == Value::Array(Vec::new())
                         && fields[8] == Value::Array(Vec::new())
                         && fields[9] == Value::Array(Vec::new())
-                        && expiry == authority.offline_valid_through
+                        && expiry == DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH
                         && fields[11] == Value::Null
                     {
                         Ok(())
@@ -880,7 +839,6 @@ fn validate_release_admission_fields(
             Ok(key_id),
             Ok(signature),
         ) => encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
-            let authority = draft_authority_contract();
             draft_authority_verifying_key()
                 .and_then(|key| {
                     key.verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
@@ -896,7 +854,7 @@ fn validate_release_admission_fields(
                         && fields[6] == provider_key_value(&transition.from)
                         && fields[7] == provider_key_value(&transition.to)
                         && fields[8] == Value::Bool(false)
-                        && key_id == authority.fixture_authority_key_id
+                        && key_id == DRAFT_AUTHORITY_KEY_ID
                     {
                         Ok(())
                     } else {
@@ -2127,10 +2085,9 @@ fn raw_execution_authority_members(
         })
         .collect::<Result<BTreeMap<_, _>, _>>();
     execution_profiles.and_then(|execution_profiles| {
-        let declared_profiles = draft_authority_contract()
-            .execution_profiles
-            .into_iter()
-            .map(|profile| profile.profile_id)
+        let declared_profiles = DRAFT_EXECUTION_PROFILES
+            .iter()
+            .map(|profile| profile.profile_id.to_owned())
             .collect::<BTreeSet<_>>();
         let execution_digests = execution_profiles
             .values()
@@ -2227,21 +2184,20 @@ fn raw_execution_profile_fields(
             Ok(budget),
             Ok(profile_digest),
         ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
-            let declaration = draft_authority_contract()
-                .execution_profiles
-                .into_iter()
+            let declaration = DRAFT_EXECUTION_PROFILES
+                .iter()
                 .find(|candidate| candidate.profile_id == profile_id)
                 .ok_or(BundleContractErrorV1::ProfileInvalid)?;
             let classes = declaration
                 .reproducibility_classes
                 .iter()
                 .copied()
-                .map(DraftReproducibilityClass::value)
+                .map(|code| Value::Integer(code.into()))
                 .collect::<Vec<_>>();
             let capabilities = declaration
                 .capability_ids
-                .into_iter()
-                .map(Value::Text)
+                .iter()
+                .map(|capability| Value::Text((*capability).to_owned()))
                 .collect::<Vec<_>>();
             if magic == "EPF1"
                 && version == 1
@@ -2295,20 +2251,19 @@ fn raw_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContra
             Ok(expiry),
             Ok(signature),
         ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
-            let authority = draft_authority_contract();
             let approved_key = crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES;
             raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
                 if magic == "TPS1"
                     && version == 1
-                    && policy_id == authority.trust_policy_id
-                    && epoch == authority.trust_policy_epoch
-                    && position == authority.effective_timeline_position
-                    && key_id == authority.fixture_authority_key_id
+                    && policy_id == DRAFT_AUTHORITY_TRUST_POLICY_ID
+                    && epoch == DRAFT_AUTHORITY_TRUST_POLICY_EPOCH
+                    && position == DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION
+                    && key_id == DRAFT_AUTHORITY_KEY_ID
                     && key == approved_key
                     && fields[7] == Value::Array(Vec::new())
                     && fields[8] == Value::Array(Vec::new())
                     && fields[9] == Value::Array(Vec::new())
-                    && expiry == authority.offline_valid_through
+                    && expiry == DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH
                     && fields[11] == Value::Null
                 {
                     Ok(())
@@ -2373,7 +2328,6 @@ fn raw_release_admission_fields(
             Ok(key_id),
             Ok(signature),
         ) => encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
-            let authority = draft_authority_contract();
             raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
                 if magic == "RAD1"
                     && version == 1
@@ -2384,7 +2338,7 @@ fn raw_release_admission_fields(
                     && from == transition.from
                     && to == transition.to
                     && fields[8] == Value::Bool(false)
-                    && key_id == authority.fixture_authority_key_id
+                    && key_id == DRAFT_AUTHORITY_KEY_ID
                 {
                     Ok(())
                 } else {

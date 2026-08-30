@@ -494,12 +494,9 @@ mod coverage_entrypoints {
         expect_err(&strict_codec::decode_evidence(&encode_value(
             &ciborium::Value::Map(Vec::new()),
         )));
-        let mut invalid_closure = evidence.host_closure.clone();
-        invalid_closure.closure_event_type = "other".to_owned();
-        expect_err(&verify_host_closure(
-            &invalid_closure,
-            &evidence.authoritative_events,
-        ));
+        let mut invalid_closure = evidence.clone();
+        invalid_closure.host_closure.closure_event_type = "other".to_owned();
+        expect_err(&verify_evidence(&invalid_closure));
         let value = decode_value(ok(evidence.to_canonical_cbor()));
         let mut paths = Vec::new();
         structural_paths(&value, &mut Vec::new(), &mut paths);
@@ -7631,22 +7628,16 @@ pub mod tests {
 
     #[test]
     fn verifier_accepts_host_closure_and_rejects_each_host_closure_boundary() {
-        fn host_fixture() -> (HostClosureAuditV1, Vec<AuthoritativeEventV1>) {
+        fn host_fixture() -> MoatProofEvidenceV1 {
             let mut value = evidence();
             value.host_closure.closure_event_type =
                 "experiment.lifecycle.consent-closed.v1".to_owned();
             value.authoritative_events[2].event_type =
                 "experiment.lifecycle.consent-closed.v1".to_owned();
-            (value.host_closure, value.authoritative_events)
+            value
         }
 
-        let (valid_audit, valid_events) = host_fixture();
-        assert_eq!(verify_host_closure(&valid_audit, &valid_events), Ok(()));
-        let mut valid = evidence();
-        valid.host_closure.closure_event_type = "experiment.lifecycle.consent-closed.v1".to_owned();
-        valid.authoritative_events[2].event_type =
-            "experiment.lifecycle.consent-closed.v1".to_owned();
-        assert_eq!(verify_evidence(&valid), Ok(()));
+        assert_eq!(verify_evidence(&host_fixture()), Ok(()));
 
         let cases: [fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
             |audit, _| audit.subject.clear(),
@@ -7676,10 +7667,10 @@ pub mod tests {
             |_, events| events[2].payload_digest = [8; 32],
         ];
         for mutate in cases {
-            let (mut audit, mut events) = host_fixture();
-            mutate(&mut audit, &mut events);
+            let mut invalid = host_fixture();
+            mutate(&mut invalid.host_closure, &mut invalid.authoritative_events);
             assert_eq!(
-                verify_host_closure(&audit, &events),
+                verify_evidence(&invalid),
                 Err(EvidenceError::InvalidConsentAudit)
             );
         }
