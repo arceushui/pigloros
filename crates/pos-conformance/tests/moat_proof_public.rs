@@ -53,6 +53,7 @@ impl ContractField {
 #[derive(Clone, Copy)]
 enum ReportField {
     Cases,
+    FollowOnCounts,
     Digest,
 }
 
@@ -60,6 +61,7 @@ impl ReportField {
     const fn index(self) -> usize {
         match self {
             Self::Cases => 13,
+            Self::FollowOnCounts => 20,
             Self::Digest => 21,
         }
     }
@@ -83,6 +85,20 @@ enum VerificationField {
     FirstError,
     CheckedArtifactCount,
     ResultDigest,
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn replace_canonical_u8(bytes: &[u8], value: u8) -> Vec<u8> {
+    let mut noncanonical = bytes.to_vec();
+    let magic = EVIDENCE_ENVELOPE_MAGIC_V1.as_bytes();
+    let magic_start = noncanonical
+        .windows(magic.len())
+        .position(|candidate| candidate == magic)
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("evidence magic is absent")));
+    let value_index = magic_start + magic.len();
+    assert_eq!(noncanonical[value_index], value);
+    noncanonical.splice(value_index..=value_index, [0x18, value]);
+    noncanonical
 }
 
 impl VerificationField {
@@ -710,6 +726,23 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
         provenance_digest: [25; 32],
     });
     evidence
+        .contract
+        .counterfactual
+        .frontier
+        .unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut;
+    evidence
+        .contract
+        .counterfactual
+        .frontier
+        .unknown_edge_coordinates = vec![DependencyNodeV1 {
+        tick: 2,
+        scheduler_position: 1,
+        owner_id: "unknown-owner".to_owned(),
+        output_ordinal: 0,
+        schema_id: schema_id_for_event_type("unknown.event.v1"),
+        artifact_digest: [26; 32],
+    }];
+    evidence
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -875,8 +908,59 @@ fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
 }
 
 #[test]
+fn public_comparisons_classify_each_authoritative_difference() -> Result<(), pos_core::CoreError> {
+    let left = public_evidence_fixture();
+    let mut right = left.clone();
+
+    assert_eq!(compare(&left, &right)?.divergence, DivergenceClassV1::None);
+    assert_eq!(
+        compare_authoritative_outputs(&left, &right)?.divergence,
+        DivergenceClassV1::None
+    );
+
+    right.manifest.seed += 1;
+    assert_eq!(
+        compare(&left, &right)?.divergence,
+        DivergenceClassV1::Metadata
+    );
+
+    right = left.clone();
+    right.authoritative_events[0].payload_digest = [31; 32];
+    assert_eq!(
+        compare_authoritative_outputs(&left, &right)?.divergence,
+        DivergenceClassV1::AuthoritativeEvents
+    );
+
+    right = left.clone();
+    right.projections[0].state = serde_json::json!({"changed": true});
+    assert_eq!(
+        compare_authoritative_outputs(&left, &right)?.divergence,
+        DivergenceClassV1::Projections
+    );
+
+    right = left.clone();
+    right.causal_trace[0].relation = "changed".to_owned();
+    assert_eq!(
+        compare(&left, &right)?.divergence,
+        DivergenceClassV1::CausalTrace
+    );
+
+    right = left.clone();
+    right.host_closure.provenance_digest = [30; 32];
+    assert_eq!(
+        compare(&left, &right)?.divergence,
+        DivergenceClassV1::Observability
+    );
+    Ok(())
+}
+
+#[test]
 fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     let evidence = public_evidence_fixture();
+    let canonical = ok(evidence.to_canonical_cbor());
+    expect_err(&MoatProofEvidenceV1::from_canonical_cbor(
+        &replace_canonical_u8(&canonical, 1),
+    ));
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &ciborium::Value::Map(Vec::new()),
     )));
@@ -935,10 +1019,26 @@ fn malformed_verification_results_reach_closed_decoder_boundaries() {
     );
     expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
         &replace_field(
-            result_value,
+            result_value.clone(),
             VerificationField::ResultDigest.index(),
             ciborium::Value::Bytes(vec![0; 32]),
         ),
+    )));
+
+    let mut invalid_semantics = result;
+    invalid_semantics.checked_artifact_count = 65_537;
+    invalid_semantics.result_digest = ok(invalid_semantics.digest());
+    let invalid_semantics_value = replace_field(
+        replace_field(
+            result_value,
+            VerificationField::CheckedArtifactCount.index(),
+            ciborium::Value::Integer(65_537_u64.into()),
+        ),
+        VerificationField::ResultDigest.index(),
+        ciborium::Value::Bytes(invalid_semantics.result_digest.to_vec()),
+    );
+    expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
+        &invalid_semantics_value,
     )));
 }
 
@@ -986,10 +1086,36 @@ fn malformed_divergence_reports_reach_closed_decoder_boundaries() {
     );
     expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
         &replace_field(
-            report_value,
+            report_value.clone(),
             ReportField::Digest.index(),
             ciborium::Value::Bytes(vec![0; 32]),
         ),
+    )));
+
+    report
+        .follow_on_counts
+        .push(report.follow_on_counts[0].clone());
+    report.report_digest = ok(report.digest());
+    let ciborium::Value::Array(report_fields) = &report_value else {
+        std::panic::resume_unwind(Box::new("divergence report root is not an array"));
+    };
+    let ciborium::Value::Array(mut duplicated_counts) =
+        report_fields[ReportField::FollowOnCounts.index()].clone()
+    else {
+        std::panic::resume_unwind(Box::new("follow-on counts are not an array"));
+    };
+    duplicated_counts.push(duplicated_counts[0].clone());
+    let invalid_semantics_value = replace_field(
+        replace_field(
+            report_value,
+            ReportField::FollowOnCounts.index(),
+            ciborium::Value::Array(duplicated_counts),
+        ),
+        ReportField::Digest.index(),
+        ciborium::Value::Bytes(report.report_digest.to_vec()),
+    );
+    expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
+        &invalid_semantics_value,
     )));
 
     report.driver_or_plugin_id = Some("x".repeat(20_000));
