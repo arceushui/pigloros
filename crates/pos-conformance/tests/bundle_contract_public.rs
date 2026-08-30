@@ -2076,7 +2076,7 @@ fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
         41..=48 => mutate_profile_fixture_tail_fields(profile, mutation),
         49..=73 => mutate_profile_text_contracts(profile, mutation),
         74..=90 => mutate_profile_nested_contracts(profile, mutation),
-        91..=102 => mutate_profile_order_and_shape_contracts(profile, mutation),
+        91..=104 => mutate_profile_order_and_shape_contracts(profile, mutation),
         _ => Err(format!("unsupported profile mutation {mutation}").into()),
     }
 }
@@ -2178,6 +2178,13 @@ fn mutate_profile_order_and_shape_contracts(profile: &mut [Value], mutation: usi
             Value::Bytes(vec![99; 32]),
             "fixture source provenance digest",
         ),
+        103 => replace_value(
+            profile,
+            5,
+            Value::Bytes(vec![99; 32]),
+            "bound normative specification digest",
+        ),
+        104 => replace_value(profile, 9, Value::Array(Vec::new()), "fixture inventory"),
         _ => Err(format!("unsupported order or shape mutation {mutation}").into()),
     }
 }
@@ -2655,7 +2662,7 @@ fn assert_archive_rejected_by_both(archive: &[u8], label: &str) {
 
 #[test]
 fn independent_verifier_rejects_each_current_profile_contract_mutation() -> TestResult {
-    for mutation in 0..103 {
+    for mutation in 0..105 {
         let archive = mutate_profile_archive(|profile| mutate_profile_fields(profile, mutation))?;
         if mutation == 4 {
             assert_eq!(
@@ -3155,6 +3162,19 @@ fn assert_deep_raw_profile_rejections() -> TestResult {
 }
 
 fn assert_deep_raw_archive_rejections() -> TestResult {
+    for (label, profile_bytes) in [
+        ("malformed profile bytes", vec![0xff]),
+        (
+            "wrong profile field count",
+            encode_value(&Value::Array(vec![Value::Null; 17]))?,
+        ),
+    ] {
+        let archive = mutate_archive(|archive| {
+            replace_archive_member_bytes(archive, "profile/CPF1.cbor", &profile_bytes)
+        })?;
+        assert_archive_rejected_by_both(&archive, label);
+    }
+
     let malformed_registry_bytes = mutate_archive(|archive| {
         let bytes = [0xff];
         replace_archive_member_bytes(archive, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, &bytes)?;

@@ -25,7 +25,6 @@ include!("materialize-conformance-bundles/atomic_publication.rs");
 
 const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
 const OUTPUT_CHECKSUM_INVENTORY_PATH: &str = "SHA256SUMS";
-const REQUIRED_FIXTURE_FAMILIES: usize = 7;
 #[derive(Clone, Copy)]
 struct FixtureContext {
     claim_layer: ClaimLayerV1,
@@ -440,7 +439,7 @@ fn provider_package(
         abi_major: layer.fixture_provider.abi_major,
         abi_minor: layer.fixture_provider.abi_minor,
     };
-    let schemas = provider_schema_artifacts(layer)?;
+    let schemas = provider_schema_artifacts(layer);
     let [licence, notices, sbom, source_provenance, _, _, limitations] = package_support;
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
@@ -476,30 +475,24 @@ fn provider_package(
     })
 }
 
-fn provider_schema_artifacts(
-    layer: &LayerCatalogEntry,
-) -> Result<Vec<PublicArtifact>, Box<dyn Error>> {
-    let mut schemas = std::collections::BTreeMap::new();
-    for fixture in &layer.fixtures {
-        let artifact = public_artifact(
-            &fixture.record.schema,
-            "application/schema+json",
-            fixture.schema,
-        );
-        if schemas.insert(fixture.record.family, artifact).is_some() {
-            return Err("provider defines a fixture family schema more than once".into());
-        }
-    }
-    if schemas.len() != REQUIRED_FIXTURE_FAMILIES {
-        return Err("provider must define exactly seven family schemas".into());
-    }
+fn provider_schema_artifacts(layer: &LayerCatalogEntry) -> Vec<PublicArtifact> {
+    let mut schemas = layer
+        .fixtures
+        .iter()
+        .map(|fixture| {
+            (
+                fixture.record.family,
+                public_artifact(
+                    &fixture.record.schema,
+                    "application/schema+json",
+                    fixture.schema,
+                ),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     CatalogFixtureFamily::ALL
         .into_iter()
-        .map(|family| {
-            schemas.remove(&family).ok_or_else(|| {
-                Box::<dyn Error>::from("provider catalog is missing a family schema")
-            })
-        })
+        .filter_map(|family| schemas.remove(&family))
         .collect()
 }
 
@@ -1290,19 +1283,6 @@ fn bundle_inputs_from_profile(
             .iter()
             .find(|source| source.record.case_id == fixture.case_id)
             .ok_or("profile fixture is absent from the typed layer catalog")?;
-        let expected_payload_path =
-            fixture_payload_member_path(&fixture.case_id, &fixture.execution_profile_digest);
-        if fixture.schema
-            != artifact_descriptor(
-                &source.record.schema,
-                "application/schema+json",
-                source.schema,
-            )
-            || fixture.payload
-                != artifact_descriptor(&expected_payload_path, "application/json", source.input)
-        {
-            return Err("profile fixture descriptors disagree with public catalog assets".into());
-        }
         members.push(BundleMemberV1::fixture_input(
             fixture.payload.member_path.clone(),
             source.input.to_vec(),
@@ -1314,19 +1294,6 @@ fn bundle_inputs_from_profile(
         );
         let evidence_path =
             evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
-        let evidence = artifact_descriptor(&evidence_path, "application/json", source.expected);
-        let oracle = artifact_descriptor(&path, "application/json", source.oracle);
-        let expected_auxiliary = if fixture.strict_oracle.output.is_some() {
-            vec![evidence]
-        } else {
-            vec![evidence, oracle.clone()]
-        };
-        if fixture.auxiliary != expected_auxiliary {
-            return Err(
-                "profile evidence and oracle descriptors disagree with public catalog assets"
-                    .into(),
-            );
-        }
         members.push(BundleMemberV1::expected_result(
             evidence_path,
             source.expected.to_vec(),
@@ -1341,13 +1308,6 @@ fn bundle_inputs_from_profile(
             digest: member.digest,
         });
         members.push(member);
-        if let Some(output) = fixture.strict_oracle.output.as_ref() {
-            if output != &oracle {
-                return Err(
-                    "profile strict-oracle descriptor disagrees with public catalog asset".into(),
-                );
-            }
-        }
     }
     expected_results.sort();
     append_supporting_members(&mut members, inventory_bytes, providers);

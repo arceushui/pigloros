@@ -1260,6 +1260,7 @@ fn public_current_cpf1_catalog_round_trips_lifecycle_adapter_mode_and_family_var
     for lifecycle in [
         pos_conformance::ProfileLifecycleV1::Draft,
         pos_conformance::ProfileLifecycleV1::Candidate,
+        pos_conformance::ProfileLifecycleV1::Stable,
         pos_conformance::ProfileLifecycleV1::Retired,
     ] {
         let mut profile = profile_for_digest();
