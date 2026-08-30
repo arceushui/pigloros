@@ -885,4 +885,92 @@ mod tests {
             "remove staged symlink",
         );
     }
+
+    #[test]
+    fn explicit_abort_and_publish_failure_remove_staging() {
+        let root = TestDirectory::create("abort");
+        let destination = root.0.join("published");
+        let mut publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
+        let original_identity = publication.staging_identity;
+        publication.staging_identity.inode ^= 1;
+        assert_error(publication.abort(), "untrusted output directory");
+        publication.staging_identity = original_identity;
+        ok(publication.abort(), "abort valid staging");
+        assert!(!publication.staging_present);
+        assert!(publication.abort().is_ok());
+
+        let publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
+        assert_error(
+            publish_materialized_tree(
+                publication,
+                &[MaterializedFile {
+                    relative_path: "../outside".to_owned(),
+                    bytes: Vec::new(),
+                    archive_release_filename: None,
+                }],
+            ),
+            "untrusted output directory",
+        );
+        assert!(std::fs::read_dir(&root.0).is_ok_and(|mut entries| entries.next().is_none()));
+    }
+
+    #[test]
+    fn retained_staging_and_cleanup_entry_types_are_rechecked() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
+
+        let root = TestDirectory::create("retained-staging");
+        let destination = root.0.join("published");
+        let publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
+        let staging_path = root
+            .0
+            .join(publication.staging_name.to_string_lossy().as_ref());
+        let retained_path = root.0.join("retained-directory");
+        ok(
+            std::fs::rename(&staging_path, &retained_path),
+            "rename retained staging",
+        );
+        ok(std::fs::create_dir(&staging_path), "replace named staging");
+        ok(
+            std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o700)),
+            "secure replacement staging",
+        );
+        assert_error(
+            staging_identity(
+                &publication.parent,
+                publication.staging_name.as_c_str(),
+                &publication.staging,
+                publication.parent_identity,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+        ok(
+            std::fs::remove_dir(&staging_path),
+            "remove replacement staging",
+        );
+        ok(
+            std::fs::rename(&retained_path, &staging_path),
+            "restore retained staging",
+        );
+
+        let empty_name = c"empty-directory";
+        ok(
+            fs::mkdirat(&publication.parent, empty_name, Mode::from_raw_mode(0o700)),
+            "create empty sibling",
+        );
+        ok(
+            remove_empty_staging(&publication.parent, empty_name),
+            "remove empty sibling",
+        );
+
+        let socket_path = staging_path.join("socket");
+        let socket = ok(UnixListener::bind(&socket_path), "create staged socket");
+        assert_error(
+            remove_directory_entry(&publication.staging, c"socket"),
+            "untrusted output directory",
+        );
+        drop(socket);
+        ok(std::fs::remove_file(socket_path), "remove staged socket");
+    }
 }

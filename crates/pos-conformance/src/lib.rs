@@ -238,6 +238,84 @@ mod coverage_entrypoints {
             [path[path.len() - 1]] = replacement;
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn value_at_path<'a>(value: &'a ciborium::Value, path: &[usize]) -> &'a ciborium::Value {
+        let mut current = value;
+        for index in path {
+            current = &current
+                .as_array()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("array path changed")))
+                [*index];
+        }
+        current
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn scalar_replacements(value: &ciborium::Value) -> Vec<ciborium::Value> {
+        match value {
+            ciborium::Value::Integer(_) => (0_u64..=9)
+                .chain([u64::from(u16::MAX), u64::from(u32::MAX), u64::MAX])
+                .map(|value| ciborium::Value::Integer(value.into()))
+                .collect(),
+            ciborium::Value::Bytes(_) => [0_usize, 15, 16, 31, 32, 33, 128, 129]
+                .into_iter()
+                .map(|length| ciborium::Value::Bytes(vec![0xff; length]))
+                .collect(),
+            ciborium::Value::Text(_) => [
+                "",
+                "unknown",
+                "local",
+                "air_gapped",
+                "verified_exact",
+                "resource_limit_exceeded",
+            ]
+            .into_iter()
+            .map(|value| ciborium::Value::Text(value.to_owned()))
+            .collect(),
+            ciborium::Value::Bool(_) => {
+                vec![ciborium::Value::Bool(false), ciborium::Value::Bool(true)]
+            }
+            ciborium::Value::Null => vec![
+                ciborium::Value::Integer(0_u64.into()),
+                ciborium::Value::Bytes(vec![0; 32]),
+            ],
+            ciborium::Value::Array(values) => {
+                let mut replacements = vec![ciborium::Value::Array(Vec::new())];
+                if let Some(first) = values.first() {
+                    replacements.push(ciborium::Value::Array(vec![first.clone(); 65]));
+                }
+                replacements
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_scalar_closure<T, E: std::fmt::Debug>(
+        value: &ciborium::Value,
+        decode: impl Fn(&[u8]) -> Result<T, E>,
+        encode: impl Fn(&T) -> Result<Vec<u8>, E>,
+    ) -> usize {
+        let mut paths = Vec::new();
+        structural_paths(value, &mut Vec::new(), &mut paths);
+        let mut exercised = 0_usize;
+        for path in paths {
+            for replacement in scalar_replacements(value_at_path(value, &path)) {
+                if replacement == *value_at_path(value, &path) {
+                    continue;
+                }
+                let mut mutant = value.clone();
+                replace_at_path(&mut mutant, &path, replacement);
+                let bytes = encode_value(&mutant);
+                if let Ok(decoded) = decode(&bytes) {
+                    assert_eq!(ok(encode(&decoded)), bytes);
+                }
+                exercised += 1;
+            }
+        }
+        exercised
+    }
+
     #[test]
     fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
         let boundary = wave8_plugin_boundary();
@@ -347,6 +425,13 @@ mod coverage_entrypoints {
 
         let result = ok(tests::evidence().to_verification_result());
         let result_value = decode_value(ok(result.to_canonical_cbor()));
+        assert!(
+            assert_scalar_closure(
+                &result_value,
+                VerificationResultV1::from_canonical_cbor,
+                VerificationResultV1::to_canonical_cbor,
+            ) > 100
+        );
         expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
             &replace_field(result_value, 17, ciborium::Value::Bytes(vec![0; 32])),
         )));
@@ -384,6 +469,13 @@ mod coverage_entrypoints {
         };
         report.report_digest = ok(report.digest());
         let report_value = decode_value(ok(report.to_canonical_cbor()));
+        assert!(
+            assert_scalar_closure(
+                &report_value,
+                DivergenceReportV1::from_canonical_cbor,
+                DivergenceReportV1::to_canonical_cbor,
+            ) > 100
+        );
         expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
             &replace_field(report_value, 21, ciborium::Value::Bytes(vec![0; 32])),
         )));
@@ -413,6 +505,19 @@ mod coverage_entrypoints {
         expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &wrong_type,
         )));
+    }
+
+    #[test]
+    fn public_evidence_decoder_closes_scalar_and_length_boundaries() {
+        let evidence = tests::evidence();
+        let value = decode_value(ok(evidence.to_canonical_cbor()));
+        assert!(
+            assert_scalar_closure(
+                &value,
+                MoatProofEvidenceV1::from_canonical_cbor,
+                MoatProofEvidenceV1::to_canonical_cbor,
+            ) > 1_000
+        );
     }
 }
 
