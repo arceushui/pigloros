@@ -1951,7 +1951,7 @@ enum ProviderPackageMutationAction {
     CollideSupportPath,
 }
 
-fn package_field_action(
+const fn package_field_action(
     field: ProviderPackageField,
     value: Value,
     name: &'static str,
