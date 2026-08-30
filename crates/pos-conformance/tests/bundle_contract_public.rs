@@ -3914,10 +3914,7 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
         replace_archive_member_bytes(archive, "authority/execution-matrix.json", &matrix_bytes)?;
         refresh_profile_matrix_binding(archive, &matrix_bytes)
     })?;
-    assert_eq!(
-        verify_archive_independently(&invalid_matrix),
-        Err(BundleContractErrorV1::ProfileInvalid)
-    );
+    assert_archive_rejected_by_both(&invalid_matrix, "noncanonical execution matrix");
 
     let mut inventory: serde_json::Value = serde_json::from_slice(AUTHORITY_INVENTORY_BYTES)?;
     inventory["entries"][0]["materialization_status"] =
@@ -3930,10 +3927,7 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
             &inventory_bytes,
         )
     })?;
-    assert_eq!(
-        verify_archive_independently(&invalid_inventory),
-        Err(BundleContractErrorV1::ProfileInvalid)
-    );
+    assert_archive_rejected_by_both(&invalid_inventory, "noncanonical authority inventory");
     Ok(())
 }
 
