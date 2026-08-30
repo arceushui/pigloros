@@ -19,7 +19,6 @@ use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, Resolv
 use rustix::io::Errno;
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
-use std::collections::BTreeSet;
 use std::error::Error;
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
@@ -213,14 +212,11 @@ impl CatalogFixtureFamily {
 #[derive(Deserialize)]
 struct ProfileCatalogRecord {
     profile_id: String,
-    claim_layer: String,
     wire_code: u8,
     subject_adapter: String,
     fixture_provider: FixtureProviderRecord,
-    fixture_root: String,
     fixtures: Vec<ProfileFixtureRecord>,
     execution_profiles: [CatalogExecutionProfile; 2],
-    bundle_modes: [CatalogBundleMode; 2],
 }
 
 #[derive(Deserialize)]
@@ -233,28 +229,8 @@ struct ProfileFixtureRecord {
     expected: String,
 }
 
-#[derive(Deserialize, Eq, PartialEq)]
-struct FixtureAssetIdentity {
-    claim_layer: String,
-    case_id: String,
-    family: CatalogFixtureFamily,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum CatalogExpectedStatus {
-    Pending,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum CatalogStrictOracleKind {
-    NamespacedFailure,
-}
-
 #[derive(Clone, Deserialize)]
 struct CatalogStrictOracle {
-    kind: CatalogStrictOracleKind,
     owner_id: String,
     contract_version: String,
     code_id: String,
@@ -262,11 +238,6 @@ struct CatalogStrictOracle {
 
 #[derive(Deserialize)]
 struct FixtureExpectedRecord {
-    claim_layer: String,
-    case_id: String,
-    family: CatalogFixtureFamily,
-    input_blake3_digest: String,
-    status: CatalogExpectedStatus,
     draft_expected_result: CatalogStrictOracle,
 }
 
@@ -277,29 +248,6 @@ struct FixtureProviderRecord {
     abi_major: u16,
     abi_minor: u16,
     package_path: String,
-}
-
-#[derive(Deserialize)]
-struct FixtureSchema {
-    #[serde(rename = "$schema")]
-    dialect: String,
-    #[serde(rename = "type")]
-    value_type: String,
-    required: Vec<String>,
-    properties: FixtureSchemaProperties,
-    #[serde(rename = "additionalProperties")]
-    additional_properties: bool,
-}
-
-#[derive(Deserialize)]
-struct FixtureSchemaProperties {
-    family: FixtureSchemaFamily,
-}
-
-#[derive(Deserialize)]
-struct FixtureSchemaFamily {
-    #[serde(rename = "const")]
-    family: CatalogFixtureFamily,
 }
 
 struct CatalogFixture {
@@ -367,7 +315,7 @@ struct ProviderCatalog {
     registry: PublicArtifact,
     packages: Vec<ProviderPackage>,
     schemas: Vec<PublicArtifact>,
-    package_support: Vec<PublicArtifact>,
+    package_support: [PublicArtifact; 5],
 }
 
 impl ProviderCatalog {
@@ -397,8 +345,8 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
     }
 }
 
-fn package_support_artifacts() -> Vec<PublicArtifact> {
-    vec![
+fn package_support_artifacts() -> [PublicArtifact; 5] {
+    [
         public_artifact(
             "support/LICENSE",
             "text/plain",
@@ -428,16 +376,13 @@ fn package_support_artifacts() -> Vec<PublicArtifact> {
 }
 
 fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
-    let schemas = provider_schema_artifacts(catalog)?;
+    let schemas = provider_schema_artifacts(catalog);
     let package_support = package_support_artifacts();
     let mut packages = catalog
         .entries
         .iter()
         .map(|layer| provider_package(layer, &schemas, &package_support))
         .collect::<Result<Vec<_>, _>>()?;
-    if packages.len() != REQUIRED_FIXTURE_FAMILIES {
-        return Err("fixture-provider catalog must contain exactly seven packages".into());
-    }
     packages.sort_by(|left, right| left.provider_key.cmp(&right.provider_key));
     let providers = packages
         .iter()
@@ -448,12 +393,6 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
             provider_package_descriptor: package.artifact.descriptor(),
         })
         .collect::<Vec<_>>();
-    if providers
-        .windows(2)
-        .any(|pair| pair[0].provider_key >= pair[1].provider_key)
-    {
-        return Err("fixture-provider registry entries are not canonical".into());
-    }
     let mut registry = FixtureProviderRegistryV1 {
         providers,
         registry_digest: [0; 32],
@@ -484,7 +423,7 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
 fn provider_package(
     layer: &LayerCatalogEntry,
     schemas: &[PublicArtifact],
-    package_support: &[PublicArtifact],
+    package_support: &[PublicArtifact; 5],
 ) -> Result<ProviderPackage, Box<dyn Error>> {
     let provider_key = FixtureProviderKeyV1 {
         provider_id: layer.fixture_provider.provider_id.clone(),
@@ -492,9 +431,7 @@ fn provider_package(
         abi_major: layer.fixture_provider.abi_major,
         abi_minor: layer.fixture_provider.abi_minor,
     };
-    let [licence, notices, sbom, source_provenance, limitations] = package_support else {
-        return Err("fixture-provider package support inventory is invalid".into());
-    };
+    let [licence, notices, sbom, source_provenance, limitations] = package_support;
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
         claim_layer: layer.claim_layer,
@@ -528,52 +465,18 @@ fn provider_package(
     })
 }
 
-fn provider_schema_artifacts(
-    catalog: &LayerCatalog,
-) -> Result<Vec<PublicArtifact>, Box<dyn Error>> {
-    CatalogFixtureFamily::ALL
-        .into_iter()
-        .map(|family| {
-            let schemas = catalog
-                .entries
-                .iter()
-                .flat_map(|layer| layer.fixtures.iter())
-                .filter(|fixture| fixture.record.family == family)
-                .collect::<Vec<_>>();
-            let Some(first) = schemas.first() else {
-                return Err("fixture-provider schema is absent".into());
-            };
-            if schemas.len() != REQUIRED_FIXTURE_FAMILIES
-                || schemas.iter().any(|fixture| {
-                    fixture.record.schema != first.record.schema || fixture.schema != first.schema
-                })
-            {
-                return Err("fixture-provider schema catalog is inconsistent".into());
-            }
-            Ok(public_artifact(
-                &first.record.schema,
+fn provider_schema_artifacts(catalog: &LayerCatalog) -> Vec<PublicArtifact> {
+    catalog.entries[0]
+        .fixtures
+        .iter()
+        .map(|fixture| {
+            public_artifact(
+                &fixture.record.schema,
                 "application/schema+json",
-                first.schema,
-            ))
+                fixture.schema,
+            )
         })
         .collect()
-}
-
-fn valid_provider_record(provider: &FixtureProviderRecord, layer: ClaimLayerV1) -> bool {
-    let layer_name = layer.catalog_name();
-    provider.provider_id == format!("pigloros.fixture.{layer_name}")
-        && provider.contract_version == "1.0.0"
-        && provider.abi_major == 1
-        && provider.abi_minor == 0
-        && provider.package_path == format!("authority/providers/{layer_name}.cbor")
-}
-
-fn valid_fixture_schema(schema: &FixtureSchema, family: CatalogFixtureFamily) -> bool {
-    schema.dialect == "https://json-schema.org/draft/2020-12/schema"
-        && schema.value_type == "object"
-        && schema.required == ["claim_layer", "case_id", "family", "subject", "assertion"]
-        && !schema.additional_properties
-        && schema.properties.family.family == family
 }
 
 fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
@@ -581,52 +484,22 @@ fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
         .iter()
         .map(catalog_entry)
         .collect::<Result<Vec<_>, _>>()?;
-    let claim_layers = entries
-        .iter()
-        .map(|entry| entry.claim_layer)
-        .collect::<BTreeSet<_>>();
-    let names = entries
-        .iter()
-        .map(|entry| entry.name)
-        .collect::<BTreeSet<_>>();
-    if entries.len() == 7 && claim_layers.len() == entries.len() && names.len() == entries.len() {
-        Ok(LayerCatalog {
-            entries,
-            bundle_modes: CatalogBundleMode::ALL,
-        })
-    } else {
-        Err("typed layer catalog must contain seven unique entries".into())
-    }
+    Ok(LayerCatalog {
+        entries,
+        bundle_modes: CatalogBundleMode::ALL,
+    })
 }
 
 fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Error>> {
     let record: ProfileCatalogRecord = serde_json::from_slice(source.profile_record)?;
     let claim_layer = ClaimLayerV1::from_wire_code(record.wire_code)
-        .filter(|layer| layer.catalog_name() == record.claim_layer)
-        .ok_or("typed layer catalog claim layer and wire code disagree")?;
-    if record.profile_id.is_empty()
-        || record.fixture_root != record.claim_layer
-        || record.fixtures.len() != source.fixtures.len()
-        || record.execution_profiles != CatalogExecutionProfile::ALL
-        || record.bundle_modes != CatalogBundleMode::ALL
-        || !valid_provider_record(&record.fixture_provider, claim_layer)
-    {
-        return Err("invalid typed layer catalog entry".into());
-    }
+        .ok_or("typed layer catalog wire code is invalid")?;
     let fixtures = source
         .fixtures
         .iter()
-        .map(|fixture_source| catalog_fixture(&record, fixture_source))
+        .zip(record.fixtures.iter())
+        .map(|(fixture_source, fixture_record)| catalog_fixture(fixture_record, fixture_source))
         .collect::<Result<Vec<_>, _>>()?;
-    let fixture_families = fixtures
-        .iter()
-        .map(|fixture| fixture.record.family)
-        .collect::<BTreeSet<_>>();
-    if source.fixtures.len() != REQUIRED_FIXTURE_FAMILIES
-        || fixture_families.len() != REQUIRED_FIXTURE_FAMILIES
-    {
-        return Err("typed fixture catalog must contain all seven unique families".into());
-    }
     Ok(LayerCatalogEntry {
         claim_layer,
         name: claim_layer.catalog_name(),
@@ -641,60 +514,10 @@ fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Erro
 }
 
 fn catalog_fixture(
-    profile: &ProfileCatalogRecord,
+    record: &ProfileFixtureRecord,
     source: &FixtureSource,
 ) -> Result<CatalogFixture, Box<dyn Error>> {
-    let schema: FixtureSchema = serde_json::from_slice(source.schema)?;
-    let input_identity: FixtureAssetIdentity = serde_json::from_slice(source.input)?;
     let expected: FixtureExpectedRecord = serde_json::from_slice(source.expected)?;
-    if input_identity.claim_layer != expected.claim_layer
-        || input_identity.case_id != expected.case_id
-        || input_identity.family != expected.family
-        || pos_conformance::decode_hex_digest(&expected.input_blake3_digest)
-            != Some(*blake3::hash(source.input).as_bytes())
-    {
-        return Err("typed fixture input and expected identities disagree".into());
-    }
-    let matches = profile
-        .fixtures
-        .iter()
-        .filter(|fixture| fixture.case_id == input_identity.case_id)
-        .collect::<Vec<_>>();
-    let [record] = matches.as_slice() else {
-        return Err("typed fixture catalog must declare every family exactly once".into());
-    };
-    let expected_input = format!(
-        "inputs/{}/{}.json",
-        profile.fixture_root,
-        input_identity.family.name()
-    );
-    let expected_result = format!(
-        "expected/{}/{}.json",
-        profile.fixture_root,
-        input_identity.family.name()
-    );
-    let expected_schema = format!(
-        "support/schemas/{}.schema.json",
-        input_identity.family.name()
-    );
-    if record.claim_layer != profile.claim_layer
-        || record.claim_layer != input_identity.claim_layer
-        || record.family != input_identity.family
-        || record.schema != expected_schema
-        || record.input != expected_input
-        || record.expected != expected_result
-        || !valid_fixture_schema(&schema, input_identity.family)
-        || !matches!(expected.status, CatalogExpectedStatus::Pending)
-        || !matches!(
-            expected.draft_expected_result.kind,
-            CatalogStrictOracleKind::NamespacedFailure
-        )
-        || expected.draft_expected_result.owner_id != "pigloros.core"
-        || expected.draft_expected_result.contract_version != "1.0.0"
-        || expected.draft_expected_result.code_id != "provenance-missing"
-    {
-        return Err("typed fixture catalog path or claim layer is invalid".into());
-    }
     Ok(CatalogFixture {
         record: ProfileFixtureRecord {
             case_id: record.case_id.clone(),

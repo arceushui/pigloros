@@ -1296,6 +1296,12 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
     fs::create_dir_all(&root)?;
     let output = root.join(source_inventory_address());
     let wrong_address = root.join("not-the-source-inventory-digest");
+    assert!(!Command::new(&materializer).status()?.success());
+    assert!(!Command::new(&materializer)
+        .arg(&output)
+        .arg("unexpected-second-output")
+        .status()?
+        .success());
     assert!(!Command::new(&materializer)
         .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
         .arg(&wrong_address)
@@ -1313,13 +1319,23 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
         .arg(&output)
         .status()?
         .success());
+
+    let relative_root = temporary_root("relative-materializer")?;
+    let _relative_cleanup = TemporaryOutput(relative_root.clone());
+    fs::create_dir_all(&relative_root)?;
+    assert!(Command::new(&materializer)
+        .current_dir(&relative_root)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
+        .arg(source_inventory_address())
+        .status()?
+        .success());
     Ok(())
 }
 
 #[cfg(unix)]
 #[test]
 fn public_binaries_reject_unsafe_filesystem_boundaries() -> TestResult {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     let root = temporary_root("unsafe-public-boundaries")?;
     let _cleanup = TemporaryOutput(root.clone());
@@ -1330,12 +1346,43 @@ fn public_binaries_reject_unsafe_filesystem_boundaries() -> TestResult {
 
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
-    assert!(!Command::new(materializer)
-        .env(
-            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
-            "0707070707070707070707070707070707070707070707070707070707070707",
-        )
+    let signing_key = "0707070707070707070707070707070707070707070707070707070707070707";
+    assert!(!Command::new(&materializer)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key,)
         .arg(alias.join(source_inventory_address()))
+        .status()?
+        .success());
+
+    let absent_parent = root.join("absent").join(source_inventory_address());
+    assert!(!Command::new(&materializer)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(absent_parent)
+        .status()?
+        .success());
+
+    let regular_parent = root.join("regular-parent");
+    fs::write(&regular_parent, b"not a directory")?;
+    assert!(!Command::new(&materializer)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(regular_parent.join(source_inventory_address()))
+        .status()?
+        .success());
+
+    let untrusted = root.join("untrusted");
+    fs::create_dir(&untrusted)?;
+    fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o777))?;
+    assert!(!Command::new(&materializer)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(untrusted.join(source_inventory_address()))
+        .status()?
+        .success());
+
+    let trusted_sticky = root.join("trusted-sticky");
+    fs::create_dir(&trusted_sticky)?;
+    fs::set_permissions(&trusted_sticky, fs::Permissions::from_mode(0o1777))?;
+    assert!(Command::new(&materializer)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", signing_key)
+        .arg(trusted_sticky.join(source_inventory_address()))
         .status()?
         .success());
 
@@ -1346,6 +1393,10 @@ fn public_binaries_reject_unsafe_filesystem_boundaries() -> TestResult {
 
     let invalid_archive = trusted.join("invalid.cfb1");
     fs::write(&invalid_archive, b"not a canonical archive")?;
+    assert!(!Command::new(&verifier)
+        .arg(&invalid_archive)
+        .status()?
+        .success());
     let archive_alias = root.join("archive-alias.cfb1");
     symlink(&invalid_archive, &archive_alias)?;
     assert!(!Command::new(&verifier)
