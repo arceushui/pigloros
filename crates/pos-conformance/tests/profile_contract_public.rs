@@ -621,6 +621,23 @@ fn with_second_execution_coordinate(mut profile: ConformanceProfileV1) -> Confor
     profile
 }
 
+fn retarget_provider_failure(
+    failure: Option<&mut NamespacedFailureV1>,
+    first: &FixtureProviderKeyV1,
+    second: &FixtureProviderKeyV1,
+) {
+    let Some(failure) = failure else {
+        return;
+    };
+    if failure.owner_id != first.provider_id || failure.contract_version != first.contract_version {
+        return;
+    }
+    failure.owner_id.clone_from(&second.provider_id);
+    failure
+        .contract_version
+        .clone_from(&second.contract_version);
+}
+
 fn with_second_provider(mut profile: ConformanceProfileV1) -> ConformanceProfileV1 {
     let first = profile.fixture_provider_registry.required_provider_keys[0].clone();
     let mut second = first.clone();
@@ -631,24 +648,12 @@ fn with_second_provider(mut profile: ConformanceProfileV1) -> ConformanceProfile
         .cloned()
         .map(|mut fixture| {
             fixture.provider_key = second.clone();
-            if let Some(failure) = fixture.strict_oracle.failure.as_mut()
-                && failure.owner_id == first.provider_id
-                && failure.contract_version == first.contract_version
-            {
-                failure.owner_id.clone_from(&second.provider_id);
-                failure
-                    .contract_version
-                    .clone_from(&second.contract_version);
-            }
-            if let Some(failure) = fixture.expected_verification_error.as_mut()
-                && failure.owner_id == first.provider_id
-                && failure.contract_version == first.contract_version
-            {
-                failure.owner_id.clone_from(&second.provider_id);
-                failure
-                    .contract_version
-                    .clone_from(&second.contract_version);
-            }
+            retarget_provider_failure(fixture.strict_oracle.failure.as_mut(), &first, &second);
+            retarget_provider_failure(
+                fixture.expected_verification_error.as_mut(),
+                &first,
+                &second,
+            );
             if let Some(transition) = fixture.transition.as_mut() {
                 transition.from = second.clone();
                 transition.to = second.clone();

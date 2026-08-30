@@ -223,7 +223,6 @@ jobs:
         run: cargo llvm-cov report --json
           --output-path "${{ runner.temp }}/coverage.json"
       - name: Enforce focused conformance region coverage
-        if: always()
         run: bash scripts/check-conformance-coverage.sh
           "${{ runner.temp }}/coverage.json"
       - name: Upload coverage details
