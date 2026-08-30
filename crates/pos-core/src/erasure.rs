@@ -5954,6 +5954,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .supporting_records
                     .retry_admissions
                     .push(admission.clone());
+                record.acknowledgements = record
+                    .supporting_records
+                    .effective_acknowledgements(admission)?;
                 if ordinal == 0 {
                     record.dispatch_provenance = Some(admission.reference());
                 }
