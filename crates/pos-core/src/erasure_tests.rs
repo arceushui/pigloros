@@ -1560,7 +1560,7 @@ fn durable_terminal_record_checks_reject_independent_receipt_mismatches(
         .terminal_state = altered_state.state.state_digest();
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(altered_state, reference(2)),
-        Err(ErasureErrorV1::ProvenanceMissing)
+        Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
 }

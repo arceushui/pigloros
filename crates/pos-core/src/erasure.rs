@@ -4754,7 +4754,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let record = self.record(request)?;
-        if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen || record.targets.is_empty()
+        if !matches!(
+            record.state.lifecycle(),
+            ErasureLifecycleV1::AccessFrozen | ErasureLifecycleV1::AwaitingAcknowledgements
+        ) || record.targets.is_empty()
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -5360,14 +5363,8 @@ mod erasure_coverage_tests {
         authorized_parts.authorize_provenance = Some(ErasureReferenceV1::from_digest([9; 32]));
         let authorized = ErasureCoordinatorRecordV1::from_parts(authorized_parts, coordinator())?;
 
-        let target = ErasureRequiredTargetV1 {
-            artifact_class: ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest: ErasureReferenceV1::from_digest([1; 32]),
-            key_role: ErasureKeyRoleV1::DataEncryption,
-            key_digest: ErasureReferenceV1::from_digest([2; 32]),
-            replica_set: ErasureReferenceV1::from_digest([3; 32]),
-            replica_id: ErasureReferenceV1::from_digest([4; 32]),
-        };
+        let target =
+            tests::acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
         let mut reserved_parts = tests::record_parts(&authorized);
         reserved_parts.reserved_targets = vec![target];
         let reserved = ErasureCoordinatorRecordV1::from_parts(reserved_parts, coordinator())?;
@@ -5476,13 +5473,7 @@ mod erasure_coverage_tests {
             Err(ErasureErrorV1::PolicyConflict)
         );
 
-        let valid_state = fixtures.authorized.state().transition(transition(
-            ErasureLifecycleV1::AccessFrozen,
-            Some(10),
-            ErasureReplayClaimV1::StructuralOnly,
-            ErasureReferenceV1::from_digest([9; 32]),
-        ))?;
-        let mut wrong_predecessor_state = valid_state;
+        let mut wrong_predecessor_state = fixtures.frozen.state.clone();
         wrong_predecessor_state.previous_state = Some(ErasureReferenceV1::from_digest([99; 32]));
         wrong_predecessor_state.state_digest = reference_zero();
         let mut wrong_predecessor_parts = tests::record_parts(&fixtures.frozen);
@@ -5516,7 +5507,7 @@ mod erasure_coverage_tests {
         });
         assert_eq!(
             ErasureCoordinatorRecordV1::from_parts(decreased_parts, coordinator()),
-            Err(ErasureErrorV1::PolicyConflict)
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
 
         let upgraded_state = forged_state(
