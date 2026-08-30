@@ -98,10 +98,18 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
     echo "missing fixture pair: ${case_id}" >&2
     exit 1
   }
-  jq -e --arg family "${family}" \
-    '.properties.family.const == $family and .additionalProperties == false' \
+  jq -e --arg family "${family}" '
+    def supported_schema:
+      type == "object" and
+      ((keys) - ["$schema", "additionalProperties", "const", "maximum", "minLength",
+        "minimum", "pattern", "properties", "required", "type"] | length) == 0 and
+      ((.properties // {}) | type == "object") and
+      all((.properties // {})[]; supported_schema);
+    supported_schema and
+    .properties.family.const == $family and .additionalProperties == false
+  ' \
     "${schema_file}" >/dev/null || {
-    echo "fixture schema does not bind its family: ${case_id}" >&2
+    echo "fixture schema uses unsupported JSON adapter semantics: ${case_id}" >&2
     exit 1
   }
   generated_file="${generated_root}/${expected_path}"

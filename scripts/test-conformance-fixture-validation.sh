@@ -36,6 +36,21 @@ expect_rejection() {
   }
 }
 
+expect_adapter_rejection() {
+  local fixture_root="$1"
+  local expected_message="$2"
+  local output="${fixture_root}.adapter.log"
+  if bash scripts/generate-conformance-fixture-records.sh "${fixture_root}" --check >"${output}" 2>&1; then
+    echo "invalid provider fixture copy was accepted: ${fixture_root}" >&2
+    exit 1
+  fi
+  grep -Fq "${expected_message}" "${output}" || {
+    echo "provider fixture copy failed for the wrong reason: ${fixture_root}" >&2
+    cat "${output}" >&2
+    exit 1
+  }
+}
+
 profile="${source_root}/profiles/artifact-integrity/profile.json"
 positive_input="$(jq -r '.fixtures[] | select(.family == "positive") | .input' "${profile}")"
 malformed_input="$(jq -r '.fixtures[] | select(.family == "malformed") | .input' "${profile}")"
@@ -43,15 +58,15 @@ positive_schema="$(jq -r '.fixtures[] | select(.family == "positive") | .schema'
 
 unknown_input_root="$(new_fixture_copy unknown-input-field)"
 replace_json "${unknown_input_root}/${positive_input}" '.undeclared_evidence = true'
-expect_rejection "${unknown_input_root}" "required pinned-schema result"
+expect_adapter_rejection "${unknown_input_root}" "input fixture is not independently reproducible"
 
 valid_malformed_root="$(new_fixture_copy valid-malformed-input)"
 replace_json "${valid_malformed_root}/${malformed_input}" '.stimulus = "now-valid"'
-expect_rejection "${valid_malformed_root}" "required pinned-schema result"
+expect_adapter_rejection "${valid_malformed_root}" "input fixture is not independently reproducible"
 
 unsupported_schema_root="$(new_fixture_copy unsupported-schema-keyword)"
 replace_json "${unsupported_schema_root}/${positive_schema}" '.oneOf = []'
-expect_rejection "${unsupported_schema_root}" "required pinned-schema result"
+expect_adapter_rejection "${unsupported_schema_root}" "unsupported JSON adapter semantics"
 
 unknown_authority_root="$(new_fixture_copy unknown-authority-field)"
 replace_json "${unknown_authority_root}/support/draft-execution-authority.json" \

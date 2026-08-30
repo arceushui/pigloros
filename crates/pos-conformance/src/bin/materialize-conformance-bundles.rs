@@ -1115,6 +1115,7 @@ fn fixture_expectation(
     fixture: &CatalogFixture,
     auxiliary: &ArtifactDescriptorV1,
 ) -> FixtureExpectation {
+    let semantics = fixture_family_semantics(fixture.family);
     let (strict_oracle, verification_outcome, verification_error) = match &fixture.strict_oracle {
         CatalogStrictOracle::CanonicalOutput => (
             StrictOracleV1 {
@@ -1136,11 +1137,6 @@ fn fixture_expectation(
                 contract_version: (*contract_version).to_owned(),
                 code_id: (*code_id).to_owned(),
             };
-            let outcome = match fixture.family {
-                FixtureFamilyV1::ResourceExhaustion => VerificationOutcomeV1::ResourceLimitExceeded,
-                FixtureFamilyV1::Downgrade => VerificationOutcomeV1::IncompatibleProfile,
-                _ => VerificationOutcomeV1::InvalidManifest,
-            };
             (
                 StrictOracleV1 {
                     kind: StrictOracleKindV1::Failure,
@@ -1148,25 +1144,52 @@ fn fixture_expectation(
                     failure: Some(failure.clone()),
                     divergence: None,
                 },
-                outcome,
+                semantics.failure_outcome,
                 Some(failure),
             )
         }
-    };
-    let (replay_claim, redaction_state) = match fixture.family {
-        FixtureFamilyV1::DeletionRedaction => (
-            ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-            RedactionStateV1::RedactedViews,
-        ),
-        FixtureFamilyV1::Downgrade => (ReplayClaimV1::IncompatibleProfile, RedactionStateV1::None),
-        _ => (ReplayClaimV1::Exact, RedactionStateV1::None),
     };
     FixtureExpectation {
         strict_oracle,
         verification_outcome,
         verification_error,
-        replay_claim,
-        redaction_state,
+        replay_claim: semantics.replay_claim,
+        redaction_state: semantics.redaction_state,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FixtureFamilySemantics {
+    failure_outcome: VerificationOutcomeV1,
+    replay_claim: ReplayClaimV1,
+    redaction_state: RedactionStateV1,
+}
+
+const fn fixture_family_semantics(family: FixtureFamilyV1) -> FixtureFamilySemantics {
+    match family {
+        FixtureFamilyV1::DeletionRedaction => FixtureFamilySemantics {
+            failure_outcome: VerificationOutcomeV1::InvalidManifest,
+            replay_claim: ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            redaction_state: RedactionStateV1::RedactedViews,
+        },
+        FixtureFamilyV1::Downgrade => FixtureFamilySemantics {
+            failure_outcome: VerificationOutcomeV1::IncompatibleProfile,
+            replay_claim: ReplayClaimV1::IncompatibleProfile,
+            redaction_state: RedactionStateV1::None,
+        },
+        FixtureFamilyV1::ResourceExhaustion => FixtureFamilySemantics {
+            failure_outcome: VerificationOutcomeV1::ResourceLimitExceeded,
+            replay_claim: ReplayClaimV1::Exact,
+            redaction_state: RedactionStateV1::None,
+        },
+        FixtureFamilyV1::Positive
+        | FixtureFamilyV1::Denied
+        | FixtureFamilyV1::Malformed
+        | FixtureFamilyV1::IndependentEvaluation => FixtureFamilySemantics {
+            failure_outcome: VerificationOutcomeV1::InvalidManifest,
+            replay_claim: ReplayClaimV1::Exact,
+            redaction_state: RedactionStateV1::None,
+        },
     }
 }
 

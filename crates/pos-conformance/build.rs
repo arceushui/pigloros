@@ -1606,6 +1606,13 @@ fn emit_materialization_assets(
          }\n",
     );
     let support = support_package_manifest(snapshots)?;
+    for artifact in &support.artifacts {
+        emit_byte_constant(
+            &mut generated,
+            &support_constant_name(&artifact.path),
+            snapshots.bytes(&artifact.path, "support package artifact")?,
+        )?;
+    }
     writeln!(
         generated,
         "const MATERIALIZATION_SUPPORT_ARTIFACTS: [MaterializationSupportArtifact; {}] = [",
@@ -1613,11 +1620,6 @@ fn emit_materialization_assets(
     )?;
     for artifact in support.artifacts {
         let bytes = snapshots.bytes(&artifact.path, "support package artifact")?;
-        emit_byte_constant(
-            &mut generated,
-            &support_constant_name(&artifact.path),
-            bytes,
-        )?;
         writeln!(
             generated,
             "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: &{:?}, role: {}, provider_package: {} }},",
