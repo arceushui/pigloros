@@ -503,6 +503,7 @@ pub(super) fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordi
         freeze_provenance: record.freeze_provenance(),
         freeze_admission: record.freeze_admission(),
         dispatch_provenance: record.dispatch_provenance(),
+        supporting_records: record.supporting_records().clone(),
     }
 }
 
@@ -3308,7 +3309,8 @@ fn lifecycle_public_edges_and_terminality_are_closed() {
     );
     assert!(!ErasureLifecycleV1::Rejected.permits(ErasureLifecycleV1::Submitted));
     assert!(ErasureLifecycleV1::Complete.is_terminal());
-    assert!(ErasureLifecycleV1::PartialFailure.is_terminal());
+    assert!(!ErasureLifecycleV1::PartialFailure.is_terminal());
+    assert!(ErasureLifecycleV1::PartialFailure.is_attempt_terminal());
     assert!(ErasureLifecycleV1::Rejected.is_terminal());
     assert!(!ErasureLifecycleV1::Authorized.is_terminal());
 }
@@ -3320,7 +3322,8 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
         .permits(ErasureLifecycleV1::Authorized));
     assert!(submitted.lifecycle().permits(ErasureLifecycleV1::Rejected));
     assert!(!ErasureLifecycleV1::Complete.permits(ErasureLifecycleV1::Authorized));
-    assert!(ErasureLifecycleV1::PartialFailure.is_terminal());
+    assert!(ErasureLifecycleV1::PartialFailure.permits(ErasureLifecycleV1::PartialFailure));
+    assert!(ErasureLifecycleV1::PartialFailure.permits(ErasureLifecycleV1::Complete));
     assert_eq!(
         submitted.transition(change(
             ErasureLifecycleV1::Submitted,

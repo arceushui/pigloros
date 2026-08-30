@@ -22,6 +22,27 @@ pub const ERASURE_COORDINATOR_RECORD_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const ERASURE_MAX_REFERENCES: usize = 4_096;
 /// Largest number of entries in each ERC1 inventory.
 pub const ERASURE_MAX_INVENTORY_RESULTS: usize = 65_536;
+/// Largest encoded portable supporting record, except retry admissions.
+pub const ERASURE_PORTABLE_RECORD_MAX_BYTES: usize = 1024 * 1024;
+/// Largest encoded retry-admission record.
+pub const ERASURE_RETRY_ADMISSION_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum number of attempt outcomes or ERC1 receipts per ERQ1.
+pub const ERASURE_MAX_ATTEMPT_OUTCOMES: usize = 4_096;
+/// Maximum number of administrative resolutions per ERQ1.
+pub const ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS: usize = 4_096;
+
+/// Domain tag for correction-provenance records.
+pub const ERASURE_CORRECTION_PROVENANCE_TAG_V1: &str = "ERCP1";
+/// Domain tag for retry-admission records.
+pub const ERASURE_RETRY_ADMISSION_TAG_V1: &str = "ERRA1";
+/// Domain tag for acknowledgement-provenance records.
+pub const ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1: &str = "ERAP1";
+/// Domain tag for attempt-outcome records.
+pub const ERASURE_ATTEMPT_OUTCOME_TAG_V1: &str = "ERAO1";
+/// Domain tag for receipt-provenance records.
+pub const ERASURE_RECEIPT_PROVENANCE_TAG_V1: &str = "ERPR1";
+/// Domain tag for administrative-resolution records.
+pub const ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1: &str = "ERAR1";
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,12 +251,18 @@ impl ErasureLifecycleV1 {
             Self::AccessFrozen => matches!(next, Self::DestructionDispatched),
             Self::DestructionDispatched => matches!(next, Self::AwaitingAcknowledgements),
             Self::AwaitingAcknowledgements => matches!(next, Self::Complete | Self::PartialFailure),
-            Self::Complete | Self::PartialFailure | Self::Rejected => false,
+            Self::PartialFailure => matches!(next, Self::PartialFailure | Self::Complete),
+            Self::Complete | Self::Rejected => false,
         }
     }
-    /// Report whether no later transition is permitted.
+    /// Report whether the request itself has reached a terminal outcome.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Complete | Self::Rejected)
+    }
+    /// Report whether the current destruction attempt has reached an outcome.
+    #[must_use]
+    pub const fn is_attempt_terminal(self) -> bool {
         matches!(self, Self::Complete | Self::PartialFailure | Self::Rejected)
     }
     /// Report whether generic `EventStore` access must be rejected.
@@ -253,6 +280,1232 @@ impl ErasureLifecycleV1 {
                 | Self::PartialFailure
         )
     }
+}
+
+/// Closed actions permitted for administrative erasure recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureAdministrativeResolutionActionV1 {
+    /// Close a containment boundary after exact evidence validation.
+    CloseContainment,
+    /// Repair evidence whose canonical bytes already match its address.
+    RecoverExactEvidence,
+}
+
+impl ErasureAdministrativeResolutionActionV1 {
+    /// Return the stable V1 wire code.
+    #[must_use]
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::CloseContainment => 0,
+            Self::RecoverExactEvidence => 1,
+        }
+    }
+
+    /// Decode a stable V1 wire code.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErasureErrorV1::InvalidEncoding`] for an unknown code.
+    pub const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
+        match code {
+            0 => Ok(Self::CloseContainment),
+            1 => Ok(Self::RecoverExactEvidence),
+            _ => Err(ErasureErrorV1::InvalidEncoding),
+        }
+    }
+}
+
+/// Construction fields for an [`ErasureCorrectionProvenanceV1`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureCorrectionProvenanceInputV1 {
+    /// Rejected ERQ1 digest.
+    pub rejected_request: ErasureReferenceV1,
+    /// Rejected terminal ERS1 digest.
+    pub rejected_terminal_state: ErasureReferenceV1,
+    /// Digest of the correction reason.
+    pub correction_reason: ErasureReferenceV1,
+    /// Host authorization provenance digest.
+    pub authorization_provenance: ErasureReferenceV1,
+}
+
+/// Content-addressed provenance for a corrected rejected request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureCorrectionProvenanceV1 {
+    input: ErasureCorrectionProvenanceInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureCorrectionProvenanceV1 {
+    /// Construct and content-address a correction-provenance record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if the record exceeds its bound.
+    pub fn new(input: ErasureCorrectionProvenanceInputV1) -> Result<Self, ErasureErrorV1> {
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the rejected ERQ1 digest.
+    #[must_use]
+    pub const fn rejected_request(&self) -> ErasureReferenceV1 {
+        self.input.rejected_request
+    }
+
+    /// Return the rejected terminal ERS1 digest.
+    #[must_use]
+    pub const fn rejected_terminal_state(&self) -> ErasureReferenceV1 {
+        self.input.rejected_terminal_state
+    }
+
+    /// Return the correction-reason digest.
+    #[must_use]
+    pub const fn correction_reason(&self) -> ErasureReferenceV1 {
+        self.input.correction_reason
+    }
+
+    /// Return the host authorization-provenance digest.
+    #[must_use]
+    pub const fn authorization_provenance(&self) -> ErasureReferenceV1 {
+        self.input.authorization_provenance
+    }
+
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+
+    /// Alias for [`Self::reference`].
+    #[must_use]
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.reference()
+    }
+
+    /// Encode the exact-length deterministic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if serialization exceeds its bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &correction_provenance_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical correction-provenance record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or oversized bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 6).and_then(correction_provenance_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &correction_provenance_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_CORRECTION_PROVENANCE_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+/// Construction fields for an [`ErasureRetryAdmissionV1`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureRetryAdmissionInputV1 {
+    /// ERQ1 digest being retried.
+    pub request: ErasureReferenceV1,
+    /// Zero-based attempt ordinal.
+    pub attempt_ordinal: u64,
+    /// ERC1 digest immediately preceding this attempt, if any.
+    pub source_receipt: Option<ErasureReferenceV1>,
+    /// Unresolved obligations selected for this attempt.
+    pub unresolved_obligations: Vec<ErasureReferenceV1>,
+    /// Stable `(ERQ1, target)` command identities corresponding to obligations.
+    pub command_identities: Vec<ErasureReferenceV1>,
+    /// Pinned retry-policy revision.
+    pub policy: ErasureReferenceV1,
+    /// Pinned trust revision.
+    pub trust: ErasureReferenceV1,
+    /// Authoritative logical position admitting the retry.
+    pub admitted_position: u64,
+    /// Deterministically derived logical deadline.
+    pub deadline_position: u64,
+    /// Host authorization-provenance digest.
+    pub authorization_provenance: ErasureReferenceV1,
+}
+
+/// Content-addressed admission for one destruction attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureRetryAdmissionV1 {
+    input: ErasureRetryAdmissionInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureRetryAdmissionV1 {
+    /// Construct, normalize, and content-address a retry admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed policy or scope error for an invalid attempt.
+    pub fn new(mut input: ErasureRetryAdmissionInputV1) -> Result<Self, ErasureErrorV1> {
+        normalize_retry_admission(&mut input)?;
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 digest.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.input.request
+    }
+
+    /// Return the zero-based attempt ordinal.
+    #[must_use]
+    pub const fn attempt_ordinal(&self) -> u64 {
+        self.input.attempt_ordinal
+    }
+
+    /// Return the preceding ERC1 digest, if this is a retry.
+    #[must_use]
+    pub const fn source_receipt(&self) -> Option<ErasureReferenceV1> {
+        self.input.source_receipt
+    }
+
+    /// Return unresolved obligations in bytewise order.
+    #[must_use]
+    pub fn unresolved_obligations(&self) -> &[ErasureReferenceV1] {
+        &self.input.unresolved_obligations
+    }
+
+    /// Return stable command identities aligned with [`Self::unresolved_obligations`].
+    #[must_use]
+    pub fn command_identities(&self) -> &[ErasureReferenceV1] {
+        &self.input.command_identities
+    }
+
+    /// Return the pinned retry-policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+
+    /// Return the logical position that admitted the retry.
+    #[must_use]
+    pub const fn admitted_position(&self) -> u64 {
+        self.input.admitted_position
+    }
+
+    /// Return the immutable logical deadline.
+    #[must_use]
+    pub const fn deadline_position(&self) -> u64 {
+        self.input.deadline_position
+    }
+
+    /// Return the host authorization-provenance digest.
+    #[must_use]
+    pub const fn authorization_provenance(&self) -> ErasureReferenceV1 {
+        self.input.authorization_provenance
+    }
+
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+
+    /// Alias for [`Self::reference`].
+    #[must_use]
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.reference()
+    }
+
+    /// Encode the exact-length deterministic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if serialization exceeds its bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &retry_admission_value(self),
+            ERASURE_RETRY_ADMISSION_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical retry-admission record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or invalid bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_RETRY_ADMISSION_MAX_BYTES,
+            ERASURE_MAX_INVENTORY_RESULTS,
+        )
+        .and_then(|value| exact_array(&value, 12).and_then(retry_admission_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &retry_admission_value(&self),
+            ERASURE_RETRY_ADMISSION_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_RETRY_ADMISSION_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+/// Construction fields for an [`ErasureAcknowledgementProvenanceV1`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureAcknowledgementProvenanceInputV1 {
+    /// ERQ1 digest.
+    pub request: ErasureReferenceV1,
+    /// Stable `(ERQ1, target)` command identity.
+    pub command: ErasureReferenceV1,
+    /// Attempt identity.
+    pub attempt: ErasureReferenceV1,
+    /// Immutable obligation identity.
+    pub obligation: ErasureReferenceV1,
+    /// Immutable owner identity.
+    pub owner: ErasureReferenceV1,
+    /// Immutable resolved-scope identity.
+    pub scope: ErasureReferenceV1,
+    /// Closed owner outcome.
+    pub outcome: ErasureAcknowledgementOutcomeV1,
+    /// Underlying evidence digest.
+    pub evidence: ErasureReferenceV1,
+    /// Pinned policy revision.
+    pub policy: ErasureReferenceV1,
+    /// Pinned trust revision.
+    pub trust: ErasureReferenceV1,
+}
+
+/// Content-addressed provenance for one acknowledgement result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureAcknowledgementProvenanceV1 {
+    input: ErasureAcknowledgementProvenanceInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureAcknowledgementProvenanceV1 {
+    /// Construct and content-address acknowledgement provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if the record exceeds its bound.
+    pub fn new(input: ErasureAcknowledgementProvenanceInputV1) -> Result<Self, ErasureErrorV1> {
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 digest.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.input.request
+    }
+    /// Return the stable command identity.
+    #[must_use]
+    pub const fn command(&self) -> ErasureReferenceV1 {
+        self.input.command
+    }
+    /// Return the attempt identity.
+    #[must_use]
+    pub const fn attempt(&self) -> ErasureReferenceV1 {
+        self.input.attempt
+    }
+    /// Return the immutable obligation identity.
+    #[must_use]
+    pub const fn obligation(&self) -> ErasureReferenceV1 {
+        self.input.obligation
+    }
+    /// Return the immutable owner identity.
+    #[must_use]
+    pub const fn owner(&self) -> ErasureReferenceV1 {
+        self.input.owner
+    }
+    /// Return the immutable scope identity.
+    #[must_use]
+    pub const fn scope(&self) -> ErasureReferenceV1 {
+        self.input.scope
+    }
+    /// Return the closed acknowledgement outcome.
+    #[must_use]
+    pub const fn outcome(&self) -> ErasureAcknowledgementOutcomeV1 {
+        self.input.outcome
+    }
+    /// Return the underlying evidence digest.
+    #[must_use]
+    pub const fn evidence(&self) -> ErasureReferenceV1 {
+        self.input.evidence
+    }
+    /// Return the pinned policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+    /// Alias for [`Self::reference`].
+    #[must_use]
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.reference()
+    }
+
+    /// Encode the exact-length deterministic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if serialization exceeds its bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &acknowledgement_provenance_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical acknowledgement-provenance record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or invalid bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 12).and_then(acknowledgement_provenance_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &acknowledgement_provenance_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+/// Construction fields for an [`ErasureAttemptOutcomeV1`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureAttemptOutcomeInputV1 {
+    /// ERQ1 digest.
+    pub request: ErasureReferenceV1,
+    /// Attempt identity.
+    pub attempt: ErasureReferenceV1,
+    /// ERC1 digest immediately preceding this attempt, if any.
+    pub source_receipt: Option<ErasureReferenceV1>,
+    /// Attempt outcome lifecycle; only `PartialFailure` or `Complete`.
+    pub lifecycle: ErasureLifecycleV1,
+    /// Digest of the selected-obligation set.
+    pub selected_obligations: ErasureReferenceV1,
+    /// Digest of the canonical acknowledgement inventory.
+    pub acknowledgement_inventory: ErasureReferenceV1,
+    /// Terminal logical position for the attempt.
+    pub terminal_position: u64,
+    /// Pinned policy revision.
+    pub policy: ErasureReferenceV1,
+    /// Pinned trust revision.
+    pub trust: ErasureReferenceV1,
+}
+
+/// Content-addressed outcome of one destruction attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureAttemptOutcomeV1 {
+    input: ErasureAttemptOutcomeInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureAttemptOutcomeV1 {
+    /// Construct and validate one attempt outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed policy error unless the attempt has an outcome.
+    pub fn new(input: ErasureAttemptOutcomeInputV1) -> Result<Self, ErasureErrorV1> {
+        if !matches!(
+            input.lifecycle,
+            ErasureLifecycleV1::PartialFailure | ErasureLifecycleV1::Complete
+        ) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 digest.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.input.request
+    }
+    /// Return the attempt identity.
+    #[must_use]
+    pub const fn attempt(&self) -> ErasureReferenceV1 {
+        self.input.attempt
+    }
+    /// Return the preceding ERC1 digest, if any.
+    #[must_use]
+    pub const fn source_receipt(&self) -> Option<ErasureReferenceV1> {
+        self.input.source_receipt
+    }
+    /// Return the attempt outcome lifecycle.
+    #[must_use]
+    pub const fn lifecycle(&self) -> ErasureLifecycleV1 {
+        self.input.lifecycle
+    }
+    /// Return the selected-obligation-set digest.
+    #[must_use]
+    pub const fn selected_obligations(&self) -> ErasureReferenceV1 {
+        self.input.selected_obligations
+    }
+    /// Return the canonical acknowledgement-inventory digest.
+    #[must_use]
+    pub const fn acknowledgement_inventory(&self) -> ErasureReferenceV1 {
+        self.input.acknowledgement_inventory
+    }
+    /// Return the terminal logical position.
+    #[must_use]
+    pub const fn terminal_position(&self) -> u64 {
+        self.input.terminal_position
+    }
+    /// Return the pinned policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+    /// Alias for [`Self::reference`].
+    #[must_use]
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.reference()
+    }
+
+    /// Encode the exact-length deterministic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if serialization exceeds its bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &attempt_outcome_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical attempt-outcome record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or invalid bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 11).and_then(attempt_outcome_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &attempt_outcome_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+/// Construction fields for an [`ErasureReceiptProvenanceV1`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureReceiptProvenanceInputV1 {
+    /// ERQ1 digest.
+    pub request: ErasureReferenceV1,
+    /// Attempt identity.
+    pub attempt: ErasureReferenceV1,
+    /// Zero-based attempt ordinal.
+    pub attempt_ordinal: u64,
+    /// Immediately preceding ERC1 digest, absent only for ordinal zero.
+    pub predecessor_receipt: Option<ErasureReferenceV1>,
+    /// Terminal ERS1 digest.
+    pub terminal_state: ErasureReferenceV1,
+    /// Canonical evidence-set digest.
+    pub evidence_set: ErasureReferenceV1,
+    /// Pinned policy revision.
+    pub policy: ErasureReferenceV1,
+    /// Pinned trust revision.
+    pub trust: ErasureReferenceV1,
+    /// Issue logical position.
+    pub issue_position: u64,
+}
+
+/// Content-addressed provenance for one ERC1 receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureReceiptProvenanceV1 {
+    input: ErasureReceiptProvenanceInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureReceiptProvenanceV1 {
+    /// Construct and validate one receipt-provenance record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed policy error for an invalid ordinal or predecessor.
+    pub fn new(input: ErasureReceiptProvenanceInputV1) -> Result<Self, ErasureErrorV1> {
+        if input.attempt_ordinal >= ERASURE_MAX_ATTEMPT_OUTCOMES as u64
+            || (input.attempt_ordinal == 0) != input.predecessor_receipt.is_none()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 digest.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.input.request
+    }
+    /// Return the attempt identity.
+    #[must_use]
+    pub const fn attempt(&self) -> ErasureReferenceV1 {
+        self.input.attempt
+    }
+    /// Return the zero-based attempt ordinal.
+    #[must_use]
+    pub const fn attempt_ordinal(&self) -> u64 {
+        self.input.attempt_ordinal
+    }
+    /// Return the preceding ERC1 digest, if any.
+    #[must_use]
+    pub const fn predecessor_receipt(&self) -> Option<ErasureReferenceV1> {
+        self.input.predecessor_receipt
+    }
+    /// Return the terminal ERS1 digest.
+    #[must_use]
+    pub const fn terminal_state(&self) -> ErasureReferenceV1 {
+        self.input.terminal_state
+    }
+    /// Return the canonical evidence-set digest.
+    #[must_use]
+    pub const fn evidence_set(&self) -> ErasureReferenceV1 {
+        self.input.evidence_set
+    }
+    /// Return the pinned policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+    /// Return the issue logical position.
+    #[must_use]
+    pub const fn issue_position(&self) -> u64 {
+        self.input.issue_position
+    }
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+    /// Alias for [`Self::reference`].
+    #[must_use]
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.reference()
+    }
+
+    /// Encode the exact-length deterministic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if serialization exceeds its bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &receipt_provenance_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical receipt-provenance record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or invalid bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 11).and_then(receipt_provenance_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &receipt_provenance_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_RECEIPT_PROVENANCE_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+/// Construction fields for an [`ErasureAdministrativeResolutionV1`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureAdministrativeResolutionInputV1 {
+    /// ERQ1 digest.
+    pub request: ErasureReferenceV1,
+    /// Affected state/evidence digests in bytewise order.
+    pub affected_digests: Vec<ErasureReferenceV1>,
+    /// Closed recovery action.
+    pub action: ErasureAdministrativeResolutionActionV1,
+    /// Affected scope-commitment digest.
+    pub scope_commitment: ErasureReferenceV1,
+    /// Pinned policy revision.
+    pub policy: ErasureReferenceV1,
+    /// Pinned trust revision.
+    pub trust: ErasureReferenceV1,
+    /// Authorizing Principal digest.
+    pub principal: ErasureReferenceV1,
+    /// Host authorization-provenance digest.
+    pub authorization_provenance: ErasureReferenceV1,
+    /// Digest of the resolution reason.
+    pub reason: ErasureReferenceV1,
+    /// Issue logical position.
+    pub issue_position: u64,
+    /// Immediately preceding resolution digest, if any.
+    pub predecessor_resolution: Option<ErasureReferenceV1>,
+}
+
+/// Content-addressed administrative recovery resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureAdministrativeResolutionV1 {
+    input: ErasureAdministrativeResolutionInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+/// Portable immutable evidence persisted with an erasure coordinator record.
+///
+/// This envelope is shared by every storage adapter. Empty evidence is valid
+/// before the first attempt outcome; once appended, entries are never removed
+/// or replaced.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ErasureSupportingRecordsV1 {
+    correction_provenance: Option<ErasureCorrectionProvenanceV1>,
+    retry_admissions: Vec<ErasureRetryAdmissionV1>,
+    acknowledgement_provenance: Vec<ErasureAcknowledgementProvenanceV1>,
+    attempt_outcomes: Vec<ErasureAttemptOutcomeV1>,
+    receipts: Vec<ErasureReceiptV1>,
+    receipt_provenance: Vec<ErasureReceiptProvenanceV1>,
+    administrative_resolutions: Vec<ErasureAdministrativeResolutionV1>,
+}
+
+/// Construction fields for [`ErasureSupportingRecordsV1`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ErasureSupportingRecordsInputV1 {
+    /// Provenance linking a corrected ERQ1 to a rejected predecessor.
+    pub correction_provenance: Option<ErasureCorrectionProvenanceV1>,
+    /// Initial-attempt and retry admissions in ordinal order.
+    pub retry_admissions: Vec<ErasureRetryAdmissionV1>,
+    /// Canonical acknowledgement-result evidence retained across attempts.
+    pub acknowledgement_provenance: Vec<ErasureAcknowledgementProvenanceV1>,
+    /// Immutable attempt outcomes in ordinal order.
+    pub attempt_outcomes: Vec<ErasureAttemptOutcomeV1>,
+    /// Immutable ERC1 receipts in ordinal order.
+    pub receipts: Vec<ErasureReceiptV1>,
+    /// Provenance for each receipt in ordinal order.
+    pub receipt_provenance: Vec<ErasureReceiptProvenanceV1>,
+    /// Non-branching administrative-resolution chain.
+    pub administrative_resolutions: Vec<ErasureAdministrativeResolutionV1>,
+}
+
+impl ErasureSupportingRecordsV1 {
+    /// Validate one complete immutable evidence ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed policy or provenance error for a fork, gap, mismatched
+    /// request, attempt, receipt, or bounded collection.
+    pub fn new(mut input: ErasureSupportingRecordsInputV1) -> Result<Self, ErasureErrorV1> {
+        input
+            .acknowledgement_provenance
+            .sort_unstable_by_key(|acknowledgement| {
+                (
+                    acknowledgement.command(),
+                    acknowledgement.attempt(),
+                    acknowledgement.owner(),
+                    acknowledgement.reference(),
+                )
+            });
+        input.acknowledgement_provenance.dedup();
+        let records = Self {
+            correction_provenance: input.correction_provenance,
+            retry_admissions: input.retry_admissions,
+            acknowledgement_provenance: input.acknowledgement_provenance,
+            attempt_outcomes: input.attempt_outcomes,
+            receipts: input.receipts,
+            receipt_provenance: input.receipt_provenance,
+            administrative_resolutions: input.administrative_resolutions,
+        };
+        records.validate().map(|()| records)
+    }
+
+    /// Return correction provenance, when this ERQ1 replaces a rejection.
+    #[must_use]
+    pub const fn correction_provenance(&self) -> Option<&ErasureCorrectionProvenanceV1> {
+        self.correction_provenance.as_ref()
+    }
+
+    /// Return attempt admissions in ordinal order.
+    #[must_use]
+    pub fn retry_admissions(&self) -> &[ErasureRetryAdmissionV1] {
+        &self.retry_admissions
+    }
+
+    /// Return acknowledgement-result evidence.
+    #[must_use]
+    pub fn acknowledgement_provenance(&self) -> &[ErasureAcknowledgementProvenanceV1] {
+        &self.acknowledgement_provenance
+    }
+
+    /// Return attempt outcomes in ordinal order.
+    #[must_use]
+    pub fn attempt_outcomes(&self) -> &[ErasureAttemptOutcomeV1] {
+        &self.attempt_outcomes
+    }
+
+    /// Return immutable ERC1 receipts in ordinal order.
+    #[must_use]
+    pub fn receipts(&self) -> &[ErasureReceiptV1] {
+        &self.receipts
+    }
+
+    /// Return receipt provenance in ordinal order.
+    #[must_use]
+    pub fn receipt_provenance(&self) -> &[ErasureReceiptProvenanceV1] {
+        &self.receipt_provenance
+    }
+
+    /// Return the administrative-resolution chain.
+    #[must_use]
+    pub fn administrative_resolutions(&self) -> &[ErasureAdministrativeResolutionV1] {
+        &self.administrative_resolutions
+    }
+
+    fn validate(&self) -> Result<(), ErasureErrorV1> {
+        if self.retry_admissions.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
+            || self.attempt_outcomes.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
+            || self.receipts.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
+            || self.receipt_provenance.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
+            || self.administrative_resolutions.len() > ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS
+            || self.acknowledgement_provenance.len() > ERASURE_MAX_INVENTORY_RESULTS
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if self.attempt_outcomes.len() != self.receipts.len()
+            || self.receipts.len() != self.receipt_provenance.len()
+            || self.retry_admissions.len() < self.attempt_outcomes.len()
+            || self.retry_admissions.len() > self.attempt_outcomes.len().saturating_add(1)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.validate_attempt_chain()?;
+        self.validate_acknowledgements()?;
+        self.validate_resolution_chain()
+    }
+
+    fn validate_attempt_chain(&self) -> Result<(), ErasureErrorV1> {
+        for (ordinal, admission) in self.retry_admissions.iter().enumerate() {
+            let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?;
+            let expected_predecessor = ordinal.checked_sub(1).and_then(|index| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| self.receipts.get(index))
+                    .map(ErasureReceiptV1::receipt_digest)
+            });
+            if admission.attempt_ordinal() != ordinal
+                || admission.source_receipt() != expected_predecessor
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+        }
+        for (ordinal, ((outcome, receipt), provenance)) in self
+            .attempt_outcomes
+            .iter()
+            .zip(&self.receipts)
+            .zip(&self.receipt_provenance)
+            .enumerate()
+        {
+            let admission = self
+                .retry_admissions
+                .get(ordinal)
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?;
+            if outcome.request() != admission.request()
+                || outcome.attempt() != admission.reference()
+                || outcome.source_receipt() != admission.source_receipt()
+                || provenance.request() != admission.request()
+                || provenance.attempt() != admission.reference()
+                || provenance.attempt_ordinal() != ordinal
+                || provenance.predecessor_receipt() != admission.source_receipt()
+                || provenance.terminal_state() != receipt.terminal_state()
+                || outcome.lifecycle() != receipt.lifecycle()
+                || outcome.policy() != admission.policy()
+                || outcome.trust() != admission.trust()
+                || provenance.policy() != admission.policy()
+                || provenance.trust() != admission.trust()
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_acknowledgements(&self) -> Result<(), ErasureErrorV1> {
+        let mut identities = Vec::with_capacity(self.acknowledgement_provenance.len());
+        for acknowledgement in &self.acknowledgement_provenance {
+            let admission = self
+                .retry_admissions
+                .iter()
+                .find(|admission| admission.reference() == acknowledgement.attempt())
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            if admission.request() != acknowledgement.request()
+                || !admission
+                    .command_identities()
+                    .contains(&acknowledgement.command())
+                || admission.policy() != acknowledgement.policy()
+                || admission.trust() != acknowledgement.trust()
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            identities.push((
+                acknowledgement.command(),
+                acknowledgement.attempt(),
+                acknowledgement.owner(),
+            ));
+        }
+        identities.sort_unstable();
+        if has_duplicate(&identities) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        Ok(())
+    }
+
+    fn validate_resolution_chain(&self) -> Result<(), ErasureErrorV1> {
+        let mut predecessor = None;
+        for resolution in &self.administrative_resolutions {
+            if resolution.predecessor_resolution() != predecessor {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+            predecessor = Some(resolution.reference());
+        }
+        Ok(())
+    }
+
+    fn validates_request(&self, request: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
+        let attempts_match = self
+            .retry_admissions
+            .iter()
+            .all(|record| record.request() == request)
+            && self
+                .acknowledgement_provenance
+                .iter()
+                .all(|record| record.request() == request)
+            && self
+                .attempt_outcomes
+                .iter()
+                .all(|record| record.request() == request)
+            && self
+                .receipt_provenance
+                .iter()
+                .all(|record| record.request() == request)
+            && self
+                .administrative_resolutions
+                .iter()
+                .all(|record| record.request() == request)
+            && self
+                .receipts
+                .iter()
+                .all(|record| record.0.request == request);
+        if attempts_match {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    fn is_prefix_of(&self, next: &Self) -> bool {
+        option_is_unchanged(&self.correction_provenance, &next.correction_provenance)
+            && next.retry_admissions.starts_with(&self.retry_admissions)
+            && next
+                .acknowledgement_provenance
+                .starts_with(&self.acknowledgement_provenance)
+            && next.attempt_outcomes.starts_with(&self.attempt_outcomes)
+            && next.receipts.starts_with(&self.receipts)
+            && next
+                .receipt_provenance
+                .starts_with(&self.receipt_provenance)
+            && next
+                .administrative_resolutions
+                .starts_with(&self.administrative_resolutions)
+    }
+}
+
+fn option_is_unchanged<T: PartialEq>(current: &Option<T>, next: &Option<T>) -> bool {
+    current
+        .as_ref()
+        .map_or(true, |value| next.as_ref() == Some(value))
+}
+
+impl ErasureAdministrativeResolutionV1 {
+    /// Construct, normalize, and content-address an administrative resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed scope error for an empty, duplicate, or oversized set.
+    pub fn new(mut input: ErasureAdministrativeResolutionInputV1) -> Result<Self, ErasureErrorV1> {
+        if input.affected_digests.is_empty()
+            || input.affected_digests.len() > ERASURE_MAX_REFERENCES
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        input.affected_digests.sort_unstable();
+        if has_duplicate(&input.affected_digests) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 digest.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.input.request
+    }
+    /// Return affected state/evidence digests in bytewise order.
+    #[must_use]
+    pub fn affected_digests(&self) -> &[ErasureReferenceV1] {
+        &self.input.affected_digests
+    }
+    /// Return the closed recovery action.
+    #[must_use]
+    pub const fn action(&self) -> ErasureAdministrativeResolutionActionV1 {
+        self.input.action
+    }
+    /// Return the affected scope-commitment digest.
+    #[must_use]
+    pub const fn scope_commitment(&self) -> ErasureReferenceV1 {
+        self.input.scope_commitment
+    }
+    /// Return the pinned policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+    /// Return the authorizing Principal digest.
+    #[must_use]
+    pub const fn principal(&self) -> ErasureReferenceV1 {
+        self.input.principal
+    }
+    /// Return the host authorization-provenance digest.
+    #[must_use]
+    pub const fn authorization_provenance(&self) -> ErasureReferenceV1 {
+        self.input.authorization_provenance
+    }
+    /// Return the resolution-reason digest.
+    #[must_use]
+    pub const fn reason(&self) -> ErasureReferenceV1 {
+        self.input.reason
+    }
+    /// Return the issue logical position.
+    #[must_use]
+    pub const fn issue_position(&self) -> u64 {
+        self.input.issue_position
+    }
+    /// Return the preceding resolution digest, if any.
+    #[must_use]
+    pub const fn predecessor_resolution(&self) -> Option<ErasureReferenceV1> {
+        self.input.predecessor_resolution
+    }
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+    /// Alias for [`Self::reference`].
+    #[must_use]
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.reference()
+    }
+
+    /// Encode the exact-length deterministic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if serialization exceeds its bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &administrative_resolution_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical administrative-resolution record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or invalid bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 13).and_then(administrative_resolution_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &administrative_resolution_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+fn normalize_retry_admission(
+    input: &mut ErasureRetryAdmissionInputV1,
+) -> Result<(), ErasureErrorV1> {
+    if input.attempt_ordinal >= ERASURE_MAX_ATTEMPT_OUTCOMES as u64
+        || (input.attempt_ordinal == 0) != input.source_receipt.is_none()
+        || input.deadline_position < input.admitted_position
+    {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    if input.unresolved_obligations.is_empty()
+        || input.unresolved_obligations.len() != input.command_identities.len()
+        || input.unresolved_obligations.len() > ERASURE_MAX_INVENTORY_RESULTS
+    {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+
+    let mut pairs = input
+        .unresolved_obligations
+        .iter()
+        .copied()
+        .zip(input.command_identities.iter().copied())
+        .collect::<Vec<_>>();
+    pairs.sort_unstable_by_key(|(obligation, _)| *obligation);
+    if has_duplicate(
+        &pairs
+            .iter()
+            .map(|(obligation, _)| *obligation)
+            .collect::<Vec<_>>(),
+    ) {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let mut commands = pairs
+        .iter()
+        .map(|(_, command)| *command)
+        .collect::<Vec<_>>();
+    commands.sort_unstable();
+    if has_duplicate(&commands) {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    input.unresolved_obligations = pairs.iter().map(|(obligation, _)| *obligation).collect();
+    input.command_identities = pairs.iter().map(|(_, command)| *command).collect();
+    Ok(())
 }
 
 /// Host-admitted outcome for a submitted ERQ1.
@@ -1301,7 +2554,7 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
     current: ErasureStateV1,
     resolver: &R,
 ) -> Result<(), ErasureErrorV1> {
-    verify_predecessor_chain_bounded(current, resolver, 8)
+    verify_predecessor_chain_bounded(current, resolver, ERASURE_MAX_ATTEMPT_OUTCOMES + 8)
 }
 
 fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1>(
@@ -1554,6 +2807,8 @@ pub struct ErasureCoordinatorRecordPartsV1 {
     pub freeze_admission: Option<ErasureFreezeAdmissionV1>,
     /// Host-authenticated dispatch provenance, if present.
     pub dispatch_provenance: Option<ErasureReferenceV1>,
+    /// Immutable retry, acknowledgement, receipt, and recovery evidence.
+    pub supporting_records: ErasureSupportingRecordsV1,
 }
 
 /// Durable ERQ1/ERS1/ERC1 coordinator record.
@@ -1584,6 +2839,7 @@ pub struct ErasureCoordinatorRecordV1 {
     freeze_provenance: Option<ErasureReferenceV1>,
     freeze_admission: Option<ErasureFreezeAdmissionV1>,
     dispatch_provenance: Option<ErasureReferenceV1>,
+    supporting_records: ErasureSupportingRecordsV1,
 }
 
 impl ErasureCoordinatorRecordV1 {
@@ -1614,6 +2870,7 @@ impl ErasureCoordinatorRecordV1 {
             freeze_provenance: parts.freeze_provenance,
             freeze_admission: parts.freeze_admission,
             dispatch_provenance: parts.dispatch_provenance,
+            supporting_records: parts.supporting_records,
         };
         record.validate(coordinator).map(|()| record)
     }
@@ -1646,7 +2903,7 @@ impl ErasureCoordinatorRecordV1 {
             ERASURE_COORDINATOR_RECORD_MAX_BYTES,
             ERASURE_MAX_INVENTORY_RESULTS,
         )
-        .and_then(|value| exact_array(&value, 12).and_then(record_from_fields))
+        .and_then(|value| exact_array(&value, 13).and_then(record_from_fields))
     }
 
     /// Validate a replacement against the currently persisted record.
@@ -1665,6 +2922,12 @@ impl ErasureCoordinatorRecordV1 {
         self.validate(coordinator)?;
         next.validate(coordinator)?;
         if self.request != next.request {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if !self
+            .supporting_records
+            .is_prefix_of(&next.supporting_records)
+        {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         if !freeze_is_monotonic(self.state.freeze_position(), next.state.freeze_position()) {
@@ -1687,6 +2950,13 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_same_state_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
+        let mut without_supporting_records = next.clone();
+        without_supporting_records
+            .supporting_records
+            .clone_from(&self.supporting_records);
+        if without_supporting_records == *self {
+            return Ok(());
+        }
         if matches!(
             (
                 self.state.lifecycle(),
@@ -1697,6 +2967,9 @@ impl ErasureCoordinatorRecordV1 {
         ) {
             let mut without_reservation = next.clone();
             without_reservation.reserved_targets.clear();
+            without_reservation
+                .supporting_records
+                .clone_from(&self.supporting_records);
             if without_reservation == *self {
                 return Ok(());
             }
@@ -1711,6 +2984,9 @@ impl ErasureCoordinatorRecordV1 {
         ) {
             let mut without_dispatch_intent = next.clone();
             without_dispatch_intent.dispatch_provenance = None;
+            without_dispatch_intent
+                .supporting_records
+                .clone_from(&self.supporting_records);
             if without_dispatch_intent == *self {
                 return Ok(());
             }
@@ -1729,6 +3005,9 @@ impl ErasureCoordinatorRecordV1 {
             without_new_acknowledgements
                 .acknowledgements
                 .clone_from(&self.acknowledgements);
+            without_new_acknowledgements
+                .supporting_records
+                .clone_from(&self.supporting_records);
             if without_new_acknowledgements == *self {
                 return Ok(());
             }
@@ -1842,6 +3121,12 @@ impl ErasureCoordinatorRecordV1 {
     #[must_use]
     pub const fn dispatch_provenance(&self) -> Option<ErasureReferenceV1> {
         self.dispatch_provenance
+    }
+
+    /// Return immutable supporting records recovered with this coordinator state.
+    #[must_use]
+    pub const fn supporting_records(&self) -> &ErasureSupportingRecordsV1 {
+        &self.supporting_records
     }
 
     fn validate_scope(&self) -> Result<(), ErasureErrorV1> {
@@ -2047,6 +3332,14 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        self.supporting_records.validate()?;
+        self.supporting_records
+            .validates_request(self.request.reference())?;
+        if let Some(correction) = self.supporting_records.correction_provenance() {
+            if self.request.provenance() != correction.reference() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
         let lifecycle = self.state.lifecycle();
         self.validate_scope()?;
         self.validate_lifecycle_shape(lifecycle)?;
@@ -2140,6 +3433,7 @@ mod erasure_targeted_coverage_tests {
             (9, Value::Text(String::new())),
             (10, Value::Array(Vec::new())),
             (11, Value::Text(String::new())),
+            (12, Value::Null),
         ];
         replacements
             .into_iter()
@@ -2283,7 +3577,7 @@ mod erasure_targeted_coverage_tests {
     #[test]
     fn canonical_record_decoder_rejects_malformed_fields_at_a_public_boundary() {
         let malformed = malformed_record_bytes();
-        assert_eq!(malformed.len(), 10);
+        assert_eq!(malformed.len(), 11);
         for bytes in malformed {
             assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).is_err());
         }
@@ -2515,7 +3809,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if record.state.lifecycle() != ErasureLifecycleV1::Submitted {
                 return if record.authorize_provenance == Some(provenance)
                     && (record.state.lifecycle() == ErasureLifecycleV1::Authorized
-                        || record.state.lifecycle().is_terminal()
+                        || record.state.lifecycle().is_attempt_terminal()
                         || record.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
                         || record.state.lifecycle() == ErasureLifecycleV1::DestructionDispatched
                         || record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements)
@@ -2870,7 +4164,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         let Some(freeze_position) = record.state.freeze_position() else {
             return Err(ErasureErrorV1::PolicyConflict);
         };
-        if !record.state.lifecycle().is_terminal() {
+        if !record.state.lifecycle().is_attempt_terminal() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         input.request = request;
@@ -3031,14 +4325,18 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinator for ErasureCoordinatorState
 #[path = "erasure_codec.rs"]
 mod codec;
 use codec::{
-    acknowledgements_are_closure_subset, acknowledgements_match_closure, decode_limited,
-    domain_digest, encode_canonical, encode_limited, exact_array, freeze_is_monotonic,
-    has_duplicate, has_duplicate_by_target, invalid_owner_sets, inventories_exceed_bound,
-    inventories_have_duplicate_targets, inventories_match_closure, inventory_categories_match,
-    inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
-    receipt_value, record_from_fields, record_value, reference_zero, request_from_fields,
-    request_value, sort_inventories, state_core_value, state_from_fields, state_value,
-    strictly_increasing, weakest_inventory_claim,
+    acknowledgement_provenance_from_fields, acknowledgement_provenance_value,
+    acknowledgements_are_closure_subset, acknowledgements_match_closure,
+    administrative_resolution_from_fields, administrative_resolution_value,
+    attempt_outcome_from_fields, attempt_outcome_value, correction_provenance_from_fields,
+    correction_provenance_value, decode_limited, domain_digest, encode_canonical, encode_limited,
+    exact_array, freeze_is_monotonic, has_duplicate, has_duplicate_by_target, invalid_owner_sets,
+    inventories_exceed_bound, inventories_have_duplicate_targets, inventories_match_closure,
+    inventory_categories_match, inventory_transitions_preserve_or_weaken, receipt_core_value,
+    receipt_from_fields, receipt_provenance_from_fields, receipt_provenance_value, receipt_value,
+    record_from_fields, record_value, reference_zero, request_from_fields, request_value,
+    retry_admission_from_fields, retry_admission_value, sort_inventories, state_core_value,
+    state_from_fields, state_value, strictly_increasing, weakest_inventory_claim,
 };
 
 #[cfg(test)]
@@ -3248,6 +4546,7 @@ mod erasure_coverage_tests {
                 freeze_provenance: None,
                 freeze_admission: None,
                 dispatch_provenance: None,
+                supporting_records: Default::default(),
             },
             coordinator(),
         )?;

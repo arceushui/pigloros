@@ -59,17 +59,28 @@ pub use consent::{
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
-    destruction_command_reference, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinator,
-    ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
-    ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureFreezeAdmissionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
+    destruction_command_reference, ErasureAcknowledgementOutcomeV1,
+    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
+    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAttemptOutcomeInputV1,
+    ErasureAttemptOutcomeV1, ErasureCoordinator, ErasureCoordinatorPortV1,
+    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
+    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1,
+    ErasureErrorV1, ErasureFreezeAdmissionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
     ErasureKeyRoleV1, ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES,
-    ERASURE_RECEIPT_MAX_BYTES, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+    ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
+    ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
+    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
+    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES,
+    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RECEIPT_MAX_BYTES,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+    ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
 };
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};

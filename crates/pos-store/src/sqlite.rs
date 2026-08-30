@@ -12531,6 +12531,7 @@ pub(super) mod key_registry_coverage {
                 freeze_provenance: None,
                 freeze_admission: None,
                 dispatch_provenance: None,
+                supporting_records: Default::default(),
             },
             erasure_reference(8),
         ))
@@ -12577,6 +12578,7 @@ pub(super) mod key_registry_coverage {
                 freeze_provenance: None,
                 freeze_admission: None,
                 dispatch_provenance: None,
+                supporting_records: Default::default(),
             },
             submitted.state().coordinator(),
         ));

@@ -10,8 +10,10 @@ use pos_core::{
     ErasureErrorV1, ErasureFreezeAdmissionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
     ErasureKeyRoleV1, ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1, EventDraft, EventStore, Kind,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1, EventDraft,
+    EventStore, Kind,
 };
 use pos_store::memory::MemoryStore;
 use std::cell::RefCell;
@@ -55,6 +57,7 @@ fn submitted_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
             freeze_provenance: None,
             freeze_admission: None,
             dispatch_provenance: None,
+            supporting_records: Default::default(),
         },
         reference(8),
     )
@@ -73,7 +76,30 @@ fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecord
         freeze_provenance: record.freeze_provenance(),
         freeze_admission: record.freeze_admission(),
         dispatch_provenance: record.dispatch_provenance(),
+        supporting_records: record.supporting_records().clone(),
     }
+}
+
+fn record_with_active_attempt() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let record = submitted_record()?;
+    let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: record.request().reference(),
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![reference(20)],
+        command_identities: vec![reference(21)],
+        policy: reference(22),
+        trust: reference(23),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(24),
+    })?;
+    let mut parts = record_parts(&record);
+    parts.supporting_records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        retry_admissions: vec![admission],
+        ..Default::default()
+    })?;
+    ErasureCoordinatorRecordV1::from_parts(parts, record.state().coordinator())
 }
 
 const fn target(value: u8) -> ErasureRequiredTargetV1 {
@@ -577,6 +603,26 @@ fn memory_erasure_persistence_exposes_the_public_contract() -> Result<(), Erasur
 }
 
 #[test]
+fn memory_erasure_persistence_recovers_supporting_records() -> Result<(), ErasureErrorV1> {
+    let initial = submitted_record()?;
+    let record = record_with_active_attempt()?;
+    let request = record.request().reference();
+    let expected = record.supporting_records().clone();
+    let mut store = MemoryStore::new();
+    store.commit_record(initial.clone())?;
+    store.commit_record(record)?;
+    let loaded = store
+        .load_record(request)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(loaded.supporting_records(), &expected);
+    assert_eq!(
+        store.commit_record(initial),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
 fn memory_erasure_persistence_commits_canonical_acknowledgement_and_receipt_state(
 ) -> Result<(), ErasureErrorV1> {
     let (store, receipt) = run_full_lifecycle(MemoryStore::new())?;
@@ -807,6 +853,30 @@ fn sqlite_erasure_persistence_survives_reopen() -> Result<(), Box<dyn std::error
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_erasure_persistence_recovers_supporting_records_after_reopen(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let record = record_with_active_attempt()?;
+    let request = record.request().reference();
+    let expected = record.supporting_records().clone();
+    let mut store = SqliteStore::open(path)?;
+    store.commit_record(record)?;
+    drop(store);
+
+    let reopened = SqliteStore::open(path)?;
+    let loaded = reopened
+        .load_record(request)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(loaded.supporting_records(), &expected);
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_erasure_lifecycle_and_receipt_survive_reopen() -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
@@ -932,6 +1002,7 @@ fn sqlite_erasure_persistence_rejects_a_record_under_the_wrong_request_key(
             freeze_provenance: None,
             freeze_admission: None,
             dispatch_provenance: None,
+            supporting_records: Default::default(),
         },
         reference(8),
     )?;

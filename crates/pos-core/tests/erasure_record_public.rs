@@ -36,6 +36,7 @@ fn submitted_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
             freeze_provenance: None,
             freeze_admission: None,
             dispatch_provenance: None,
+            supporting_records: Default::default(),
         },
         coordinator,
     )
@@ -75,6 +76,8 @@ fn malformed_record_bytes() -> Vec<Vec<u8>> {
             Value::Array(vec![Value::Integer(0.into()), bytes32(), Value::Null]),
         ),
         (11, Value::Text("invalid".to_owned())),
+        (12, Value::Null),
+        (12, Value::Array(Vec::new())),
     ];
     replacements
         .into_iter()
@@ -92,7 +95,7 @@ fn malformed_record_bytes() -> Vec<Vec<u8>> {
 #[test]
 fn public_record_decoder_rejects_each_malformed_field() {
     let malformed = malformed_record_bytes();
-    assert_eq!(malformed.len(), 15);
+    assert_eq!(malformed.len(), 17);
     for bytes in malformed {
         assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).is_err());
     }
