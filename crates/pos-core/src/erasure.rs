@@ -1535,9 +1535,9 @@ impl ErasureSupportingRecordsV1 {
             let Some(scope) = self.scope_commitment.as_ref() else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
-            if freeze.scope_commitment() != scope.reference()
-                || freeze.extension_head() != scope.extension_head()
-            {
+            let freeze_matches_scope = freeze.scope_commitment() == scope.reference()
+                && freeze.extension_head() == scope.extension_head();
+            if !freeze_matches_scope {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
@@ -1786,7 +1786,7 @@ impl ErasureSupportingRecordsV1 {
     }
 }
 
-fn acknowledgement_provenance_ordering_key(
+const fn acknowledgement_provenance_ordering_key(
     acknowledgement: &ErasureAcknowledgementProvenanceV1,
 ) -> (
     ErasureReferenceV1,
@@ -3083,9 +3083,9 @@ fn reference_set_digest(domain: &[u8], references: &[ErasureReferenceV1]) -> Era
     references.sort_unstable();
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain);
-    references.iter().for_each(|reference| {
+    for reference in references {
         hasher.update(&reference.digest());
-    });
+    }
     ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
 }
 
@@ -4739,83 +4739,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if !freeze_is_authorized {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
-            if record.reserved_targets.is_empty() {
-                let mut targets = match self.port.required_targets(request) {
-                    Ok(targets) => targets,
-                    Err(ErasureErrorV1::ScopeInvalid) => {
-                        return self.reject_freeze_failure(
-                            record,
-                            ErasureErrorV1::ScopeInvalid,
-                            requested_transition.provenance,
-                        );
-                    }
-                    Err(error) => return Err(error),
-                };
-                if targets.is_empty() || targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
-                    return self.reject_freeze_failure(
-                        record,
-                        ErasureErrorV1::ScopeInvalid,
-                        requested_transition.provenance,
-                    );
-                }
-                targets.sort_unstable();
-                if has_duplicate(&targets) {
-                    return self.reject_freeze_failure(
-                        record,
-                        ErasureErrorV1::ScopeInvalid,
-                        requested_transition.provenance,
-                    );
-                }
-                record.reserved_targets = targets;
-                self.commit(record.clone())?;
-            }
-            let targets = record.reserved_targets.clone();
-            let target_closure = target_closure_digest(&targets);
-            let affected_scope = match self.port.affected_scope(request) {
-                Ok(scope) => scope,
-                Err(ErasureErrorV1::ScopeInvalid) => {
-                    return self.reject_freeze_failure(
-                        record,
-                        ErasureErrorV1::ScopeInvalid,
-                        requested_transition.provenance,
-                    );
-                }
-                Err(error) => return Err(error),
-            };
-            let scope_commitment = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
-                request,
-                affected_scope,
-                target_closure,
-                extension_head: None,
-            })?;
-            let admission = match self
-                .port
-                .admit_freeze(request, &requested_transition, &targets)
-            {
-                Ok(admission) => admission,
-                Err(ErasureErrorV1::ScopeInvalid) => {
-                    return self.reject_freeze_failure(
-                        record,
-                        ErasureErrorV1::ScopeInvalid,
-                        requested_transition.provenance,
-                    );
-                }
-                Err(ErasureErrorV1::AccessFreezeFailed) => {
-                    return self.reject_freeze_failure(
-                        record,
-                        ErasureErrorV1::AccessFreezeFailed,
-                        requested_transition.provenance,
-                    );
-                }
-                Err(error) => return Err(error),
-            };
-            if admission.target_closure != target_closure {
-                return self.reject_freeze_failure(
-                    record,
-                    ErasureErrorV1::ScopeInvalid,
-                    admission.provenance,
-                );
-            }
+            let targets =
+                self.reserve_freeze_targets(request, &mut record, requested_transition.provenance)?;
+            let (scope_commitment, admission) =
+                self.admit_freeze_evidence(request, &mut record, &requested_transition, &targets)?;
             let freeze_provenance =
                 ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
                     request,
@@ -4851,12 +4778,85 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         })
     }
 
-    fn reject_freeze_failure(
+    fn admit_freeze_evidence(
         &mut self,
-        mut record: ErasureCoordinatorRecordV1,
+        request: ErasureReferenceV1,
+        record: &mut ErasureCoordinatorRecordV1,
+        requested: &ErasureStateTransitionV1,
+        targets: &[ErasureRequiredTargetV1],
+    ) -> Result<(ErasureScopeCommitmentV1, ErasureFreezeAdmissionV1), ErasureErrorV1> {
+        let target_closure = target_closure_digest(targets);
+        let affected_scope = match self.port.affected_scope(request) {
+            Ok(scope) => scope,
+            Err(ErasureErrorV1::ScopeInvalid) => {
+                return self.reject_freeze_failure(
+                    record,
+                    ErasureErrorV1::ScopeInvalid,
+                    requested.provenance,
+                );
+            }
+            Err(error) => return Err(error),
+        };
+        let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+            request,
+            affected_scope,
+            target_closure,
+            extension_head: None,
+        })?;
+        let admission = match self.port.admit_freeze(request, requested, targets) {
+            Ok(admission) => admission,
+            Err(error @ (ErasureErrorV1::ScopeInvalid | ErasureErrorV1::AccessFreezeFailed)) => {
+                return self.reject_freeze_failure(record, error, requested.provenance);
+            }
+            Err(error) => return Err(error),
+        };
+        if admission.target_closure != target_closure {
+            return self.reject_freeze_failure(
+                record,
+                ErasureErrorV1::ScopeInvalid,
+                admission.provenance,
+            );
+        }
+        Ok((scope, admission))
+    }
+
+    fn reserve_freeze_targets(
+        &mut self,
+        request: ErasureReferenceV1,
+        record: &mut ErasureCoordinatorRecordV1,
+        evidence: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
+        if record.reserved_targets.is_empty() {
+            let mut targets = match self.port.required_targets(request) {
+                Ok(targets) => targets,
+                Err(ErasureErrorV1::ScopeInvalid) => {
+                    return self.reject_freeze_failure(
+                        record,
+                        ErasureErrorV1::ScopeInvalid,
+                        evidence,
+                    );
+                }
+                Err(error) => return Err(error),
+            };
+            if targets.is_empty() || targets.len() > ERASURE_MAX_INVENTORY_RESULTS {
+                return self.reject_freeze_failure(record, ErasureErrorV1::ScopeInvalid, evidence);
+            }
+            targets.sort_unstable();
+            if has_duplicate(&targets) {
+                return self.reject_freeze_failure(record, ErasureErrorV1::ScopeInvalid, evidence);
+            }
+            record.reserved_targets = targets;
+            self.commit(record.clone())?;
+        }
+        Ok(record.reserved_targets.clone())
+    }
+
+    fn reject_freeze_failure<T>(
+        &mut self,
+        record: &mut ErasureCoordinatorRecordV1,
         error: ErasureErrorV1,
         evidence: ErasureReferenceV1,
-    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+    ) -> Result<T, ErasureErrorV1> {
         let authorization_provenance = record
             .authorize_provenance
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
@@ -4878,7 +4878,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         })?;
         record.reserved_targets.clear();
         record.supporting_records.freeze_failure = Some(failure);
-        self.commit(record)?;
+        self.commit(record.clone())?;
         Err(error)
     }
     /// Dispatch the frozen closure through the host-owned idempotent port.
@@ -4895,15 +4895,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     pub fn dispatch_attempt(
         &mut self,
         request: ErasureReferenceV1,
-        admission: ErasureRetryAdmissionV1,
+        admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
             if record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
-                && record.supporting_records.retry_admissions.last() == Some(&admission)
+                && record.supporting_records.retry_admissions.last() == Some(admission)
             {
                 return Ok(record.state);
             }
-            let ordinal = record.supporting_records.attempt_outcomes.len() as u64;
+            let ordinal_index = record.supporting_records.attempt_outcomes.len();
+            let ordinal =
+                u64::try_from(ordinal_index).map_err(|_| ErasureErrorV1::PolicyConflict)?;
             let source_receipt = record
                 .supporting_records
                 .receipts
@@ -4942,8 +4944,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             let already_admitted = record
                 .supporting_records
                 .retry_admissions
-                .get(ordinal as usize)
-                == Some(&admission);
+                .get(ordinal_index)
+                == Some(admission);
             if !already_admitted {
                 self.port.admit_attempt(&admission)?;
                 record
@@ -4952,11 +4954,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .push(admission.clone());
                 if ordinal == 0 {
                     record.dispatch_provenance = Some(admission.reference());
-                    self.commit(record.clone())?;
                 } else {
                     record.acknowledgements.clear();
-                    self.commit(record.clone())?;
                 }
+                self.commit(record.clone())?;
             }
             self.port.dispatch_destruction(request, &commands)?;
             if ordinal == 0 {
@@ -5030,7 +5031,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             deadline_position: u64::MAX,
             authorization_provenance: provenance,
         })?;
-        self.dispatch_attempt(request, admission)
+        self.dispatch_attempt(request, &admission)
     }
     /// Persist one frozen-closure acknowledgement; an exact retry is idempotent.
     ///
@@ -5094,25 +5095,19 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     policy: admission.policy(),
                     trust: admission.trust(),
                 })?;
-            self.port
-                .admit_acknowledgement(request, &acknowledgement)
-                .and_then(|()| {
-                    record.acknowledgements.push(acknowledgement);
-                    record.acknowledgements.sort_unstable();
-                    record
-                        .supporting_records
-                        .acknowledgement_provenance
-                        .push(acknowledgement_provenance);
-                    record
-                        .supporting_records
-                        .acknowledgement_provenance
-                        .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
-                    Ok(())
-                })
-                .and_then(|()| {
-                    let state = record.state.clone();
-                    self.commit(record).map(|()| state)
-                })
+            self.port.admit_acknowledgement(request, &acknowledgement)?;
+            record.acknowledgements.push(acknowledgement);
+            record.acknowledgements.sort_unstable();
+            record
+                .supporting_records
+                .acknowledgement_provenance
+                .push(acknowledgement_provenance);
+            record
+                .supporting_records
+                .acknowledgement_provenance
+                .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
+            let state = record.state.clone();
+            self.commit(record).map(|()| state)
         })
     }
     /// Commit a receipt after normalizing core-derived fields against this record.
@@ -5200,6 +5195,54 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .and_then(|(terminal_record, receipt)| self.commit(terminal_record).map(|()| receipt))
     }
 
+    fn attempt_outcome(
+        record: &ErasureCoordinatorRecordV1,
+        admission: &ErasureRetryAdmissionV1,
+        lifecycle: ErasureLifecycleV1,
+        terminal_position: u64,
+    ) -> Result<(ErasureAttemptOutcomeV1, Vec<ErasureReferenceV1>), ErasureErrorV1> {
+        let acknowledgements = record
+            .supporting_records
+            .acknowledgement_provenance
+            .iter()
+            .filter(|provenance| provenance.attempt() == admission.reference())
+            .map(ErasureAcknowledgementProvenanceV1::reference)
+            .collect::<Vec<_>>();
+        let outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
+            request: record.request.reference(),
+            attempt: admission.reference(),
+            source_receipt: admission.source_receipt(),
+            lifecycle,
+            selected_obligations: selected_obligations_reference(
+                admission.unresolved_obligations(),
+            ),
+            acknowledgement_inventory: acknowledgement_inventory_reference(&acknowledgements),
+            terminal_position,
+            policy: admission.policy(),
+            trust: admission.trust(),
+        })?;
+        Ok((outcome, acknowledgements))
+    }
+
+    fn receipt_provenance_for_attempt(
+        admission: &ErasureRetryAdmissionV1,
+        terminal_state: ErasureReferenceV1,
+        acknowledgements: &[ErasureReferenceV1],
+        issue_position: u64,
+    ) -> Result<ErasureReceiptProvenanceV1, ErasureErrorV1> {
+        ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
+            request: admission.request(),
+            attempt: admission.reference(),
+            attempt_ordinal: admission.attempt_ordinal(),
+            predecessor_receipt: admission.source_receipt(),
+            terminal_state,
+            evidence_set: erasure_evidence_set_reference(acknowledgements),
+            policy: admission.policy(),
+            trust: admission.trust(),
+            issue_position,
+        })
+    }
+
     fn prepare_finalization(
         &self,
         request: ErasureReferenceV1,
@@ -5244,28 +5287,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             derived_outcome_owners(&input.inventories, &record.acknowledgements)?;
         let replay_claim = weakest_inventory_claim(&input.inventories);
         let freeze_position = record.state.freeze_position();
-        let acknowledgement_references = record
-            .supporting_records
-            .acknowledgement_provenance
-            .iter()
-            .filter(|provenance| provenance.attempt() == admission.reference())
-            .map(ErasureAcknowledgementProvenanceV1::reference)
-            .collect::<Vec<_>>();
-        let outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
-            request,
-            attempt: admission.reference(),
-            source_receipt: admission.source_receipt(),
-            lifecycle,
-            selected_obligations: selected_obligations_reference(
-                admission.unresolved_obligations(),
-            ),
-            acknowledgement_inventory: acknowledgement_inventory_reference(
-                &acknowledgement_references,
-            ),
-            terminal_position: input.issue_position,
-            policy: admission.policy(),
-            trust: admission.trust(),
-        })?;
+        let (outcome, acknowledgement_references) =
+            Self::attempt_outcome(record, &admission, lifecycle, input.issue_position)?;
         let terminal = record.state.transition(ErasureStateTransitionV1 {
             lifecycle,
             freeze_position,
@@ -5280,18 +5303,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             provenance: outcome.reference(),
         })?;
         record.state = terminal;
-        let receipt_provenance =
-            ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
-                request,
-                attempt: admission.reference(),
-                attempt_ordinal: admission.attempt_ordinal(),
-                predecessor_receipt: admission.source_receipt(),
-                terminal_state: record.state.state_digest(),
-                evidence_set: erasure_evidence_set_reference(&acknowledgement_references),
-                policy: admission.policy(),
-                trust: admission.trust(),
-                issue_position: input.issue_position,
-            })?;
+        let receipt_provenance = Self::receipt_provenance_for_attempt(
+            &admission,
+            record.state.state_digest(),
+            &acknowledgement_references,
+            input.issue_position,
+        )?;
         let mut normalized =
             Self::normalize_receipt_input(request, self.coordinator, record, input.clone())?;
         normalized.policy = admission.policy();
@@ -5346,7 +5363,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinator for ErasureCoordinatorState
         request: ErasureReferenceV1,
         admission: ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        Self::dispatch_attempt(self, request, admission)
+        Self::dispatch_attempt(self, request, &admission)
     }
 
     fn acknowledge(

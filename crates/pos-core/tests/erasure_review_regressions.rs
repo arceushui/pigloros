@@ -540,7 +540,7 @@ fn state_after_acknowledgements(
         deadline_position: 10,
         authorization_provenance: reference(94),
     })?;
-    coordinator.dispatch_attempt(request_reference, admission)?;
+    coordinator.dispatch_attempt(request_reference, &admission)?;
     for acknowledgement in acknowledgements {
         coordinator.acknowledge(request_reference, acknowledgement)?;
     }

@@ -4,7 +4,7 @@
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    CanonicalBytes, CoreError, EntityId, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
+    CanonicalBytes, EntityId, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
     ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinatorPortV1,
     ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
     ErasureErrorV1, ErasureFreezeAdmissionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
