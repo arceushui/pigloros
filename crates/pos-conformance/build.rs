@@ -37,6 +37,11 @@ struct CatalogRoot {
 }
 
 struct FixturePaths {
+    case_id: String,
+    family: CatalogFixtureFamily,
+    schema_path: String,
+    contract: CatalogFixtureContract,
+    strict_oracle: CatalogStrictOracle,
     schema: FixtureAsset,
     input: FixtureAsset,
     expected: FixtureAsset,
@@ -51,9 +56,204 @@ struct FixtureAsset {
 struct ProfilePaths {
     wire_code: u64,
     profile: String,
+    profile_id: String,
+    claim_layer: CatalogClaimLayer,
+    subject_adapter: CatalogSubjectAdapter,
     profile_record: Vec<u8>,
-    provider: FixtureAsset,
+    fixture_provider: FixtureProvider,
+    provider_manifest: FixtureAsset,
     fixtures: Vec<FixturePaths>,
+}
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogFixtureFamily {
+    Positive,
+    Denied,
+    Malformed,
+    ResourceExhaustion,
+    DeletionRedaction,
+    Downgrade,
+    IndependentEvaluation,
+}
+
+impl CatalogFixtureFamily {
+    const ALL: [Self; FIXTURES_PER_PROFILE] = [
+        Self::Positive,
+        Self::Denied,
+        Self::Malformed,
+        Self::ResourceExhaustion,
+        Self::DeletionRedaction,
+        Self::Downgrade,
+        Self::IndependentEvaluation,
+    ];
+
+    const fn catalog_name(self) -> &'static str {
+        match self {
+            Self::Positive => "positive",
+            Self::Denied => "denied",
+            Self::Malformed => "malformed",
+            Self::ResourceExhaustion => "resource-exhaustion",
+            Self::DeletionRedaction => "deletion-redaction",
+            Self::Downgrade => "downgrade",
+            Self::IndependentEvaluation => "independent-evaluation",
+        }
+    }
+
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::Positive => "CatalogFixtureFamily::Positive",
+            Self::Denied => "CatalogFixtureFamily::Denied",
+            Self::Malformed => "CatalogFixtureFamily::Malformed",
+            Self::ResourceExhaustion => "CatalogFixtureFamily::ResourceExhaustion",
+            Self::DeletionRedaction => "CatalogFixtureFamily::DeletionRedaction",
+            Self::Downgrade => "CatalogFixtureFamily::Downgrade",
+            Self::IndependentEvaluation => "CatalogFixtureFamily::IndependentEvaluation",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CatalogClaimLayer {
+    ArtifactIntegrity,
+    ReplayConformance,
+    KnowledgeNonInterference,
+    GatewayClientConformance,
+    PluginConformance,
+    MetricConformance,
+    EmpiricalEvaluation,
+}
+
+impl CatalogClaimLayer {
+    fn from_catalog_name(name: &str) -> Result<Self, io::Error> {
+        match name {
+            "artifact-integrity" => Ok(Self::ArtifactIntegrity),
+            "replay-conformance" => Ok(Self::ReplayConformance),
+            "knowledge-non-interference" => Ok(Self::KnowledgeNonInterference),
+            "gateway-client-conformance" => Ok(Self::GatewayClientConformance),
+            "plugin-conformance" => Ok(Self::PluginConformance),
+            "metric-conformance" => Ok(Self::MetricConformance),
+            "empirical-evaluation" => Ok(Self::EmpiricalEvaluation),
+            _ => Err(invalid_data("profile catalog claim_layer is invalid")),
+        }
+    }
+
+    const fn wire_code(self) -> u64 {
+        match self {
+            Self::ArtifactIntegrity => 0,
+            Self::ReplayConformance => 1,
+            Self::KnowledgeNonInterference => 2,
+            Self::GatewayClientConformance => 3,
+            Self::PluginConformance => 4,
+            Self::MetricConformance => 5,
+            Self::EmpiricalEvaluation => 6,
+        }
+    }
+
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::ArtifactIntegrity => "ClaimLayerV1::ArtifactIntegrity",
+            Self::ReplayConformance => "ClaimLayerV1::ReplayConformance",
+            Self::KnowledgeNonInterference => "ClaimLayerV1::KnowledgeNonInterference",
+            Self::GatewayClientConformance => "ClaimLayerV1::GatewayClientConformance",
+            Self::PluginConformance => "ClaimLayerV1::PluginConformance",
+            Self::MetricConformance => "ClaimLayerV1::MetricConformance",
+            Self::EmpiricalEvaluation => "ClaimLayerV1::EmpiricalEvaluation",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CatalogSubjectAdapter {
+    ExportedArtifact,
+    PublicGatewayProtocol,
+    PublicPluginProtocol,
+}
+
+impl CatalogSubjectAdapter {
+    fn from_catalog_name(name: &str) -> Result<Self, io::Error> {
+        match name {
+            "exported-artifact" => Ok(Self::ExportedArtifact),
+            "public-gateway-protocol" => Ok(Self::PublicGatewayProtocol),
+            "public-plugin-protocol" => Ok(Self::PublicPluginProtocol),
+            _ => Err(invalid_data("profile catalog subject_adapter is invalid")),
+        }
+    }
+
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::ExportedArtifact => "SubjectAdapterKindV1::ExportedArtifact",
+            Self::PublicGatewayProtocol => "SubjectAdapterKindV1::PublicGatewayProtocol",
+            Self::PublicPluginProtocol => "SubjectAdapterKindV1::PublicPluginProtocol",
+        }
+    }
+}
+
+struct FixtureProvider {
+    provider_id: String,
+    contract_version: String,
+    abi_major: u16,
+    abi_minor: u16,
+    package_path: String,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct CatalogFixtureContract {
+    deterministic_budget: CatalogDeterministicBudget,
+    watchdog_ms: u64,
+    network_allowed: bool,
+    minimum_capability_ids: Vec<String>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct CatalogDeterministicBudget {
+    memory_bytes: u64,
+    cpu_fuel: u64,
+    host_calls: u64,
+    event_count: u64,
+    output_bytes: u64,
+    storage_bytes: u64,
+    execution_steps: u64,
+    simulation_time_ns: u64,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum CatalogStrictOracle {
+    CanonicalOutput,
+    NamespacedFailure {
+        owner_id: String,
+        contract_version: String,
+        code_id: String,
+    },
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureOracleRecord {
+    case_id: String,
+    claim_layer: String,
+    family: CatalogFixtureFamily,
+    oracle: CatalogStrictOracle,
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureInputIdentity {
+    case_id: String,
+    claim_layer: String,
+    family: CatalogFixtureFamily,
+    provider_contract: String,
+    subject_adapter: String,
+}
+
+#[derive(serde::Deserialize)]
+struct EvidenceStatusRecord {
+    case_id: String,
+    claim_layer: String,
+    family: CatalogFixtureFamily,
+    input_blake3_digest: String,
+    status: String,
+    execution_result: serde_json::Value,
+    executed_at: serde_json::Value,
 }
 
 #[derive(serde::Deserialize)]
@@ -260,7 +460,7 @@ fn expected_source_paths(profiles: &[ProfilePaths]) -> BTreeSet<String> {
     let mut paths = STATIC_SOURCE_PATHS.map(str::to_owned).into_iter().collect();
     for profile in profiles {
         paths.insert(profile.profile.clone());
-        paths.insert(profile.provider.relative.clone());
+        paths.insert(profile.provider_manifest.relative.clone());
         for fixture in &profile.fixtures {
             paths.insert(fixture.schema.relative.clone());
             paths.insert(fixture.input.relative.clone());
@@ -379,25 +579,37 @@ fn validate_fixture_provider(
 fn validate_fixture_records(
     fixture: &Value,
     provider: &Value,
-    paths: &FixturePaths,
+    input_bytes: &[u8],
+    expected_bytes: &[u8],
+    oracle_bytes: &[u8],
     claim_layer: &str,
     subject_adapter: &str,
-) -> Result<(), io::Error> {
+) -> Result<CatalogStrictOracle, io::Error> {
     let case_id = json_text(fixture, "case_id")?;
-    let family = json_text(fixture, "family")?;
+    let family: CatalogFixtureFamily =
+        serde_json::from_value(json_field(fixture, "family")?.clone()).map_err(|error| {
+            invalid_data(format!("fixture {case_id} family is invalid: {error}"))
+        })?;
     if json_text(fixture, "claim_layer")? != claim_layer {
         return Err(invalid_data(format!(
             "fixture {case_id} claim layer does not match its profile"
         )));
     }
-    let input: Value = serde_json::from_slice(&paths.input.bytes)
+    let input: Value = serde_json::from_slice(input_bytes)
         .map_err(|error| invalid_data(format!("fixture {case_id} input is invalid: {error}")))?;
-    let evidence: Value = serde_json::from_slice(&paths.expected.bytes).map_err(|error| {
-        invalid_data(format!(
-            "fixture {case_id} evidence status is invalid: {error}"
-        ))
-    })?;
-    let oracle: Value = serde_json::from_slice(&paths.oracle.bytes)
+    let input_identity: FixtureInputIdentity =
+        serde_json::from_slice(input_bytes).map_err(|error| {
+            invalid_data(format!(
+                "fixture {case_id} input identity is invalid: {error}"
+            ))
+        })?;
+    let evidence: EvidenceStatusRecord =
+        serde_json::from_slice(expected_bytes).map_err(|error| {
+            invalid_data(format!(
+                "fixture {case_id} evidence status is invalid: {error}"
+            ))
+        })?;
+    let oracle: FixtureOracleRecord = serde_json::from_slice(oracle_bytes)
         .map_err(|error| invalid_data(format!("fixture {case_id} oracle is invalid: {error}")))?;
     let provider_contract = format!(
         "{}@{}",
@@ -405,37 +617,76 @@ fn validate_fixture_records(
         json_text(provider, "contract_version")?
     );
     let operation = json_field(provider, "fixture_operations")?
-        .get(&family)
-        .ok_or_else(|| invalid_data(format!("provider omits operation for {family}")))?;
+        .get(family.catalog_name())
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "provider omits operation for {}",
+                family.catalog_name()
+            ))
+        })?;
     let actual_operation = input.pointer("/stimulus/operation");
     let operation_matches = match operation {
         Value::Null => actual_operation.is_none(),
         Value::String(expected) => actual_operation.and_then(Value::as_str) == Some(expected),
         _ => false,
     };
-    let input_digest = blake3::hash(&paths.input.bytes).to_hex().to_string();
-    let identity_matches = json_text(&input, "case_id")? == case_id
-        && json_text(&input, "claim_layer")? == claim_layer
-        && json_text(&input, "family")? == family
-        && json_text(&input, "provider_contract")? == provider_contract
-        && json_text(&input, "subject_adapter")? == subject_adapter
-        && json_text(&evidence, "case_id")? == case_id
-        && json_text(&evidence, "claim_layer")? == claim_layer
-        && json_text(&evidence, "family")? == family
-        && json_text(&evidence, "input_blake3_digest")? == input_digest
-        && json_text(&evidence, "status")? == "pending"
-        && evidence.get("execution_result") == Some(&Value::Null)
-        && evidence.get("executed_at") == Some(&Value::Null)
-        && json_text(&oracle, "case_id")? == case_id
-        && json_text(&oracle, "claim_layer")? == claim_layer
-        && json_text(&oracle, "family")? == family;
+    let input_digest = blake3::hash(input_bytes).to_hex().to_string();
+    let identity_matches = input_identity.case_id == case_id
+        && input_identity.claim_layer == claim_layer
+        && input_identity.family == family
+        && input_identity.provider_contract == provider_contract
+        && input_identity.subject_adapter == subject_adapter
+        && evidence.case_id == case_id
+        && evidence.claim_layer == claim_layer
+        && evidence.family == family
+        && evidence.input_blake3_digest == input_digest
+        && evidence.status == "pending"
+        && evidence.execution_result == Value::Null
+        && evidence.executed_at == Value::Null
+        && oracle.case_id == case_id
+        && oracle.claim_layer == claim_layer
+        && oracle.family == family;
     if operation_matches && identity_matches {
-        Ok(())
+        Ok(oracle.oracle)
     } else {
         Err(invalid_data(format!(
             "fixture {case_id} does not match its profile/provider identity"
         )))
     }
+}
+
+fn fixture_contract(
+    provider: &Value,
+    family: CatalogFixtureFamily,
+) -> Result<CatalogFixtureContract, io::Error> {
+    let contract = json_field(provider, "fixture_contracts")?
+        .get(family.catalog_name())
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "provider omits contract for {}",
+                family.catalog_name()
+            ))
+        })?;
+    serde_json::from_value(contract.clone()).map_err(|error| {
+        invalid_data(format!(
+            "provider contract for {} is invalid: {error}",
+            family.catalog_name()
+        ))
+    })
+}
+
+fn fixture_provider(provider: &Value) -> Result<FixtureProvider, io::Error> {
+    let abi_major = u16::try_from(json_u64(provider, "abi_major")?)
+        .map_err(|_| invalid_data("provider abi_major must fit u16"))?;
+    let abi_minor = u16::try_from(json_u64(provider, "abi_minor")?)
+        .map_err(|_| invalid_data("provider abi_minor must fit u16"))?;
+    Ok(FixtureProvider {
+        provider_id: json_text(provider, "provider_id")?,
+        contract_version: json_text(provider, "contract_version")?,
+        abi_major,
+        abi_minor,
+        package_path: json_text(provider, "package_path")?,
+    })
 }
 
 fn relative_asset(
@@ -452,67 +703,92 @@ fn relative_asset(
 fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Box<dyn Error>> {
     let profile_record = read_fixture_relative(root, &profile, "profile manifest")?;
     let profile_value: Value = serde_json::from_slice(&profile_record)?;
+    let profile_id = json_text(&profile_value, "profile_id")?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
+    let catalog_claim_layer = CatalogClaimLayer::from_catalog_name(&claim_layer)?;
     let subject_adapter = json_text(&profile_value, "subject_adapter")?;
+    let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
     let fixture_root = json_text(&profile_value, "fixture_root")?;
-    let provider = relative_asset(root, &profile_value, "fixture_provider_manifest")?;
-    let provider_value: Value = serde_json::from_slice(&provider.bytes)?;
+    let provider_manifest = relative_asset(root, &profile_value, "fixture_provider_manifest")?;
+    let provider_value: Value = serde_json::from_slice(&provider_manifest.bytes)?;
     validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
+    let fixture_provider = fixture_provider(&provider_value)?;
     let provider_schemas = json_field(&provider_value, "schemas")?
         .as_object()
         .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
     let wire_code = json_field(&profile_value, "wire_code")?
         .as_u64()
         .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
-    let fixtures = json_field(&profile_value, "fixtures")?
+    let profile_fixtures = json_field(&profile_value, "fixtures")?
         .as_array()
-        .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?
+        .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?;
+    if profile_fixtures.len() != FIXTURES_PER_PROFILE {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
+            profile_fixtures.len()
+        ))
+        .into());
+    }
+    let fixtures = profile_fixtures
         .iter()
-        .map(|fixture| {
-            let family = json_text(fixture, "family")?;
+        .zip(CatalogFixtureFamily::ALL)
+        .map(|(fixture, expected_family)| {
+            let case_id = json_text(fixture, "case_id")?;
+            let family: CatalogFixtureFamily =
+                serde_json::from_value(json_field(fixture, "family")?.clone()).map_err(
+                    |error| invalid_data(format!("fixture {case_id} family is invalid: {error}")),
+                )?;
+            if family != expected_family {
+                return Err(invalid_data(format!(
+                    "profile fixture {case_id} is not in canonical family order"
+                )));
+            }
+            let schema_path = json_text(fixture, "schema")?;
             let schema = relative_asset(root, fixture, "schema")?;
             let expected_schema = provider_schemas
-                .get(&family)
+                .get(family.catalog_name())
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    invalid_data(format!("provider manifest is missing schema {family}"))
+                    invalid_data(format!(
+                        "provider manifest is missing schema {}",
+                        family.catalog_name()
+                    ))
                 })?;
             if schema.relative != expected_schema {
                 return Err(invalid_data(format!(
-                    "profile fixture schema does not match family {family}"
+                    "profile fixture schema does not match family {}",
+                    family.catalog_name()
                 )));
             }
-            let paths = FixturePaths {
-                schema,
-                input: relative_asset(root, fixture, "input")?,
-                expected: relative_asset(root, fixture, "expected")?,
-                oracle: relative_asset(root, fixture, "oracle")?,
-            };
-            validate_fixture_records(
+            let input = relative_asset(root, fixture, "input")?;
+            let expected = relative_asset(root, fixture, "expected")?;
+            let oracle = relative_asset(root, fixture, "oracle")?;
+            let strict_oracle = validate_fixture_records(
                 fixture,
                 &provider_value,
-                &paths,
+                &input.bytes,
+                &expected.bytes,
+                &oracle.bytes,
                 &claim_layer,
                 &subject_adapter,
             )?;
-            Ok(paths)
+            Ok(FixturePaths {
+                case_id,
+                family,
+                schema_path,
+                contract: fixture_contract(&provider_value, family)?,
+                strict_oracle,
+                schema,
+                input,
+                expected,
+                oracle,
+            })
         })
         .collect::<Result<Vec<_>, io::Error>>()?;
-    let expected_wire_code = match claim_layer.as_str() {
-        "artifact-integrity" => 0,
-        "replay-conformance" => 1,
-        "knowledge-non-interference" => 2,
-        "gateway-client-conformance" => 3,
-        "plugin-conformance" => 4,
-        "metric-conformance" => 5,
-        "empirical-evaluation" => 6,
-        _ => u64::MAX,
-    };
     let bundle_modes = json_field(&profile_value, "bundle_modes")?;
     let execution_profiles = json_field(&profile_value, "execution_profiles")?;
-    if fixtures.len() != FIXTURES_PER_PROFILE
-        || fixture_root != claim_layer
-        || wire_code != expected_wire_code
+    if fixture_root != claim_layer
+        || wire_code != catalog_claim_layer.wire_code()
         || bundle_modes != &serde_json::json!(["local", "air-gapped"])
         || execution_profiles
             != &serde_json::json!(["deterministic-local-v1", "deterministic-air-gapped-v1"])
@@ -526,8 +802,12 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
     Ok(ProfilePaths {
         wire_code,
         profile,
+        profile_id,
+        claim_layer: catalog_claim_layer,
+        subject_adapter: catalog_subject_adapter,
         profile_record,
-        provider,
+        fixture_provider,
+        provider_manifest,
         fixtures,
     })
 }
@@ -574,48 +854,204 @@ fn discover_profiles(root: &CatalogRoot) -> Result<Vec<ProfilePaths>, Box<dyn Er
 }
 
 fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
-    let mut generated = String::from("const LAYER_SOURCES: &[LayerSource] = &[\n");
+    let mut generated = String::from(
+        "fn layer_catalog() -> LayerCatalog {\n    LayerCatalog {\n        entries: vec![\n",
+    );
     for profile in profiles {
-        writeln!(generated, "    LayerSource {{")?;
+        writeln!(generated, "            LayerCatalogEntry {{")?;
         writeln!(
             generated,
-            "        profile_record: &{:?},",
+            "                claim_layer: {},",
+            profile.claim_layer.rust_variant()
+        )?;
+        writeln!(
+            generated,
+            "                profile_id: {:?},",
+            profile.profile_id
+        )?;
+        writeln!(
+            generated,
+            "                subject_adapter: {},",
+            profile.subject_adapter.rust_variant()
+        )?;
+        writeln!(
+            generated,
+            "                fixture_provider: FixtureProvider {{"
+        )?;
+        writeln!(
+            generated,
+            "                    provider_id: {:?},",
+            profile.fixture_provider.provider_id
+        )?;
+        writeln!(
+            generated,
+            "                    contract_version: {:?},",
+            profile.fixture_provider.contract_version
+        )?;
+        writeln!(
+            generated,
+            "                    abi_major: {},",
+            profile.fixture_provider.abi_major
+        )?;
+        writeln!(
+            generated,
+            "                    abi_minor: {},",
+            profile.fixture_provider.abi_minor
+        )?;
+        writeln!(
+            generated,
+            "                    package_path: {:?},",
+            profile.fixture_provider.package_path
+        )?;
+        writeln!(generated, "                }},")?;
+        writeln!(
+            generated,
+            "                profile_record: &{:?},",
             profile.profile_record
         )?;
-        writeln!(
-            generated,
-            "        provider_record: &{:?},",
-            profile.provider.bytes
-        )?;
-        writeln!(generated, "        fixtures: &[")?;
+        writeln!(generated, "                fixtures: vec![")?;
         for fixture in &profile.fixtures {
-            writeln!(generated, "            FixtureSource {{")?;
+            writeln!(generated, "                    CatalogFixture {{")?;
             writeln!(
                 generated,
-                "                schema: &{:?},",
+                "                        case_id: {:?},",
+                fixture.case_id
+            )?;
+            writeln!(
+                generated,
+                "                        family: {},",
+                fixture.family.rust_variant()
+            )?;
+            writeln!(
+                generated,
+                "                        schema_path: {:?},",
+                fixture.schema_path
+            )?;
+            writeln!(
+                generated,
+                "                        contract: CatalogFixtureContract {{"
+            )?;
+            writeln!(
+                generated,
+                "                            deterministic_budget: DeterministicBudgetV1 {{"
+            )?;
+            writeln!(
+                generated,
+                "                                memory_bytes: {},",
+                fixture.contract.deterministic_budget.memory_bytes
+            )?;
+            writeln!(
+                generated,
+                "                                cpu_fuel: {},",
+                fixture.contract.deterministic_budget.cpu_fuel
+            )?;
+            writeln!(
+                generated,
+                "                                host_calls: {},",
+                fixture.contract.deterministic_budget.host_calls
+            )?;
+            writeln!(
+                generated,
+                "                                event_count: {},",
+                fixture.contract.deterministic_budget.event_count
+            )?;
+            writeln!(
+                generated,
+                "                                output_bytes: {},",
+                fixture.contract.deterministic_budget.output_bytes
+            )?;
+            writeln!(
+                generated,
+                "                                storage_bytes: {},",
+                fixture.contract.deterministic_budget.storage_bytes
+            )?;
+            writeln!(
+                generated,
+                "                                execution_steps: {},",
+                fixture.contract.deterministic_budget.execution_steps
+            )?;
+            writeln!(
+                generated,
+                "                                simulation_time_ns: {},",
+                fixture.contract.deterministic_budget.simulation_time_ns
+            )?;
+            writeln!(generated, "                            }},")?;
+            writeln!(
+                generated,
+                "                            watchdog_ms: {},",
+                fixture.contract.watchdog_ms
+            )?;
+            writeln!(
+                generated,
+                "                            network_allowed: {},",
+                fixture.contract.network_allowed
+            )?;
+            write!(
+                generated,
+                "                            minimum_capability_ids: &["
+            )?;
+            for capability in &fixture.contract.minimum_capability_ids {
+                write!(generated, "{capability:?}, ")?;
+            }
+            writeln!(generated, "],")?;
+            writeln!(generated, "                        }},")?;
+            writeln!(
+                generated,
+                "                        schema: &{:?},",
                 fixture.schema.bytes
             )?;
             writeln!(
                 generated,
-                "                input: &{:?},",
+                "                        input: &{:?},",
                 fixture.input.bytes
             )?;
             writeln!(
                 generated,
-                "                expected: &{:?},",
+                "                        expected: &{:?},",
                 fixture.expected.bytes
             )?;
             writeln!(
                 generated,
-                "                oracle: &{:?},",
+                "                        oracle: &{:?},",
                 fixture.oracle.bytes
             )?;
-            writeln!(generated, "            }},")?;
+            match &fixture.strict_oracle {
+                CatalogStrictOracle::CanonicalOutput => {
+                    writeln!(
+                        generated,
+                        "                        strict_oracle: CatalogStrictOracle::CanonicalOutput,"
+                    )?;
+                }
+                CatalogStrictOracle::NamespacedFailure {
+                    owner_id,
+                    contract_version,
+                    code_id,
+                } => {
+                    writeln!(
+                        generated,
+                        "                        strict_oracle: CatalogStrictOracle::NamespacedFailure {{"
+                    )?;
+                    writeln!(
+                        generated,
+                        "                            owner_id: {owner_id:?},"
+                    )?;
+                    writeln!(
+                        generated,
+                        "                            contract_version: {contract_version:?},"
+                    )?;
+                    writeln!(
+                        generated,
+                        "                            code_id: {code_id:?},"
+                    )?;
+                    writeln!(generated, "                        }},")?;
+                }
+            }
+            writeln!(generated, "                    }},")?;
         }
-        writeln!(generated, "        ],")?;
-        writeln!(generated, "    }},")?;
+        writeln!(generated, "                ],")?;
+        writeln!(generated, "            }},")?;
     }
-    generated.push_str("];\n");
+    generated.push_str("        ],\n    }\n}\n");
     Ok(generated)
 }
 
@@ -680,7 +1116,7 @@ fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
             paths.insert(profile_directory.to_owned());
         }
         paths.insert(profile_path);
-        paths.insert(root.source.join(&profile.provider.relative));
+        paths.insert(root.source.join(&profile.provider_manifest.relative));
         for fixture in &profile.fixtures {
             paths.insert(root.source.join(&fixture.schema.relative));
             paths.insert(root.source.join(&fixture.input.relative));

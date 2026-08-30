@@ -14,9 +14,7 @@ use pos_conformance::{
     ProviderFamilySchemaV1, RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1,
     SubjectAdapterKindV1, VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
-use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
-use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::Write;
@@ -82,25 +80,9 @@ enum MaterializationError {
     SourceInventoryAddressMismatch,
 }
 
-#[derive(Clone, Copy)]
-struct FixtureSource {
-    schema: &'static [u8],
-    input: &'static [u8],
-    expected: &'static [u8],
-    oracle: &'static [u8],
-}
-
-struct LayerSource {
-    profile_record: &'static [u8],
-    provider_record: &'static [u8],
-    fixtures: &'static [FixtureSource],
-}
-
-include!(concat!(env!("OUT_DIR"), "/conformance_fixture_catalog.rs"));
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
-#[derive(Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum CatalogFixtureFamily {
     Positive,
     Denied,
@@ -111,8 +93,7 @@ enum CatalogFixtureFamily {
     IndependentEvaluation,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogExecutionProfile {
     DeterministicLocalV1,
     DeterministicAirGappedV1,
@@ -144,7 +125,7 @@ impl CatalogExecutionProfile {
 // deployment trust root and is used solely to make Draft evidence reproducible.
 const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct DraftAuthorityDeclaration {
     trust_policy_id: String,
     trust_policy_epoch: u64,
@@ -154,7 +135,7 @@ struct DraftAuthorityDeclaration {
     execution_profiles: Vec<DraftExecutionProfileDeclaration>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct DraftExecutionProfileDeclaration {
     profile_id: String,
     semantic_version: String,
@@ -163,7 +144,7 @@ struct DraftExecutionProfileDeclaration {
     reproducibility_classes: Vec<DraftReproducibilityClass>,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, serde::Deserialize)]
 enum DraftReproducibilityClass {
     ProfileRecomputation,
     CrossProfileConformance,
@@ -310,8 +291,7 @@ fn release_admission_bytes(
     })
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogBundleMode {
     Local,
     AirGapped,
@@ -359,119 +339,35 @@ impl CatalogFixtureFamily {
     }
 }
 
-#[derive(Deserialize)]
-struct ProfileCatalogRecord {
-    profile_id: String,
-    claim_layer: String,
-    wire_code: u8,
-    subject_adapter: String,
-    fixture_root: String,
-    fixtures: Vec<ProfileFixtureRecord>,
-    execution_profiles: [CatalogExecutionProfile; 2],
-    bundle_modes: [CatalogBundleMode; 2],
-}
-
-#[derive(Deserialize)]
-struct ProfileFixtureRecord {
-    case_id: String,
-    claim_layer: String,
-    family: CatalogFixtureFamily,
-    schema: String,
-    input: String,
-    expected: String,
-    oracle: String,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[derive(Clone)]
 enum CatalogStrictOracle {
     CanonicalOutput,
     NamespacedFailure {
-        owner_id: String,
-        contract_version: String,
-        code_id: String,
+        owner_id: &'static str,
+        contract_version: &'static str,
+        code_id: &'static str,
     },
 }
 
-#[derive(Deserialize)]
-struct FixtureOracleRecord {
-    case_id: String,
-    claim_layer: String,
-    family: CatalogFixtureFamily,
-    oracle: CatalogStrictOracle,
-}
-
-#[derive(Deserialize)]
-struct FixtureInputIdentity {
-    case_id: String,
-    claim_layer: String,
-    family: CatalogFixtureFamily,
-    provider_contract: String,
-    subject_adapter: String,
-}
-
-#[derive(Deserialize)]
-struct EvidenceStatusRecord {
-    case_id: String,
-    claim_layer: String,
-    family: CatalogFixtureFamily,
-    input_blake3_digest: String,
-    status: String,
-    execution_result: Option<serde_json::Value>,
-    executed_at: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-struct FixtureProviderRecord {
-    provider_id: String,
-    contract_version: String,
+struct FixtureProvider {
+    provider_id: &'static str,
+    contract_version: &'static str,
     abi_major: u16,
     abi_minor: u16,
-    claim_layer: String,
-    subject_adapter: String,
-    package_path: String,
-    fixture_operations: BTreeMap<CatalogFixtureFamily, Option<String>>,
-    schemas: BTreeMap<CatalogFixtureFamily, String>,
-    fixture_contracts: BTreeMap<CatalogFixtureFamily, CatalogFixtureContract>,
+    package_path: &'static str,
 }
 
-#[derive(Clone, Deserialize)]
 struct CatalogFixtureContract {
-    deterministic_budget: CatalogDeterministicBudget,
+    deterministic_budget: DeterministicBudgetV1,
     watchdog_ms: u64,
     network_allowed: bool,
-    minimum_capability_ids: Vec<String>,
-}
-
-#[derive(Clone, Deserialize)]
-struct CatalogDeterministicBudget {
-    memory_bytes: u64,
-    cpu_fuel: u64,
-    host_calls: u64,
-    event_count: u64,
-    output_bytes: u64,
-    storage_bytes: u64,
-    execution_steps: u64,
-    simulation_time_ns: u64,
-}
-
-impl CatalogDeterministicBudget {
-    const fn resolved(&self) -> DeterministicBudgetV1 {
-        DeterministicBudgetV1 {
-            memory_bytes: self.memory_bytes,
-            cpu_fuel: self.cpu_fuel,
-            host_calls: self.host_calls,
-            event_count: self.event_count,
-            output_bytes: self.output_bytes,
-            storage_bytes: self.storage_bytes,
-            execution_steps: self.execution_steps,
-            simulation_time_ns: self.simulation_time_ns,
-        }
-    }
+    minimum_capability_ids: &'static [&'static str],
 }
 
 struct CatalogFixture {
-    record: ProfileFixtureRecord,
+    case_id: &'static str,
+    family: CatalogFixtureFamily,
+    schema_path: &'static str,
     contract: CatalogFixtureContract,
     schema: &'static [u8],
     input: &'static [u8],
@@ -490,25 +386,18 @@ struct FixtureExpectation {
 
 struct LayerCatalogEntry {
     claim_layer: ClaimLayerV1,
-    name: &'static str,
-    profile_id: String,
+    profile_id: &'static str,
     subject_adapter: SubjectAdapterKindV1,
-    fixture_provider: FixtureProviderRecord,
+    fixture_provider: FixtureProvider,
     profile_record: &'static [u8],
     fixtures: Vec<CatalogFixture>,
-    execution_profiles: [CatalogExecutionProfile; 2],
-    bundle_modes: [CatalogBundleMode; 2],
 }
 
 struct LayerCatalog {
     entries: Vec<LayerCatalogEntry>,
-    bundle_modes: [CatalogBundleMode; 2],
 }
 
-struct CatalogEntryInput {
-    record: ProfileCatalogRecord,
-    fixture_provider: FixtureProviderRecord,
-}
+include!(concat!(env!("OUT_DIR"), "/conformance_fixture_catalog.rs"));
 
 #[derive(Clone)]
 struct PublicArtifact {
@@ -582,14 +471,6 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
     }
 }
 
-fn embedded_catalog_result<T, E>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|_| std::process::abort())
-}
-
-fn embedded_catalog_option<T>(value: Option<T>) -> T {
-    value.unwrap_or_else(|| std::process::abort())
-}
-
 fn package_support_artifacts() -> [PublicArtifact; 7] {
     [
         public_artifact(
@@ -630,59 +511,77 @@ fn package_support_artifacts() -> [PublicArtifact; 7] {
     ]
 }
 
-fn provider_catalog(catalog: &LayerCatalog) -> ProviderCatalog {
+fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
     let package_support = package_support_artifacts();
-    let mut packages = catalog
+    catalog
         .entries
         .iter()
         .map(|layer| provider_package(layer, &package_support))
-        .collect::<Vec<_>>();
-    packages.sort_by(|left, right| left.provider_key.cmp(&right.provider_key));
-    let providers = packages
-        .iter()
-        .map(|package| FixtureProviderEntryV1 {
-            provider_key: package.provider_key.clone(),
-            claim_layer: package.claim_layer,
-            subject_adapter: package.subject_adapter,
-            provider_package_descriptor: package.artifact.descriptor(),
+        .collect::<Result<Vec<_>, _>>()
+        .map(|mut packages| {
+            packages.sort_by(|left, right| left.provider_key.cmp(&right.provider_key));
+            packages
         })
-        .collect::<Vec<_>>();
-    let mut registry = FixtureProviderRegistryV1 {
-        providers,
-        registry_digest: [0; 32],
-    };
-    registry.registry_digest = embedded_catalog_result(registry.digest());
-    registry
-        .providers
-        .iter()
-        .zip(&packages)
-        .for_each(|(entry, catalog_package)| {
-            embedded_catalog_result(
-                FixtureProviderPackageV1::from_canonical_cbor(&catalog_package.artifact.bytes)
-                    .and_then(|decoded| {
-                        decoded.validate_registry_binding(entry, &catalog_package.artifact.bytes)
-                    }),
-            );
-        });
-    let registry = public_artifact(
-        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
-        "application/cbor",
-        &embedded_catalog_result(registry.to_canonical_cbor()),
-    );
-    ProviderCatalog {
-        registry,
-        packages,
-        package_support,
-    }
+        .and_then(|packages| {
+            let providers = packages
+                .iter()
+                .map(|package| FixtureProviderEntryV1 {
+                    provider_key: package.provider_key.clone(),
+                    claim_layer: package.claim_layer,
+                    subject_adapter: package.subject_adapter,
+                    provider_package_descriptor: package.artifact.descriptor(),
+                })
+                .collect::<Vec<_>>();
+            let mut registry = FixtureProviderRegistryV1 {
+                providers,
+                registry_digest: [0; 32],
+            };
+            registry
+                .digest()
+                .map_err(Box::<dyn Error>::from)
+                .map(|registry_digest| {
+                    registry.registry_digest = registry_digest;
+                    (packages, registry)
+                })
+        })
+        .and_then(|(packages, registry)| {
+            registry
+                .providers
+                .iter()
+                .zip(&packages)
+                .try_for_each(|(entry, catalog_package)| {
+                    FixtureProviderPackageV1::from_canonical_cbor(&catalog_package.artifact.bytes)
+                        .and_then(|decoded| {
+                            decoded
+                                .validate_registry_binding(entry, &catalog_package.artifact.bytes)
+                        })
+                        .map_err(Box::<dyn Error>::from)
+                })
+                .map(|()| (packages, registry))
+        })
+        .and_then(|(packages, registry)| {
+            registry
+                .to_canonical_cbor()
+                .map_err(Box::<dyn Error>::from)
+                .map(|registry_bytes| ProviderCatalog {
+                    registry: public_artifact(
+                        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+                        "application/cbor",
+                        &registry_bytes,
+                    ),
+                    packages,
+                    package_support,
+                })
+        })
 }
 
 fn provider_package(
     layer: &LayerCatalogEntry,
     package_support: &[PublicArtifact; 7],
-) -> ProviderPackage {
+) -> Result<ProviderPackage, Box<dyn Error>> {
     let provider_key = FixtureProviderKeyV1 {
-        provider_id: layer.fixture_provider.provider_id.clone(),
-        contract_version: layer.fixture_provider.contract_version.clone(),
+        provider_id: layer.fixture_provider.provider_id.to_owned(),
+        contract_version: layer.fixture_provider.contract_version.to_owned(),
         abi_major: layer.fixture_provider.abi_major,
         abi_minor: layer.fixture_provider.abi_minor,
     };
@@ -707,235 +606,40 @@ fn provider_package(
         limitations_descriptor: limitations.descriptor(),
         package_digest: [0; 32],
     };
-    package.package_digest = embedded_catalog_result(package.digest());
-    let artifact = public_artifact(
-        &layer.fixture_provider.package_path,
-        "application/cbor",
-        &embedded_catalog_result(package.to_canonical_cbor()),
-    );
-    ProviderPackage {
-        provider_key,
-        claim_layer: layer.claim_layer,
-        subject_adapter: layer.subject_adapter,
-        schemas,
-        artifact,
-    }
+    package
+        .digest()
+        .map_err(Box::<dyn Error>::from)
+        .and_then(|package_digest| {
+            package.package_digest = package_digest;
+            package
+                .to_canonical_cbor()
+                .map_err(Box::<dyn Error>::from)
+                .map(|package_bytes| ProviderPackage {
+                    provider_key,
+                    claim_layer: layer.claim_layer,
+                    subject_adapter: layer.subject_adapter,
+                    schemas,
+                    artifact: public_artifact(
+                        layer.fixture_provider.package_path,
+                        "application/cbor",
+                        &package_bytes,
+                    ),
+                })
+        })
 }
 
 fn provider_schema_artifacts(layer: &LayerCatalogEntry) -> Vec<PublicArtifact> {
-    let mut schemas = layer
+    layer
         .fixtures
         .iter()
         .map(|fixture| {
-            (
-                fixture.record.family,
-                public_artifact(
-                    &fixture.record.schema,
-                    "application/schema+json",
-                    fixture.schema,
-                ),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    CatalogFixtureFamily::ALL
-        .into_iter()
-        .filter_map(|family| schemas.remove(&family))
-        .collect()
-}
-
-fn invalid_catalog(message: &str) -> Box<dyn Error> {
-    std::io::Error::new(std::io::ErrorKind::InvalidData, message).into()
-}
-
-fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
-    layer_catalog_from_sources(LAYER_SOURCES)
-}
-
-fn layer_catalog_from_sources(sources: &[LayerSource]) -> Result<LayerCatalog, Box<dyn Error>> {
-    let entries = sources
-        .iter()
-        .map(catalog_entry)
-        .collect::<Result<Vec<_>, _>>()?;
-    finish_layer_catalog(entries)
-}
-
-fn finish_layer_catalog(entries: Vec<LayerCatalogEntry>) -> Result<LayerCatalog, Box<dyn Error>> {
-    let bundle_modes = entries
-        .first()
-        .map_or(CatalogBundleMode::ALL, |entry| entry.bundle_modes);
-    if entries
-        .iter()
-        .any(|entry| entry.bundle_modes != bundle_modes)
-    {
-        return Err(invalid_catalog("profile bundle modes disagree"));
-    }
-    Ok(LayerCatalog {
-        entries,
-        bundle_modes,
-    })
-}
-
-fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Error>> {
-    let input = catalog_entry_input(source)?;
-    let (claim_layer, subject_adapter) = catalog_identity(&input.record)?;
-    let fixtures_match_profile = input.record.fixtures.len() == CatalogFixtureFamily::ALL.len()
-        && input
-            .record
-            .fixtures
-            .iter()
-            .zip(CatalogFixtureFamily::ALL)
-            .all(|(fixture, family)| {
-                fixture.family == family && fixture.claim_layer == input.record.claim_layer
-            });
-    if !fixtures_match_profile
-        || input.record.execution_profiles != CatalogExecutionProfile::ALL
-        || input.record.bundle_modes != CatalogBundleMode::ALL
-    {
-        return Err(invalid_catalog("profile catalog shape is invalid"));
-    }
-    let fixtures = catalog_fixtures(source, &input.record, &input.fixture_provider)?;
-    Ok(LayerCatalogEntry {
-        claim_layer,
-        name: claim_layer.catalog_name(),
-        profile_id: input.record.profile_id,
-        subject_adapter,
-        fixture_provider: input.fixture_provider,
-        profile_record: source.profile_record,
-        fixtures,
-        execution_profiles: input.record.execution_profiles,
-        bundle_modes: input.record.bundle_modes,
-    })
-}
-
-fn catalog_entry_input(source: &LayerSource) -> Result<CatalogEntryInput, Box<dyn Error>> {
-    let record = serde_json::from_slice(source.profile_record)?;
-    let fixture_provider = serde_json::from_slice(source.provider_record)?;
-    Ok(CatalogEntryInput {
-        record,
-        fixture_provider,
-    })
-}
-
-fn catalog_identity(
-    record: &ProfileCatalogRecord,
-) -> Result<(ClaimLayerV1, SubjectAdapterKindV1), Box<dyn Error>> {
-    let claim_layer = ClaimLayerV1::from_wire_code(record.wire_code)
-        .ok_or_else(|| invalid_catalog("profile wire code is invalid"))?;
-    let subject_adapter = SubjectAdapterKindV1::from_catalog_name(&record.subject_adapter)
-        .ok_or_else(|| invalid_catalog("profile subject adapter is invalid"))?;
-    if record.claim_layer != claim_layer.catalog_name() || record.fixture_root != record.claim_layer
-    {
-        return Err(invalid_catalog("profile identity is inconsistent"));
-    }
-    Ok((claim_layer, subject_adapter))
-}
-
-fn catalog_fixtures(
-    source: &LayerSource,
-    record: &ProfileCatalogRecord,
-    fixture_provider: &FixtureProviderRecord,
-) -> Result<Vec<CatalogFixture>, Box<dyn Error>> {
-    let provider_contract = format!(
-        "{}@{}",
-        fixture_provider.provider_id, fixture_provider.contract_version
-    );
-    if fixture_provider.claim_layer != record.claim_layer
-        || fixture_provider.subject_adapter != record.subject_adapter
-        || source.fixtures.len() != record.fixtures.len()
-    {
-        return Err(invalid_catalog("provider identity is inconsistent"));
-    }
-    source
-        .fixtures
-        .iter()
-        .zip(record.fixtures.iter())
-        .map(|(fixture_source, fixture_record)| {
-            let contract = fixture_provider
-                .fixture_contracts
-                .get(&fixture_record.family)
-                .ok_or_else(|| invalid_catalog("provider contract is missing"))?;
-            let operation = fixture_provider
-                .fixture_operations
-                .get(&fixture_record.family)
-                .ok_or_else(|| invalid_catalog("provider operation is missing"))?;
-            let schema = fixture_provider
-                .schemas
-                .get(&fixture_record.family)
-                .ok_or_else(|| invalid_catalog("provider schema is missing"))?;
-            if schema != &fixture_record.schema {
-                return Err(invalid_catalog("provider schema binding is inconsistent"));
-            }
-            catalog_fixture(
-                fixture_record,
-                fixture_source,
-                contract,
-                &provider_contract,
-                &record.subject_adapter,
-                operation.as_deref(),
+            public_artifact(
+                fixture.schema_path,
+                "application/schema+json",
+                fixture.schema,
             )
         })
         .collect()
-}
-
-fn catalog_fixture(
-    record: &ProfileFixtureRecord,
-    source: &FixtureSource,
-    contract: &CatalogFixtureContract,
-    provider_contract: &str,
-    subject_adapter: &str,
-    operation: Option<&str>,
-) -> Result<CatalogFixture, Box<dyn Error>> {
-    let oracle: FixtureOracleRecord = serde_json::from_slice(source.oracle)?;
-    let input: FixtureInputIdentity = serde_json::from_slice(source.input)?;
-    let evidence: EvidenceStatusRecord = serde_json::from_slice(source.expected)?;
-    let input_digest = blake3::hash(source.input).to_hex().to_string();
-    let identity_matches = input.case_id == record.case_id
-        && input.claim_layer == record.claim_layer
-        && input.family == record.family
-        && input.provider_contract == provider_contract
-        && input.subject_adapter == subject_adapter
-        && evidence.case_id == record.case_id
-        && evidence.claim_layer == record.claim_layer
-        && evidence.family == record.family
-        && evidence.input_blake3_digest == input_digest
-        && evidence.status == "pending"
-        && evidence.execution_result.is_none()
-        && evidence.executed_at.is_none()
-        && oracle.case_id == record.case_id
-        && oracle.claim_layer == record.claim_layer
-        && oracle.family == record.family;
-    let operation_matches = operation.is_none_or(|expected| {
-        serde_json::from_slice::<serde_json::Value>(source.input)
-            .ok()
-            .and_then(|value| {
-                value
-                    .pointer("/stimulus/operation")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .as_deref()
-            == Some(expected)
-    });
-    if !identity_matches || !operation_matches {
-        return Err(invalid_catalog("fixture identity is inconsistent"));
-    }
-    Ok(CatalogFixture {
-        record: ProfileFixtureRecord {
-            case_id: record.case_id.clone(),
-            claim_layer: record.claim_layer.clone(),
-            family: record.family,
-            schema: record.schema.clone(),
-            input: record.input.clone(),
-            expected: record.expected.clone(),
-            oracle: record.oracle.clone(),
-        },
-        contract: contract.clone(),
-        schema: source.schema,
-        input: source.input,
-        expected: source.expected,
-        oracle: source.oracle,
-        strict_oracle: oracle.oracle,
-    })
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1010,34 +714,38 @@ fn execute_command(
 fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
     let inventory_bytes =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
-    let catalog = layer_catalog()?;
-    let providers = provider_catalog(&catalog);
-    let context = MaterializationContext {
-        signing_key,
-        inventory_bytes,
-        providers: &providers,
-    };
-    catalog
-        .entries
-        .iter()
-        .try_fold(providers.materialized_files(), |mut outputs, spec| {
-            materialize_profile(&context, spec, catalog.bundle_modes).map(|files| {
-                outputs.extend(files);
-                outputs
+    let catalog = layer_catalog();
+    provider_catalog(&catalog).and_then(|providers| {
+        let context = MaterializationContext {
+            signing_key,
+            inventory_bytes,
+            providers: &providers,
+        };
+        catalog
+            .entries
+            .iter()
+            .try_fold(providers.materialized_files(), |mut outputs, spec| {
+                materialize_profile(&context, spec, CatalogBundleMode::ALL).map(|files| {
+                    outputs.extend(files);
+                    outputs
+                })
             })
-        })
-        .map(|mut outputs| {
-            let archives = outputs
-                .iter()
-                .filter(|output| output.archive_release_filename.is_some())
-                .map(|output| output.bytes.as_slice())
-                .collect::<Vec<_>>();
-            embedded_catalog_result(verify_release_tree_independently(&archives));
-            let published_file_count = outputs.len().saturating_add(2);
-            outputs.push(materialization_metadata(&catalog, published_file_count));
-            outputs.push(output_checksum_inventory(&outputs));
-            outputs
-        })
+            .and_then(|mut outputs| {
+                let archives = outputs
+                    .iter()
+                    .filter(|output| output.archive_release_filename.is_some())
+                    .map(|output| output.bytes.as_slice())
+                    .collect::<Vec<_>>();
+                verify_release_tree_independently(&archives)
+                    .map_err(Box::<dyn Error>::from)
+                    .map(|()| {
+                        let published_file_count = outputs.len().saturating_add(2);
+                        outputs.push(materialization_metadata(&catalog, published_file_count));
+                        outputs.push(output_checksum_inventory(&outputs));
+                        outputs
+                    })
+            })
+    })
 }
 
 fn command_from_arguments(
@@ -1099,7 +807,7 @@ fn materialize_profile(
     profile_from_catalog(layer, context.providers).and_then(|mut profile| {
         profile.lifecycle = ProfileLifecycleV1::Draft;
         profile.profile_digest = profile.digest();
-        let prefix = format!("{}/draft", layer.name);
+        let prefix = format!("{}/draft", layer.claim_layer.catalog_name());
         profile
             .to_canonical_cbor()
             .map_err(Into::into)
@@ -1229,10 +937,9 @@ fn materialization_metadata(
     let layer_names = catalog
         .entries
         .iter()
-        .map(|layer| layer.name)
+        .map(|layer| layer.claim_layer.catalog_name())
         .collect::<Vec<_>>();
-    let mode_names = catalog
-        .bundle_modes
+    let mode_names = CatalogBundleMode::ALL
         .into_iter()
         .map(CatalogBundleMode::name)
         .collect::<Vec<_>>();
@@ -1308,10 +1015,9 @@ fn fixtures_for_layer(
         .fixtures
         .iter()
         .try_fold(
-            Vec::with_capacity(layer.fixtures.len() * layer.execution_profiles.len()),
+            Vec::with_capacity(layer.fixtures.len() * CatalogExecutionProfile::ALL.len()),
             |mut fixtures, fixture| {
-                layer
-                    .execution_profiles
+                CatalogExecutionProfile::ALL
                     .into_iter()
                     .map(|execution_profile| {
                         execution_profile.digest().and_then(|digest| {
@@ -1352,14 +1058,13 @@ fn profile_from_catalog(
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let context = fixture_context(layer.profile_record, layer.claim_layer);
     let provider_key = FixtureProviderKeyV1 {
-        provider_id: layer.fixture_provider.provider_id.clone(),
-        contract_version: layer.fixture_provider.contract_version.clone(),
+        provider_id: layer.fixture_provider.provider_id.to_owned(),
+        contract_version: layer.fixture_provider.contract_version.to_owned(),
         abi_major: layer.fixture_provider.abi_major,
         abi_minor: layer.fixture_provider.abi_minor,
     };
     fixtures_for_layer(layer, &context, &provider_key).and_then(|fixtures| {
-        layer
-            .execution_profiles
+        CatalogExecutionProfile::ALL
             .into_iter()
             .map(CatalogExecutionProfile::digest)
             .collect::<Result<Vec<_>, _>>()
@@ -1371,7 +1076,7 @@ fn profile_from_catalog(
                     ))
                     .as_bytes();
                     let mut profile = ConformanceProfileV1 {
-                        profile_id: layer.profile_id.clone(),
+                        profile_id: layer.profile_id.to_owned(),
                         semantic_version: "1.0.0".to_owned(),
                         lifecycle: ProfileLifecycleV1::Draft,
                         normative_spec_digest: context.normative_spec_digest,
@@ -1415,12 +1120,10 @@ fn fixture_descriptor_from_record(
     execution_profile_digest: [u8; 32],
     mode: pos_conformance::ExecutionModeV1,
 ) -> Result<FixtureDescriptorV1, Box<dyn Error>> {
-    let payload_path =
-        fixture_payload_member_path(&fixture.record.case_id, &execution_profile_digest);
-    let evidence_path =
-        evidence_status_member_path(&fixture.record.case_id, &execution_profile_digest);
+    let payload_path = fixture_payload_member_path(fixture.case_id, &execution_profile_digest);
+    let evidence_path = evidence_status_member_path(fixture.case_id, &execution_profile_digest);
     let oracle_output_path = expected_result_member_path(
-        &fixture.record.case_id,
+        fixture.case_id,
         context.claim_layer,
         &execution_profile_digest,
     );
@@ -1433,7 +1136,7 @@ fn fixture_descriptor_from_record(
     } else {
         vec![evidence, oracle_output]
     };
-    let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
+    let downgrade = fixture.family == CatalogFixtureFamily::Downgrade;
     let transition = downgrade.then(|| FixtureContractTransitionV1 {
         from: FixtureProviderKeyV1 {
             provider_id: provider_key.provider_id.clone(),
@@ -1448,7 +1151,7 @@ fn fixture_descriptor_from_record(
             || Ok(None),
             |transition| {
                 release_admission_bytes(
-                    &fixture.record.case_id,
+                    fixture.case_id,
                     execution_profile_digest,
                     trust_policy_snapshot_digest,
                     &transition.from,
@@ -1459,16 +1162,16 @@ fn fixture_descriptor_from_record(
         );
         release_admission_digest.map(|release_admission_digest| {
             let mut descriptor = FixtureDescriptorV1 {
-                case_id: fixture.record.case_id.clone(),
+                case_id: fixture.case_id.to_owned(),
                 mandatory: true,
                 claim_layer: context.claim_layer,
-                family: fixture.record.family.provider_family(),
+                family: fixture.family.provider_family(),
                 provider_key: provider_key.clone(),
                 execution_profile_digest,
                 modes: vec![mode],
                 subject_adapter: layer.subject_adapter,
                 schema: artifact_descriptor(
-                    &fixture.record.schema,
+                    fixture.schema_path,
                     "application/schema+json",
                     fixture.schema,
                 ),
@@ -1479,13 +1182,18 @@ fn fixture_descriptor_from_record(
                 expected_verification_error: expectation.verification_error,
                 replay_claim: expectation.replay_claim,
                 redaction_state: expectation.redaction_state,
-                deterministic_budget: fixture.contract.deterministic_budget.resolved(),
+                deterministic_budget: fixture.contract.deterministic_budget.clone(),
                 operational_safety: OperationalSafetyV1 {
                     watchdog_ms: fixture.contract.watchdog_ms,
                 },
                 capability_policy: CapabilityPolicyV1 {
                     network_allowed: fixture.contract.network_allowed,
-                    capability_ids: fixture.contract.minimum_capability_ids.clone(),
+                    capability_ids: fixture
+                        .contract
+                        .minimum_capability_ids
+                        .iter()
+                        .map(|capability| (*capability).to_owned())
+                        .collect(),
                 },
                 provenance: fixture_provenance(context),
                 trust_policy_snapshot_digest: downgrade.then_some(trust_policy_snapshot_digest),
@@ -1520,11 +1228,11 @@ fn fixture_expectation(
             code_id,
         } => {
             let failure = NamespacedFailureV1 {
-                owner_id: owner_id.clone(),
-                contract_version: contract_version.clone(),
-                code_id: code_id.clone(),
+                owner_id: (*owner_id).to_owned(),
+                contract_version: (*contract_version).to_owned(),
+                code_id: (*code_id).to_owned(),
             };
-            let outcome = match fixture.record.family {
+            let outcome = match fixture.family {
                 CatalogFixtureFamily::ResourceExhaustion => {
                     VerificationOutcomeV1::ResourceLimitExceeded
                 }
@@ -1543,7 +1251,7 @@ fn fixture_expectation(
             )
         }
     };
-    let (replay_claim, redaction_state) = match fixture.record.family {
+    let (replay_claim, redaction_state) = match fixture.family {
         CatalogFixtureFamily::DeletionRedaction => (
             ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
             RedactionStateV1::RedactedViews,
@@ -1644,42 +1352,39 @@ fn bundle_inputs_from_profile(
     };
     let mut members = Vec::new();
     let mut expected_results = Vec::new();
-    for fixture in profile
-        .fixtures
-        .iter()
-        .filter(|fixture| fixture.modes.contains(&execution_mode))
-    {
-        let source = embedded_catalog_option(
-            layer
-                .fixtures
-                .iter()
-                .find(|source| source.record.case_id == fixture.case_id),
-        );
-        members.push(BundleMemberV1::fixture_input(
-            fixture.payload.member_path.clone(),
-            source.input.to_vec(),
-        ));
-        let path = expected_result_member_path(
-            &fixture.case_id,
-            fixture.claim_layer,
-            &fixture.execution_profile_digest,
-        );
-        let evidence_path =
-            evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
-        members.push(BundleMemberV1::evidence_status(
-            evidence_path,
-            source.expected.to_vec(),
-        ));
-        let member = BundleMemberV1::expected_result(path.clone(), source.oracle.to_vec());
-        expected_results.push(BundleExpectedResultV1 {
-            case_id: fixture.case_id.clone(),
-            claim_layer: fixture.claim_layer,
-            execution_profile_digest: fixture.execution_profile_digest,
-            mode,
-            member_path: path.clone(),
-            digest: member.digest,
-        });
-        members.push(member);
+    for source in &layer.fixtures {
+        for fixture in profile
+            .fixtures
+            .iter()
+            .filter(|fixture| fixture.case_id == source.case_id)
+            .filter(|fixture| fixture.modes.contains(&execution_mode))
+        {
+            members.push(BundleMemberV1::fixture_input(
+                fixture.payload.member_path.clone(),
+                source.input.to_vec(),
+            ));
+            let path = expected_result_member_path(
+                &fixture.case_id,
+                fixture.claim_layer,
+                &fixture.execution_profile_digest,
+            );
+            let evidence_path =
+                evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
+            members.push(BundleMemberV1::evidence_status(
+                evidence_path,
+                source.expected.to_vec(),
+            ));
+            let member = BundleMemberV1::expected_result(path.clone(), source.oracle.to_vec());
+            expected_results.push(BundleExpectedResultV1 {
+                case_id: fixture.case_id.clone(),
+                claim_layer: fixture.claim_layer,
+                execution_profile_digest: fixture.execution_profile_digest,
+                mode,
+                member_path: path.clone(),
+                digest: member.digest,
+            });
+            members.push(member);
+        }
     }
     expected_results.sort();
     append_supporting_members(&mut members, inventory_bytes, providers, profile, mode)
@@ -1837,264 +1542,38 @@ fn append_draft_release_admissions(
         .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
         .filter(|fixture| fixture.modes.contains(&execution_mode))
         .try_for_each(|fixture| {
-            let transition = embedded_catalog_option(fixture.transition.as_ref());
-            let trust_snapshot = embedded_catalog_option(fixture.trust_policy_snapshot_digest);
-            release_admission_bytes(
-                &fixture.case_id,
-                fixture.execution_profile_digest,
-                trust_snapshot,
-                &transition.from,
-                &transition.to,
-            )
-            .map(|bytes| {
-                members.push(BundleMemberV1::supporting(
-                    format!(
-                        "authority/release-admissions/{}-{}.rad1",
-                        fixture.case_id,
-                        pos_conformance::hex_digest(&fixture.execution_profile_digest)
-                    ),
-                    bytes,
-                    BundleMemberRoleV1::ReleaseAdmission,
-                ));
+            let transition = FixtureContractTransitionV1 {
+                from: FixtureProviderKeyV1 {
+                    provider_id: fixture.provider_key.provider_id.clone(),
+                    contract_version: fixture.provider_key.contract_version.clone(),
+                    abi_major: fixture.provider_key.abi_major,
+                    abi_minor: 1,
+                },
+                to: fixture.provider_key.clone(),
+            };
+            trust_policy_snapshot_digest().and_then(|trust_snapshot| {
+                release_admission_bytes(
+                    &fixture.case_id,
+                    fixture.execution_profile_digest,
+                    trust_snapshot,
+                    &transition.from,
+                    &transition.to,
+                )
+                .map(|bytes| {
+                    members.push(BundleMemberV1::supporting(
+                        format!(
+                            "authority/release-admissions/{}-{}.rad1",
+                            fixture.case_id,
+                            pos_conformance::hex_digest(&fixture.execution_profile_digest)
+                        ),
+                        bytes,
+                        BundleMemberRoleV1::ReleaseAdmission,
+                    ));
+                })
             })
         })
 }
 
-#[cfg(test)]
-fn tested<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("test setup failed: {error:?}")))
-    })
-}
-
-#[cfg(test)]
-fn first_catalog_input() -> CatalogEntryInput {
-    tested(catalog_entry_input(&LAYER_SOURCES[0]))
-}
-
-#[cfg(test)]
-#[test]
-#[should_panic(expected = "test setup failed")]
-fn tested_reports_setup_failures() {
-    tested::<(), _>(Err("intentional setup failure"));
-}
-
-#[cfg(test)]
-#[test]
-fn embedded_catalog_uses_manifest_owned_identity_modes_and_fixtures() {
-    let catalog = tested(layer_catalog());
-    assert_eq!(catalog.entries.len(), 7);
-    assert_eq!(catalog.bundle_modes, CatalogBundleMode::ALL);
-    assert!(catalog.entries.iter().all(|entry| {
-        entry.name == entry.claim_layer.catalog_name()
-            && entry.bundle_modes == CatalogBundleMode::ALL
-            && entry.execution_profiles == CatalogExecutionProfile::ALL
-            && entry.fixtures.len() == CatalogFixtureFamily::ALL.len()
-    }));
-}
-
-#[cfg(test)]
-#[test]
-fn catalog_identity_rejects_each_conflicting_manifest_field() {
-    let mut input = first_catalog_input();
-    input.record.claim_layer = "replay-conformance".to_owned();
-    assert!(catalog_identity(&input.record).is_err());
-
-    let mut input = first_catalog_input();
-    input.record.fixture_root = "other-root".to_owned();
-    assert!(catalog_identity(&input.record).is_err());
-
-    let mut input = first_catalog_input();
-    input.record.wire_code = u8::MAX;
-    assert!(catalog_identity(&input.record).is_err());
-
-    let mut input = first_catalog_input();
-    input.record.subject_adapter = "private-helper".to_owned();
-    assert!(catalog_identity(&input.record).is_err());
-}
-
-#[cfg(test)]
-#[test]
-fn catalog_fixture_rejects_conflicting_public_records() {
-    let input = first_catalog_input();
-    let record = &input.record.fixtures[0];
-    let contract = &input.fixture_provider.fixture_contracts[&record.family];
-    let source = &LAYER_SOURCES[0].fixtures[0];
-    let provider_contract = format!(
-        "{}@{}",
-        input.fixture_provider.provider_id, input.fixture_provider.contract_version
-    );
-    let operation = input.fixture_provider.fixture_operations[&record.family].as_deref();
-    assert!(catalog_fixture(
-        record,
-        source,
-        contract,
-        &provider_contract,
-        &input.record.subject_adapter,
-        operation,
-    )
-    .is_ok());
-    assert!(catalog_fixture(
-        record,
-        source,
-        contract,
-        "wrong-provider@1.0.0",
-        &input.record.subject_adapter,
-        operation,
-    )
-    .is_err());
-    assert!(catalog_fixture(
-        record,
-        source,
-        contract,
-        &provider_contract,
-        &input.record.subject_adapter,
-        Some("wrong-operation"),
-    )
-    .is_err());
-
-    let mut invalid_source = *source;
-    invalid_source.oracle = b"{";
-    assert!(catalog_fixture(
-        record,
-        &invalid_source,
-        contract,
-        &provider_contract,
-        &input.record.subject_adapter,
-        operation,
-    )
-    .is_err());
-
-    invalid_source = *source;
-    invalid_source.input = b"{";
-    assert!(catalog_fixture(
-        record,
-        &invalid_source,
-        contract,
-        &provider_contract,
-        &input.record.subject_adapter,
-        operation,
-    )
-    .is_err());
-
-    invalid_source = *source;
-    invalid_source.expected = b"{";
-    assert!(catalog_fixture(
-        record,
-        &invalid_source,
-        contract,
-        &provider_contract,
-        &input.record.subject_adapter,
-        operation,
-    )
-    .is_err());
-}
-
-#[cfg(test)]
-#[test]
-fn catalog_entry_rejects_profile_and_provider_drift() {
-    let source = &LAYER_SOURCES[0];
-    let mut profile: serde_json::Value = tested(serde_json::from_slice(source.profile_record));
-    profile["bundle_modes"] = serde_json::json!(["air-gapped", "local"]);
-    let profile = Box::leak(tested(serde_json::to_vec(&profile)).into_boxed_slice());
-    let changed = LayerSource {
-        profile_record: profile,
-        provider_record: source.provider_record,
-        fixtures: source.fixtures,
-    };
-    assert!(catalog_entry(&changed).is_err());
-
-    let mut profile: serde_json::Value = tested(serde_json::from_slice(source.profile_record));
-    profile["execution_profiles"] = serde_json::json!(["deterministic-local-v1"]);
-    let profile = Box::leak(tested(serde_json::to_vec(&profile)).into_boxed_slice());
-    let changed = LayerSource {
-        profile_record: profile,
-        provider_record: source.provider_record,
-        fixtures: source.fixtures,
-    };
-    assert!(catalog_entry(&changed).is_err());
-
-    let mut provider: serde_json::Value = tested(serde_json::from_slice(source.provider_record));
-    provider["claim_layer"] = serde_json::Value::String("replay-conformance".to_owned());
-    let provider = Box::leak(tested(serde_json::to_vec(&provider)).into_boxed_slice());
-    let changed = LayerSource {
-        profile_record: source.profile_record,
-        provider_record: provider,
-        fixtures: source.fixtures,
-    };
-    assert!(catalog_entry(&changed).is_err());
-
-    let mut profile: serde_json::Value = tested(serde_json::from_slice(source.profile_record));
-    profile["wire_code"] = serde_json::json!(255);
-    let profile = Box::leak(tested(serde_json::to_vec(&profile)).into_boxed_slice());
-    let changed = LayerSource {
-        profile_record: profile,
-        provider_record: source.provider_record,
-        fixtures: source.fixtures,
-    };
-    assert!(catalog_entry(&changed).is_err());
-
-    let invalid_provider = LayerSource {
-        profile_record: source.profile_record,
-        provider_record: b"{",
-        fixtures: source.fixtures,
-    };
-    assert!(catalog_entry_input(&invalid_provider).is_err());
-    assert!(layer_catalog_from_sources(&[invalid_provider]).is_err());
-
-    let mut input = first_catalog_input();
-    input
-        .fixture_provider
-        .fixture_contracts
-        .remove(&CatalogFixtureFamily::Positive);
-    assert!(catalog_fixtures(source, &input.record, &input.fixture_provider).is_err());
-
-    let mut input = first_catalog_input();
-    input
-        .fixture_provider
-        .fixture_operations
-        .remove(&CatalogFixtureFamily::Positive);
-    assert!(catalog_fixtures(source, &input.record, &input.fixture_provider).is_err());
-
-    let mut input = first_catalog_input();
-    input
-        .fixture_provider
-        .schemas
-        .remove(&CatalogFixtureFamily::Positive);
-    assert!(catalog_fixtures(source, &input.record, &input.fixture_provider).is_err());
-
-    let mut provider: serde_json::Value = tested(serde_json::from_slice(source.provider_record));
-    provider["schemas"]["positive"] = serde_json::Value::String("wrong-schema.json".to_owned());
-    let provider = Box::leak(tested(serde_json::to_vec(&provider)).into_boxed_slice());
-    let changed = LayerSource {
-        profile_record: source.profile_record,
-        provider_record: provider,
-        fixtures: source.fixtures,
-    };
-    assert!(catalog_entry(&changed).is_err());
-
-    let entries = LAYER_SOURCES
-        .iter()
-        .map(catalog_entry)
-        .collect::<Result<Vec<_>, _>>();
-    let mut entries = tested(entries);
-    entries[0].bundle_modes = [CatalogBundleMode::AirGapped, CatalogBundleMode::Local];
-    assert!(finish_layer_catalog(entries).is_err());
-}
-
-#[cfg(test)]
-#[test]
-fn draft_authority_rejects_mismatched_signing_key_and_unknown_classes() {
-    assert!(authority_signing_key([0; 32]).is_err());
-    assert!(authority_signing_key(DRAFT_AUTHORITY_PUBLIC_KEY_BYTES).is_ok());
-
-    let mut declaration: serde_json::Value = tested(serde_json::from_slice(include_bytes!(
-        "../../../../fixtures/conformance/support/draft-execution-authority.json"
-    )));
-    declaration["execution_profiles"][0]["reproducibility_classes"][0] =
-        serde_json::Value::String("UnknownClass".to_owned());
-    assert!(serde_json::from_value::<DraftAuthorityDeclaration>(declaration).is_err());
-}
 fn verify_public_archive(
     archive_bytes: &[u8],
     release_filename: &str,
