@@ -58,6 +58,8 @@ const FIXTURE_CONTRACT_POLICY_BYTES: &[u8] =
     include_bytes!("../../../fixtures/conformance/support/fixture-family-contract.json");
 const DRAFT_AUTHORITY_DECLARATION_BYTES: &[u8] =
     include_bytes!("../../../fixtures/conformance/support/draft-execution-authority.json");
+const SUPPORT_PACKAGE_MANIFEST_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/package-manifest.json");
 const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
 const PAYLOAD_BYTES: &[u8] = b"public fixture payload";
 const DRAFT_FIXTURE_AUTHORITY_KEY: [u8; 32] = [7; 32];
@@ -530,6 +532,11 @@ fn current_bundle_members(
             BundleMemberRoleV1::FixtureContractPolicy,
         ),
         BundleMemberV1::supporting(
+            "support/package-manifest.json",
+            SUPPORT_PACKAGE_MANIFEST_BYTES.to_vec(),
+            BundleMemberRoleV1::Schema,
+        ),
+        BundleMemberV1::supporting(
             "support/draft-execution-authority.json",
             DRAFT_AUTHORITY_DECLARATION_BYTES.to_vec(),
             BundleMemberRoleV1::AuthorityDeclaration,
@@ -687,6 +694,7 @@ fn bundle_rejects_tampered_policy_and_authority_declaration() -> TestResult {
             "support/draft-execution-authority.json",
             BundleMemberRoleV1::AuthorityDeclaration,
         ),
+        ("support/package-manifest.json", BundleMemberRoleV1::Schema),
     ] {
         let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
         let member = inputs

@@ -1,0 +1,18 @@
+{
+  "magic": "SPM1",
+  "version": 1,
+  "artifacts": [
+    { "path": "support/LICENSE", "media_type": "text/plain", "role": "licence", "provider_package": true },
+    { "path": "support/NOTICE", "media_type": "text/plain", "role": "notice", "provider_package": true },
+    { "path": "support/build-provenance.json", "media_type": "application/json", "role": "provenance", "provider_package": true },
+    { "path": "support/draft-execution-authority.json", "media_type": "application/json", "role": "authority-declaration", "provider_package": false },
+    { "path": "support/fixture-family-contract.json", "media_type": "application/json", "role": "fixture-contract-policy", "provider_package": false },
+    { "path": "support/limitations.md", "media_type": "text/markdown", "role": "limitations", "provider_package": true },
+    { "path": "support/normative-requirements.md", "media_type": "text/markdown", "role": "normative-specification", "provider_package": false },
+    { "path": "support/package-manifest.json", "media_type": "application/json", "role": "schema", "provider_package": false },
+    { "path": "support/publication-review.json", "media_type": "application/json", "role": "provenance", "provider_package": true },
+    { "path": "support/sbom.json", "media_type": "application/json", "role": "sbom", "provider_package": true },
+    { "path": "support/schema-cpf1-v1.cddl", "media_type": "text/plain", "role": "schema", "provider_package": false },
+    { "path": "support/source-provenance.json", "media_type": "application/json", "role": "provenance", "provider_package": true }
+  ]
+}

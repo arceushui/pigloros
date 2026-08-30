@@ -22,7 +22,7 @@ use std::path::{Component, Path, PathBuf};
 
 const PROFILE_COUNT: usize = 7;
 const FIXTURES_PER_PROFILE: usize = 7;
-const STATIC_SOURCE_PATHS: [&str; 14] = [
+const STATIC_SOURCE_PATHS: [&str; 15] = [
     "BLAKE3SUMS",
     "expected-authority/inventory.json",
     "matrix/execution-matrix.json",
@@ -33,6 +33,7 @@ const STATIC_SOURCE_PATHS: [&str; 14] = [
     "support/fixture-family-contract.json",
     "support/limitations.md",
     "support/normative-requirements.md",
+    "support/package-manifest.json",
     "support/publication-review.json",
     "support/sbom.json",
     "support/schema-cpf1-v1.cddl",
@@ -301,6 +302,53 @@ struct EvidenceStatusRecord {
     status: String,
     execution_result: serde_json::Value,
     executed_at: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportPackageManifest {
+    magic: String,
+    version: u64,
+    artifacts: Vec<SupportArtifactDeclaration>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportArtifactDeclaration {
+    path: String,
+    media_type: String,
+    role: SupportArtifactRole,
+    provider_package: bool,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum SupportArtifactRole {
+    NormativeSpecification,
+    Schema,
+    Licence,
+    Notice,
+    Sbom,
+    Provenance,
+    Limitations,
+    FixtureContractPolicy,
+    AuthorityDeclaration,
+}
+
+impl SupportArtifactRole {
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::NormativeSpecification => "BundleMemberRoleV1::NormativeSpecification",
+            Self::Schema => "BundleMemberRoleV1::Schema",
+            Self::Licence => "BundleMemberRoleV1::Licence",
+            Self::Notice => "BundleMemberRoleV1::Notice",
+            Self::Sbom => "BundleMemberRoleV1::Sbom",
+            Self::Provenance => "BundleMemberRoleV1::Provenance",
+            Self::Limitations => "BundleMemberRoleV1::Limitations",
+            Self::FixtureContractPolicy => "BundleMemberRoleV1::FixtureContractPolicy",
+            Self::AuthorityDeclaration => "BundleMemberRoleV1::AuthorityDeclaration",
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1366,7 +1414,7 @@ fn draft_authority(
     {
         return Err(invalid_data("Draft authority declaration is inconsistent"));
     }
-    let hex = declaration.fixture_authority_public_key_hex;
+    let hex = &declaration.fixture_authority_public_key_hex;
     if hex.len() != 64 || !hex.is_ascii() {
         return Err(invalid_data(
             "Draft authority public key must contain 64 ASCII hex digits",
@@ -1448,6 +1496,19 @@ fn emit_byte_constant(
     writeln!(generated, "const {name}: &[u8] = &{bytes:?};")
 }
 
+fn support_constant_name(path: &str) -> String {
+    let mut name = String::from("MATERIALIZATION_");
+    for character in path.chars() {
+        if character.is_ascii_alphanumeric() {
+            name.push(character.to_ascii_uppercase());
+        } else {
+            name.push('_');
+        }
+    }
+    name.push_str("_BYTES");
+    name
+}
+
 fn emit_bundle_contract_assets(snapshots: &SourceSnapshots) -> Result<String, Box<dyn Error>> {
     let mut generated = String::new();
     for (name, relative) in [
@@ -1460,6 +1521,10 @@ fn emit_bundle_contract_assets(snapshots: &SourceSnapshots) -> Result<String, Bo
             "DRAFT_AUTHORITY_DECLARATION_BYTES_V1",
             "support/draft-execution-authority.json",
         ),
+        (
+            "SUPPORT_PACKAGE_MANIFEST_BYTES_V1",
+            "support/package-manifest.json",
+        ),
     ] {
         emit_byte_constant(
             &mut generated,
@@ -1468,6 +1533,40 @@ fn emit_bundle_contract_assets(snapshots: &SourceSnapshots) -> Result<String, Bo
         )?;
     }
     Ok(generated)
+}
+
+fn support_package_manifest(
+    snapshots: &SourceSnapshots,
+) -> Result<SupportPackageManifest, io::Error> {
+    let manifest: SupportPackageManifest = serde_json::from_slice(
+        snapshots.bytes("support/package-manifest.json", "support package manifest")?,
+    )
+    .map_err(|error| invalid_data(format!("support package manifest is invalid: {error}")))?;
+    let declared = manifest
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected = STATIC_SOURCE_PATHS
+        .iter()
+        .copied()
+        .filter(|path| path.starts_with("support/"))
+        .collect::<BTreeSet<_>>();
+    let records_are_valid = manifest.artifacts.iter().all(|artifact| {
+        valid_media_type(&artifact.media_type)
+            && artifact.path.starts_with("support/")
+            && !artifact.path.contains("..")
+    });
+    if manifest.magic == "SPM1"
+        && manifest.version == 1
+        && declared.len() == manifest.artifacts.len()
+        && declared == expected
+        && records_are_valid
+    {
+        Ok(manifest)
+    } else {
+        Err(invalid_data("support package manifest is inconsistent"))
+    }
 }
 
 fn emit_materialization_assets(
@@ -1490,41 +1589,6 @@ fn emit_materialization_assets(
             "MATERIALIZATION_EXECUTION_MATRIX_BYTES",
             "matrix/execution-matrix.json",
         ),
-        ("MATERIALIZATION_LICENSE_BYTES", "support/LICENSE"),
-        ("MATERIALIZATION_NOTICE_BYTES", "support/NOTICE"),
-        (
-            "MATERIALIZATION_BUILD_PROVENANCE_BYTES",
-            "support/build-provenance.json",
-        ),
-        (
-            "MATERIALIZATION_DRAFT_AUTHORITY_DECLARATION_BYTES",
-            "support/draft-execution-authority.json",
-        ),
-        (
-            "MATERIALIZATION_FIXTURE_CONTRACT_POLICY_BYTES",
-            "support/fixture-family-contract.json",
-        ),
-        (
-            "MATERIALIZATION_LIMITATIONS_BYTES",
-            "support/limitations.md",
-        ),
-        (
-            "MATERIALIZATION_NORMATIVE_REQUIREMENTS_BYTES",
-            "support/normative-requirements.md",
-        ),
-        (
-            "MATERIALIZATION_PUBLICATION_REVIEW_BYTES",
-            "support/publication-review.json",
-        ),
-        ("MATERIALIZATION_SBOM_BYTES", "support/sbom.json"),
-        (
-            "MATERIALIZATION_PROFILE_SCHEMA_BYTES",
-            "support/schema-cpf1-v1.cddl",
-        ),
-        (
-            "MATERIALIZATION_SOURCE_PROVENANCE_BYTES",
-            "support/source-provenance.json",
-        ),
     ] {
         emit_byte_constant(
             &mut generated,
@@ -1532,6 +1596,39 @@ fn emit_materialization_assets(
             snapshots.bytes(relative, "materialization source")?,
         )?;
     }
+    generated.push_str(
+        "struct MaterializationSupportArtifact {\n\
+             path: &'static str,\n\
+             media_type: &'static str,\n\
+             bytes: &'static [u8],\n\
+             role: BundleMemberRoleV1,\n\
+             provider_package: bool,\n\
+         }\n",
+    );
+    let support = support_package_manifest(snapshots)?;
+    writeln!(
+        generated,
+        "const MATERIALIZATION_SUPPORT_ARTIFACTS: [MaterializationSupportArtifact; {}] = [",
+        support.artifacts.len()
+    )?;
+    for artifact in support.artifacts {
+        let bytes = snapshots.bytes(&artifact.path, "support package artifact")?;
+        emit_byte_constant(
+            &mut generated,
+            &support_constant_name(&artifact.path),
+            bytes,
+        )?;
+        writeln!(
+            generated,
+            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: &{:?}, role: {}, provider_package: {} }},",
+            artifact.path,
+            artifact.media_type,
+            bytes,
+            artifact.role.rust_variant(),
+            artifact.provider_package,
+        )?;
+    }
+    generated.push_str("];\n");
     Ok(generated)
 }
 

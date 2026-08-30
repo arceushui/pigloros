@@ -533,18 +533,24 @@ if (( ${#provider_manifests[@]} != 7 )); then
   echo "expected exactly seven provider-owned package manifests" >&2
   exit 1
 fi
-expected_support=(
-  "${fixture_root}/support/LICENSE"
-  "${fixture_root}/support/NOTICE"
-  "${fixture_root}/support/build-provenance.json"
-  "${fixture_root}/support/draft-execution-authority.json"
-  "${fixture_root}/support/fixture-family-contract.json"
-  "${fixture_root}/support/limitations.md"
-  "${fixture_root}/support/normative-requirements.md"
-  "${fixture_root}/support/publication-review.json"
-  "${fixture_root}/support/sbom.json"
-  "${fixture_root}/support/schema-cpf1-v1.cddl"
-  "${fixture_root}/support/source-provenance.json"
+support_manifest="${fixture_root}/support/package-manifest.json"
+jq -e '
+  .magic == "SPM1" and .version == 1 and
+  (.artifacts | type == "array" and length > 0) and
+  ([.artifacts[].path] | unique | length) == (.artifacts | length) and
+  all(.artifacts[];
+    ((.path | test("^support/[A-Za-z0-9._/-]+$")) and
+      ((.path | contains("..")) | not)) and
+    (.media_type | test("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")) and
+    (.role | IN("normative-specification", "schema", "licence", "notice", "sbom",
+      "provenance", "limitations", "fixture-contract-policy", "authority-declaration")) and
+    (.provider_package | type == "boolean"))
+' "${support_manifest}" >/dev/null || {
+  echo "invalid support package manifest" >&2
+  exit 1
+}
+mapfile -t expected_support < <(
+  jq -r --arg root "${fixture_root}" '.artifacts[].path | "\($root)/\(.)"' "${support_manifest}" | sort
 )
 if [[ "${support[*]}" != "${expected_support[*]}" ]]; then
   echo "public support artifact inventory does not match the current CPF1 contract" >&2

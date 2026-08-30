@@ -39,6 +39,7 @@ const LIMITATIONS_PATH: &str = "support/limitations.md";
 const SOURCE_PROVENANCE_PATH: &str = "support/source-provenance.json";
 const BUILD_PROVENANCE_PATH: &str = "support/build-provenance.json";
 const PUBLICATION_REVIEW_PATH: &str = "support/publication-review.json";
+const SUPPORT_PACKAGE_MANIFEST_PATH: &str = "support/package-manifest.json";
 const NOTICE_PATH: &str = "support/NOTICE";
 const SBOM_PATH: &str = "support/sbom.json";
 include!(concat!(env!("OUT_DIR"), "/bundle_contract_assets.rs"));
@@ -536,6 +537,20 @@ fn validate_profile_support_members(
         .and_then(|()| {
             member_by_role_and_path(
                 members,
+                BundleMemberRoleV1::Schema,
+                SUPPORT_PACKAGE_MANIFEST_PATH,
+            )
+            .and_then(|member| {
+                if member.bytes == SUPPORT_PACKAGE_MANIFEST_BYTES_V1 {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                }
+            })
+        })
+        .and_then(|()| {
+            member_by_role_and_path(
+                members,
                 BundleMemberRoleV1::ExecutionMatrix,
                 EXECUTION_MATRIX_PATH,
             )
@@ -933,6 +948,7 @@ fn validate_member_closure(
         EXECUTION_MATRIX_PATH,
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
+        SUPPORT_PACKAGE_MANIFEST_PATH,
         FIXTURE_CONTRACT_POLICY_PATH,
         "support/draft-execution-authority.json",
         LIMITATIONS_PATH,
@@ -2065,6 +2081,14 @@ fn raw_profile_support_members(
                 DRAFT_AUTHORITY_DECLARATION_BYTES_V1,
             )
         })
+        .and_then(|()| {
+            raw_authority_member_matches(
+                members,
+                SUPPORT_PACKAGE_MANIFEST_PATH,
+                RawMemberRole::Schema,
+                SUPPORT_PACKAGE_MANIFEST_BYTES_V1,
+            )
+        })
 }
 
 fn raw_execution_authority_members(
@@ -2415,6 +2439,7 @@ fn raw_member_closure(
         EXECUTION_MATRIX_PATH,
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
+        SUPPORT_PACKAGE_MANIFEST_PATH,
         FIXTURE_CONTRACT_POLICY_PATH,
         "support/draft-execution-authority.json",
         LIMITATIONS_PATH,

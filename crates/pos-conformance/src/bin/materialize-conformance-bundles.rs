@@ -366,7 +366,7 @@ struct ProviderPackage {
 struct ProviderCatalog {
     registry: PublicArtifact,
     packages: Vec<ProviderPackage>,
-    package_support: [PublicArtifact; 7],
+    package_support: Vec<PublicArtifact>,
 }
 
 impl ProviderCatalog {
@@ -397,40 +397,12 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
     }
 }
 
-fn package_support_artifacts() -> [PublicArtifact; 7] {
-    [
-        public_artifact(
-            "support/LICENSE",
-            "text/plain",
-            MATERIALIZATION_LICENSE_BYTES,
-        ),
-        public_artifact("support/NOTICE", "text/plain", MATERIALIZATION_NOTICE_BYTES),
-        public_artifact(
-            "support/sbom.json",
-            "application/json",
-            MATERIALIZATION_SBOM_BYTES,
-        ),
-        public_artifact(
-            "support/source-provenance.json",
-            "application/json",
-            MATERIALIZATION_SOURCE_PROVENANCE_BYTES,
-        ),
-        public_artifact(
-            "support/build-provenance.json",
-            "application/json",
-            MATERIALIZATION_BUILD_PROVENANCE_BYTES,
-        ),
-        public_artifact(
-            "support/publication-review.json",
-            "application/json",
-            MATERIALIZATION_PUBLICATION_REVIEW_BYTES,
-        ),
-        public_artifact(
-            "support/limitations.md",
-            "text/markdown",
-            MATERIALIZATION_LIMITATIONS_BYTES,
-        ),
-    ]
+fn package_support_artifacts() -> Vec<PublicArtifact> {
+    MATERIALIZATION_SUPPORT_ARTIFACTS
+        .iter()
+        .filter(|artifact| artifact.provider_package)
+        .map(|artifact| public_artifact(artifact.path, artifact.media_type, artifact.bytes))
+        .collect()
 }
 
 fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
@@ -499,7 +471,7 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
 
 fn provider_package(
     layer: &LayerCatalogEntry,
-    package_support: &[PublicArtifact; 7],
+    package_support: &[PublicArtifact],
 ) -> Result<ProviderPackage, Box<dyn Error>> {
     let provider_key = FixtureProviderKeyV1 {
         provider_id: layer.fixture_provider.provider_id.to_owned(),
@@ -508,7 +480,17 @@ fn provider_package(
         abi_minor: layer.fixture_provider.abi_minor,
     };
     let schemas = provider_schema_artifacts(layer);
-    let [licence, notices, sbom, source_provenance, _, _, limitations] = package_support;
+    let support = |path| {
+        package_support
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .ok_or_else(|| -> Box<dyn Error> { format!("support package omits {path}").into() })
+    };
+    let licence = support("support/LICENSE")?;
+    let notices = support("support/NOTICE")?;
+    let sbom = support("support/sbom.json")?;
+    let source_provenance = support("support/source-provenance.json")?;
+    let limitations = support("support/limitations.md")?;
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
         claim_layer: layer.claim_layer,
@@ -900,13 +882,13 @@ fn output_checksum_inventory(files: &[MaterializedFile]) -> MaterializedFile {
 fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> FixtureContext {
     let profile_record_digest =
         labeled_digest("PiglorOS.CPF1ProfileRecord.v1", profile_record_bytes);
-    let normative = MATERIALIZATION_NORMATIVE_REQUIREMENTS_BYTES;
-    let notice = MATERIALIZATION_NOTICE_BYTES;
-    let sbom = MATERIALIZATION_SBOM_BYTES;
-    let source_provenance = MATERIALIZATION_SOURCE_PROVENANCE_BYTES;
-    let build_provenance = MATERIALIZATION_BUILD_PROVENANCE_BYTES;
-    let publication_review = MATERIALIZATION_PUBLICATION_REVIEW_BYTES;
-    let limitations = MATERIALIZATION_LIMITATIONS_BYTES;
+    let normative = MATERIALIZATION_SUPPORT_NORMATIVE_REQUIREMENTS_MD_BYTES;
+    let notice = MATERIALIZATION_SUPPORT_NOTICE_BYTES;
+    let sbom = MATERIALIZATION_SUPPORT_SBOM_JSON_BYTES;
+    let source_provenance = MATERIALIZATION_SUPPORT_SOURCE_PROVENANCE_JSON_BYTES;
+    let build_provenance = MATERIALIZATION_SUPPORT_BUILD_PROVENANCE_JSON_BYTES;
+    let publication_review = MATERIALIZATION_SUPPORT_PUBLICATION_REVIEW_JSON_BYTES;
+    let limitations = MATERIALIZATION_SUPPORT_LIMITATIONS_MD_BYTES;
     let notice_digest = *blake3::hash(notice).as_bytes();
     let sbom_digest = *blake3::hash(sbom).as_bytes();
     let limitations_digest = *blake3::hash(limitations).as_bytes();
@@ -1012,7 +994,7 @@ fn profile_from_catalog(
                             ),
                         },
                         fixture_contract_policy_digest: *blake3::hash(
-                            MATERIALIZATION_FIXTURE_CONTRACT_POLICY_BYTES,
+                            MATERIALIZATION_SUPPORT_FIXTURE_FAMILY_CONTRACT_JSON_BYTES,
                         )
                         .as_bytes(),
                         limitations_digest: context.limitations_digest,
@@ -1313,66 +1295,9 @@ fn append_supporting_members(
     profile: &ConformanceProfileV1,
     mode: BundleModeV1,
 ) -> Result<(), Box<dyn Error>> {
-    let support = [
-        (
-            "support/normative-requirements.md",
-            MATERIALIZATION_NORMATIVE_REQUIREMENTS_BYTES,
-            BundleMemberRoleV1::NormativeSpecification,
-        ),
-        (
-            "support/LICENSE",
-            MATERIALIZATION_LICENSE_BYTES,
-            BundleMemberRoleV1::Licence,
-        ),
-        (
-            "support/NOTICE",
-            MATERIALIZATION_NOTICE_BYTES,
-            BundleMemberRoleV1::Notice,
-        ),
-        (
-            "support/sbom.json",
-            MATERIALIZATION_SBOM_BYTES,
-            BundleMemberRoleV1::Sbom,
-        ),
-        (
-            "support/source-provenance.json",
-            MATERIALIZATION_SOURCE_PROVENANCE_BYTES,
-            BundleMemberRoleV1::Provenance,
-        ),
-        (
-            "support/build-provenance.json",
-            MATERIALIZATION_BUILD_PROVENANCE_BYTES,
-            BundleMemberRoleV1::Provenance,
-        ),
-        (
-            "support/publication-review.json",
-            MATERIALIZATION_PUBLICATION_REVIEW_BYTES,
-            BundleMemberRoleV1::Provenance,
-        ),
-        (
-            "support/limitations.md",
-            MATERIALIZATION_LIMITATIONS_BYTES,
-            BundleMemberRoleV1::Limitations,
-        ),
-    ];
-    for (path, bytes, role) in support {
-        members.push(BundleMemberV1::supporting(path, bytes.to_vec(), role));
-    }
-    members.push(BundleMemberV1::supporting(
-        "support/schema-cpf1-v1.cddl",
-        MATERIALIZATION_PROFILE_SCHEMA_BYTES.to_vec(),
-        BundleMemberRoleV1::Schema,
-    ));
-    members.push(BundleMemberV1::supporting(
-        "support/fixture-family-contract.json",
-        MATERIALIZATION_FIXTURE_CONTRACT_POLICY_BYTES.to_vec(),
-        BundleMemberRoleV1::FixtureContractPolicy,
-    ));
-    members.push(BundleMemberV1::supporting(
-        "support/draft-execution-authority.json",
-        MATERIALIZATION_DRAFT_AUTHORITY_DECLARATION_BYTES.to_vec(),
-        BundleMemberRoleV1::AuthorityDeclaration,
-    ));
+    members.extend(MATERIALIZATION_SUPPORT_ARTIFACTS.iter().map(|artifact| {
+        BundleMemberV1::supporting(artifact.path, artifact.bytes.to_vec(), artifact.role)
+    }));
     for schema in providers
         .packages
         .iter()

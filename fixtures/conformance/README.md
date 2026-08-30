@@ -65,6 +65,11 @@ their dependency/advisory checks remain CI responsibilities (`cargo-deny`,
 `cargo-audit`, and the pinned toolchain). The checked-in `SHA256SUMS` file is
 the byte-integrity authority for this scoped support record.
 
+`support/package-manifest.json` is the single ordered inventory for support
+artifacts, their media types, bundle roles, and provider-package membership.
+Build-time generation and the independent shell verifier consume that manifest;
+neither maintains a second support-artifact list.
+
 The canonical architecture decisions for the CPF1 and authority workflow are
 ADR-058 through ADR-068 on the [Redmine project wiki](https://redmine.piglor.com/projects/pigloros/wiki). ADR-068 owns the data-only FPR1/FPP1 provider contract used here.
 
