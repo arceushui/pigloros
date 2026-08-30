@@ -1789,7 +1789,10 @@ impl ErasureSupportingRecordsV1 {
                 Err(ErasureErrorV1::ProvenanceMissing)
             };
         };
-        if self.obligations.is_empty() || self.obligations.len() > ERASURE_MAX_OBLIGATIONS {
+        if self.obligations.is_empty() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if self.obligations.len() > ERASURE_MAX_OBLIGATIONS {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         let references = self
@@ -5267,6 +5270,7 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        self.supporting_records.validate()?;
         self.supporting_records
             .validates_request(self.request.reference())?;
         if let Some(correction) = self.supporting_records.correction_provenance() {

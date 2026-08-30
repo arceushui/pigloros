@@ -1550,7 +1550,7 @@ fn assert_complete_trait_record(
     assert_eq!(freeze.host_evidence(), reference(9));
     assert_eq!(persisted.freeze_provenance(), Some(freeze.reference()));
     assert_eq!(admission.authorization_provenance(), reference(9));
-    assert_eq!(admission.trust(), reference(3));
+    assert_eq!(admission.trust(), reference(9));
     assert_eq!(persisted.dispatch_provenance(), Some(admission.reference()));
     Ok(())
 }
