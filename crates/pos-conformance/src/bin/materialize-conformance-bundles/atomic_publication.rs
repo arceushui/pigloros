@@ -917,7 +917,6 @@ mod tests {
     #[test]
     fn retained_staging_and_cleanup_entry_types_are_rechecked() {
         use std::os::unix::fs::PermissionsExt as _;
-        use std::os::unix::net::UnixListener;
 
         let root = TestDirectory::create("retained-staging");
         let destination = root.0.join("published");
@@ -964,13 +963,23 @@ mod tests {
             "remove empty sibling",
         );
 
-        let socket_path = staging_path.join("socket");
-        let socket = ok(UnixListener::bind(&socket_path), "create staged socket");
+        ok(
+            fs::mknodat(
+                &publication.staging,
+                c"socket",
+                FileType::Socket,
+                Mode::RWXU,
+                fs::makedev(0, 0),
+            ),
+            "create staged socket",
+        );
         assert_error(
             remove_directory_entry(&publication.staging, c"socket"),
             "untrusted output directory",
         );
-        drop(socket);
-        ok(std::fs::remove_file(socket_path), "remove staged socket");
+        ok(
+            fs::unlinkat(&publication.staging, c"socket", AtFlags::empty()),
+            "remove staged socket",
+        );
     }
 }

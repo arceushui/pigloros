@@ -306,7 +306,7 @@ mod coverage_entrypoints {
                 let mut mutant = value.clone();
                 replace_at_path(&mut mutant, &path, replacement);
                 let bytes = encode_value(&mutant);
-                let _ = decode(&bytes);
+                drop(decode(&bytes));
                 exercised += 1;
             }
         }
