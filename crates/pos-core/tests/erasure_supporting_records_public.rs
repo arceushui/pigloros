@@ -253,7 +253,7 @@ fn supporting_records_reject_conflicting_rejection_and_freeze_evidence(
         Err(ErasureErrorV1::PolicyConflict)
     );
     let failure_with_scope = ErasureSupportingRecordsInputV1 {
-        scope_commitment: Some(scope.clone()),
+        scope_commitment: Some(scope),
         freeze_failure: Some(failure),
         ..ErasureSupportingRecordsInputV1::default()
     };
@@ -318,10 +318,10 @@ fn supporting_records_require_complete_freeze_commitments() -> Result<(), Erasur
         host_evidence: reference(6),
     })?;
     let mismatched_freeze = ErasureSupportingRecordsInputV1 {
-        scope_commitment: Some(scope.clone()),
+        scope_commitment: Some(scope),
         freeze_provenance: Some(mismatched_freeze),
         obligations: vec![obligation],
-        obligation_set: Some(obligation_set.clone()),
+        obligation_set: Some(obligation_set),
         ..ErasureSupportingRecordsInputV1::default()
     };
     assert_eq!(
