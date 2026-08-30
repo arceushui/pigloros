@@ -4152,14 +4152,15 @@ impl ErasurePersistencePortV1 for SqliteStore {
                         if expected_digest != record.state().state_digest() {
                             return Err(ErasureErrorV1::ProvenanceMissing);
                         }
-                        self.resolve_state(expected_digest)?.map_or(
-                            Err(ErasureErrorV1::ProvenanceMissing),
-                            |_| {
-                                record.state().verify_predecessor_chain(self)?;
-                                validate_sqlite_correction(&self.conn, &record)?;
-                                Ok(record)
-                            },
-                        )
+                        self.resolve_state(expected_digest).and_then(|state| {
+                            state.map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| {
+                                record
+                                    .state()
+                                    .verify_predecessor_chain(self)
+                                    .and_then(|()| validate_sqlite_correction(&self.conn, &record))
+                                    .map(|()| record)
+                            })
+                        })
                     } else {
                         Err(ErasureErrorV1::ProvenanceMissing)
                     }
@@ -4176,7 +4177,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
         &mut self,
         records: &[ErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
-        let encoded = records
+        records
             .iter()
             .map(|record| {
                 record.to_canonical_cbor().and_then(|record_bytes| {
@@ -4186,19 +4187,21 @@ impl ErasurePersistencePortV1 for SqliteStore {
                         .map(|state_bytes| (record.clone(), record_bytes, state_bytes))
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        if encoded.is_empty() {
-            return Ok(());
-        }
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        let result = encoded
-            .iter()
-            .try_for_each(|(record, record_bytes, state_bytes)| {
-                stage_erasure_record_sql(&self.conn, record, record_bytes, state_bytes)
-            });
-        finish_erasure_transaction(&self.conn, result)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|encoded| {
+                if encoded.is_empty() {
+                    return Ok(());
+                }
+                self.conn
+                    .execute_batch(begin_immediate_sql())
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                let result = encoded
+                    .iter()
+                    .try_for_each(|(record, record_bytes, state_bytes)| {
+                        stage_erasure_record_sql(&self.conn, record, record_bytes, state_bytes)
+                    });
+                finish_erasure_transaction(&self.conn, result)
+            })
     }
 }
 
@@ -4209,18 +4212,22 @@ fn stage_erasure_record_sql(
     state_bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
     let request = record.request().reference();
-    validate_sqlite_correction(conn, record)?;
-    let state_digest = record.state().state_digest();
-    let existing_state_digest = validate_erasure_record_slot(conn, request, record, record_bytes)?;
-    persist_erasure_state(
-        conn,
-        request,
-        record,
-        state_digest,
-        state_bytes,
-        existing_state_digest,
-    )?;
-    insert_erasure_record(conn, request, state_digest, record_bytes)
+    validate_sqlite_correction(conn, record).and_then(|()| {
+        let state_digest = record.state().state_digest();
+        validate_erasure_record_slot(conn, request, record, record_bytes).and_then(
+            |existing_state_digest| {
+                persist_erasure_state(
+                    conn,
+                    request,
+                    record,
+                    state_digest,
+                    state_bytes,
+                    existing_state_digest,
+                )
+                .and_then(|()| insert_erasure_record(conn, request, state_digest, record_bytes))
+            },
+        )
+    })
 }
 
 fn validate_sqlite_correction(
@@ -4230,17 +4237,16 @@ fn validate_sqlite_correction(
     let Some(correction) = record.supporting_records().correction_provenance() else {
         return Ok(());
     };
-    let bytes = conn
-        .query_row(
-            "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
-            params![correction.rejected_request().digest().as_slice()],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let predecessor = ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes)?;
-    record.validate_correction_predecessor(&predecessor)
+    conn.query_row(
+        "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
+        params![correction.rejected_request().digest().as_slice()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+    .and_then(|bytes| bytes.ok_or(ErasureErrorV1::ProvenanceMissing))
+    .and_then(|bytes| ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes))
+    .and_then(|predecessor| record.validate_correction_predecessor(&predecessor))
 }
 
 fn validate_erasure_record_slot(
@@ -4316,25 +4322,28 @@ fn persist_erasure_state(
     state_bytes: &[u8],
     existing_state_digest: Option<ErasureReferenceV1>,
 ) -> Result<(), ErasureErrorV1> {
-    if let Some(row) = load_erasure_state_row(conn, state_digest)? {
-        validate_erasure_state_row(request, state_bytes, row.request_digest, &row.state_cbor)
-    } else {
-        if existing_state_digest == Some(state_digest) {
-            return Err(ErasureErrorV1::ProvenanceMissing);
+    load_erasure_state_row(conn, state_digest).and_then(|row| {
+        if let Some(row) = row {
+            validate_erasure_state_row(request, state_bytes, row.request_digest, &row.state_cbor)
+        } else {
+            if existing_state_digest == Some(state_digest) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            validate_erasure_predecessor(conn, request, record).and_then(|()| {
+                conn.execute(
+                    "INSERT INTO erasure_states
+                     (state_digest, request_digest, state_cbor) VALUES (?1, ?2, ?3)",
+                    params![
+                        state_digest.digest().as_slice(),
+                        request.digest().as_slice(),
+                        state_bytes,
+                    ],
+                )
+                .map(|_| ())
+                .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+            })
         }
-        validate_erasure_predecessor(conn, request, record)?;
-        conn.execute(
-            "INSERT INTO erasure_states
-             (state_digest, request_digest, state_cbor) VALUES (?1, ?2, ?3)",
-            params![
-                state_digest.digest().as_slice(),
-                request.digest().as_slice(),
-                state_bytes,
-            ],
-        )
-        .map(|_| ())
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
-    }
+    })
 }
 
 fn validate_erasure_state_row(
@@ -4364,16 +4373,22 @@ fn validate_erasure_predecessor(
     let Some(previous) = record.state().previous_state() else {
         return Ok(());
     };
-    let row = load_erasure_state_row(conn, previous)?.ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let metadata_request: [u8; 32] = row
-        .request_digest
-        .try_into()
-        .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-    let decoded_previous = pos_core::ErasureStateV1::from_canonical_cbor(&row.state_cbor)?;
-    if ErasureReferenceV1::from_digest(metadata_request) != request {
-        return Err(ErasureErrorV1::ProvenanceMissing);
-    }
-    record.state().validate_predecessor(&decoded_previous)
+    load_erasure_state_row(conn, previous)
+        .and_then(|row| row.ok_or(ErasureErrorV1::ProvenanceMissing))
+        .and_then(|row| {
+            let metadata_request: [u8; 32] = row
+                .request_digest
+                .try_into()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            pos_core::ErasureStateV1::from_canonical_cbor(&row.state_cbor).and_then(
+                |decoded_previous| {
+                    if ErasureReferenceV1::from_digest(metadata_request) != request {
+                        return Err(ErasureErrorV1::ProvenanceMissing);
+                    }
+                    record.state().validate_predecessor(&decoded_previous)
+                },
+            )
+        })
 }
 
 fn insert_erasure_record(

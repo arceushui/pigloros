@@ -1164,14 +1164,17 @@ impl ErasurePersistencePortV1 for MemoryStore {
                 ErasureCoordinatorRecordV1::from_canonical_cbor(bytes).and_then(|record| {
                     if record.request().reference() == request {
                         let state_digest = record.state().state_digest();
-                        self.resolve_state(state_digest)?.map_or(
-                            Err(ErasureErrorV1::ProvenanceMissing),
-                            |_| {
-                                record.state().verify_predecessor_chain(self)?;
-                                validate_memory_correction(&record, &self.erasure_records)?;
-                                Ok(record)
-                            },
-                        )
+                        self.resolve_state(state_digest).and_then(|state| {
+                            state.map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| {
+                                record
+                                    .state()
+                                    .verify_predecessor_chain(self)
+                                    .and_then(|()| {
+                                        validate_memory_correction(&record, &self.erasure_records)
+                                    })
+                                    .map(|()| record)
+                            })
+                        })
                     } else {
                         Err(ErasureErrorV1::ProvenanceMissing)
                     }
@@ -1190,12 +1193,15 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<(), ErasureErrorV1> {
         let mut staged_records = self.erasure_records.clone();
         let mut staged_states = self.erasure_states.clone();
-        for record in records {
-            stage_erasure_record(&mut staged_records, &mut staged_states, record)?;
-        }
-        self.erasure_records = staged_records;
-        self.erasure_states = staged_states;
-        Ok(())
+        records
+            .iter()
+            .try_for_each(|record| {
+                stage_erasure_record(&mut staged_records, &mut staged_states, record)
+            })
+            .map(|()| {
+                self.erasure_records = staged_records;
+                self.erasure_states = staged_states;
+            })
     }
 }
 
@@ -1249,11 +1255,11 @@ fn validate_memory_correction(
     let Some(correction) = record.supporting_records().correction_provenance() else {
         return Ok(());
     };
-    let bytes = records
+    records
         .get(&correction.rejected_request())
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let predecessor = ErasureCoordinatorRecordV1::from_canonical_cbor(bytes)?;
-    record.validate_correction_predecessor(&predecessor)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+        .and_then(|bytes| ErasureCoordinatorRecordV1::from_canonical_cbor(bytes))
+        .and_then(|predecessor| record.validate_correction_predecessor(&predecessor))
 }
 
 impl OwnTracksEnrollmentStore for MemoryStore {
