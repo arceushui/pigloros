@@ -524,6 +524,7 @@ expected_support=(
   "${fixture_root}/support/LICENSE"
   "${fixture_root}/support/NOTICE"
   "${fixture_root}/support/build-provenance.json"
+  "${fixture_root}/support/draft-execution-authority.json"
   "${fixture_root}/support/fixture-family-contract.json"
   "${fixture_root}/support/limitations.md"
   "${fixture_root}/support/normative-requirements.md"
@@ -536,6 +537,26 @@ if [[ "${support[*]}" != "${expected_support[*]}" ]]; then
   echo "public support artifact inventory does not match the current CPF1 contract" >&2
   exit 1
 fi
+
+jq -e '
+  .magic == "DFA1" and .version == 1 and .lifecycle == "Draft" and
+  .authority_kind == "repository-test-fixture-only" and
+  (.trust_policy_id | type == "string" and length > 0) and
+  (.trust_policy_epoch | type == "number" and . > 0 and floor == .) and
+  (.effective_timeline_position | type == "number" and . >= 0 and floor == .) and
+  (.fixture_authority_key_id | type == "string" and length > 0) and
+  (.fixture_authority_public_key_hex | test("^[0-9a-f]{64}$")) and
+  (.execution_profiles | length == 2) and
+  ([.execution_profiles[].profile_id] | sort == ["deterministic-air-gapped-v1", "deterministic-local-v1"]) and
+  all(.execution_profiles[];
+    .semantic_version == "1.0.0" and .network_allowed == false and
+    .capability_ids == [] and
+    .reproducibility_classes == ["ProfileRecomputation", "CrossProfileConformance"]
+  )
+' "${fixture_root}/support/draft-execution-authority.json" >/dev/null || {
+  echo "invalid Draft execution-authority source" >&2
+  exit 1
+}
 
 for path in "${inputs[@]}" "${expected[@]}" "${oracles[@]}" "${profiles[@]}" "${provider_files[@]}" "${support[@]}"; do
   [[ -s "${path}" ]] || {

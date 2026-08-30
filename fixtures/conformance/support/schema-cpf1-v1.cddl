@@ -93,6 +93,36 @@ fixture-contract = [
 artifact-descriptor = [member-path: tstr .size (1..512),
                        media-type: tstr .size (3..127),
                        byte-length: uint .gt 0, blake3-digest: digest]
+
+; Draft-only authority closure members. These are archive artifacts rather
+; than additional CPF1 fields: CPF1 already binds them by digest.
+execution-profile = [
+  magic: "EPF1", version: 1, profile-id: identifier,
+  semantic-version: tstr .size (1..64),
+  reproducibility-classes: [1* 0..3],
+  network-allowed: bool, capability-ids: [* identifier],
+  scheduler-policy: identifier, numeric-policy: identifier,
+  schema-policy: identifier, artifact-policy: identifier,
+  deterministic-budget-policy: identifier,
+  allowed-operational-differences: [* identifier],
+  previous-profile-digest: null / digest, profile-digest: digest
+]
+
+trust-policy-snapshot = [
+  magic: "TPS1", version: 1, policy-id: identifier, epoch: uint .gt 0,
+  effective-timeline-position: uint, trust-root-key-id: identifier,
+  trust-root-public-key: bstr .size 32, revoked-key-digests: [* digest],
+  revoked-artifact-digests: [* digest], minimum-versions: [* identifier],
+  offline-valid-through: tstr .size (1..64), previous-digest: null / digest,
+  signature: bstr .size 64
+]
+
+release-admission = [
+  magic: "RAD1", version: 1, lifecycle: 0, case-id: identifier,
+  execution-profile-digest: digest, trust-policy-snapshot-digest: digest,
+  from-provider: provider-key, to-provider: provider-key,
+  allow-fallback: false, signer-key-id: identifier, signature: bstr .size 64
+]
 strict-oracle = [kind: 0..2, output: null / artifact-descriptor,
                  failure: null / namespaced-failure,
                  divergence: null / divergence]

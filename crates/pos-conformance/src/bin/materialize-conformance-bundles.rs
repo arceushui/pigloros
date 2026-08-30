@@ -1,6 +1,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use ed25519_dalek::SigningKey;
+use ciborium::value::Value;
+use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     expected_result_member_path, verify_archive_release_filename,
     verify_release_tree_independently, ArtifactDescriptorV1, BundleExpectedResultV1,
@@ -117,6 +118,8 @@ enum CatalogExecutionProfile {
 }
 
 impl CatalogExecutionProfile {
+    const ALL: [Self; 2] = [Self::DeterministicLocalV1, Self::DeterministicAirGappedV1];
+
     const fn name(self) -> &'static str {
         match self {
             Self::DeterministicLocalV1 => "deterministic-local-v1",
@@ -124,8 +127,8 @@ impl CatalogExecutionProfile {
         }
     }
 
-    fn digest(self) -> [u8; 32] {
-        labeled_digest("PiglorOS.ExecutionProfile.v1", self.name().as_bytes())
+    fn digest(self) -> Result<[u8; 32], Box<dyn Error>> {
+        execution_profile_bytes(self).map(|bytes| *blake3::hash(&bytes).as_bytes())
     }
 
     const fn execution_mode(self) -> pos_conformance::ExecutionModeV1 {
@@ -134,6 +137,109 @@ impl CatalogExecutionProfile {
             Self::DeterministicAirGappedV1 => pos_conformance::ExecutionModeV1::AirGapped,
         }
     }
+}
+
+const DRAFT_FIXTURE_AUTHORITY_KEY_ID: &str = "pigloros.fixture.conformance-authority";
+// This seed is repository test-fixture authority only.  It is never a
+// deployment trust root and is used solely to make Draft evidence reproducible.
+const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
+const DRAFT_FIXTURE_AUTHORITY_PUBLIC_BYTES: [u8; 32] = [
+    0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e, 0xc5, 0xf9,
+    0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69, 0x14, 0x46, 0xd2, 0x2c,
+];
+
+fn cbor_bytes(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(Box::<dyn Error>::from)
+        .map(|()| bytes)
+}
+
+fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, Box<dyn Error>> {
+    let fields = vec![
+        Value::Text("EPF1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text(profile.name().to_owned()),
+        Value::Text("1.0.0".to_owned()),
+        Value::Array(vec![
+            Value::Integer(1_u64.into()),
+            Value::Integer(2_u64.into()),
+        ]),
+        Value::Bool(false),
+        Value::Array(Vec::new()),
+        Value::Text("fixture-scheduler-v1".to_owned()),
+        Value::Text("fixture-numeric-v1".to_owned()),
+        Value::Text("fixture-schema-v1".to_owned()),
+        Value::Text("fixture-artifact-v1".to_owned()),
+        Value::Text("fixture-budget-v1".to_owned()),
+        Value::Array(Vec::new()),
+        Value::Null,
+    ];
+    cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let digest = labeled_digest("PiglorOS.ExecutionProfile.v1", &unsigned);
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(digest.to_vec()));
+        cbor_bytes(&Value::Array(signed_fields))
+    })
+}
+
+fn trust_policy_snapshot_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
+    let fields = vec![
+        Value::Text("TPS1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text("pigloros.fixture.conformance-draft".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Integer(0_u64.into()),
+        Value::Text(DRAFT_FIXTURE_AUTHORITY_KEY_ID.to_owned()),
+        Value::Bytes(DRAFT_FIXTURE_AUTHORITY_PUBLIC_BYTES.to_vec()),
+        Value::Array(Vec::new()),
+        Value::Array(Vec::new()),
+        Value::Array(Vec::new()),
+        Value::Text("2030-01-01T00:00:00Z".to_owned()),
+        Value::Null,
+    ];
+    cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let key = SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES);
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(key.sign(&unsigned).to_bytes().to_vec()));
+        cbor_bytes(&Value::Array(signed_fields))
+    })
+}
+
+fn provider_key_value(key: &FixtureProviderKeyV1) -> Value {
+    Value::Array(vec![
+        Value::Text(key.provider_id.clone()),
+        Value::Text(key.contract_version.clone()),
+        Value::Integer(u64::from(key.abi_major).into()),
+        Value::Integer(u64::from(key.abi_minor).into()),
+    ])
+}
+
+fn release_admission_bytes(
+    case_id: &str,
+    execution_profile_digest: [u8; 32],
+    trust_policy_snapshot_digest: [u8; 32],
+    from: &FixtureProviderKeyV1,
+    to: &FixtureProviderKeyV1,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let fields = vec![
+        Value::Text("RAD1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Integer(0_u64.into()),
+        Value::Text(case_id.to_owned()),
+        Value::Bytes(execution_profile_digest.to_vec()),
+        Value::Bytes(trust_policy_snapshot_digest.to_vec()),
+        provider_key_value(from),
+        provider_key_value(to),
+        Value::Bool(false),
+        Value::Text(DRAFT_FIXTURE_AUTHORITY_KEY_ID.to_owned()),
+    ];
+    cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let key = SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES);
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(key.sign(&unsigned).to_bytes().to_vec()));
+        cbor_bytes(&Value::Array(signed_fields))
+    })
 }
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
@@ -796,31 +902,32 @@ fn materialize_profile(
     layer: &LayerCatalogEntry,
     bundle_modes: [CatalogBundleMode; 2],
 ) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
-    let mut profile = profile_from_catalog(layer, context.providers);
-    profile.lifecycle = ProfileLifecycleV1::Draft;
-    profile.profile_digest = profile.digest();
-    let prefix = format!("{}/draft", layer.name);
-    profile
-        .to_canonical_cbor()
-        .map_err(Into::into)
-        .and_then(|profile_bytes| {
-            let [local, air_gapped] = bundle_modes
-                .map(|mode| signed_bundle(context, layer, &profile, mode.bundle_mode()));
-            local.and_then(|local| {
-                air_gapped.and_then(|air_gapped| {
-                    let pair = ConformanceBundlePairV1 { local, air_gapped };
-                    pair.validate().map_err(Into::into).and_then(|()| {
-                        materialized_profile_outputs(
-                            &profile,
-                            &prefix,
-                            profile_bytes,
-                            &pair,
-                            bundle_modes,
-                        )
+    profile_from_catalog(layer, context.providers).and_then(|mut profile| {
+        profile.lifecycle = ProfileLifecycleV1::Draft;
+        profile.profile_digest = profile.digest();
+        let prefix = format!("{}/draft", layer.name);
+        profile
+            .to_canonical_cbor()
+            .map_err(Into::into)
+            .and_then(|profile_bytes| {
+                let [local, air_gapped] = bundle_modes
+                    .map(|mode| signed_bundle(context, layer, &profile, mode.bundle_mode()));
+                local.and_then(|local| {
+                    air_gapped.and_then(|air_gapped| {
+                        let pair = ConformanceBundlePairV1 { local, air_gapped };
+                        pair.validate().map_err(Into::into).and_then(|()| {
+                            materialized_profile_outputs(
+                                &profile,
+                                &prefix,
+                                profile_bytes,
+                                &pair,
+                                bundle_modes,
+                            )
+                        })
                     })
                 })
             })
-        })
+    })
 }
 
 fn signed_bundle(
@@ -1000,19 +1107,19 @@ fn fixtures_for_layer(
     layer: &LayerCatalogEntry,
     context: &FixtureContext,
     provider_key: &FixtureProviderKeyV1,
-) -> Vec<FixtureDescriptorV1> {
+) -> Result<Vec<FixtureDescriptorV1>, Box<dyn Error>> {
     let mut fixtures = Vec::with_capacity(layer.fixtures.len() * layer.execution_profiles.len());
     for fixture in &layer.fixtures {
-        fixtures.extend(layer.execution_profiles.map(|execution_profile| {
-            fixture_descriptor_from_record(
+        for execution_profile in layer.execution_profiles {
+            fixtures.push(fixture_descriptor_from_record(
                 layer,
                 fixture,
                 context,
                 provider_key,
-                execution_profile.digest(),
+                execution_profile.digest()?,
                 execution_profile.execution_mode(),
-            )
-        }));
+            )?);
+        }
     }
     fixtures.sort_by_key(|fixture| {
         (
@@ -1023,13 +1130,13 @@ fn fixtures_for_layer(
             fixture.modes.clone(),
         )
     });
-    fixtures
+    Ok(fixtures)
 }
 
 fn profile_from_catalog(
     layer: &LayerCatalogEntry,
     providers: &ProviderCatalog,
-) -> ConformanceProfileV1 {
+) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let context = fixture_context(layer.profile_record, layer.claim_layer);
     let provider_key = FixtureProviderKeyV1 {
         provider_id: layer.fixture_provider.provider_id.clone(),
@@ -1037,11 +1144,12 @@ fn profile_from_catalog(
         abi_major: layer.fixture_provider.abi_major,
         abi_minor: layer.fixture_provider.abi_minor,
     };
-    let fixtures = fixtures_for_layer(layer, &context, &provider_key);
+    let fixtures = fixtures_for_layer(layer, &context, &provider_key)?;
     let mut execution_profile_digests = layer
         .execution_profiles
+        .into_iter()
         .map(CatalogExecutionProfile::digest)
-        .to_vec();
+        .collect::<Result<Vec<_>, _>>()?;
     execution_profile_digests.sort_unstable();
     let execution_matrix_digest = *blake3::hash(include_bytes!(
         "../../../../fixtures/conformance/matrix/execution-matrix.json"
@@ -1062,10 +1170,7 @@ fn profile_from_catalog(
             technical_independence_required: true,
             authorship_independence_required: true,
             organizational_independence_required: false,
-            trust_policy_snapshot_digest: labeled_digest(
-                "PiglorOS.TrustPolicySnapshot.v1",
-                layer.profile_record,
-            ),
+            trust_policy_snapshot_digest: *blake3::hash(&trust_policy_snapshot_bytes()?).as_bytes(),
             requirements_digest: labeled_digest(
                 "PiglorOS.IndependenceRequirements.v1",
                 layer.profile_record,
@@ -1081,7 +1186,7 @@ fn profile_from_catalog(
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();
-    profile
+    Ok(profile)
 }
 
 fn fixture_descriptor_from_record(
@@ -1091,7 +1196,7 @@ fn fixture_descriptor_from_record(
     provider_key: &FixtureProviderKeyV1,
     execution_profile_digest: [u8; 32],
     mode: pos_conformance::ExecutionModeV1,
-) -> FixtureDescriptorV1 {
+) -> Result<FixtureDescriptorV1, Box<dyn Error>> {
     let payload_path =
         fixture_payload_member_path(&fixture.record.case_id, &execution_profile_digest);
     let evidence_path =
@@ -1101,18 +1206,6 @@ fn fixture_descriptor_from_record(
         context.claim_layer,
         &execution_profile_digest,
     );
-    let fixture_record = serde_json::json!({
-        "case_id": &fixture.record.case_id,
-        "claim_layer": &fixture.record.claim_layer,
-        "expected": &fixture.record.expected,
-        "family": fixture.record.family.name(),
-        "schema": &fixture.record.schema,
-        "input": &fixture.record.input,
-        "oracle": &fixture.record.oracle,
-    })
-    .to_string();
-    let fixture_record_digest =
-        labeled_digest("PiglorOS.CPF1FixtureRecord.v1", fixture_record.as_bytes());
     let evidence = artifact_descriptor(&evidence_path, "application/json", fixture.expected);
     let oracle_output =
         artifact_descriptor(&oracle_output_path, "application/json", fixture.oracle);
@@ -1123,6 +1216,29 @@ fn fixture_descriptor_from_record(
         vec![evidence, oracle_output]
     };
     let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
+    let trust_policy_snapshot_digest = *blake3::hash(&trust_policy_snapshot_bytes()?).as_bytes();
+    let transition = downgrade.then(|| FixtureContractTransitionV1 {
+        from: FixtureProviderKeyV1 {
+            provider_id: provider_key.provider_id.clone(),
+            contract_version: provider_key.contract_version.clone(),
+            abi_major: provider_key.abi_major,
+            abi_minor: 1,
+        },
+        to: provider_key.clone(),
+    });
+    let release_admission_digest = transition
+        .as_ref()
+        .map(|transition| {
+            release_admission_bytes(
+                &fixture.record.case_id,
+                execution_profile_digest,
+                trust_policy_snapshot_digest,
+                &transition.from,
+                &transition.to,
+            )
+            .map(|bytes| *blake3::hash(&bytes).as_bytes())
+        })
+        .transpose()?;
     let mut descriptor = FixtureDescriptorV1 {
         case_id: fixture.record.case_id.clone(),
         mandatory: true,
@@ -1153,39 +1269,13 @@ fn fixture_descriptor_from_record(
             capability_ids: fixture.contract.minimum_capability_ids.clone(),
         },
         provenance: fixture_provenance(context),
-        trust_policy_snapshot_digest: downgrade.then(|| {
-            labeled_digest(
-                "PiglorOS.DowngradeTrustPolicy.v1",
-                &[
-                    context.profile_record_digest.as_slice(),
-                    fixture_record_digest.as_slice(),
-                ]
-                .concat(),
-            )
-        }),
-        release_admission_digest: downgrade.then(|| {
-            labeled_digest(
-                "PiglorOS.DowngradeReleaseAdmission.v1",
-                &[
-                    context.profile_record_digest.as_slice(),
-                    fixture_record_digest.as_slice(),
-                ]
-                .concat(),
-            )
-        }),
-        transition: downgrade.then(|| FixtureContractTransitionV1 {
-            from: FixtureProviderKeyV1 {
-                provider_id: provider_key.provider_id.clone(),
-                contract_version: provider_key.contract_version.clone(),
-                abi_major: provider_key.abi_major,
-                abi_minor: 1,
-            },
-            to: provider_key.clone(),
-        }),
+        trust_policy_snapshot_digest: downgrade.then_some(trust_policy_snapshot_digest),
+        release_admission_digest,
+        transition,
         fixture_digest: [0; 32],
     };
     descriptor.fixture_digest = descriptor.digest();
-    descriptor
+    Ok(descriptor)
 }
 
 fn fixture_expectation(
@@ -1370,7 +1460,7 @@ fn bundle_inputs_from_profile(
         members.push(member);
     }
     expected_results.sort();
-    append_supporting_members(&mut members, inventory_bytes, providers);
+    append_supporting_members(&mut members, inventory_bytes, providers, profile, mode)?;
     Ok((members, expected_results))
 }
 
@@ -1378,7 +1468,9 @@ fn append_supporting_members(
     members: &mut Vec<BundleMemberV1>,
     inventory_bytes: &[u8],
     providers: &ProviderCatalog,
-) {
+    profile: &ConformanceProfileV1,
+    mode: BundleModeV1,
+) -> Result<(), Box<dyn Error>> {
     let support = [
         (
             "support/normative-requirements.md",
@@ -1450,6 +1542,54 @@ fn append_supporting_members(
         include_bytes!("../../../../fixtures/conformance/matrix/execution-matrix.json").to_vec(),
     );
     members.push(matrix);
+    for execution_profile in CatalogExecutionProfile::ALL {
+        members.push(BundleMemberV1::supporting(
+            format!(
+                "authority/execution-profiles/{}.epf1",
+                execution_profile.name()
+            ),
+            execution_profile_bytes(execution_profile)?,
+            BundleMemberRoleV1::ExecutionProfile,
+        ));
+    }
+    members.push(BundleMemberV1::supporting(
+        "authority/trust-policy-snapshot.tps1",
+        trust_policy_snapshot_bytes()?,
+        BundleMemberRoleV1::TrustPolicySnapshot,
+    ));
+    let execution_mode = match mode {
+        BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
+        BundleModeV1::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
+    };
+    for fixture in profile
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
+        .filter(|fixture| fixture.modes.contains(&execution_mode))
+    {
+        let transition = fixture
+            .transition
+            .as_ref()
+            .ok_or("downgrade fixture has no transition")?;
+        let trust_snapshot = fixture
+            .trust_policy_snapshot_digest
+            .ok_or("downgrade fixture has no trust-policy digest")?;
+        members.push(BundleMemberV1::supporting(
+            format!(
+                "authority/release-admissions/{}-{}.rad1",
+                fixture.case_id,
+                pos_conformance::hex_digest(&fixture.execution_profile_digest)
+            ),
+            release_admission_bytes(
+                &fixture.case_id,
+                fixture.execution_profile_digest,
+                trust_snapshot,
+                &transition.from,
+                &transition.to,
+            )?,
+            BundleMemberRoleV1::ReleaseAdmission,
+        ));
+    }
     members.push(BundleMemberV1::fixture_provider_registry(
         providers.registry.bytes.clone(),
     ));
@@ -1459,6 +1599,7 @@ fn append_supporting_members(
             package.artifact.bytes.clone(),
         ));
     }
+    Ok(())
 }
 
 fn verify_public_archive(

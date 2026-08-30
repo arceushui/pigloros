@@ -107,3 +107,11 @@ inventory, and rebuilds both byte inventories before running the Rust
 materializer. This check does not import the materializer or execute a claim;
 it ensures the checked-in Draft handoff is reproducible by a separate, small
 verifier.
+
+`support/draft-execution-authority.json` is the checked public Draft authority
+declaration for the authority closure required by ADR-058: two immutable EPF1
+artifacts, a signed TPS1 snapshot, and signed RAD1 downgrade admissions. Its
+authority key is a repository test-fixture authority, not a production
+Deployment TrustPolicyRegistry root. The materializer emits only canonical
+CBOR authority members and the independent verifier checks their digests,
+sizes, signatures, and fixture relations.

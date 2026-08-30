@@ -56,6 +56,11 @@ const AUTHORITY_INVENTORY_BYTES: &[u8] =
 const PROFILE_SCHEMA_BYTES: &[u8] = b"cpf1 schema";
 const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
 const PAYLOAD_BYTES: &[u8] = b"public fixture payload";
+const DRAFT_FIXTURE_AUTHORITY_KEY: [u8; 32] = [7; 32];
+const DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY: [u8; 32] = [
+    0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e, 0xc5, 0xf9,
+    0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69, 0x14, 0x46, 0xd2, 0x2c,
+];
 
 const fn digest(seed: u8) -> [u8; 32] {
     [seed; 32]
@@ -166,8 +171,9 @@ fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
 
 fn current_fixtures(
     family_schemas: &[ProviderFamilySchemaV1],
+    execution: [u8; 32],
+    trust_policy_snapshot_digest: [u8; 32],
 ) -> TestResult<Vec<FixtureDescriptorV1>> {
-    let execution = digest(31);
     let failure = NamespacedFailureV1 {
         owner_id: "pigloros.core".to_owned(),
         contract_version: "1.0.0".to_owned(),
@@ -250,12 +256,22 @@ fn current_fixtures(
             if fixture.family == FixtureFamilyV1::Downgrade {
                 let mut next_provider = provider_key();
                 next_provider.abi_minor = 1;
-                fixture.trust_policy_snapshot_digest = Some(digest(43));
-                fixture.release_admission_digest = Some(digest(44));
+                fixture.trust_policy_snapshot_digest = Some(trust_policy_snapshot_digest);
                 fixture.transition = Some(pos_conformance::FixtureContractTransitionV1 {
                     from: provider_key(),
                     to: next_provider,
                 });
+                let transition = fixture.transition.as_ref().ok_or("transition missing")?;
+                fixture.release_admission_digest = Some(
+                    *blake3::hash(&release_admission_bytes(
+                        &fixture.case_id,
+                        execution,
+                        trust_policy_snapshot_digest,
+                        &transition.from,
+                        &transition.to,
+                    )?)
+                    .as_bytes(),
+                );
             }
             fixture.fixture_digest = fixture.digest();
             Ok(fixture)
@@ -266,6 +282,8 @@ fn current_fixtures(
 fn current_profile(
     fixtures: Vec<FixtureDescriptorV1>,
     registry_bytes: &[u8],
+    execution_profile_digest: [u8; 32],
+    trust_policy_snapshot_digest: [u8; 32],
 ) -> TestResult<ConformanceProfileV1> {
     let mut profile = ConformanceProfileV1 {
         profile_id: "pigloros.current.example".to_owned(),
@@ -273,7 +291,7 @@ fn current_profile(
         lifecycle: ProfileLifecycleV1::Draft,
         normative_spec_digest: *blake3::hash(NORMATIVE_BYTES).as_bytes(),
         execution_matrix_digest: *blake3::hash(MATRIX_BYTES).as_bytes(),
-        execution_profile_digests: vec![digest(31)],
+        execution_profile_digests: vec![execution_profile_digest],
         fixture_provider_registry: FixtureProviderRegistryBindingV1 {
             registry_artifact: artifact(
                 FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
@@ -316,7 +334,7 @@ fn current_profile(
             technical_independence_required: true,
             authorship_independence_required: true,
             organizational_independence_required: false,
-            trust_policy_snapshot_digest: digest(54),
+            trust_policy_snapshot_digest,
             requirements_digest: digest(55),
         },
         fixture_contract_policy_digest: *blake3::hash(PROFILE_SCHEMA_BYTES).as_bytes(),
@@ -357,7 +375,15 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         registry_bytes,
     } = current_provider_contract_inputs()?;
 
-    let fixtures = current_fixtures(&family_schemas)?;
+    let execution_profile = execution_profile_bytes()?;
+    let execution_profile_digest = *blake3::hash(&execution_profile).as_bytes();
+    let trust_policy_snapshot = trust_policy_snapshot_bytes()?;
+    let trust_policy_snapshot_digest = *blake3::hash(&trust_policy_snapshot).as_bytes();
+    let fixtures = current_fixtures(
+        &family_schemas,
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+    )?;
     let mut expected = fixtures
         .iter()
         .map(|fixture| {
@@ -376,7 +402,12 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         })
         .collect::<TestResult<Vec<_>>>()?;
     expected.sort_unstable();
-    let profile = current_profile(fixtures, &registry_bytes)?;
+    let profile = current_profile(
+        fixtures,
+        &registry_bytes,
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+    )?;
     let mut members = family_schemas
         .iter()
         .zip(CURRENT_SCHEMA_BYTES)
@@ -432,9 +463,39 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         ),
         BundleMemberV1::authority_inventory(AUTHORITY_INVENTORY_BYTES.to_vec()),
         BundleMemberV1::execution_matrix(MATRIX_BYTES.to_vec()),
+        BundleMemberV1::supporting(
+            "authority/execution-profiles/deterministic-local-v1.epf1",
+            execution_profile,
+            BundleMemberRoleV1::ExecutionProfile,
+        ),
+        BundleMemberV1::supporting(
+            "authority/trust-policy-snapshot.tps1",
+            trust_policy_snapshot,
+            BundleMemberRoleV1::TrustPolicySnapshot,
+        ),
         BundleMemberV1::fixture_provider_package(package_path, package_bytes),
         BundleMemberV1::fixture_provider_registry(registry_bytes),
     ]);
+    for fixture in profile
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
+    {
+        let transition = fixture.transition.as_ref().ok_or("transition missing")?;
+        members.push(BundleMemberV1::supporting(
+            format!("authority/release-admissions/{}.rad1", fixture.case_id),
+            release_admission_bytes(
+                &fixture.case_id,
+                fixture.execution_profile_digest,
+                fixture
+                    .trust_policy_snapshot_digest
+                    .ok_or("trust-policy digest missing")?,
+                &transition.from,
+                &transition.to,
+            )?,
+            BundleMemberRoleV1::ReleaseAdmission,
+        ));
+    }
     members.extend(current_provenance_members());
     Ok(CurrentBundleInputs {
         profile,
@@ -448,6 +509,124 @@ fn signed_current_bundle(mode: BundleModeV1) -> TestResult<ConformanceBundleV1> 
     ConformanceBundleV1::materialize(&inputs.profile, mode, inputs.members, inputs.expected)
         .and_then(|bundle| bundle.sign(&SigningKey::from_bytes(&[7; 32])))
         .map_err(Into::into)
+}
+
+#[test]
+fn bundle_rejects_tampered_execution_authority_artifacts() -> TestResult {
+    for role in [
+        BundleMemberRoleV1::ExecutionProfile,
+        BundleMemberRoleV1::TrustPolicySnapshot,
+        BundleMemberRoleV1::ReleaseAdmission,
+    ] {
+        let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+        let member = inputs
+            .members
+            .iter_mut()
+            .find(|member| member.role == role)
+            .ok_or("Draft authority member is absent")?;
+        let final_byte = member
+            .bytes
+            .last_mut()
+            .ok_or("Draft authority member is empty")?;
+        *final_byte ^= 1;
+        member.digest = *blake3::hash(&member.bytes).as_bytes();
+        assert!(ConformanceBundleV1::materialize(
+            &inputs.profile,
+            BundleModeV1::Local,
+            inputs.members,
+            inputs.expected,
+        )
+        .is_err());
+    }
+    Ok(())
+}
+
+fn mutate_draft_authority_archive(
+    path: &str,
+    mutate: impl FnOnce(&mut [Value]) -> TestResult,
+) -> TestResult<Vec<u8>> {
+    let bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let Value::Array(archive_fields) = &mut archive else {
+        return Err("archive is not an array".into());
+    };
+    let authority_bytes = match archive_member_fields(archive_fields, path)?.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("authority member is not bytes".into()),
+    };
+    let mut authority: Value = ciborium::from_reader(authority_bytes.as_slice())?;
+    let Value::Array(fields) = &mut authority else {
+        return Err("authority member is not an array".into());
+    };
+    mutate(fields)?;
+    if path == "authority/trust-policy-snapshot.tps1" {
+        let unsigned = encode_value(&Value::Array(fields[..12].to_vec()))?;
+        fields[12] = Value::Bytes(
+            SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_KEY)
+                .sign(&unsigned)
+                .to_bytes()
+                .to_vec(),
+        );
+    }
+    let encoded = encode_value(&authority)?;
+    replace_archive_member_bytes(archive_fields, path, &encoded)?;
+    resign_archive(&mut archive)?;
+    encode_value(&archive)
+}
+
+fn assert_authority_archive_rejected_by_both(archive: &[u8]) {
+    assert!(ConformanceBundleV1::from_canonical_cbor(archive).is_err());
+    assert!(verify_archive_independently(archive).is_err());
+}
+
+#[test]
+fn authority_members_reject_closed_contract_mutations() -> TestResult {
+    let changed_scheduler = mutate_draft_authority_archive(
+        "authority/execution-profiles/deterministic-local-v1.epf1",
+        |fields| {
+            replace_value(
+                fields,
+                7,
+                Value::Text("other-scheduler".to_owned()),
+                "scheduler",
+            )
+        },
+    )?;
+    assert_authority_archive_rejected_by_both(&changed_scheduler);
+
+    let changed_epoch =
+        mutate_draft_authority_archive("authority/trust-policy-snapshot.tps1", |fields| {
+            replace_value(
+                fields,
+                3,
+                Value::Integer(2_u64.into()),
+                "trust-policy epoch",
+            )
+        })?;
+    assert_authority_archive_rejected_by_both(&changed_epoch);
+
+    let bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+    let Value::Array(archive_fields) = &mut archive else {
+        return Err("archive is not an array".into());
+    };
+    let path = "authority/execution-profiles/deterministic-local-v1.epf1";
+    replace_value(
+        archive_member_fields(archive_fields, path)?,
+        0,
+        Value::Text("authority/execution-profiles/wrong.epf1".to_owned()),
+        "execution profile member path",
+    )?;
+    replace_value(
+        archive_descriptor_fields(archive_fields, path)?,
+        0,
+        Value::Text("authority/execution-profiles/wrong.epf1".to_owned()),
+        "execution profile descriptor path",
+    )?;
+    resign_archive(&mut archive)?;
+    let wrong_path = encode_value(&archive)?;
+    assert_authority_archive_rejected_by_both(&wrong_path);
+    Ok(())
 }
 
 fn signed_bundle_with_authority(
@@ -483,6 +662,108 @@ fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
     Ok(bytes)
+}
+
+fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {
+    let mut preimage = Vec::with_capacity(label.len() + 1 + bytes.len());
+    preimage.extend_from_slice(label.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(bytes);
+    *blake3::hash(&preimage).as_bytes()
+}
+
+fn execution_profile_bytes() -> TestResult<Vec<u8>> {
+    let fields = vec![
+        Value::Text("EPF1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text("deterministic-local-v1".to_owned()),
+        Value::Text("1.0.0".to_owned()),
+        Value::Array(vec![
+            Value::Integer(1_u64.into()),
+            Value::Integer(2_u64.into()),
+        ]),
+        Value::Bool(false),
+        Value::Array(Vec::new()),
+        Value::Text("fixture-scheduler-v1".to_owned()),
+        Value::Text("fixture-numeric-v1".to_owned()),
+        Value::Text("fixture-schema-v1".to_owned()),
+        Value::Text("fixture-artifact-v1".to_owned()),
+        Value::Text("fixture-budget-v1".to_owned()),
+        Value::Array(Vec::new()),
+        Value::Null,
+    ];
+    let mut encoded = fields.clone();
+    encoded.push(Value::Bytes(
+        labeled_digest(
+            "PiglorOS.ExecutionProfile.v1",
+            &encode_value(&Value::Array(fields))?,
+        )
+        .to_vec(),
+    ));
+    encode_value(&Value::Array(encoded))
+}
+
+fn trust_policy_snapshot_bytes() -> TestResult<Vec<u8>> {
+    let fields = vec![
+        Value::Text("TPS1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text("pigloros.fixture.conformance-draft".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Integer(0_u64.into()),
+        Value::Text("pigloros.fixture.conformance-authority".to_owned()),
+        Value::Bytes(DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY.to_vec()),
+        Value::Array(Vec::new()),
+        Value::Array(Vec::new()),
+        Value::Array(Vec::new()),
+        Value::Text("2030-01-01T00:00:00Z".to_owned()),
+        Value::Null,
+    ];
+    let mut signed = fields.clone();
+    signed.push(Value::Bytes(
+        SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_KEY)
+            .sign(&encode_value(&Value::Array(fields))?)
+            .to_bytes()
+            .to_vec(),
+    ));
+    encode_value(&Value::Array(signed))
+}
+
+fn provider_key_value(key: &FixtureProviderKeyV1) -> Value {
+    Value::Array(vec![
+        Value::Text(key.provider_id.clone()),
+        Value::Text(key.contract_version.clone()),
+        Value::Integer(u64::from(key.abi_major).into()),
+        Value::Integer(u64::from(key.abi_minor).into()),
+    ])
+}
+
+fn release_admission_bytes(
+    case_id: &str,
+    execution_profile_digest: [u8; 32],
+    trust_policy_snapshot_digest: [u8; 32],
+    from: &FixtureProviderKeyV1,
+    to: &FixtureProviderKeyV1,
+) -> TestResult<Vec<u8>> {
+    let fields = vec![
+        Value::Text("RAD1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Integer(0_u64.into()),
+        Value::Text(case_id.to_owned()),
+        Value::Bytes(execution_profile_digest.to_vec()),
+        Value::Bytes(trust_policy_snapshot_digest.to_vec()),
+        provider_key_value(from),
+        provider_key_value(to),
+        Value::Bool(false),
+        Value::Text("pigloros.fixture.conformance-authority".to_owned()),
+    ];
+    let mut signed = fields.clone();
+    signed.push(Value::Bytes(
+        SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_KEY)
+            .sign(&encode_value(&Value::Array(fields))?)
+            .to_bytes()
+            .to_vec(),
+    ));
+    encode_value(&Value::Array(signed))
 }
 
 fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> {
@@ -2054,7 +2335,7 @@ fn materialize_rejects_more_expected_results_than_selected_fixtures() -> TestRes
     inputs.expected.push(BundleExpectedResultV1 {
         case_id: "example-positive".to_owned(),
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
-        execution_profile_digest: digest(31),
+        execution_profile_digest: inputs.profile.execution_profile_digests[0],
         mode: BundleModeV1::Local,
         member_path: extra_path.to_owned(),
         digest: extra_member.digest,

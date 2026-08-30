@@ -1,0 +1,28 @@
+{
+  "magic": "DFA1",
+  "version": 1,
+  "lifecycle": "Draft",
+  "authority_kind": "repository-test-fixture-only",
+  "trust_policy_id": "pigloros.fixture.conformance-draft",
+  "trust_policy_epoch": 1,
+  "effective_timeline_position": 0,
+  "offline_valid_through": "2030-01-01T00:00:00Z",
+  "fixture_authority_key_id": "pigloros.fixture.conformance-authority",
+  "fixture_authority_public_key_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "execution_profiles": [
+    {
+      "profile_id": "deterministic-air-gapped-v1",
+      "semantic_version": "1.0.0",
+      "network_allowed": false,
+      "capability_ids": [],
+      "reproducibility_classes": ["ProfileRecomputation", "CrossProfileConformance"]
+    },
+    {
+      "profile_id": "deterministic-local-v1",
+      "semantic_version": "1.0.0",
+      "network_allowed": false,
+      "capability_ids": [],
+      "reproducibility_classes": ["ProfileRecomputation", "CrossProfileConformance"]
+    }
+  ]
+}

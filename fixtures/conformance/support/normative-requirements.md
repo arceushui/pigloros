@@ -34,6 +34,17 @@ default-deny capability policy, licence, notices, SBOM, source/build/publication
 provenance, and limitations. Missing bounds or provenance are invalid, not
 unlimited. Only downgrade fixtures carry trust-policy, release-admission, and
 provider-transition bindings; no implementation digest authorizes a downgrade.
+
+The Draft authority closure is declared by
+`support/draft-execution-authority.json`. It contains exact canonical-CBOR
+`EPF1` bytes for the Local and Air-Gapped profiles, one signed `TPS1` snapshot,
+and one signed `RAD1` release-admission record for every downgrade
+fixture/profile pair. The embedded authority key is a repository test-fixture
+key only: it is not a production deployment trust root and does not create a
+Candidate or executed-evidence claim. CPF1 binds EPF1 and TPS1 by BLAKE3;
+downgrade descriptors bind RAD1 by BLAKE3. Archive verification checks member
+size, digest, canonical encoding, signature, and the profile/snapshot/provider
+relations before accepting a Draft bundle.
 The evaluator hard-cap record digest-binds both the ten structural limits and
 the following eight deterministic ceilings, in budget-field order: 1 GiB
 memory, 1,000,000,000 CPU fuel, 1,000,000 host calls, 1,000,000 Events, 64 MiB
