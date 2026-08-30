@@ -355,6 +355,42 @@ fn public_typed_bundle_rejects_missing_or_malformed_authority() -> TestResult {
         );
     }
 
+    let release_admission_path = member_path_by_role(&archive_value, 16)?;
+    let release_admission_bytes = member_bytes(&archive_value, &release_admission_path)?;
+    let mut malformed: Value = ciborium::from_reader(release_admission_bytes.as_slice())?;
+    array_mut(&mut malformed, "release admission")?[0] = Value::Integer(0_u64.into());
+    let mut malformed_bundle = valid.clone();
+    update_typed_member(
+        &mut malformed_bundle,
+        BundleMemberRoleV1::ReleaseAdmission,
+        encode(&malformed)?,
+    )?;
+    assert_eq!(
+        malformed_bundle.validate(),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+
+    let mut invalid: Value = ciborium::from_reader(release_admission_bytes.as_slice())?;
+    let fields = array_mut(&mut invalid, "release admission")?;
+    fields[0] = Value::Text("RAD0".to_owned());
+    let unsigned = encode(&Value::Array(fields[..10].to_vec()))?;
+    fields[10] = Value::Bytes(
+        SigningKey::from_bytes(&SIGNING_KEY)
+            .sign(&unsigned)
+            .to_bytes()
+            .to_vec(),
+    );
+    let mut invalid_bundle = valid;
+    update_typed_member(
+        &mut invalid_bundle,
+        BundleMemberRoleV1::ReleaseAdmission,
+        encode(&invalid)?,
+    )?;
+    assert_eq!(
+        invalid_bundle.validate(),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+
     Ok(())
 }
 
@@ -408,10 +444,6 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
         fields[0] = Value::Integer(0_u64.into());
         Ok(())
     })?;
-    assert_eq!(
-        ConformanceBundleV1::from_canonical_cbor(&malformed_release_admission),
-        Err(BundleContractErrorV1::ProfileInvalid)
-    );
     assert_independent_rejects(
         &malformed_release_admission,
         "a malformed release admission",
@@ -428,10 +460,6 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
         );
         Ok(())
     })?;
-    assert_eq!(
-        ConformanceBundleV1::from_canonical_cbor(&invalid_release_admission),
-        Err(BundleContractErrorV1::ProfileInvalid)
-    );
     assert_independent_rejects(&invalid_release_admission, "a re-signed invalid admission")?;
 
     Ok(())

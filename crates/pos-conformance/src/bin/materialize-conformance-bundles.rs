@@ -488,11 +488,11 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
 }
 
 fn embedded_catalog_result<T, E>(result: Result<T, E>) -> T {
-    result.map_or_else(|_| std::process::abort(), |value| value)
+    result.unwrap_or_else(|_| std::process::abort())
 }
 
 fn embedded_catalog_option<T>(value: Option<T>) -> T {
-    value.map_or_else(|| std::process::abort(), |value| value)
+    value.unwrap_or_else(|| std::process::abort())
 }
 
 fn package_support_artifacts() -> [PublicArtifact; 7] {
