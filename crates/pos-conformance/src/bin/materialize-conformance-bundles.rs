@@ -29,7 +29,6 @@ const OUTPUT_CHECKSUM_INVENTORY_PATH: &str = "SHA256SUMS";
 #[derive(Clone, Copy)]
 struct FixtureContext {
     claim_layer: ClaimLayerV1,
-    profile_record_digest: [u8; 32],
     source_provenance_digest: [u8; 32],
     build_provenance_digest: [u8; 32],
     publication_review_digest: [u8; 32],
@@ -896,9 +895,7 @@ fn output_checksum_inventory(files: &[MaterializedFile]) -> MaterializedFile {
     }
 }
 
-fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> FixtureContext {
-    let profile_record_digest =
-        labeled_digest("PiglorOS.CPF1ProfileRecord.v1", profile_record_bytes);
+fn fixture_context(claim_layer: ClaimLayerV1) -> FixtureContext {
     let normative = MATERIALIZATION_SUPPORT_NORMATIVE_REQUIREMENTS_MD_BYTES;
     let notice = MATERIALIZATION_SUPPORT_NOTICE_BYTES;
     let sbom = MATERIALIZATION_SUPPORT_SBOM_JSON_BYTES;
@@ -911,7 +908,6 @@ fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> Fi
     let limitations_digest = *blake3::hash(limitations).as_bytes();
     FixtureContext {
         claim_layer,
-        profile_record_digest,
         source_provenance_digest: *blake3::hash(source_provenance).as_bytes(),
         build_provenance_digest: *blake3::hash(build_provenance).as_bytes(),
         publication_review_digest: *blake3::hash(publication_review).as_bytes(),
@@ -975,7 +971,7 @@ fn profile_from_catalog(
     layer: &LayerCatalogEntry,
     providers: &ProviderCatalog,
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
-    let context = fixture_context(layer.profile_record, layer.claim_layer);
+    let context = fixture_context(layer.claim_layer);
     let provider_keys = layer
         .fixture_providers
         .iter()

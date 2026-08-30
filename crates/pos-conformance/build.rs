@@ -22,8 +22,11 @@ use std::path::{Component, Path, PathBuf};
 
 const PROFILE_COUNT: usize = 7;
 const FIXTURES_PER_PROFILE: usize = 7;
+#[cfg(target_os = "linux")]
 const MAX_SOURCE_FILE_COUNT: usize = 4_096;
+#[cfg(target_os = "linux")]
 const MAX_SOURCE_FILE_SIZE: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
 const MAX_SOURCE_TOTAL_SIZE: u64 = 1024 * 1024 * 1024;
 const CORE_SOURCE_PATHS: [&str; 3] = [
     "BLAKE3SUMS",

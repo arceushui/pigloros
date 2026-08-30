@@ -13,13 +13,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub(crate) type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-pub(crate) const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
-pub(crate) const ARCHIVE_SIGNING_KEY: [u8; 32] = [7; 32];
+pub const PROFILE_MEMBER_PATH: &str = "profile/CPF1.cbor";
+pub const ARCHIVE_SIGNING_KEY: [u8; 32] = [7; 32];
 
 #[derive(Clone, Copy)]
-pub(crate) enum ArchiveField {
+pub enum ArchiveField {
     Manifest,
     Members,
     SigningPublicKey,
@@ -27,7 +27,7 @@ pub(crate) enum ArchiveField {
 }
 
 impl ArchiveField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Manifest => 0,
             Self::Members => 1,
@@ -38,13 +38,13 @@ impl ArchiveField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ManifestField {
+pub enum ManifestField {
     ProfileDigest,
     MemberDescriptors,
 }
 
 impl ManifestField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::ProfileDigest => 3,
             Self::MemberDescriptors => 4,
@@ -53,14 +53,14 @@ impl ManifestField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum MemberField {
+pub enum MemberField {
     Path,
     Bytes,
     Role,
 }
 
 impl MemberField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Path => 0,
             Self::Bytes => 1,
@@ -70,7 +70,7 @@ impl MemberField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum DescriptorField {
+pub enum DescriptorField {
     Path,
     Length,
     Digest,
@@ -78,7 +78,7 @@ pub(crate) enum DescriptorField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ArtifactDescriptorField {
+pub enum ArtifactDescriptorField {
     Path,
     MediaType,
     Length,
@@ -86,7 +86,7 @@ pub(crate) enum ArtifactDescriptorField {
 }
 
 impl ArtifactDescriptorField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Path => 0,
             Self::MediaType => 1,
@@ -97,7 +97,7 @@ impl ArtifactDescriptorField {
 }
 
 impl DescriptorField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Path => 0,
             Self::Length => 1,
@@ -108,7 +108,7 @@ impl DescriptorField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ProfileField {
+pub enum ProfileField {
     ExecutionMatrixDigest,
     ExecutionProfileDigests,
     ProviderRegistryBinding,
@@ -118,7 +118,7 @@ pub(crate) enum ProfileField {
 }
 
 impl ProfileField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::ExecutionMatrixDigest => 6,
             Self::ExecutionProfileDigests => 7,
@@ -131,13 +131,13 @@ impl ProfileField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ProviderBindingField {
+pub enum ProviderBindingField {
     RegistryDescriptor,
     RequiredProviders,
 }
 
 impl ProviderBindingField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::RegistryDescriptor => 0,
             Self::RequiredProviders => 1,
@@ -146,12 +146,12 @@ impl ProviderBindingField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ProviderKeyField {
+pub enum ProviderKeyField {
     ProviderId,
 }
 
 impl ProviderKeyField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::ProviderId => 0,
         }
@@ -159,12 +159,12 @@ impl ProviderKeyField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum IndependenceRequirementField {
+pub enum IndependenceRequirementField {
     TrustPolicySnapshotDigest,
 }
 
 impl IndependenceRequirementField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::TrustPolicySnapshotDigest => 3,
         }
@@ -172,18 +172,18 @@ impl IndependenceRequirementField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ReleaseAdmissionField {
+pub enum ReleaseAdmissionField {
     Magic,
     Signature,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum RecordField {
+pub enum RecordField {
     Magic,
 }
 
 impl RecordField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Magic => 0,
         }
@@ -191,7 +191,7 @@ impl RecordField {
 }
 
 impl ReleaseAdmissionField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Magic => 0,
             Self::Signature => 10,
@@ -200,7 +200,7 @@ impl ReleaseAdmissionField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum FixtureField {
+pub enum FixtureField {
     ProviderKey,
     ExecutionProfileDigest,
     Modes,
@@ -210,7 +210,7 @@ pub(crate) enum FixtureField {
 }
 
 impl FixtureField {
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::ProviderKey => 4,
             Self::ExecutionProfileDigest => 6,
@@ -228,7 +228,7 @@ fn shared_named_wire_fields_cover_cross_suite_variants() {
     assert_eq!(ProviderBindingField::RegistryDescriptor.index(), 0);
 }
 
-pub(crate) struct TemporaryOutput(pub PathBuf);
+pub struct TemporaryOutput(pub PathBuf);
 
 impl Drop for TemporaryOutput {
     fn drop(&mut self) {
@@ -236,14 +236,14 @@ impl Drop for TemporaryOutput {
     }
 }
 
-pub(crate) fn temporary_root(label: &str) -> TestResult<PathBuf> {
+pub fn temporary_root(label: &str) -> TestResult<PathBuf> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
     Ok(std::env::temp_dir().join(format!("pigloros-{label}-{}-{nonce}", std::process::id())))
 }
 
-pub(crate) fn source_inventory_address() -> String {
+pub fn source_inventory_address() -> String {
     let digest: [u8; 32] = Sha256::digest(include_bytes!(
         "../../../../fixtures/conformance/SHA256SUMS"
     ))
@@ -251,7 +251,7 @@ pub(crate) fn source_inventory_address() -> String {
     pos_conformance::hex_digest(&digest)
 }
 
-pub(crate) fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
+pub fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     let mut pending = vec![root.to_path_buf()];
     let mut files = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -268,7 +268,7 @@ pub(crate) fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(files)
 }
 
-pub(crate) fn current_archive(label: &str) -> TestResult<Vec<u8>> {
+pub fn current_archive(label: &str) -> TestResult<Vec<u8>> {
     let root = temporary_root(label)?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
@@ -296,13 +296,13 @@ pub(crate) fn current_archive(label: &str) -> TestResult<Vec<u8>> {
     Ok(fs::read(archive)?)
 }
 
-pub(crate) fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
+pub fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
     Ok(bytes)
 }
 
-pub(crate) fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> {
+pub fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> {
     let bytes = encode_value(&Value::Array(fields.to_vec()))?;
     let mut preimage = Vec::with_capacity(domain.len() + bytes.len() + 9);
     preimage.extend_from_slice(domain);
@@ -312,14 +312,14 @@ pub(crate) fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8
     Ok(*blake3::hash(&preimage).as_bytes())
 }
 
-pub(crate) fn array_mut<'a>(value: &'a mut Value, name: &str) -> TestResult<&'a mut Vec<Value>> {
+pub fn array_mut<'a>(value: &'a mut Value, name: &str) -> TestResult<&'a mut Vec<Value>> {
     match value {
         Value::Array(values) => Ok(values),
         _ => Err(format!("{name} is not an array").into()),
     }
 }
 
-pub(crate) fn array_field<'a>(
+pub fn array_field<'a>(
     fields: &'a mut [Value],
     index: usize,
     name: &str,
@@ -330,12 +330,7 @@ pub(crate) fn array_field<'a>(
     }
 }
 
-pub(crate) fn replace_value(
-    fields: &mut [Value],
-    index: usize,
-    value: Value,
-    name: &str,
-) -> TestResult {
+pub fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &str) -> TestResult {
     let slot = fields
         .get_mut(index)
         .ok_or_else(|| format!("{name} is absent"))?;
@@ -343,7 +338,7 @@ pub(crate) fn replace_value(
     Ok(())
 }
 
-pub(crate) fn member_bytes(archive: &Value, path: &str) -> TestResult<Vec<u8>> {
+pub fn member_bytes(archive: &Value, path: &str) -> TestResult<Vec<u8>> {
     let Value::Array(archive_fields) = archive else {
         return Err("archive is not an array".into());
     };
@@ -365,7 +360,7 @@ pub(crate) fn member_bytes(archive: &Value, path: &str) -> TestResult<Vec<u8>> {
     }
 }
 
-pub(crate) fn member_path_by_role(archive: &Value, role: u64) -> TestResult<String> {
+pub fn member_path_by_role(archive: &Value, role: u64) -> TestResult<String> {
     let Value::Array(archive_fields) = archive else {
         return Err("archive is not an array".into());
     };
@@ -387,7 +382,7 @@ pub(crate) fn member_path_by_role(archive: &Value, role: u64) -> TestResult<Stri
     }
 }
 
-pub(crate) fn archive_member_fields<'a>(
+pub fn archive_member_fields<'a>(
     archive: &'a mut [Value],
     path: &str,
 ) -> TestResult<&'a mut Vec<Value>> {
@@ -401,7 +396,7 @@ pub(crate) fn archive_member_fields<'a>(
     array_mut(member, "archive member")
 }
 
-pub(crate) fn archive_descriptor_fields<'a>(
+pub fn archive_descriptor_fields<'a>(
     archive: &'a mut [Value],
     path: &str,
 ) -> TestResult<&'a mut Vec<Value>> {
@@ -420,11 +415,7 @@ pub(crate) fn archive_descriptor_fields<'a>(
     array_mut(descriptor, "archive descriptor")
 }
 
-pub(crate) fn replace_archive_member_bytes(
-    archive: &mut [Value],
-    path: &str,
-    bytes: &[u8],
-) -> TestResult {
+pub fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[u8]) -> TestResult {
     replace_value(
         archive_member_fields(archive, path)?,
         MemberField::Bytes.index(),
@@ -446,7 +437,7 @@ pub(crate) fn replace_archive_member_bytes(
     )
 }
 
-pub(crate) fn resign_archive(archive: &mut Value) -> TestResult {
+pub fn resign_archive(archive: &mut Value) -> TestResult {
     let manifest = {
         let fields = array_mut(archive, "archive")?;
         encode_value(&fields[ArchiveField::Manifest.index()])?
@@ -459,7 +450,7 @@ pub(crate) fn resign_archive(archive: &mut Value) -> TestResult {
     Ok(())
 }
 
-pub(crate) fn refresh_fixture_digests(profile: &mut [Value]) -> TestResult {
+pub fn refresh_fixture_digests(profile: &mut [Value]) -> TestResult {
     let fixtures = array_field(profile, ProfileField::Fixtures.index(), "profile fixtures")?;
     for fixture in fixtures {
         let fields = array_mut(fixture, "fixture")?;
@@ -477,7 +468,7 @@ pub(crate) fn refresh_fixture_digests(profile: &mut [Value]) -> TestResult {
     Ok(())
 }
 
-pub(crate) fn mutate_archive(
+pub fn mutate_archive(
     original: &[u8],
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
 ) -> TestResult<Vec<u8>> {
@@ -487,7 +478,7 @@ pub(crate) fn mutate_archive(
     encode_value(&archive)
 }
 
-pub(crate) fn mutate_member(
+pub fn mutate_member(
     original: &[u8],
     path: &str,
     mutate: impl FnOnce(&mut Vec<Value>) -> TestResult,
@@ -502,7 +493,7 @@ pub(crate) fn mutate_member(
     encode_value(&archive)
 }
 
-pub(crate) fn mutate_release_admission(
+pub fn mutate_release_admission(
     original: &[u8],
     path: &str,
     mutate: impl FnOnce(&mut Vec<Value>) -> TestResult,
@@ -564,7 +555,7 @@ pub(crate) fn mutate_release_admission(
     encode_value(&archive)
 }
 
-pub(crate) fn mutate_draft_evidence(
+pub fn mutate_draft_evidence(
     original: &[u8],
     mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> TestResult,
 ) -> TestResult<Vec<u8>> {
@@ -663,7 +654,7 @@ pub(crate) fn mutate_draft_evidence(
     encode_value(&archive)
 }
 
-pub(crate) fn mutate_profile(
+pub fn mutate_profile(
     original: &[u8],
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
 ) -> TestResult<Vec<u8>> {
@@ -702,14 +693,14 @@ pub(crate) fn mutate_profile(
     encode_value(&archive)
 }
 
-pub(crate) fn assert_independent_rejects(archive: &[u8], scenario: &str) -> TestResult {
+pub fn assert_independent_rejects(archive: &[u8], scenario: &str) -> TestResult {
     if verify_archive_independently(archive).is_ok() {
         return Err(format!("independent verifier accepted {scenario}").into());
     }
     Ok(())
 }
 
-pub(crate) fn update_typed_member(
+pub fn update_typed_member(
     bundle: &mut ConformanceBundleV1,
     role: BundleMemberRoleV1,
     bytes: Vec<u8>,
