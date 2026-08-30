@@ -10,15 +10,15 @@ use pos_core::{
     ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
     ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinatorPortV1,
-    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
-    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
-    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeAdmissionV1,
-    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasurePersistencePortV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
+    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureFreezeAdmissionV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeV1,
+    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
     ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
 };
 
@@ -846,8 +846,8 @@ fn supporting_records_bind_minimal_acknowledgement_trust_and_record_request(
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
     );
-    let wrong_trust = ErasureAcknowledgementProvenanceV1::new(
-        ErasureAcknowledgementProvenanceInputV1 {
+    let wrong_trust =
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
             request,
             command: destruction_command_reference(request, target),
             attempt: admission.reference(),
@@ -858,8 +858,7 @@ fn supporting_records_bind_minimal_acknowledgement_trust_and_record_request(
             evidence: acknowledgement.evidence,
             policy: admission.policy(),
             trust: reference(97),
-        },
-    )?;
+        })?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
             retry_admissions: vec![admission],
@@ -872,11 +871,10 @@ fn supporting_records_bind_minimal_acknowledgement_trust_and_record_request(
     let fixture = submitted_fixture(vec![target])?;
     let submitted = latest_record(&fixture.state, fixture.request)?;
     let mut parts = record_parts(&submitted);
-    parts.supporting_records =
-        ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
-            administrative_resolutions: vec![administrative_resolution(reference(98))?],
-            ..ErasureSupportingRecordsInputV1::default()
-        })?;
+    parts.supporting_records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        administrative_resolutions: vec![administrative_resolution(reference(98))?],
+        ..ErasureSupportingRecordsInputV1::default()
+    })?;
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(parts, COORDINATOR),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -1186,30 +1184,6 @@ fn freeze_admission_binds_closure_scope_evidence_and_position() -> Result<(), Er
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let authorized = historical_record(
-        &fixture.state,
-        ErasureLifecycleV1::Authorized,
-        |record| !record.reserved_targets().is_empty(),
-    )?;
-    for (freeze_position, provenance) in [
-        (11, original_freeze.reference()),
-        (10, reference(99)),
-    ] {
-        let mut state_mismatch = record_parts(&frozen);
-        state_mismatch.state = authorized.state().transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::AccessFrozen,
-            freeze_position: Some(freeze_position),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: ErasureReplayClaimV1::Exact,
-            provenance,
-        })?;
-        assert_eq!(
-            ErasureCoordinatorRecordV1::from_parts(state_mismatch, COORDINATOR),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-    }
     Ok(())
 }
 

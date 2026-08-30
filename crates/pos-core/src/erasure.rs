@@ -4170,9 +4170,9 @@ impl ErasureCoordinatorRecordV1 {
             ErasureLifecycleV1::Rejected => {
                 if let Some(failure) = failure {
                     if failure.authorization_provenance()
-                            != self
-                                .authorize_provenance
-                                .ok_or(ErasureErrorV1::ProvenanceMissing)?
+                        != self
+                            .authorize_provenance
+                            .ok_or(ErasureErrorV1::ProvenanceMissing)?
                         || self.state.provenance() != failure.reference()
                     {
                         return Err(ErasureErrorV1::ProvenanceMissing);
@@ -4827,14 +4827,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if !record.targets.contains(&acknowledgement.target) {
                 return Err(ErasureErrorV1::Unauthorized);
             }
-            if record
-                .acknowledgements
-                .iter()
-                .any(|existing| {
-                    (existing.obligation, existing.owner)
-                        == (acknowledgement.obligation, acknowledgement.owner)
-                })
-            {
+            if record.acknowledgements.iter().any(|existing| {
+                (existing.obligation, existing.owner)
+                    == (acknowledgement.obligation, acknowledgement.owner)
+            }) {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
             let admission = record
