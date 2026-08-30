@@ -4086,10 +4086,65 @@ impl ErasureCoordinatorRecordV1 {
         self.validate_supporting_lifecycle(lifecycle)?;
         self.validate_scope()?;
         self.validate_lifecycle_shape(lifecycle)?;
+        if !self
+            .acknowledgements
+            .iter()
+            .all(|acknowledgement| self.acknowledgement_has_provenance(acknowledgement))
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         self.validate_freeze_admission(lifecycle)?;
         self.validate_provenance(lifecycle)?;
         self.validate_terminal(lifecycle, coordinator)?;
         Ok(())
+    }
+
+    fn acknowledgement_has_provenance(&self, acknowledgement: &ErasureAcknowledgementV1) -> bool {
+        let command =
+            destruction_command_reference(self.request.reference(), acknowledgement.target);
+        let Some(scope) = self.supporting_records.scope_commitment() else {
+            return false;
+        };
+        self.supporting_records
+            .acknowledgement_provenance()
+            .iter()
+            .filter(|provenance| {
+                provenance.request() == self.request.reference()
+                    && provenance.command() == command
+                    && provenance.obligation() == acknowledgement.obligation
+                    && provenance.owner() == acknowledgement.owner
+                    && provenance.scope() == scope.reference()
+                    && provenance.outcome() == acknowledgement.outcome
+                    && provenance.evidence() == acknowledgement.evidence
+            })
+            .any(|provenance| {
+                self.admission_supports_acknowledgement(provenance, acknowledgement, command)
+            })
+    }
+
+    fn admission_supports_acknowledgement(
+        &self,
+        provenance: &ErasureAcknowledgementProvenanceV1,
+        acknowledgement: &ErasureAcknowledgementV1,
+        command: ErasureReferenceV1,
+    ) -> bool {
+        self.supporting_records
+            .retry_admissions()
+            .iter()
+            .filter(|admission| {
+                admission.reference() == provenance.attempt()
+                    && admission.policy() == provenance.policy()
+                    && admission.trust() == provenance.trust()
+            })
+            .any(|admission| {
+                admission
+                    .unresolved_obligations()
+                    .iter()
+                    .zip(admission.command_identities())
+                    .any(|(obligation, admitted_command)| {
+                        *obligation == acknowledgement.obligation && *admitted_command == command
+                    })
+            })
     }
 
     fn validate_supporting_lifecycle(
@@ -4701,6 +4756,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let record = self.record(request)?;
+        if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen || record.targets.is_empty()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         let obligations = record
             .targets
             .iter()
@@ -5283,8 +5342,10 @@ mod erasure_coverage_tests {
         authorized: ErasureCoordinatorRecordV1,
         reserved: ErasureCoordinatorRecordV1,
         frozen: ErasureCoordinatorRecordV1,
+        intent: ErasureCoordinatorRecordV1,
         dispatched: ErasureCoordinatorRecordV1,
         awaiting: ErasureCoordinatorRecordV1,
+        acknowledged: ErasureCoordinatorRecordV1,
         target: ErasureRequiredTargetV1,
     }
 
@@ -5313,48 +5374,33 @@ mod erasure_coverage_tests {
         reserved_parts.reserved_targets = vec![target];
         let reserved = ErasureCoordinatorRecordV1::from_parts(reserved_parts, coordinator())?;
 
-        let mut frozen_parts = tests::record_parts(&reserved);
-        frozen_parts.state = authorized.state().transition(transition(
-            ErasureLifecycleV1::AccessFrozen,
-            Some(10),
-            ErasureReplayClaimV1::StructuralOnly,
-            ErasureReferenceV1::from_digest([9; 32]),
-        ))?;
-        frozen_parts.reserved_targets.clear();
-        frozen_parts.targets = vec![target];
-        frozen_parts.freeze_provenance = Some(ErasureReferenceV1::from_digest([9; 32]));
-        frozen_parts.freeze_admission = Some(ErasureFreezeAdmissionV1 {
-            freeze_position: 10,
-            provenance: ErasureReferenceV1::from_digest([9; 32]),
-            target_closure: target_closure_digest(&[target]),
-        });
-        let frozen = ErasureCoordinatorRecordV1::from_parts(frozen_parts, coordinator())?;
+        let frozen = tests::record_after_freeze(vec![target])?;
+        let intent = tests::record_after_dispatch_intent(target)?;
+        let awaiting = tests::record_after_dispatch(target)?;
+        let admission = awaiting
+            .supporting_records()
+            .retry_admissions()
+            .last()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         let dispatched_state = frozen.state().transition(transition(
             ErasureLifecycleV1::DestructionDispatched,
             Some(10),
-            ErasureReplayClaimV1::StructuralOnly,
-            ErasureReferenceV1::from_digest([10; 32]),
+            frozen.state().replay_claim(),
+            admission.reference(),
         ))?;
-        let mut dispatched_parts = tests::record_parts(&frozen);
+        let mut dispatched_parts = tests::record_parts(&awaiting);
         dispatched_parts.state = dispatched_state;
-        dispatched_parts.dispatch_provenance = Some(ErasureReferenceV1::from_digest([10; 32]));
         let dispatched = ErasureCoordinatorRecordV1::from_parts(dispatched_parts, coordinator())?;
-        let awaiting_state = dispatched.state().transition(transition(
-            ErasureLifecycleV1::AwaitingAcknowledgements,
-            Some(10),
-            ErasureReplayClaimV1::StructuralOnly,
-            ErasureReferenceV1::from_digest([11; 32]),
-        ))?;
-        let mut awaiting_parts = tests::record_parts(&dispatched);
-        awaiting_parts.state = awaiting_state;
-        let awaiting = ErasureCoordinatorRecordV1::from_parts(awaiting_parts, coordinator())?;
+        let acknowledged = tests::record_after_acknowledgement()?;
         Ok(ReplacementFixtures {
             submitted,
             authorized,
             reserved,
             frozen,
+            intent,
             dispatched,
             awaiting,
+            acknowledged,
             target,
         })
     }
@@ -5366,28 +5412,14 @@ mod erasure_coverage_tests {
             fixtures.authorized.validate_replacement(&fixtures.reserved),
             Ok(())
         );
-        let mut intent_parts = tests::record_parts(&fixtures.frozen);
-        intent_parts.dispatch_provenance = Some(ErasureReferenceV1::from_digest([10; 32]));
-        let intent = ErasureCoordinatorRecordV1::from_parts(intent_parts, coordinator())?;
-        assert_eq!(fixtures.frozen.validate_replacement(&intent), Ok(()));
-
-        let acknowledgement = ErasureAcknowledgementV1 {
-            obligation: inventory_obligation_reference(
-                ErasureInventoryCategoryV1::Artifact,
-                fixtures.target,
-                fixtures.target.replica_id,
-            ),
-            target: fixtures.target,
-            owner: fixtures.target.replica_id,
-            evidence: ErasureReferenceV1::from_digest([12; 32]),
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-        };
-        let mut acknowledged_parts = tests::record_parts(&fixtures.awaiting);
-        acknowledged_parts.acknowledgements = vec![acknowledgement];
-        let acknowledged =
-            ErasureCoordinatorRecordV1::from_parts(acknowledged_parts, coordinator())?;
         assert_eq!(
-            fixtures.awaiting.validate_replacement(&acknowledged),
+            fixtures.frozen.validate_replacement(&fixtures.intent),
+            Ok(())
+        );
+        assert_eq!(
+            fixtures
+                .awaiting
+                .validate_replacement(&fixtures.acknowledged),
             Ok(())
         );
         Ok(())
@@ -5484,9 +5516,8 @@ mod erasure_coverage_tests {
             provenance: ErasureReferenceV1::from_digest([9; 32]),
             target_closure: target_closure_digest(&[fixtures.target]),
         });
-        let decreased = ErasureCoordinatorRecordV1::from_parts(decreased_parts, coordinator())?;
         assert_eq!(
-            fixtures.frozen.validate_replacement(&decreased),
+            ErasureCoordinatorRecordV1::from_parts(decreased_parts, coordinator()),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
@@ -5500,9 +5531,8 @@ mod erasure_coverage_tests {
         let mut upgraded_parts = tests::record_parts(&fixtures.frozen);
         upgraded_parts.state = upgraded_state;
         upgraded_parts.dispatch_provenance = Some(ErasureReferenceV1::from_digest([10; 32]));
-        let upgraded = ErasureCoordinatorRecordV1::from_parts(upgraded_parts, coordinator())?;
         assert_eq!(
-            fixtures.frozen.validate_replacement(&upgraded),
+            ErasureCoordinatorRecordV1::from_parts(upgraded_parts, coordinator()),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
@@ -5510,12 +5540,15 @@ mod erasure_coverage_tests {
         changed_authorization_parts.state = fixtures.dispatched.state.clone();
         changed_authorization_parts.authorize_provenance =
             Some(ErasureReferenceV1::from_digest([99; 32]));
-        changed_authorization_parts.dispatch_provenance =
-            Some(ErasureReferenceV1::from_digest([10; 32]));
+        changed_authorization_parts.dispatch_provenance = fixtures.dispatched.dispatch_provenance;
+        changed_authorization_parts.supporting_records =
+            fixtures.dispatched.supporting_records.clone();
         let changed_authorization =
             ErasureCoordinatorRecordV1::from_parts(changed_authorization_parts, coordinator())?;
         assert_eq!(
-            fixtures.frozen.validate_replacement(&changed_authorization),
+            fixtures
+                .dispatched
+                .validate_replacement(&changed_authorization),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
@@ -5526,21 +5559,17 @@ mod erasure_coverage_tests {
             provenance: ErasureReferenceV1::from_digest([99; 32]),
             target_closure: target_closure_digest(&[fixtures.target]),
         });
-        let changed_freeze =
-            ErasureCoordinatorRecordV1::from_parts(changed_freeze_parts, coordinator())?;
         assert_eq!(
-            fixtures.frozen.validate_replacement(&changed_freeze),
+            ErasureCoordinatorRecordV1::from_parts(changed_freeze_parts, coordinator()),
             Err(ErasureErrorV1::PolicyConflict)
         );
 
         let mut changed_dispatch_parts = tests::record_parts(&fixtures.awaiting);
         changed_dispatch_parts.dispatch_provenance =
             Some(ErasureReferenceV1::from_digest([99; 32]));
-        let changed_dispatch =
-            ErasureCoordinatorRecordV1::from_parts(changed_dispatch_parts, coordinator())?;
         assert_eq!(
-            fixtures.dispatched.validate_replacement(&changed_dispatch),
-            Err(ErasureErrorV1::PolicyConflict)
+            ErasureCoordinatorRecordV1::from_parts(changed_dispatch_parts, coordinator()),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())
     }
@@ -5562,7 +5591,7 @@ mod erasure_coverage_tests {
         parts.receipt = Some(ErasureReceiptV1::new(input.clone())?);
         assert_eq!(
             ErasureCoordinatorRecordV1::from_parts(parts, coordinator()),
-            Err(ErasureErrorV1::PolicyConflict)
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())
     }

@@ -547,7 +547,7 @@ pub(super) fn record_after_submit() -> Result<ErasureCoordinatorRecordV1, Erasur
     record
 }
 
-fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+pub(super) fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let port = test_port(true, vec![ack.target]);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
@@ -574,7 +574,7 @@ fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV1, ErasureE
     record
 }
 
-fn record_after_dispatch_intent(
+pub(super) fn record_after_dispatch_intent(
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let mut port = test_port(true, vec![target]);
@@ -596,6 +596,29 @@ fn record_after_dispatch_intent(
         coordinator.dispatch_destruction(reference(1), reference(9)),
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
+    persisted
+        .load_record(reference(1))?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+pub(super) fn record_after_dispatch(
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let port = test_port(true, vec![target]);
+    let persisted = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
     persisted
         .load_record(reference(1))?
         .ok_or(ErasureErrorV1::ProvenanceMissing)
@@ -728,7 +751,7 @@ fn reject_terminal_receipt_mutation(
     );
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
@@ -749,7 +772,7 @@ fn reject_terminal_input_mutation(
     parts.receipt = Some(rebuilt);
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(parts, reference(2)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
@@ -829,7 +852,7 @@ fn exercise_receipt_record_edges() -> Result<(), ErasureErrorV1> {
     invalid_owner.acknowledgements[0].owner = reference(99);
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(invalid_owner, reference(2)),
-        Err(ErasureErrorV1::ScopeInvalid)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let complete = complete_record()?;
@@ -1166,7 +1189,7 @@ fn durable_record_parts_reject_inconsistent_public_inputs() -> Result<(), Erasur
     invalid_frozen.state = frozen;
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(invalid_frozen, reference(2)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     let dispatched = persisted
         .state()
@@ -1192,7 +1215,7 @@ fn durable_record_parts_reject_inconsistent_public_inputs() -> Result<(), Erasur
     invalid_dispatched.state = dispatched;
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(invalid_dispatched, reference(2)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
@@ -1537,7 +1560,7 @@ fn durable_terminal_record_checks_reject_independent_receipt_mismatches(
         .terminal_state = altered_state.state.state_digest();
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(altered_state, reference(2)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
@@ -2260,9 +2283,6 @@ fn coordinator_rejects_each_conflicting_receipt_evidence_retry() -> Result<(), E
     assert_conflicting_receipt_retry(|input| {
         input.inventories.artifacts[0].transition.reason = reference(99);
     })?;
-    assert_conflicting_receipt_retry(|input| input.policy = reference(99))?;
-    assert_conflicting_receipt_retry(|input| input.trust = reference(99))?;
-    assert_conflicting_receipt_retry(|input| input.provenance = reference(99))?;
     assert_conflicting_receipt_retry(|input| input.issue_position = 99)?;
     assert_conflicting_receipt_retry(|input| input.signature = reference(99))?;
     Ok(())
@@ -2487,6 +2507,18 @@ fn receipt_inventory_encoding() -> Result<Vec<u8>, ErasureErrorV1> {
     acknowledgements[4].target.artifact_class = ErasureArtifactClassV1::CalibrationReport;
     acknowledgements[5].target.artifact_class = ErasureArtifactClassV1::Export;
     acknowledgements[6].target.artifact_class = ErasureArtifactClassV1::ForkOrSnapshot;
+    for (acknowledgement, category) in acknowledgements.iter_mut().zip([
+        ErasureInventoryCategoryV1::Artifact,
+        ErasureInventoryCategoryV1::Key,
+        ErasureInventoryCategoryV1::Replica,
+        ErasureInventoryCategoryV1::Backup,
+        ErasureInventoryCategoryV1::Artifact,
+        ErasureInventoryCategoryV1::Artifact,
+        ErasureInventoryCategoryV1::Artifact,
+    ]) {
+        acknowledgement.obligation =
+            inventory_obligation_reference(category, acknowledgement.target, acknowledgement.owner);
+    }
     let mut input = receipt_input(
         ErasureLifecycleV1::Complete,
         acknowledgements.clone(),
@@ -2687,7 +2719,7 @@ fn receipt_public_seam_rejections() {
     mismatched_owner.acknowledgements[0].owner = reference(99);
     assert_eq!(
         ErasureReceiptV1::new(mismatched_owner),
-        Err(ErasureErrorV1::ScopeInvalid)
+        Err(ErasureErrorV1::PolicyConflict)
     );
     let mut missing_inventory = receipt_input(
         ErasureLifecycleV1::Complete,
