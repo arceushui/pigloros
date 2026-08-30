@@ -492,7 +492,7 @@ fn embedded_catalog_result<T, E>(result: Result<T, E>) -> T {
 }
 
 fn embedded_catalog_option<T>(value: Option<T>) -> T {
-    value.map_or_else(std::process::abort, |value| value)
+    value.map_or_else(|| std::process::abort(), |value| value)
 }
 
 fn package_support_artifacts() -> [PublicArtifact; 7] {

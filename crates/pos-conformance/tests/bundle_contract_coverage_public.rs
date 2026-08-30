@@ -192,7 +192,7 @@ fn replace_member_bytes(archive: &mut [Value], path: &str, bytes: &[u8]) -> Test
     }
     let descriptor = descriptor_fields(archive, path)?;
     descriptor[1] = Value::Integer(u64::try_from(bytes.len())?.into());
-    descriptor[2] = Value::Bytes(blake3::hash(&bytes).as_bytes().to_vec());
+    descriptor[2] = Value::Bytes(blake3::hash(bytes).as_bytes().to_vec());
     Ok(())
 }
 
