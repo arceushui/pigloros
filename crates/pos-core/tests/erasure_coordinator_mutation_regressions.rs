@@ -1845,6 +1845,7 @@ fn coordinator_trait_forwards_public_lifecycle_operations() -> Result<(), Erasur
         reference(95),
     )?;
     ErasureCoordinator::acknowledge(&mut awaiting.machine, awaiting.request, acknowledgement)?;
+    ErasureCoordinator::acknowledge(&mut awaiting.machine, awaiting.request, acknowledgement)?;
     let receipt = ErasureCoordinator::finalize(
         &mut awaiting.machine,
         awaiting.request,
@@ -1857,5 +1858,25 @@ fn coordinator_trait_forwards_public_lifecycle_operations() -> Result<(), Erasur
         ),
     )?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    Ok(())
+}
+
+#[test]
+fn coordinator_trait_submits_and_retries_a_corrected_request() -> Result<(), ErasureErrorV1> {
+    let mut fixture = submitted_fixture(Vec::new())?;
+    fixture.machine.reject(fixture.request, reference(9))?;
+    let rejected = latest_record(&fixture.state, fixture.request)?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: fixture.request,
+        rejected_terminal_state: rejected.state().state_digest(),
+        correction_reason: reference(31),
+        authorization_provenance: reference(32),
+    })?;
+    let corrected = request_with(reference(40), correction.reference())?;
+    let corrected_reference = corrected.reference();
+    ErasureCoordinator::submit_corrected(&mut fixture.machine, corrected.clone(), correction)?;
+    let retry = ErasureCoordinator::submit_corrected(&mut fixture.machine, corrected, correction)?;
+    assert_eq!(retry.request(), corrected_reference);
+    assert_eq!(retry.lifecycle(), ErasureLifecycleV1::Submitted);
     Ok(())
 }

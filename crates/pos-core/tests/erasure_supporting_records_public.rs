@@ -23,7 +23,7 @@ use pos_core::{
     ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
     ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
     ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RETRY_ADMISSION_MAX_BYTES,
 };
 
@@ -383,6 +383,157 @@ fn supporting_records_bind_obligation_objects_and_lineage_ledgers() -> Result<()
     assert_eq!(
         ErasureSupportingRecordsV1::new(ledger_without_lineage),
         Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn supporting_records_bound_and_bind_obligation_evidence() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let scope = scope_commitment(request)?;
+    let obligation = obligation(request)?;
+    let missing_set = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        obligations: vec![obligation],
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(missing_set),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let oversized = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        obligations: vec![obligation; ERASURE_MAX_OBLIGATIONS + 1],
+        obligation_set: Some(obligation_set.clone()),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(oversized),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let wrong_command = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target: required_target(),
+        owner: reference(36),
+        command_identity: reference(99),
+    })?;
+    let wrong_command_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![wrong_command.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let wrong_command = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        obligations: vec![wrong_command],
+        obligation_set: Some(wrong_command_set),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_command),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut duplicate_target = vec![
+        obligation,
+        ErasureObligationV1::new(ErasureObligationInputV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target: required_target(),
+            owner: reference(37),
+            command_identity: destruction_command_reference(request, required_target()),
+        })?,
+    ];
+    duplicate_target.sort_unstable_by_key(ErasureObligationV1::reference);
+    let duplicate_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: duplicate_target
+            .iter()
+            .map(ErasureObligationV1::reference)
+            .collect(),
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let duplicate_target = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope),
+        obligations: duplicate_target,
+        obligation_set: Some(duplicate_set),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(duplicate_target),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn supporting_records_validate_lineage_chain_and_ledger_snapshots() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(2)],
+        target_closure: reference(3),
+        lineage_rule: Some(reference(4)),
+    })?;
+    let missing_initial_ledger = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(missing_initial_ledger),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let initial = ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        scope_commitment: scope.reference(),
+        extensions: Vec::new(),
+        head: None,
+    })?;
+    let wrong_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(9),
+        scope_commitment: scope.reference(),
+        fork: reference(5),
+        lineage_rule: reference(4),
+        predecessor_extension: None,
+        admission_provenance: reference(6),
+    })?;
+    let successor = ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        scope_commitment: scope.reference(),
+        extensions: vec![wrong_extension.reference()],
+        head: Some(wrong_extension.reference()),
+    })?;
+    let wrong_extension = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        scope_extensions: vec![wrong_extension],
+        scope_extension_ledgers: vec![initial, successor],
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_extension),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let wrong_ledger = ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        scope_commitment: reference(99),
+        extensions: Vec::new(),
+        head: None,
+    })?;
+    let wrong_ledger = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope),
+        scope_extension_ledgers: vec![wrong_ledger],
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_ledger),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
