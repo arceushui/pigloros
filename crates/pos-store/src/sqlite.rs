@@ -521,7 +521,7 @@ impl SqliteStore {
                  record_cbor BLOB NOT NULL CHECK (length(record_cbor) <= 67108864)
              );
              CREATE TABLE IF NOT EXISTS erasure_states (
-                 state_digest BLOB PRIMARY KEY CHECK (length(state_digest) = 32),
+                 state_digest BLOB NOT NULL PRIMARY KEY CHECK (length(state_digest) = 32),
                  request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
                  state_cbor BLOB NOT NULL CHECK (length(state_cbor) <= 1048576)
              );
@@ -622,6 +622,12 @@ impl SqliteStore {
         let tables = [
             (
                 "erasure_records",
+                "PRAGMA table_info(erasure_records)",
+                [
+                    ("request_digest", "BLOB", 1_i64, 1_i64),
+                    ("state_digest", "BLOB", 1_i64, 0_i64),
+                    ("record_cbor", "BLOB", 1_i64, 0_i64),
+                ],
                 [
                     "request_digest",
                     "state_digest",
@@ -633,6 +639,12 @@ impl SqliteStore {
             ),
             (
                 "erasure_states",
+                "PRAGMA table_info(erasure_states)",
+                [
+                    ("state_digest", "BLOB", 1_i64, 1_i64),
+                    ("request_digest", "BLOB", 1_i64, 0_i64),
+                    ("state_cbor", "BLOB", 1_i64, 0_i64),
+                ],
                 [
                     "state_digest",
                     "request_digest",
@@ -643,7 +655,7 @@ impl SqliteStore {
                 ],
             ),
         ];
-        for (table, markers) in tables {
+        for (table, columns_query, expected_columns, markers) in tables {
             let sql = self
                 .conn
                 .query_row(
@@ -664,6 +676,32 @@ impl SqliteStore {
             if markers.iter().any(|marker| !normalized.contains(*marker)) {
                 return Err(CoreError::Storage(format!(
                     "SQLite {table} table has an incompatible schema"
+                )));
+            }
+            let mut statement = self
+                .conn
+                .prepare(columns_query)
+                .map_err(Self::into_storage_error)?;
+            let columns = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })
+                .map_err(Self::into_storage_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Self::into_storage_error)?;
+            let expected_columns = expected_columns
+                .map(|(name, kind, not_null, primary_key)| {
+                    (name.to_owned(), kind.to_owned(), not_null, primary_key)
+                })
+                .to_vec();
+            if columns != expected_columns {
+                return Err(CoreError::Storage(format!(
+                    "SQLite {table} table has an incompatible schema: columns or key constraints"
                 )));
             }
         }
@@ -7158,6 +7196,16 @@ mod tests {
         for schema in [
             "CREATE TABLE erasure_records (request_digest BLOB PRIMARY KEY);",
             "CREATE TABLE erasure_states (state_digest BLOB PRIMARY KEY);",
+            "CREATE TABLE erasure_records (
+                request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                state_digest BLOB NOT NULL CHECK (length(state_digest) = 32),
+                record_cbor BLOB NOT NULL CHECK (length(record_cbor) <= 67108864)
+            );",
+            "CREATE TABLE erasure_states (
+                state_digest BLOB PRIMARY KEY CHECK (length(state_digest) = 32),
+                request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                state_cbor BLOB NOT NULL CHECK (length(state_cbor) <= 1048576)
+            );",
         ] {
             let file = tempfile::NamedTempFile::new().test_ok();
             {

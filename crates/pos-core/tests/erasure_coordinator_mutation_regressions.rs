@@ -1053,6 +1053,44 @@ fn supporting_records_bind_minimal_acknowledgement_trust_and_record_request(
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
+    let target = target(10);
+    let mut scoped = awaiting_fixture(vec![target])?;
+    let acknowledgement = acknowledgement_for(
+        scoped.request,
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+        reference(95),
+    )?;
+    scoped
+        .machine
+        .acknowledge(scoped.request, acknowledgement)?;
+    let scoped_record = latest_record(&scoped.state, scoped.request)?;
+    let mut scoped_supporting = supporting_input(scoped_record.supporting_records());
+    let admitted = scoped_supporting
+        .acknowledgement_provenance
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    scoped_supporting.acknowledgement_provenance = vec![ErasureAcknowledgementProvenanceV1::new(
+        ErasureAcknowledgementProvenanceInputV1 {
+            request: admitted.request(),
+            command: admitted.command(),
+            attempt: admitted.attempt(),
+            obligation: admitted.obligation(),
+            owner: admitted.owner(),
+            scope: reference(99),
+            outcome: admitted.outcome(),
+            evidence: admitted.evidence(),
+            policy: admitted.policy(),
+            trust: admitted.trust(),
+        },
+    )?];
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(scoped_supporting),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
     let fixture = submitted_fixture(vec![target])?;
     let submitted = latest_record(&fixture.state, fixture.request)?;
     let frozen = frozen_fixture(vec![target])?;

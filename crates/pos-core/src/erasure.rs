@@ -2031,6 +2031,10 @@ impl ErasureSupportingRecordsV1 {
 
     fn validate_acknowledgements(&self) -> Result<(), ErasureErrorV1> {
         let mut identities = Vec::with_capacity(self.acknowledgement_provenance.len());
+        let scope = self
+            .scope_commitment
+            .as_ref()
+            .map(ErasureScopeCommitmentV1::reference);
         for acknowledgement in &self.acknowledgement_provenance {
             let obligation = self
                 .obligations
@@ -2055,6 +2059,7 @@ impl ErasureSupportingRecordsV1 {
                 || !command_matches_obligation
                 || command_differs
                 || obligation.owner() != acknowledgement.owner()
+                || Some(acknowledgement.scope()) != scope
                 || admission.policy() != acknowledgement.policy()
                 || admission.trust() != acknowledgement.trust()
             {
@@ -4360,6 +4365,11 @@ pub trait ErasureCoordinatorPortV1: ErasurePersistencePortV1 {
     ) -> Result<(), ErasureErrorV1>;
     /// Authenticate one initial or retry attempt before its outbox intent is committed.
     ///
+    /// Admission is idempotent by the content-addressed admission reference.
+    /// An exact retry after a coordinator commit failure must return the same
+    /// successful decision; a conflicting admission for the active ordinal or
+    /// receipt head must fail closed.
+    ///
     /// # Errors
     ///
     /// Returns a closed policy/trust error when the admission is stale or unauthorized.
@@ -5006,13 +5016,11 @@ impl ErasureCoordinatorRecordV1 {
                 | ErasureLifecycleV1::Complete
                 | ErasureLifecycleV1::PartialFailure
         ) {
-            let Some(scope) = self.supporting_records.scope_commitment() else {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            };
-            let Some(freeze) = self.supporting_records.freeze_provenance() else {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            };
-            let Some(obligation_set) = self.supporting_records.obligation_set() else {
+            let (Some(scope), Some(freeze), Some(obligation_set)) = (
+                self.supporting_records.scope_commitment(),
+                self.supporting_records.freeze_provenance(),
+                self.supporting_records.obligation_set(),
+            ) else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
             let expected_state_provenance =
@@ -5055,36 +5063,15 @@ impl ErasureCoordinatorRecordV1 {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
-            match scope.lineage_rule() {
-                Some(_) => {
-                    let current = self
-                        .scope_extension_ledger
-                        .and_then(|reference| {
-                            self.supporting_records
-                                .scope_extension_ledgers()
-                                .iter()
-                                .find(|ledger| ledger.reference() == reference)
-                        })
-                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-                    if self.supporting_records.scope_extension_ledgers().last() != Some(current) {
-                        return Err(ErasureErrorV1::ProvenanceMissing);
-                    }
-                }
-                None if self.scope_extension_ledger.is_some() => {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
-                None => {}
+            let expected_ledger = scope.lineage_rule().and_then(|_| {
+                self.supporting_records
+                    .scope_extension_ledgers()
+                    .last()
+                    .map(ErasureScopeExtensionLedgerV1::reference)
+            });
+            if self.scope_extension_ledger != expected_ledger {
+                return Err(ErasureErrorV1::ProvenanceMissing);
             }
-        }
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::Submitted
-                | ErasureLifecycleV1::Authorized
-                | ErasureLifecycleV1::Rejected
-        ) && (self.scope_extension_ledger.is_some()
-            || !self.supporting_records.obligations().is_empty())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
         }
         Ok(())
     }
@@ -5136,14 +5123,12 @@ impl ErasureCoordinatorRecordV1 {
         if resolutions.is_empty() {
             return Ok(());
         }
-        let scope = self
-            .supporting_records
-            .scope_commitment()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let obligation_set = self
-            .supporting_records
-            .obligation_set()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let (Some(scope), Some(obligation_set)) = (
+            self.supporting_records.scope_commitment(),
+            self.supporting_records.obligation_set(),
+        ) else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        };
         if resolutions.iter().any(|resolution| {
             (
                 resolution.request(),
@@ -5173,34 +5158,31 @@ impl ErasureCoordinatorRecordV1 {
         ) {
             return Ok(());
         }
-        let Some(receipt) = self.receipt.as_ref() else {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        };
-        let Some(receipt_input) = self.receipt_input.as_ref() else {
+        let (Some(receipt), Some(receipt_input)) =
+            (self.receipt.as_ref(), self.receipt_input.as_ref())
+        else {
             return Err(ErasureErrorV1::ProvenanceMissing);
         };
         let reconstructed = ErasureReceiptV1::new(receipt_input.clone())?;
-        if self.receipt.as_ref() != Some(&reconstructed) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
         let mut acknowledgements = self.acknowledgements.clone();
         acknowledgements.sort_unstable();
-        if receipt.terminal_state().ne(&self.state.state_digest()) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if receipt.lifecycle().ne(&lifecycle) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if receipt.coordinator().ne(&coordinator) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if receipt.replay_claim() != self.state.replay_claim() {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if receipt.0.request.ne(&self.request.reference()) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if receipt.frozen_targets().ne(self.targets.as_slice()) {
+        if (
+            receipt,
+            receipt.terminal_state(),
+            receipt.lifecycle(),
+            receipt.coordinator(),
+            receipt.replay_claim(),
+            receipt.0.request,
+            receipt.frozen_targets(),
+        ) != (
+            &reconstructed,
+            self.state.state_digest(),
+            lifecycle,
+            coordinator,
+            self.state.replay_claim(),
+            self.request.reference(),
+            self.targets.as_slice(),
+        ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         if receipt.acknowledgements().ne(acknowledgements.as_slice()) {
@@ -5219,87 +5201,56 @@ impl ErasureCoordinatorRecordV1 {
             self.supporting_records.obligations(),
             receipt.acknowledgements(),
         );
-        if self.state.pending_owners() != pending.as_slice()
-            || self.state.failed_owners() != failed.as_slice()
+        if (self.state.pending_owners(), self.state.failed_owners())
+            != (pending.as_slice(), failed.as_slice())
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let outcome = self
-            .supporting_records
-            .attempt_outcomes()
-            .last()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let provenance = self
-            .supporting_records
-            .receipt_provenance()
-            .last()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if self.state.provenance() != outcome.reference()
-            || receipt.provenance() != provenance.reference()
-            || provenance.terminal_state() != self.state.state_digest()
-        {
+        let (Some(outcome), Some(provenance)) = (
+            self.supporting_records.attempt_outcomes().last(),
+            self.supporting_records.receipt_provenance().last(),
+        ) else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        };
+        if (
+            self.state.provenance(),
+            receipt.provenance(),
+            provenance.terminal_state(),
+        ) != (
+            outcome.reference(),
+            provenance.reference(),
+            self.state.state_digest(),
+        ) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         Ok(())
     }
 
     fn validate(&self, coordinator: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
-        if self.request.reference() != self.state.request()
-            || self.state.coordinator() != coordinator
+        if (self.request.reference(), self.state.coordinator())
+            != (self.state.request(), coordinator)
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         self.supporting_records.validate()?;
         self.supporting_records
             .validates_request(self.request.reference())?;
-        if let Some(correction) = self.supporting_records.correction_provenance() {
-            if self.request.provenance() != correction.reference() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
+        if self
+            .supporting_records
+            .correction_provenance()
+            .is_some_and(|correction| self.request.provenance() != correction.reference())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let lifecycle = self.state.lifecycle();
         self.validate_supporting_lifecycle(lifecycle)?;
         self.validate_scope()?;
         self.validate_lifecycle_shape(lifecycle)?;
-        if !self
-            .acknowledgements
-            .iter()
-            .all(|acknowledgement| self.acknowledgement_has_provenance(acknowledgement))
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
         self.validate_frozen_evidence(lifecycle)?;
         self.validate_provenance(lifecycle)?;
         self.validate_administrative_resolution_head()?;
         self.validate_terminal(lifecycle, coordinator)?;
         Ok(())
-    }
-
-    fn acknowledgement_has_provenance(&self, acknowledgement: &ErasureAcknowledgementV1) -> bool {
-        let Some(obligation) = self
-            .supporting_records
-            .obligations()
-            .iter()
-            .find(|obligation| obligation.reference() == acknowledgement.obligation)
-        else {
-            return false;
-        };
-        let command = obligation.command_identity();
-        let Some(scope) = self.supporting_records.scope_commitment() else {
-            return false;
-        };
-        self.supporting_records
-            .acknowledgement_provenance()
-            .iter()
-            .any(|provenance| {
-                provenance.request() == self.request.reference()
-                    && provenance.command() == command
-                    && provenance.obligation() == acknowledgement.obligation
-                    && provenance.owner() == acknowledgement.owner
-                    && provenance.scope() == scope.reference()
-                    && provenance.outcome() == acknowledgement.outcome
-                    && provenance.evidence() == acknowledgement.evidence
-            })
     }
 
     fn validate_supporting_lifecycle(
