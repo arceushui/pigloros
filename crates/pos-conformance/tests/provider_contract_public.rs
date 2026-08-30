@@ -1035,7 +1035,7 @@ fn public_decoders_reject_every_provider_record_type_and_bound_violation() -> Te
 }
 
 #[test]
-fn public_decoders_enforce_raw_cbor_size_depth_and_collection_caps() {
+fn public_decoders_enforce_raw_cbor_size_depth_and_collection_caps() -> TestResult {
     let oversized_record = vec![0_u8; 16 * 1024 * 1024 + 1];
     assert_eq!(
         FixtureProviderPackageV1::from_canonical_cbor(&oversized_record),
@@ -1063,11 +1063,13 @@ fn public_decoders_enforce_raw_cbor_size_depth_and_collection_caps() {
         vec![0x9a, 0, 1, 0, 1],
     ] {
         let error = FixtureProviderPackageV1::from_canonical_cbor(&malformed)
-            .expect_err("malformed provider package must be rejected");
+            .err()
+            .ok_or("malformed provider package was accepted")?;
         assert!([
             ProviderContractErrorV1::InvalidEncoding,
             ProviderContractErrorV1::FieldOutOfBounds,
         ]
         .contains(&error));
     }
+    Ok(())
 }

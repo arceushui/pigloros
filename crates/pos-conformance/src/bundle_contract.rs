@@ -899,7 +899,8 @@ fn verify_archive_summary_independently(
 pub fn verify_release_tree_independently(archives: &[&[u8]]) -> Result<(), BundleContractErrorV1> {
     let mut registry_bytes: Option<Vec<u8>> = None;
     let mut registry_providers: Option<BTreeSet<RawProviderKey>> = None;
-    let mut profile_modes = BTreeMap::<[u8; 32], BTreeSet<u64>>::new();
+    let mut profile_modes =
+        BTreeMap::<[u8; 32], BTreeMap<u64, BTreeMap<(String, u64), Vec<u8>>>>::new();
     let mut claim_layers = BTreeSet::new();
     let mut referenced_providers = BTreeSet::new();
 
@@ -913,24 +914,35 @@ pub fn verify_release_tree_independently(archives: &[&[u8]]) -> Result<(), Bundl
         }
         registry_bytes.get_or_insert(summary.registry_bytes);
         registry_providers.get_or_insert(summary.registry_providers);
-        profile_modes
+        if profile_modes
             .entry(summary.profile_digest)
             .or_default()
-            .insert(summary.mode);
+            .insert(summary.mode, summary.expected_results)
+            .is_some()
+        {
+            return Err(BundleContractErrorV1::ModeParityMismatch);
+        }
         claim_layers.insert(summary.claim_layer);
         referenced_providers.extend(summary.required_providers);
     }
 
-    let complete_modes = BTreeSet::from([0, 1]);
     if profile_modes.len() == 7
         && claim_layers == BTreeSet::from([0, 1, 2, 3, 4, 5, 6])
-        && profile_modes.values().all(|modes| *modes == complete_modes)
+        && profile_modes.values().all(raw_mode_pair_has_parity)
         && registry_providers.as_ref() == Some(&referenced_providers)
     {
         Ok(())
     } else {
         Err(BundleContractErrorV1::ProfileInvalid)
     }
+}
+
+fn raw_mode_pair_has_parity(modes: &BTreeMap<u64, BTreeMap<(String, u64), Vec<u8>>>) -> bool {
+    modes.len() == 2
+        && modes
+            .get(&0)
+            .zip(modes.get(&1))
+            .is_some_and(|(local, air_gapped)| local == air_gapped)
 }
 
 type RawProviderKey = (String, String, u64, u64);
@@ -942,6 +954,7 @@ struct RawReleaseArchiveSummary {
     registry_bytes: Vec<u8>,
     registry_providers: BTreeSet<RawProviderKey>,
     required_providers: BTreeSet<RawProviderKey>,
+    expected_results: BTreeMap<(String, u64), Vec<u8>>,
 }
 
 fn raw_profile_claim_layer(fixtures: &[Value]) -> Result<u64, BundleContractErrorV1> {
@@ -1046,7 +1059,7 @@ fn raw_archive_profile(
     }
     let profile_digest = raw_profile_digest(manifest, profile_fields)?;
     let registry = raw_registry_and_packages(profile_fields, members, mode)?;
-    raw_expected_results(&manifest[5], profile_fields, members, mode)?;
+    let expected_results = raw_expected_results(&manifest[5], profile_fields, members, mode)?;
     Ok(RawReleaseArchiveSummary {
         profile_digest,
         claim_layer,
@@ -1054,6 +1067,7 @@ fn raw_archive_profile(
         registry_bytes: registry.bytes,
         registry_providers: registry.providers,
         required_providers: registry.required_providers,
+        expected_results,
     })
 }
 
@@ -1981,28 +1995,27 @@ fn raw_expected_results(
     profile: &[Value],
     members: &[Value],
     mode: u64,
-) -> Result<(), BundleContractErrorV1> {
+) -> Result<BTreeMap<(String, u64), Vec<u8>>, BundleContractErrorV1> {
     array_values(value).and_then(|expected| {
         raw_expected_ordered(expected).and_then(|ordered| {
             if !ordered {
                 return Err(BundleContractErrorV1::NonCanonicalOrder);
             }
-            expected
+            let results = expected
                 .iter()
-                .try_for_each(|record| raw_expected_result(record, profile, members, mode))
-                .and_then(|()| {
-                    array_values(&profile[9]).and_then(|fixtures| {
-                        let selected = fixtures
-                            .iter()
-                            .filter(|fixture| raw_fixture_selects_mode(fixture, mode))
-                            .count();
-                        if expected.len() == selected {
-                            Ok(())
-                        } else {
-                            Err(BundleContractErrorV1::ExpectedResultMismatch)
-                        }
-                    })
-                })
+                .map(|record| raw_expected_result(record, profile, members, mode))
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            array_values(&profile[9]).and_then(|fixtures| {
+                let selected = fixtures
+                    .iter()
+                    .filter(|fixture| raw_fixture_selects_mode(fixture, mode))
+                    .count();
+                if expected.len() == selected && results.len() == expected.len() {
+                    Ok(results)
+                } else {
+                    Err(BundleContractErrorV1::ExpectedResultMismatch)
+                }
+            })
         })
     })
 }
@@ -2012,7 +2025,7 @@ fn raw_expected_result(
     profile: &[Value],
     members: &[Value],
     mode: u64,
-) -> Result<(), BundleContractErrorV1> {
+) -> Result<((String, u64), Vec<u8>), BundleContractErrorV1> {
     array(value, 6).and_then(|fields| {
         uint(&fields[3]).and_then(|record_mode| {
             if record_mode != mode {
@@ -2027,7 +2040,10 @@ fn raw_expected_result(
                             {
                                 Err(BundleContractErrorV1::ExpectedResultMismatch)
                             } else {
-                                Ok(())
+                                Ok((
+                                    (text(&fields[0])?.to_owned(), uint(&fields[1])?),
+                                    member_bytes.to_vec(),
+                                ))
                             }
                         })
                     })
@@ -2722,7 +2738,12 @@ impl ConformanceBundlePairV1 {
     pub fn validate(&self) -> Result<(), BundleContractErrorV1> {
         self.local.validate().and_then(|()| {
             self.air_gapped.validate().and_then(|()| {
-                if self.local.manifest.profile_digest == self.air_gapped.manifest.profile_digest {
+                if self.local.manifest.mode == BundleModeV1::Local
+                    && self.air_gapped.manifest.mode == BundleModeV1::AirGapped
+                    && self.local.manifest.profile_digest == self.air_gapped.manifest.profile_digest
+                    && authoritative_expected_results(&self.local)?
+                        == authoritative_expected_results(&self.air_gapped)?
+                {
                     Ok(())
                 } else {
                     Err(BundleContractErrorV1::ModeParityMismatch)
@@ -2730,4 +2751,27 @@ impl ConformanceBundlePairV1 {
             })
         })
     }
+}
+
+fn authoritative_expected_results(
+    bundle: &ConformanceBundleV1,
+) -> Result<BTreeMap<(String, crate::ClaimLayerV1), Vec<u8>>, BundleContractErrorV1> {
+    bundle
+        .manifest
+        .expected_results
+        .iter()
+        .map(|expected| {
+            member_by_role_and_path(
+                &bundle.members,
+                BundleMemberRoleV1::ExpectedResult,
+                &expected.member_path,
+            )
+            .map(|member| {
+                (
+                    (expected.case_id.clone(), expected.claim_layer),
+                    member.bytes.clone(),
+                )
+            })
+        })
+        .collect()
 }

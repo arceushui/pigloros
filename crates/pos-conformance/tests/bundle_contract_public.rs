@@ -1172,6 +1172,16 @@ fn current_bundle_pair_requires_profile_parity() -> TestResult {
     let pair = ConformanceBundlePairV1 { local, air_gapped };
     assert_eq!(pair.validate(), Ok(()));
 
+    let duplicate_local = pair.local.clone();
+    assert_eq!(
+        ConformanceBundlePairV1 {
+            local: duplicate_local.clone(),
+            air_gapped: duplicate_local,
+        }
+        .validate(),
+        Err(BundleContractErrorV1::ModeParityMismatch)
+    );
+
     let mut mismatched = pair;
     mismatched.air_gapped.manifest.profile_digest[0] ^= 1;
     let error = mismatched
@@ -1249,7 +1259,7 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
     duplicate_mode[1] = duplicate_mode[0];
     assert_eq!(
         verify_release_tree_independently(&duplicate_mode),
-        Err(BundleContractErrorV1::ProfileInvalid)
+        Err(BundleContractErrorV1::ModeParityMismatch)
     );
 
     let foreign_registry_archive =

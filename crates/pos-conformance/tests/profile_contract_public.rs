@@ -518,7 +518,7 @@ fn request_for_caps(caps: &EvaluatorHardCapsV1) -> EvaluatorRequestV1 {
     request
 }
 
-fn set_deterministic_cap(caps: &mut EvaluatorHardCapsV1, field: usize, value: u64) {
+fn set_deterministic_cap(caps: &mut EvaluatorHardCapsV1, field: usize, value: u64) -> TestResult {
     match field {
         0 => caps.max_deterministic_memory_bytes = value,
         1 => caps.max_deterministic_cpu_fuel = value,
@@ -528,8 +528,9 @@ fn set_deterministic_cap(caps: &mut EvaluatorHardCapsV1, field: usize, value: u6
         5 => caps.max_deterministic_storage_bytes = value,
         6 => caps.max_deterministic_execution_steps = value,
         7 => caps.max_deterministic_simulation_time_ns = value,
-        _ => unreachable!("the contract has exactly eight deterministic budget fields"),
+        _ => return Err(format!("deterministic budget field {field} is out of bounds").into()),
     }
+    Ok(())
 }
 
 fn canonical_value(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -637,7 +638,9 @@ fn retarget_provider_failure(
     let Some(failure) = failure else {
         return;
     };
-    if failure.owner_id != first.provider_id || failure.contract_version != first.contract_version {
+    if (&failure.owner_id, &failure.contract_version)
+        != (&first.provider_id, &first.contract_version)
+    {
         return;
     }
     failure.owner_id.clone_from(&second.provider_id);
@@ -649,7 +652,7 @@ fn retarget_provider_failure(
 fn with_second_provider(mut profile: ConformanceProfileV1) -> ConformanceProfileV1 {
     let first = profile.fixture_provider_registry.required_provider_keys[0].clone();
     let mut second = first.clone();
-    second.provider_id = "pigloros.fixture.zzz".to_owned();
+    "pigloros.fixture.zzz".clone_into(&mut second.provider_id);
     let additional = profile
         .fixtures
         .iter()
@@ -911,7 +914,7 @@ fn public_profile_validation_rejects_required_fixture_contract_violations() {
 }
 
 #[test]
-fn public_profile_binds_each_selected_deterministic_budget_ceiling() {
+fn public_profile_binds_each_selected_deterministic_budget_ceiling() -> TestResult {
     let profile = profile_for_digest();
     let budget = &profile.fixtures[0].deterministic_budget;
     let selected = [
@@ -927,7 +930,7 @@ fn public_profile_binds_each_selected_deterministic_budget_ceiling() {
 
     for (field, ceiling) in selected.into_iter().enumerate() {
         let mut exact = profile.clone();
-        set_deterministic_cap(&mut exact.evaluator_protocol.hard_caps, field, ceiling);
+        set_deterministic_cap(&mut exact.evaluator_protocol.hard_caps, field, ceiling)?;
         refresh(&mut exact);
         assert_eq!(exact.validate(), Ok(()));
         assert_ne!(
@@ -940,7 +943,7 @@ fn public_profile_binds_each_selected_deterministic_budget_ceiling() {
             &mut insufficient.evaluator_protocol.hard_caps,
             field,
             ceiling.saturating_sub(1),
-        );
+        )?;
         refresh(&mut insufficient);
         assert_eq!(
             insufficient.validate(),
@@ -964,13 +967,14 @@ fn public_profile_binds_each_selected_deterministic_budget_ceiling() {
             &mut invalid.evaluator_protocol.hard_caps,
             field,
             maximum.saturating_add(1),
-        );
+        )?;
         refresh(&mut invalid);
         assert_eq!(
             invalid.validate(),
             Err(ConformanceContractError::FieldOutOfBounds)
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -996,7 +1000,7 @@ fn public_profile_requires_every_mode_coordinate_from_every_provider() {
 }
 
 #[test]
-fn every_provider_execution_mode_coordinate_requires_exactly_seven_families() {
+fn every_provider_execution_mode_coordinate_requires_exactly_seven_families() -> TestResult {
     let complete = with_second_execution_coordinate(profile_for_digest());
     assert_eq!(complete.validate(), Ok(()));
 
@@ -1008,7 +1012,7 @@ fn every_provider_execution_mode_coordinate_requires_exactly_seven_families() {
             fixture.execution_profile_digest == [2; 32]
                 && fixture.family == FixtureFamilyV1::IndependentEvaluation
         })
-        .expect("second execution coordinate must contain every family");
+        .ok_or("second execution coordinate lacks the independent-evaluation family")?;
     missing.fixtures.remove(remove_at);
     refresh(&mut missing);
     assert_eq!(
@@ -1042,6 +1046,7 @@ fn every_provider_execution_mode_coordinate_requires_exactly_seven_families() {
         duplicate.validate(),
         Err(ConformanceContractError::NonCanonicalOrder)
     );
+    Ok(())
 }
 
 #[test]
