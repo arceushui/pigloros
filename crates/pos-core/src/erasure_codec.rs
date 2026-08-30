@@ -311,11 +311,10 @@ pub(super) fn retry_admission_from_fields(
             ERASURE_MAX_OBLIGATIONS,
             true,
         )?,
-        command_identities: bounded_references_from_value(
-            &fields[6],
-            ERASURE_MAX_OBLIGATIONS,
-            true,
-        )?,
+        // Command identities are positionally aligned with the sorted obligation
+        // references. They are not an independently ordered set: multiple
+        // obligations may also refer to the same destruction command.
+        command_identities: unordered_references_from_value(&fields[6], ERASURE_MAX_OBLIGATIONS)?,
         policy: bytes32(&fields[7])?,
         trust: bytes32(&fields[8])?,
         admitted_position: unsigned(&fields[9])?,
