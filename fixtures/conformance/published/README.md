@@ -13,10 +13,12 @@ artifacts only; the materializer refuses to overwrite an existing output
 directory but does not claim that the output is a retained Candidate
 publication. Candidate publication is a later #198 governance operation.
 
-Published archives are signed with `PIGLOROS_CONFORMANCE_SIGNING_KEY`, supplied
-only by the materialization environment. The repository contains no publication
-private key; the archive's public verification key and signature remain part of
-the immutable CFB1 bytes.
+Draft archives are signed with a public, deterministic repository test-fixture
+key supplied through `PIGLOROS_CONFORMANCE_SIGNING_KEY`. The signature proves
+that repeated materialization produced internally consistent fixture bytes; it
+does not establish authenticity and grants no Candidate publication authority.
+Candidate publication must use the separate #198 governance workflow and its
+own trust policy.
 
 GitHub Actions artifacts are a temporary transport copy and are not the
 retention authority. Candidate publication and any release-retention policy

@@ -14,6 +14,8 @@ use super::{
     DRAFT_AUTHORITY_DECLARATION_BYTES_V1, DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION,
     DRAFT_AUTHORITY_KEY_ID, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
     DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
+    EVALUATOR_PROTOCOL_BYTES, EVALUATOR_PROTOCOL_PATH, EVALUATOR_REPORT_SCHEMA_BYTES,
+    EVALUATOR_REPORT_SCHEMA_PATH, EVALUATOR_REQUEST_SCHEMA_BYTES, EVALUATOR_REQUEST_SCHEMA_PATH,
     EXECUTION_MATRIX_BYTES_V1, EXECUTION_MATRIX_PATH, FIXTURE_CONTRACT_POLICY_PATH,
     FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, LIMITATIONS_PATH, MAX_CONFORMANCE_BUNDLE_LEN_V1,
     NORMATIVE_SPEC_PATH, NOTICE_PATH, PROFILE_PATH, PROFILE_SCHEMA_PATH, PUBLICATION_REVIEW_PATH,
@@ -603,6 +605,7 @@ fn raw_profile_support_members(
                 }
             })
         })
+        .and_then(|()| raw_evaluator_support_members(profile, members))
         .and_then(|()| raw_fixture_provenance_members(&profile.fixtures, members))
         .and_then(|()| {
             raw_authority_member_matches(
@@ -636,6 +639,41 @@ fn raw_profile_support_members(
                 SUPPORT_PACKAGE_MANIFEST_BYTES_V1,
             )
         })
+}
+
+fn raw_evaluator_support_members(
+    profile: &RawCpf1Summary,
+    members: &[RawArchiveMember<'_>],
+) -> Result<(), BundleContractErrorV1> {
+    [
+        (
+            EVALUATOR_PROTOCOL_PATH,
+            profile.evaluator_artifact_digests[0],
+            EVALUATOR_PROTOCOL_BYTES,
+        ),
+        (
+            EVALUATOR_REQUEST_SCHEMA_PATH,
+            profile.evaluator_artifact_digests[1],
+            EVALUATOR_REQUEST_SCHEMA_BYTES,
+        ),
+        (
+            EVALUATOR_REPORT_SCHEMA_PATH,
+            profile.evaluator_artifact_digests[2],
+            EVALUATOR_REPORT_SCHEMA_BYTES,
+        ),
+    ]
+    .into_iter()
+    .try_for_each(|(path, declared_digest, approved_bytes)| {
+        raw_member(members, path, RawMemberRole::Schema).and_then(|member| {
+            if member.bytes == approved_bytes
+                && declared_digest == *blake3::hash(approved_bytes).as_bytes()
+            {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            }
+        })
+    })
 }
 
 fn raw_execution_authority_members(
@@ -986,6 +1024,9 @@ fn raw_member_closure(
         EXECUTION_MATRIX_PATH,
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
+        EVALUATOR_PROTOCOL_PATH,
+        EVALUATOR_REQUEST_SCHEMA_PATH,
+        EVALUATOR_REPORT_SCHEMA_PATH,
         SUPPORT_PACKAGE_MANIFEST_PATH,
         FIXTURE_CONTRACT_POLICY_PATH,
         "support/draft-execution-authority.json",
@@ -1057,6 +1098,7 @@ struct RawCpf1Summary {
     execution_digests: BTreeSet<[u8; 32]>,
     trust_policy_snapshot_digest: [u8; 32],
     support_digests: [[u8; 32]; 5],
+    evaluator_artifact_digests: [[u8; 32]; 3],
     registry: RawArtifact,
 }
 
@@ -1064,8 +1106,8 @@ fn raw_cpf1_value(profile_fields: &[Value]) -> Result<RawCpf1Summary, BundleCont
     raw_cpf1_header(profile_fields).and_then(|support_digests| {
         raw_execution_digests(&profile_fields[7]).and_then(|executions| {
             raw_provider_binding(&profile_fields[8]).and_then(|(registry, required_providers)| {
-                raw_protocol(&profile_fields[11]).and_then(|deterministic_caps| {
-                    raw_fixtures(&profile_fields[9], &deterministic_caps).and_then(
+                raw_protocol(&profile_fields[11]).and_then(|protocol| {
+                    raw_fixtures(&profile_fields[9], &protocol.deterministic_caps).and_then(
                         |mut fixture_collection| {
                             let claim_layer = fixture_collection.fixtures[0].claim_layer;
                             fixture_collection
@@ -1091,6 +1133,8 @@ fn raw_cpf1_value(profile_fields: &[Value]) -> Result<RawCpf1Summary, BundleCont
                                                 execution_digests: executions,
                                                 trust_policy_snapshot_digest,
                                                 support_digests,
+                                                evaluator_artifact_digests: protocol
+                                                    .artifact_digests,
                                                 registry,
                                             }
                                         })
@@ -1693,64 +1737,74 @@ fn raw_optional_transition(
         })
     })
 }
-fn raw_protocol(value: &Value) -> Result<[u64; 8], BundleContractErrorV1> {
+struct RawEvaluatorProtocol {
+    deterministic_caps: [u64; 8],
+    artifact_digests: [[u8; 32]; 3],
+}
+
+fn raw_protocol(value: &Value) -> Result<RawEvaluatorProtocol, BundleContractErrorV1> {
     array(value, 5).and_then(|fields| {
         text(&fields[0]).and_then(|version| {
             if version.is_empty() {
                 return Err(BundleContractErrorV1::ProfileInvalid);
             }
-            fields[1..4]
-                .iter()
-                .try_for_each(|value| {
-                    digest::<32>(value).and_then(|digest| {
-                        if digest == [0; 32] {
-                            Err(BundleContractErrorV1::ProfileInvalid)
-                        } else {
-                            Ok(())
-                        }
-                    })
-                })
-                .and_then(|()| {
-                    array(&fields[4], 18).and_then(|caps| {
-                        let maxima = [
-                            16 * 1024 * 1024,
-                            65_536,
-                            65_536,
-                            256,
-                            64 * 1024 * 1024,
-                            1024 * 1024 * 1024,
-                            100,
-                            32,
-                            128,
-                            1024 * 1024,
-                            1024 * 1024 * 1024,
-                            1_000_000_000,
-                            1_000_000,
-                            1_000_000,
-                            64 * 1024 * 1024,
-                            1024 * 1024 * 1024,
-                            1_000_000_000,
-                            86_400_000_000_000,
-                        ];
-                        caps.iter()
-                            .map(uint)
-                            .collect::<Result<Vec<_>, _>>()
-                            .and_then(|values| {
-                                let valid = values.iter().zip(maxima).enumerate().all(
-                                    |(index, (cap, maximum))| {
-                                        *cap <= maximum && (index == 9 || *cap > 0)
-                                    },
-                                );
-                                if !valid {
-                                    return Err(BundleContractErrorV1::ProfileInvalid);
-                                }
-                                Ok([
+            let (Ok(protocol), Ok(request), Ok(report)) = (
+                digest::<32>(&fields[1]),
+                digest::<32>(&fields[2]),
+                digest::<32>(&fields[3]),
+            ) else {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            };
+            if [protocol, request, report]
+                .into_iter()
+                .any(|digest| digest == [0; 32])
+            {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            } else {
+                let artifact_digests = [protocol, request, report];
+                array(&fields[4], 18).and_then(|caps| {
+                    let maxima = [
+                        16 * 1024 * 1024,
+                        65_536,
+                        65_536,
+                        256,
+                        64 * 1024 * 1024,
+                        1024 * 1024 * 1024,
+                        100,
+                        32,
+                        128,
+                        1024 * 1024,
+                        1024 * 1024 * 1024,
+                        1_000_000_000,
+                        1_000_000,
+                        1_000_000,
+                        64 * 1024 * 1024,
+                        1024 * 1024 * 1024,
+                        1_000_000_000,
+                        86_400_000_000_000,
+                    ];
+                    caps.iter()
+                        .map(uint)
+                        .collect::<Result<Vec<_>, _>>()
+                        .and_then(|values| {
+                            let valid = values.iter().zip(maxima).enumerate().all(
+                                |(index, (cap, maximum))| {
+                                    *cap <= maximum && (index == 9 || *cap > 0)
+                                },
+                            );
+                            if !valid {
+                                return Err(BundleContractErrorV1::ProfileInvalid);
+                            }
+                            Ok(RawEvaluatorProtocol {
+                                deterministic_caps: [
                                     values[10], values[11], values[12], values[13], values[14],
                                     values[15], values[16], values[17],
-                                ])
+                                ],
+                                artifact_digests,
                             })
-                    })
+                        })
                 })
+            }
         })
     })
 }

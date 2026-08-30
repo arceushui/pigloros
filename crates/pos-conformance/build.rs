@@ -22,6 +22,9 @@ use std::path::{Component, Path, PathBuf};
 
 const PROFILE_COUNT: usize = 7;
 const FIXTURES_PER_PROFILE: usize = 7;
+const MAX_SOURCE_FILE_COUNT: usize = 4_096;
+const MAX_SOURCE_FILE_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_SOURCE_TOTAL_SIZE: u64 = 1024 * 1024 * 1024;
 const CORE_SOURCE_PATHS: [&str; 3] = [
     "BLAKE3SUMS",
     "expected-authority/inventory.json",
@@ -79,8 +82,12 @@ struct ProfilePaths {
     claim_layer: CatalogClaimLayer,
     subject_adapter: CatalogSubjectAdapter,
     profile_record: Vec<u8>,
-    fixture_provider: FixtureProvider,
-    provider_manifest: FixtureAsset,
+    fixture_providers: Vec<ProfileFixtureProvider>,
+}
+
+struct ProfileFixtureProvider {
+    provider: FixtureProvider,
+    manifest: FixtureAsset,
     fixtures: Vec<FixturePaths>,
 }
 
@@ -562,19 +569,75 @@ fn open_fixture_relative(
 }
 
 #[cfg(target_os = "linux")]
+fn fixture_file_size(file: &OwnedFd, relative: &str, description: &str) -> Result<u64, io::Error> {
+    let metadata = rustix_fs::fstat(file).map_err(|error| {
+        invalid_data(format!(
+            "{description} cannot be inspected at {relative}: {error}"
+        ))
+    })?;
+    let size = u64::try_from(metadata.st_size).map_err(|_| {
+        invalid_data(format!(
+            "{description} has an invalid negative size at {relative}"
+        ))
+    })?;
+    if size > MAX_SOURCE_FILE_SIZE {
+        return Err(invalid_data(format!(
+            "{description} exceeds the {MAX_SOURCE_FILE_SIZE}-byte source-file limit at {relative}: {size} bytes"
+        )));
+    }
+    Ok(size)
+}
+
+#[cfg(target_os = "linux")]
+fn read_opened_fixture(
+    opened: OwnedFd,
+    declared_size: u64,
+    relative: &str,
+    description: &str,
+) -> Result<Vec<u8>, io::Error> {
+    let capacity = usize::try_from(declared_size).map_err(|_| {
+        invalid_data(format!(
+            "{description} size cannot be represented on this platform at {relative}"
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        invalid_data(format!(
+            "{description} cannot reserve {capacity} bytes at {relative}: {error}"
+        ))
+    })?;
+    let file: File = opened.into();
+    file.take(MAX_SOURCE_FILE_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            invalid_data(format!(
+                "{description} cannot be read at {relative}: {error}"
+            ))
+        })?;
+    let actual_size = u64::try_from(bytes.len())
+        .map_err(|_| invalid_data(format!("{description} is too large at {relative}")))?;
+    if actual_size > MAX_SOURCE_FILE_SIZE {
+        return Err(invalid_data(format!(
+            "{description} grew beyond the {MAX_SOURCE_FILE_SIZE}-byte source-file limit while reading {relative}"
+        )));
+    }
+    if actual_size != declared_size {
+        return Err(invalid_data(format!(
+            "{description} changed size while reading {relative}: declared {declared_size} bytes, read {actual_size} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
 fn read_fixture_relative(
     root: &CatalogRoot,
     relative: &str,
     description: &str,
 ) -> Result<Vec<u8>, io::Error> {
-    let mut file: File = open_fixture_relative(root, relative, description, false)?.into();
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| {
-        invalid_data(format!(
-            "{description} cannot be read at {relative}: {error}"
-        ))
-    })?;
-    Ok(bytes)
+    let opened = open_fixture_relative(root, relative, description, false)?;
+    let declared_size = fixture_file_size(&opened, relative, description)?;
+    read_opened_fixture(opened, declared_size, relative, description)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -644,12 +707,14 @@ fn expected_source_paths(
     );
     for profile in profiles {
         paths.insert(profile.profile.clone());
-        paths.insert(profile.provider_manifest.relative.clone());
-        for fixture in &profile.fixtures {
-            paths.insert(fixture.schema.relative.clone());
-            paths.insert(fixture.input.relative.clone());
-            paths.insert(fixture.expected.relative.clone());
-            paths.insert(fixture.oracle.relative.clone());
+        for provider in &profile.fixture_providers {
+            paths.insert(provider.manifest.relative.clone());
+            for fixture in &provider.fixtures {
+                paths.insert(fixture.schema.relative.clone());
+                paths.insert(fixture.input.relative.clone());
+                paths.insert(fixture.expected.relative.clone());
+                paths.insert(fixture.oracle.relative.clone());
+            }
         }
     }
     paths
@@ -663,13 +728,47 @@ fn source_snapshots(root: &CatalogRoot) -> Result<SourceSnapshots, io::Error> {
             "SHA-256 source inventory must not declare itself",
         ));
     }
-    let sources = sha256_entries
-        .keys()
-        .map(|relative| {
-            read_fixture_relative(root, relative, "SHA-256 inventoried source")
-                .map(|bytes| (relative.clone(), bytes))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    if sha256_entries.len() > MAX_SOURCE_FILE_COUNT {
+        return Err(invalid_data(format!(
+            "SHA-256 source inventory exceeds the {MAX_SOURCE_FILE_COUNT}-file limit: {} files",
+            sha256_entries.len()
+        )));
+    }
+    let mut declared_total_size = 0_u64;
+    for relative in sha256_entries.keys() {
+        let opened = open_fixture_relative(root, relative, "SHA-256 inventoried source", false)?;
+        let declared_size = fixture_file_size(&opened, relative, "SHA-256 inventoried source")?;
+        declared_total_size = declared_total_size
+            .checked_add(declared_size)
+            .ok_or_else(|| invalid_data("SHA-256 inventoried source size total overflowed"))?;
+        if declared_total_size > MAX_SOURCE_TOTAL_SIZE {
+            return Err(invalid_data(format!(
+                "SHA-256 inventoried sources exceed the {MAX_SOURCE_TOTAL_SIZE}-byte cumulative limit"
+            )));
+        }
+    }
+    let mut retained_total_size = 0_u64;
+    let mut sources = BTreeMap::new();
+    for relative in sha256_entries.keys() {
+        let opened = open_fixture_relative(root, relative, "SHA-256 inventoried source", false)?;
+        let declared_size = fixture_file_size(&opened, relative, "SHA-256 inventoried source")?;
+        let next_total_size = retained_total_size
+            .checked_add(declared_size)
+            .ok_or_else(|| invalid_data("SHA-256 inventoried source size total overflowed"))?;
+        if next_total_size > MAX_SOURCE_TOTAL_SIZE {
+            return Err(invalid_data(format!(
+                "SHA-256 inventoried sources exceed the {MAX_SOURCE_TOTAL_SIZE}-byte cumulative limit"
+            )));
+        }
+        let bytes = read_opened_fixture(
+            opened,
+            declared_size,
+            relative,
+            "SHA-256 inventoried source",
+        )?;
+        retained_total_size = next_total_size;
+        sources.insert(relative.clone(), bytes);
+    }
     let blake3_bytes = sources
         .get("BLAKE3SUMS")
         .ok_or_else(|| invalid_data("SHA-256 source inventory omits BLAKE3SUMS"))?;
@@ -953,16 +1052,13 @@ fn relative_asset(
 
 fn profile_fixtures(
     snapshots: &SourceSnapshots,
-    profile_value: &Value,
+    fixtures: &[&Value],
     provider_value: &Value,
     provider: &FixtureProvider,
     provider_schemas: &serde_json::Map<String, Value>,
     family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
     claim_layer: &str,
 ) -> Result<Vec<FixturePaths>, io::Error> {
-    let fixtures = json_field(profile_value, "fixtures")?
-        .as_array()
-        .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?;
     fixtures
         .iter()
         .zip(CatalogFixtureFamily::ALL)
@@ -1035,46 +1131,152 @@ fn profile_paths(
     let subject_adapter = json_text(&profile_value, "subject_adapter")?;
     let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
     let fixture_root = json_text(&profile_value, "fixture_root")?;
-    let provider_manifest = relative_asset(snapshots, &profile_value, "fixture_provider_manifest")?;
-    let provider_value: Value = serde_json::from_slice(&provider_manifest.bytes)?;
-    validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
-    let fixture_provider = fixture_provider(&provider_value)?;
-    let provider_schemas = json_field(&provider_value, "schemas")?
-        .as_object()
-        .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
+    let provider_declarations = json_field(&profile_value, "fixture_providers")?
+        .as_array()
+        .ok_or_else(|| invalid_data("profile catalog fixture_providers must be an array"))?;
+    if provider_declarations.is_empty() {
+        return Err(invalid_data("profile catalog fixture_providers must not be empty").into());
+    }
     let wire_code = json_field(&profile_value, "wire_code")?
         .as_u64()
         .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
     let fixture_records = json_field(&profile_value, "fixtures")?
         .as_array()
         .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?;
-    if fixture_records.len() != FIXTURES_PER_PROFILE {
+    let fixtures_by_case_id = fixture_records
+        .iter()
+        .map(|fixture| json_text(fixture, "case_id").map(|case_id| (case_id, fixture)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    if fixtures_by_case_id.len() != fixture_records.len() {
         return Err(invalid_data(format!(
-            "profile manifest {profile} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
-            fixture_records.len()
+            "profile manifest {profile} contains duplicate fixture case IDs"
         ))
         .into());
     }
-    let fixtures = profile_fixtures(
-        snapshots,
-        &profile_value,
-        &provider_value,
-        &fixture_provider,
-        provider_schemas,
-        family_contract,
-        &claim_layer,
-    )?;
+    let mut assigned_case_ids = BTreeSet::new();
+    let fixture_providers = provider_declarations
+        .iter()
+        .map(|declaration| {
+            let manifest = relative_asset(snapshots, declaration, "manifest")?;
+            let provider_value: Value = serde_json::from_slice(&manifest.bytes).map_err(|error| {
+                invalid_data(format!(
+                    "fixture provider manifest {} is invalid: {error}",
+                    manifest.relative
+                ))
+            })?;
+            validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
+            let provider = fixture_provider(&provider_value)?;
+            let provider_schemas = json_field(&provider_value, "schemas")?
+                .as_object()
+                .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
+            let fixture_case_ids = json_field(declaration, "fixture_case_ids")?
+                .as_array()
+                .ok_or_else(|| invalid_data("fixture provider fixture_case_ids must be an array"))?
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_owned).ok_or_else(|| {
+                        invalid_data("fixture provider fixture_case_ids must contain strings")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if fixture_case_ids.len() != FIXTURES_PER_PROFILE {
+                return Err(invalid_data(format!(
+                    "profile manifest {profile} provider {} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
+                    provider.provider_id,
+                    fixture_case_ids.len()
+                )));
+            }
+            let fixtures = fixture_case_ids
+                .iter()
+                .map(|case_id| {
+                    if !assigned_case_ids.insert(case_id.clone()) {
+                        return Err(invalid_data(format!(
+                            "profile manifest {profile} assigns fixture {case_id} to multiple providers"
+                        )));
+                    }
+                    fixtures_by_case_id.get(case_id).copied().ok_or_else(|| {
+                        invalid_data(format!(
+                            "profile manifest {profile} provider {} references undeclared fixture {case_id}",
+                            provider.provider_id
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            profile_fixtures(
+                snapshots,
+                &fixtures,
+                &provider_value,
+                &provider,
+                provider_schemas,
+                family_contract,
+                &claim_layer,
+            )
+            .map(|fixtures| ProfileFixtureProvider {
+                provider,
+                manifest,
+                fixtures,
+            })
+        })
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    if assigned_case_ids.len() != fixture_records.len() {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} has fixtures that are not owned by a declared provider"
+        ))
+        .into());
+    }
+    let mut provider_keys = fixture_providers
+        .iter()
+        .map(|entry| {
+            (
+                entry.provider.provider_id.as_str(),
+                entry.provider.contract_version.as_str(),
+                entry.provider.abi_major,
+                entry.provider.abi_minor,
+            )
+        })
+        .collect::<Vec<_>>();
+    let declared_provider_keys = provider_keys.clone();
+    provider_keys.sort_unstable();
+    provider_keys.dedup();
+    if provider_keys.len() != fixture_providers.len() {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} contains duplicate fixture provider keys"
+        ))
+        .into());
+    }
+    if provider_keys != declared_provider_keys {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} fixture providers are not in canonical provider-key order"
+        ))
+        .into());
+    }
     let bundle_modes = json_field(&profile_value, "bundle_modes")?;
     let execution_profiles = json_field(&profile_value, "execution_profiles")?;
-    if fixture_root != claim_layer
-        || wire_code != catalog_claim_layer.wire_code()
-        || bundle_modes != &serde_json::json!(["local", "air-gapped"])
-        || execution_profiles
-            != &serde_json::json!(["deterministic-local-v1", "deterministic-air-gapped-v1"])
-    {
+    if fixture_root != claim_layer {
         return Err(invalid_data(format!(
-            "profile manifest {profile} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
-            fixtures.len()
+            "profile manifest {profile} fixture_root must match claim_layer {claim_layer}, found {fixture_root}"
+        ))
+        .into());
+    }
+    let expected_wire_code = catalog_claim_layer.wire_code();
+    if wire_code != expected_wire_code {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} wire_code must be {expected_wire_code}, found {wire_code}"
+        ))
+        .into());
+    }
+    let expected_bundle_modes = serde_json::json!(["local", "air-gapped"]);
+    if bundle_modes != &expected_bundle_modes {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} bundle_modes must be {expected_bundle_modes}, found {bundle_modes}"
+        ))
+        .into());
+    }
+    let expected_execution_profiles =
+        serde_json::json!(["deterministic-local-v1", "deterministic-air-gapped-v1"]);
+    if execution_profiles != &expected_execution_profiles {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} execution_profiles must be {expected_execution_profiles}, found {execution_profiles}"
         ))
         .into());
     }
@@ -1085,9 +1287,7 @@ fn profile_paths(
         claim_layer: catalog_claim_layer,
         subject_adapter: catalog_subject_adapter,
         profile_record,
-        fixture_provider,
-        provider_manifest,
-        fixtures,
+        fixture_providers,
     })
 }
 
@@ -1365,60 +1565,68 @@ fn emit_profile(
     )?;
     writeln!(
         generated,
-        "                fixture_provider: FixtureProvider {{"
-    )?;
-    writeln!(
-        generated,
-        "                    provider_id: {:?},",
-        profile.fixture_provider.provider_id
-    )?;
-    writeln!(
-        generated,
-        "                    contract_version: {:?},",
-        profile.fixture_provider.contract_version
-    )?;
-    writeln!(
-        generated,
-        "                    abi_major: {},",
-        profile.fixture_provider.abi_major
-    )?;
-    writeln!(
-        generated,
-        "                    abi_minor: {},",
-        profile.fixture_provider.abi_minor
-    )?;
-    writeln!(
-        generated,
-        "                    package_path: {:?},",
-        profile.fixture_provider.package_path
-    )?;
-    writeln!(
-        generated,
-        "                    schema_media_type: {:?},",
-        profile.fixture_provider.schema_media_type
-    )?;
-    writeln!(
-        generated,
-        "                    payload_media_type: {:?},",
-        profile.fixture_provider.payload_media_type
-    )?;
-    writeln!(
-        generated,
-        "                    oracle_media_type: {:?},",
-        profile.fixture_provider.oracle_media_type
-    )?;
-    writeln!(generated, "                }},")?;
-    writeln!(
-        generated,
         "                profile_record: &{:?},",
         profile.profile_record
     )?;
-    writeln!(generated, "                fixtures: vec![")?;
-    for fixture_index in first_fixture_index..first_fixture_index + profile.fixtures.len() {
+    writeln!(generated, "                fixture_providers: vec![")?;
+    let mut fixture_index = first_fixture_index;
+    for entry in &profile.fixture_providers {
+        writeln!(generated, "                    CatalogFixtureProvider {{")?;
         writeln!(
             generated,
-            "                    catalog_fixture_{fixture_index}(),"
+            "                        provider: FixtureProvider {{"
         )?;
+        writeln!(
+            generated,
+            "                            provider_id: {:?},",
+            entry.provider.provider_id
+        )?;
+        writeln!(
+            generated,
+            "                            contract_version: {:?},",
+            entry.provider.contract_version
+        )?;
+        writeln!(
+            generated,
+            "                            abi_major: {},",
+            entry.provider.abi_major
+        )?;
+        writeln!(
+            generated,
+            "                            abi_minor: {},",
+            entry.provider.abi_minor
+        )?;
+        writeln!(
+            generated,
+            "                            package_path: {:?},",
+            entry.provider.package_path
+        )?;
+        writeln!(
+            generated,
+            "                            schema_media_type: {:?},",
+            entry.provider.schema_media_type
+        )?;
+        writeln!(
+            generated,
+            "                            payload_media_type: {:?},",
+            entry.provider.payload_media_type
+        )?;
+        writeln!(
+            generated,
+            "                            oracle_media_type: {:?},",
+            entry.provider.oracle_media_type
+        )?;
+        writeln!(generated, "                        }},")?;
+        writeln!(generated, "                        fixtures: vec![")?;
+        for current_index in fixture_index..fixture_index + entry.fixtures.len() {
+            writeln!(
+                generated,
+                "                            catalog_fixture_{current_index}(),"
+            )?;
+        }
+        fixture_index += entry.fixtures.len();
+        writeln!(generated, "                        ],")?;
+        writeln!(generated, "                    }},")?;
     }
     writeln!(generated, "                ],")?;
     writeln!(generated, "            }}\n}}")
@@ -1428,15 +1636,21 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
     let mut generated = String::new();
     let mut fixture_index = 0;
     for profile in profiles {
-        for fixture in &profile.fixtures {
-            emit_fixture(&mut generated, fixture, fixture_index)?;
-            fixture_index += 1;
+        for provider in &profile.fixture_providers {
+            for fixture in &provider.fixtures {
+                emit_fixture(&mut generated, fixture, fixture_index)?;
+                fixture_index += 1;
+            }
         }
     }
     let mut first_fixture_index = 0;
     for (profile_index, profile) in profiles.iter().enumerate() {
         emit_profile(&mut generated, profile, profile_index, first_fixture_index)?;
-        first_fixture_index += profile.fixtures.len();
+        first_fixture_index += profile
+            .fixture_providers
+            .iter()
+            .map(|provider| provider.fixtures.len())
+            .sum::<usize>();
     }
     generated.push_str(
         "fn layer_catalog() -> LayerCatalog {\n    LayerCatalog {\n        entries: vec![\n",

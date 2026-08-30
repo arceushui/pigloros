@@ -3,7 +3,18 @@
   "claim_layer": "replay-conformance",
   "wire_code": 1,
   "subject_adapter": "exported-artifact",
-  "fixture_provider_manifest": "providers/replay-conformance/provider.json",
+  "fixture_providers": [{
+    "manifest": "providers/replay-conformance/provider.json",
+    "fixture_case_ids": [
+      "replay-conformance-positive",
+      "replay-conformance-denied",
+      "replay-conformance-malformed",
+      "replay-conformance-resource-exhaustion",
+      "replay-conformance-deletion-redaction",
+      "replay-conformance-downgrade",
+      "replay-conformance-independent-evaluation"
+    ]
+  }],
   "fixture_root": "replay-conformance",
   "fixtures": [
     {

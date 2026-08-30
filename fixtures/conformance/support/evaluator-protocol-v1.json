@@ -1,0 +1,22 @@
+{
+  "magic": "EVP1",
+  "version": 1,
+  "protocol_id": "pigloros.evaluator.v1",
+  "digest_algorithm": "BLAKE3-256",
+  "digest_scope": "exact-member-bytes",
+  "offline_required": true,
+  "request_schema": {
+    "path": "support/evaluator-request-v1.cddl",
+    "media_type": "text/plain",
+    "role": "schema",
+    "wire_magic": "EVR1",
+    "wire_version": 1
+  },
+  "report_schema": {
+    "path": "support/evaluator-report-v1.cddl",
+    "media_type": "text/plain",
+    "role": "schema",
+    "wire_magic": "CNR1",
+    "wire_version": 1
+  }
+}

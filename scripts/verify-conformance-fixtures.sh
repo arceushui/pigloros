@@ -217,9 +217,10 @@ for layer in "${profile_layers[@]}"; do
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
     --argjson family_names "${family_names}" \
     --argjson family_count "${family_count}" \
-    '((keys | sort) == (([
+    '. as $profile |
+     ((keys | sort) == (([
         "authority_inventory", "authority_inventory_sha256_digest", "bundle_modes",
-        "claim_layer", "execution_profiles", "fixture_provider_manifest", "fixture_root",
+        "claim_layer", "execution_profiles", "fixture_providers", "fixture_root",
         "fixtures", "profile_id", "subject_adapter", "wire_code"
       ] + (if $layer == "knowledge-non-interference" then [
         "adr_059_execution_matrix", "adr_059_execution_matrix_blake3_digest",
@@ -230,13 +231,23 @@ for layer in "${profile_layers[@]}"; do
       (.subject_adapter | type == "string" and length > 0) and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
-      (.fixtures | length == $family_count) and
+      (.fixture_providers | type == "array" and length > 0) and
+      all(.fixture_providers[];
+        (keys | sort) == (["fixture_case_ids", "manifest"] | sort) and
+        (.manifest | type == "string" and startswith("providers/") and endswith("/provider.json")) and
+        (.fixture_case_ids | type == "array" and length == $family_count and
+          all(.[]; type == "string" and length > 0) and
+          (unique | length) == length)) and
+      ([.fixture_providers[].fixture_case_ids[]] | sort) == ([.fixtures[].case_id] | sort) and
+      ([.fixture_providers[].fixture_case_ids[]] | unique | length) == ([.fixtures[].case_id] | length) and
+      (.fixtures | length >= $family_count and length % $family_count == 0) and
       all(.fixtures[];
         (keys | sort) == (["case_id", "claim_layer", "expected", "family", "input", "oracle", "schema"] | sort)) and
       all(.fixtures[]; .claim_layer == $layer) and
       all(.fixtures[]; .schema == ("providers/" + $layer + "/schemas/" + .family + ".schema.json")) and
-      [.fixtures[].family] == $family_names and
-      .fixture_provider_manifest == ("providers/" + $layer + "/provider.json") and
+      all(.fixture_providers[];
+        . as $provider |
+        [$provider.fixture_case_ids[] as $case_id | $profile.fixtures[] | select(.case_id == $case_id) | .family] == $family_names) and
       (if $layer == "knowledge-non-interference" then
         .adr_059_execution_matrix == $matrix and
         .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
@@ -254,12 +265,13 @@ for layer in "${profile_layers[@]}"; do
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
   }
-  provider_manifest="${fixture_root}/$(jq -r '.fixture_provider_manifest' "${profile}")"
-  [[ -s "${provider_manifest}" ]] || {
-    echo "missing provider manifest for ${layer}" >&2
-    exit 1
-  }
-  jq -e --arg layer "${layer}" --argjson family_names "${family_names}" --argjson family_count "${family_count}" \
+  while IFS= read -r provider_relative; do
+    provider_manifest="${fixture_root}/${provider_relative}"
+    [[ -s "${provider_manifest}" ]] || {
+      echo "missing provider manifest for ${layer}: ${provider_relative}" >&2
+      exit 1
+    }
+    jq -e --arg layer "${layer}" --argjson family_names "${family_names}" --argjson family_count "${family_count}" \
     '(keys | sort) == ([
        "abi_major", "abi_minor", "artifact_media_types", "claim_layer", "contract_version", "fixture_contracts",
        "fixture_operations", "fixture_payloads", "package_path", "provider_id", "schemas",
@@ -297,20 +309,28 @@ for layer in "${profile_layers[@]}"; do
        all(.minimum_capability_ids[]; type == "string" and length > 0) and
        (.minimum_capability_ids == (.minimum_capability_ids | unique | sort))
      )' "${provider_manifest}" >/dev/null || {
-    echo "invalid provider manifest for ${layer}" >&2
-    exit 1
-  }
-  subject_adapter="$(jq -r '.subject_adapter' "${provider_manifest}")"
-  jq -e --arg subject_adapter "${subject_adapter}" '.subject_adapter == $subject_adapter' "${profile}" >/dev/null || {
-    echo "profile subject adapter does not match its provider manifest: ${layer}" >&2
-    exit 1
-  }
+      echo "invalid provider manifest for ${layer}: ${provider_relative}" >&2
+      exit 1
+    }
+    subject_adapter="$(jq -r '.subject_adapter' "${provider_manifest}")"
+    jq -e --arg subject_adapter "${subject_adapter}" '.subject_adapter == $subject_adapter' "${profile}" >/dev/null || {
+      echo "profile subject adapter does not match provider ${provider_relative}: ${layer}" >&2
+      exit 1
+    }
+  done < <(jq -r '.fixture_providers[].manifest' "${profile}")
   while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path oracle_path; do
     family_metadata="$(jq -ce --arg family "${family}" '.families[] | select(.name == $family)' "${family_contract}")" || {
       echo "profile declares an unknown fixture family: ${case_id}" >&2
       exit 1
     }
     [[ -n "${family_metadata}" ]] || exit 1
+    provider_relative="$(jq -r --arg case_id "${case_id}" '.fixture_providers[] | select(.fixture_case_ids | index($case_id)) | .manifest' "${profile}")"
+    provider_manifest="${fixture_root}/${provider_relative}"
+    declared_schema="$(jq -r --arg family "${family}" '.schemas[$family]' "${provider_manifest}")"
+    [[ "${schema_path}" == "${declared_schema}" ]] || {
+      echo "fixture schema is not owned by its declared provider: ${case_id}" >&2
+      exit 1
+    }
     for path in "${schema_path}" "${input_path}" "${expected_path}" "${oracle_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
         echo "unsafe profile fixture path for ${layer}: ${path}" >&2

@@ -13,7 +13,10 @@ source_inventory="fixtures/conformance/SHA256SUMS"
 }
 (cd fixtures/conformance && sha256sum --check --strict SHA256SUMS)
 
-: "${PIGLOROS_CONFORMANCE_SIGNING_KEY:?materialization requires a non-repository signing key}"
+: "${PIGLOROS_CONFORMANCE_SIGNING_KEY:?Draft materialization requires the public deterministic repository test-fixture signing key}"
+# This public deterministic key proves fixture reproducibility and internal
+# consistency only. It provides neither authenticity nor Candidate publication
+# authority; #198 owns Candidate publication and its trust policy.
 source_digest="$(sha256sum "${source_inventory}" | awk '{print $1}')"
 publication_parent="${1:-fixtures/conformance/published}"
 output_root="${publication_parent}/${source_digest}"

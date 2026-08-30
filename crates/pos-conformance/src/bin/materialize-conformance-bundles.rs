@@ -268,6 +268,17 @@ struct FixtureProvider {
     oracle_media_type: &'static str,
 }
 
+impl FixtureProvider {
+    fn key(&self) -> FixtureProviderKeyV1 {
+        FixtureProviderKeyV1 {
+            provider_id: self.provider_id.to_owned(),
+            contract_version: self.contract_version.to_owned(),
+            abi_major: self.abi_major,
+            abi_minor: self.abi_minor,
+        }
+    }
+}
+
 struct CatalogFixtureContract {
     deterministic_budget: DeterministicBudgetV1,
     watchdog_ms: u64,
@@ -302,8 +313,12 @@ struct LayerCatalogEntry {
     claim_layer: ClaimLayerV1,
     profile_id: &'static str,
     subject_adapter: SubjectAdapterKindV1,
-    fixture_provider: FixtureProvider,
     profile_record: &'static [u8],
+    fixture_providers: Vec<CatalogFixtureProvider>,
+}
+
+struct CatalogFixtureProvider {
+    provider: FixtureProvider,
     fixtures: Vec<CatalogFixture>,
 }
 
@@ -358,10 +373,13 @@ struct ProviderCatalog {
 }
 
 impl ProviderCatalog {
-    fn binding_for(&self, provider_key: FixtureProviderKeyV1) -> FixtureProviderRegistryBindingV1 {
+    fn binding_for(
+        &self,
+        required_provider_keys: Vec<FixtureProviderKeyV1>,
+    ) -> FixtureProviderRegistryBindingV1 {
         FixtureProviderRegistryBindingV1 {
             registry_artifact: self.registry.descriptor(),
-            required_provider_keys: vec![provider_key],
+            required_provider_keys,
         }
     }
 
@@ -398,7 +416,16 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
     catalog
         .entries
         .iter()
-        .map(|layer| provider_package(layer, &package_support))
+        .flat_map(|layer| {
+            layer.fixture_providers.iter().map(|provider| {
+                provider_package(
+                    layer.claim_layer,
+                    layer.subject_adapter,
+                    provider,
+                    &package_support,
+                )
+            })
+        })
         .collect::<Result<Vec<_>, _>>()
         .map(|mut packages| {
             packages.sort_by(|left, right| left.provider_key.cmp(&right.provider_key));
@@ -458,16 +485,13 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
 }
 
 fn provider_package(
-    layer: &LayerCatalogEntry,
+    claim_layer: ClaimLayerV1,
+    subject_adapter: SubjectAdapterKindV1,
+    catalog_provider: &CatalogFixtureProvider,
     package_support: &[PublicArtifact],
 ) -> Result<ProviderPackage, Box<dyn Error>> {
-    let provider_key = FixtureProviderKeyV1 {
-        provider_id: layer.fixture_provider.provider_id.to_owned(),
-        contract_version: layer.fixture_provider.contract_version.to_owned(),
-        abi_major: layer.fixture_provider.abi_major,
-        abi_minor: layer.fixture_provider.abi_minor,
-    };
-    let schemas = provider_schema_artifacts(layer);
+    let provider_key = catalog_provider.provider.key();
+    let schemas = provider_schema_artifacts(catalog_provider);
     let support = |path| {
         package_support
             .iter()
@@ -481,11 +505,16 @@ fn provider_package(
     let limitations = support("support/limitations.md")?;
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
-        claim_layer: layer.claim_layer,
-        subject_adapter: layer.subject_adapter,
+        claim_layer,
+        subject_adapter,
         family_schemas: schemas
             .iter()
-            .zip(layer.fixtures.iter().map(|fixture| fixture.family))
+            .zip(
+                catalog_provider
+                    .fixtures
+                    .iter()
+                    .map(|fixture| fixture.family),
+            )
             .map(|(schema, family)| ProviderFamilySchemaV1 {
                 family,
                 schema_descriptor: schema.descriptor(),
@@ -508,11 +537,11 @@ fn provider_package(
                 .map_err(Box::<dyn Error>::from)
                 .map(|package_bytes| ProviderPackage {
                     provider_key,
-                    claim_layer: layer.claim_layer,
-                    subject_adapter: layer.subject_adapter,
+                    claim_layer,
+                    subject_adapter,
                     schemas,
                     artifact: public_artifact(
-                        layer.fixture_provider.package_path,
+                        catalog_provider.provider.package_path,
                         "application/cbor",
                         &package_bytes,
                     ),
@@ -520,14 +549,14 @@ fn provider_package(
         })
 }
 
-fn provider_schema_artifacts(layer: &LayerCatalogEntry) -> Vec<PublicArtifact> {
-    layer
+fn provider_schema_artifacts(catalog_provider: &CatalogFixtureProvider) -> Vec<PublicArtifact> {
+    catalog_provider
         .fixtures
         .iter()
         .map(|fixture| {
             public_artifact(
                 fixture.schema_path,
-                layer.fixture_provider.schema_media_type,
+                catalog_provider.provider.schema_media_type,
                 fixture.schema,
             )
         })
@@ -893,8 +922,9 @@ fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> Fi
     }
 }
 
-fn fixtures_for_layer(
+fn fixtures_for_provider(
     layer: &LayerCatalogEntry,
+    catalog_provider: &CatalogFixtureProvider,
     context: &FixtureContext,
     provider_key: &FixtureProviderKeyV1,
 ) -> Result<Vec<FixtureDescriptorV1>, Box<dyn Error>> {
@@ -903,7 +933,7 @@ fn fixtures_for_layer(
         .map(execution_profile_digest)
         .collect::<Result<Vec<_>, _>>()
         .and_then(|execution_profiles| {
-            layer
+            catalog_provider
                 .fixtures
                 .iter()
                 .flat_map(|fixture| {
@@ -917,6 +947,7 @@ fn fixtures_for_layer(
                 .map(|(fixture, digest, mode)| {
                     fixture_descriptor_from_record(
                         layer,
+                        catalog_provider,
                         fixture,
                         context,
                         provider_key,
@@ -945,61 +976,79 @@ fn profile_from_catalog(
     providers: &ProviderCatalog,
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
     let context = fixture_context(layer.profile_record, layer.claim_layer);
-    let provider_key = FixtureProviderKeyV1 {
-        provider_id: layer.fixture_provider.provider_id.to_owned(),
-        contract_version: layer.fixture_provider.contract_version.to_owned(),
-        abi_major: layer.fixture_provider.abi_major,
-        abi_minor: layer.fixture_provider.abi_minor,
-    };
-    fixtures_for_layer(layer, &context, &provider_key).and_then(|fixtures| {
-        DRAFT_EXECUTION_PROFILES
-            .iter()
-            .map(execution_profile_digest)
-            .collect::<Result<Vec<_>, _>>()
-            .and_then(|mut execution_profile_digests| {
-                execution_profile_digests.sort_unstable();
-                trust_policy_snapshot_digest().map(|snapshot_digest| {
-                    let execution_matrix_digest =
-                        *blake3::hash(MATERIALIZATION_EXECUTION_MATRIX_BYTES).as_bytes();
-                    let mut profile = ConformanceProfileV1 {
-                        profile_id: layer.profile_id.to_owned(),
-                        semantic_version: "1.0.0".to_owned(),
-                        lifecycle: ProfileLifecycleV1::Draft,
-                        normative_spec_digest: context.normative_spec_digest,
-                        execution_matrix_digest,
-                        execution_profile_digests,
-                        fixture_provider_registry: providers.binding_for(provider_key),
-                        fixtures,
-                        allowed_divergences: Vec::new(),
-                        evaluator_protocol: evaluator_protocol(context.profile_record_digest),
-                        independence_requirements: IndependenceRequirementsV1 {
-                            technical_independence_required: true,
-                            authorship_independence_required: true,
-                            organizational_independence_required: false,
-                            trust_policy_snapshot_digest: snapshot_digest,
-                            requirements_digest: labeled_digest(
-                                "PiglorOS.IndependenceRequirements.v1",
-                                layer.profile_record,
-                            ),
-                        },
-                        fixture_contract_policy_digest: *blake3::hash(
-                            MATERIALIZATION_SUPPORT_FIXTURE_FAMILY_CONTRACT_JSON_BYTES,
-                        )
-                        .as_bytes(),
-                        limitations_digest: context.limitations_digest,
-                        provenance_digest: context.publication_review_digest,
-                        previous_profile_digest: None,
-                        profile_digest: [0; 32],
-                    };
-                    profile.profile_digest = profile.digest();
-                    profile
+    let provider_keys = layer
+        .fixture_providers
+        .iter()
+        .map(|provider| provider.provider.key())
+        .collect::<Vec<_>>();
+    layer
+        .fixture_providers
+        .iter()
+        .zip(&provider_keys)
+        .map(|(catalog_provider, provider_key)| {
+            fixtures_for_provider(layer, catalog_provider, &context, provider_key)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|provider_fixtures| provider_fixtures.into_iter().flatten().collect::<Vec<_>>())
+        .and_then(|mut fixtures| {
+            fixtures.sort_by_key(|fixture| {
+                (
+                    fixture.provider_key.clone(),
+                    fixture.family,
+                    fixture.case_id.clone(),
+                    fixture.execution_profile_digest,
+                    fixture.modes.clone(),
+                )
+            });
+            DRAFT_EXECUTION_PROFILES
+                .iter()
+                .map(execution_profile_digest)
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|mut execution_profile_digests| {
+                    execution_profile_digests.sort_unstable();
+                    trust_policy_snapshot_digest().map(|snapshot_digest| {
+                        let execution_matrix_digest =
+                            *blake3::hash(MATERIALIZATION_EXECUTION_MATRIX_BYTES).as_bytes();
+                        let mut profile = ConformanceProfileV1 {
+                            profile_id: layer.profile_id.to_owned(),
+                            semantic_version: "1.0.0".to_owned(),
+                            lifecycle: ProfileLifecycleV1::Draft,
+                            normative_spec_digest: context.normative_spec_digest,
+                            execution_matrix_digest,
+                            execution_profile_digests,
+                            fixture_provider_registry: providers.binding_for(provider_keys),
+                            fixtures,
+                            allowed_divergences: Vec::new(),
+                            evaluator_protocol: evaluator_protocol(),
+                            independence_requirements: IndependenceRequirementsV1 {
+                                technical_independence_required: true,
+                                authorship_independence_required: true,
+                                organizational_independence_required: false,
+                                trust_policy_snapshot_digest: snapshot_digest,
+                                requirements_digest: labeled_digest(
+                                    "PiglorOS.IndependenceRequirements.v1",
+                                    layer.profile_record,
+                                ),
+                            },
+                            fixture_contract_policy_digest: *blake3::hash(
+                                MATERIALIZATION_SUPPORT_FIXTURE_FAMILY_CONTRACT_JSON_BYTES,
+                            )
+                            .as_bytes(),
+                            limitations_digest: context.limitations_digest,
+                            provenance_digest: context.publication_review_digest,
+                            previous_profile_digest: None,
+                            profile_digest: [0; 32],
+                        };
+                        profile.profile_digest = profile.digest();
+                        profile
+                    })
                 })
-            })
-    })
+        })
 }
 
 fn fixture_descriptor_from_record(
     layer: &LayerCatalogEntry,
+    catalog_provider: &CatalogFixtureProvider,
     fixture: &CatalogFixture,
     context: &FixtureContext,
     provider_key: &FixtureProviderKeyV1,
@@ -1016,7 +1065,7 @@ fn fixture_descriptor_from_record(
     let evidence = artifact_descriptor(&evidence_path, "application/json", fixture.expected);
     let oracle_output = artifact_descriptor(
         &oracle_output_path,
-        layer.fixture_provider.oracle_media_type,
+        catalog_provider.provider.oracle_media_type,
         fixture.oracle,
     );
     let expectation = fixture_expectation(fixture, &oracle_output);
@@ -1061,12 +1110,12 @@ fn fixture_descriptor_from_record(
                 subject_adapter: layer.subject_adapter,
                 schema: artifact_descriptor(
                     fixture.schema_path,
-                    layer.fixture_provider.schema_media_type,
+                    catalog_provider.provider.schema_media_type,
                     fixture.schema,
                 ),
                 payload: artifact_descriptor(
                     &payload_path,
-                    layer.fixture_provider.payload_media_type,
+                    catalog_provider.provider.payload_media_type,
                     fixture.input,
                 ),
                 auxiliary,
@@ -1180,18 +1229,17 @@ fn evidence_status_member_path(case_id: &str, execution_profile_digest: &[u8; 32
     )
 }
 
-fn evaluator_protocol(profile_record_digest: [u8; 32]) -> EvaluatorProtocolV1 {
+fn evaluator_protocol() -> EvaluatorProtocolV1 {
     EvaluatorProtocolV1 {
         protocol_id: "pigloros.evaluator.v1".to_owned(),
-        protocol_digest: labeled_digest("PiglorOS.EvaluatorProtocol.v1", &profile_record_digest),
-        request_schema_digest: labeled_digest(
-            "PiglorOS.EvaluatorRequestSchema.v1",
-            &profile_record_digest,
-        ),
-        report_schema_digest: labeled_digest(
-            "PiglorOS.EvaluatorReportSchema.v1",
-            &profile_record_digest,
-        ),
+        protocol_digest: *blake3::hash(MATERIALIZATION_SUPPORT_EVALUATOR_PROTOCOL_V1_JSON_BYTES)
+            .as_bytes(),
+        request_schema_digest: *blake3::hash(
+            MATERIALIZATION_SUPPORT_EVALUATOR_REQUEST_V1_CDDL_BYTES,
+        )
+        .as_bytes(),
+        report_schema_digest: *blake3::hash(MATERIALIZATION_SUPPORT_EVALUATOR_REPORT_V1_CDDL_BYTES)
+            .as_bytes(),
         hard_caps: EvaluatorHardCapsV1 {
             max_profile_bytes: 16 * 1024 * 1024,
             max_cases: 65_536,
@@ -1225,7 +1273,11 @@ fn bundle_inputs_from_profile(
     let execution_mode = mode.execution_mode();
     let mut members = Vec::new();
     let mut expected_results = Vec::new();
-    for source in &layer.fixtures {
+    for source in layer
+        .fixture_providers
+        .iter()
+        .flat_map(|provider| &provider.fixtures)
+    {
         for fixture in profile
             .fixtures
             .iter()

@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "78c921e303096178a1065ae8528713b5cb345a7e145932a32772a1b896b4284a",
+  "input_blake3_digest": "e72ad5c313fb134936f80cfc127a671216b2b54d8e85cdf7c1f4443f49c6cffd",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

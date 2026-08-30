@@ -63,6 +63,12 @@ const FIXTURE_CONTRACT_POLICY_BYTES: &[u8] =
     include_bytes!("../../../fixtures/conformance/support/fixture-family-contract.json");
 const DRAFT_AUTHORITY_DECLARATION_BYTES: &[u8] =
     include_bytes!("../../../fixtures/conformance/support/draft-execution-authority.json");
+const EVALUATOR_PROTOCOL_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/evaluator-protocol-v1.json");
+const EVALUATOR_REQUEST_SCHEMA_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/evaluator-request-v1.cddl");
+const EVALUATOR_REPORT_SCHEMA_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/evaluator-report-v1.cddl");
 const SUPPORT_PACKAGE_MANIFEST_BYTES: &[u8] =
     include_bytes!("../../../fixtures/conformance/support/package-manifest.json");
 const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
@@ -351,9 +357,9 @@ fn current_profile(
         allowed_divergences: Vec::new(),
         evaluator_protocol: EvaluatorProtocolV1 {
             protocol_id: "pigloros.evaluator.v1".to_owned(),
-            protocol_digest: digest(51),
-            request_schema_digest: digest(52),
-            report_schema_digest: digest(53),
+            protocol_digest: *blake3::hash(EVALUATOR_PROTOCOL_BYTES).as_bytes(),
+            request_schema_digest: *blake3::hash(EVALUATOR_REQUEST_SCHEMA_BYTES).as_bytes(),
+            report_schema_digest: *blake3::hash(EVALUATOR_REPORT_SCHEMA_BYTES).as_bytes(),
             hard_caps: EvaluatorHardCapsV1 {
                 max_profile_bytes: 16 * 1024 * 1024,
                 max_cases: 64,
@@ -532,6 +538,21 @@ fn current_bundle_members(
             BundleMemberRoleV1::Schema,
         ),
         BundleMemberV1::supporting(
+            "support/evaluator-protocol-v1.json",
+            EVALUATOR_PROTOCOL_BYTES.to_vec(),
+            BundleMemberRoleV1::Schema,
+        ),
+        BundleMemberV1::supporting(
+            "support/evaluator-request-v1.cddl",
+            EVALUATOR_REQUEST_SCHEMA_BYTES.to_vec(),
+            BundleMemberRoleV1::Schema,
+        ),
+        BundleMemberV1::supporting(
+            "support/evaluator-report-v1.cddl",
+            EVALUATOR_REPORT_SCHEMA_BYTES.to_vec(),
+            BundleMemberRoleV1::Schema,
+        ),
+        BundleMemberV1::supporting(
             "support/fixture-family-contract.json",
             FIXTURE_CONTRACT_POLICY_BYTES.to_vec(),
             BundleMemberRoleV1::FixtureContractPolicy,
@@ -698,6 +719,18 @@ fn bundle_rejects_tampered_policy_and_authority_declaration() -> TestResult {
         (
             "support/draft-execution-authority.json",
             BundleMemberRoleV1::AuthorityDeclaration,
+        ),
+        (
+            "support/evaluator-protocol-v1.json",
+            BundleMemberRoleV1::Schema,
+        ),
+        (
+            "support/evaluator-request-v1.cddl",
+            BundleMemberRoleV1::Schema,
+        ),
+        (
+            "support/evaluator-report-v1.cddl",
+            BundleMemberRoleV1::Schema,
         ),
         ("support/package-manifest.json", BundleMemberRoleV1::Schema),
     ] {
@@ -1348,7 +1381,6 @@ enum ProviderRegistryMutation {
     InvalidProviderPackageLength,
     InvalidProviderPackageDigest,
     DuplicateProviderEntry,
-    InvalidProviderPackageRole,
 }
 
 impl ProviderRegistryMutation {
@@ -1371,12 +1403,11 @@ impl ProviderRegistryMutation {
             Self::InvalidProviderPackageLength => "invalid provider package length",
             Self::InvalidProviderPackageDigest => "invalid provider package digest",
             Self::DuplicateProviderEntry => "duplicate provider entry",
-            Self::InvalidProviderPackageRole => "invalid provider package role",
         }
     }
 }
 
-const PROVIDER_REGISTRY_MUTATIONS: [ProviderRegistryMutation; 18] = [
+const PROVIDER_REGISTRY_MUTATIONS: [ProviderRegistryMutation; 17] = [
     ProviderRegistryMutation::InvalidMagic,
     ProviderRegistryMutation::InvalidVersion,
     ProviderRegistryMutation::EmptyProviders,
@@ -1394,7 +1425,6 @@ const PROVIDER_REGISTRY_MUTATIONS: [ProviderRegistryMutation; 18] = [
     ProviderRegistryMutation::InvalidProviderPackageLength,
     ProviderRegistryMutation::InvalidProviderPackageDigest,
     ProviderRegistryMutation::DuplicateProviderEntry,
-    ProviderRegistryMutation::InvalidProviderPackageRole,
 ];
 
 #[derive(Clone, Copy)]
@@ -1686,15 +1716,6 @@ fn mutate_provider_registry_fields(
             )?;
             let duplicate = providers.first().ok_or("provider entry is absent")?.clone();
             providers.push(duplicate);
-            Ok(true)
-        }
-        ProviderRegistryMutation::InvalidProviderPackageRole => {
-            replace_value(
-                provider_package_descriptor(provider_registry_entry(fields)?)?,
-                ArtifactDescriptorField::Role.index(),
-                Value::Integer(999_u64.into()),
-                "provider package descriptor field",
-            )?;
             Ok(true)
         }
     }

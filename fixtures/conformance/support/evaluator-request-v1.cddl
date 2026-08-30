@@ -1,0 +1,37 @@
+# EVR1 evaluator request (deterministic, definite-length CBOR array)
+
+evaluator-request-v1 = [
+  magic: "EVR1",
+  version: 1,
+  request-id: identifier-16,
+  conformance-profile-digest: digest,
+  fixture-bundle-digest: digest,
+  subject-adapter: 0..2,
+  subject-artifact-digest: digest,
+  implementation: implementation-identity,
+  execution-profile-digest: digest,
+  trust-policy-snapshot-digest: digest,
+  output-capability: output-capability,
+  evaluator-protocol-digest: digest,
+  evaluator-hard-caps-digest: digest,
+  request-digest: digest
+]
+
+implementation-identity = [
+  implementation-id: identifier,
+  source-digest: digest,
+  build-digest: digest,
+  binary-digest: digest,
+  public-contract-digest: digest,
+  organization-id: null / identifier
+]
+
+output-capability = [
+  capability-digest: digest,
+  report-bytes-limit: uint .gt 0,
+  diagnostic-bytes-limit: uint
+]
+
+identifier = tstr .size (1..128)
+identifier-16 = bstr .size 16
+digest = bstr .size 32

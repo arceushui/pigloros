@@ -398,7 +398,7 @@ fn conformance_report_fixture() -> ConformanceReportV1 {
         provenance_digest: [12; 32],
         report_digest: [0; 32],
     };
-    report.report_digest = report.digest().unwrap_or([0; 32]);
+    report.report_digest = fixture_ok("compute conformance report digest", report.digest());
     report
 }
 
@@ -465,7 +465,31 @@ fn encode_value(value: &ciborium::Value) -> Vec<u8> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn decode_value(bytes: Vec<u8>) -> ciborium::Value {
-    ciborium::from_reader(std::io::Cursor::new(bytes)).unwrap_or(ciborium::Value::Null)
+    fixture_ok(
+        "decode canonical CBOR fixture value",
+        ciborium::from_reader(std::io::Cursor::new(bytes)),
+    )
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn fixture_ok<T, E: std::fmt::Debug>(context: &str, value: Result<T, E>) -> T {
+    value.unwrap_or_else(|error| panic!("{context}: {error:?}"))
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn array_fields(value: ciborium::Value, context: &str) -> Vec<ciborium::Value> {
+    match value {
+        ciborium::Value::Array(fields) => fields,
+        other => panic!("{context}: expected CBOR array, found {other:?}"),
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn cloned_array_fields(value: &ciborium::Value, context: &str) -> Vec<ciborium::Value> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("{context}: expected CBOR array, found {value:?}"))
+        .clone()
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -474,10 +498,7 @@ fn replace_field(
     index: usize,
     replacement: ciborium::Value,
 ) -> ciborium::Value {
-    let mut fields = match value {
-        ciborium::Value::Array(fields) => fields,
-        _ => Vec::new(),
-    };
+    let mut fields = array_fields(value, "replace top-level fixture field");
     fields[index] = replacement;
     ciborium::Value::Array(fields)
 }
@@ -489,10 +510,7 @@ fn replace_nested_field(
     inner: usize,
     replacement: ciborium::Value,
 ) -> ciborium::Value {
-    let mut fields = match value {
-        ciborium::Value::Array(fields) => fields,
-        _ => Vec::new(),
-    };
+    let mut fields = array_fields(value, "replace outer fixture field");
     let nested = fields.remove(outer);
     fields.insert(outer, replace_field(nested, inner, replacement));
     ciborium::Value::Array(fields)
@@ -503,17 +521,20 @@ fn replace_evidence_case_coordinate(
     evidence: &ciborium::Value,
     coordinate: ciborium::Value,
 ) -> ciborium::Value {
-    let mut evidence_fields = evidence.as_array().map_or_else(Vec::new, Clone::clone);
-    let mut contract_fields = evidence_fields[EvidenceField::Contract.index()]
-        .as_array()
-        .map_or_else(Vec::new, Clone::clone);
-    let mut report_fields = contract_fields[ContractField::Report.index()]
-        .as_array()
-        .map_or_else(Vec::new, Clone::clone);
-    let mut cases = report_fields[ReportField::Cases.index()]
-        .as_array()
-        .map_or_else(Vec::new, Clone::clone);
-    let mut case = cases[0].as_array().map_or_else(Vec::new, Clone::clone);
+    let mut evidence_fields = cloned_array_fields(evidence, "decode evidence fixture structure");
+    let mut contract_fields = cloned_array_fields(
+        &evidence_fields[EvidenceField::Contract.index()],
+        "decode proof-contract fixture structure",
+    );
+    let mut report_fields = cloned_array_fields(
+        &contract_fields[ContractField::Report.index()],
+        "decode conformance-report fixture structure",
+    );
+    let mut cases = cloned_array_fields(
+        &report_fields[ReportField::Cases.index()],
+        "decode conformance cases fixture structure",
+    );
+    let mut case = cloned_array_fields(&cases[0], "decode first conformance case structure");
     case[CaseField::FirstCoordinate.index()] = coordinate;
     cases[0] = ciborium::Value::Array(case);
     report_fields[ReportField::Cases.index()] = ciborium::Value::Array(cases);
@@ -804,10 +825,15 @@ fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
         }],
         report_digest: [0; 32],
     };
-    report.report_digest = report.digest().unwrap_or([0; 32]);
-    let report_bytes = report.to_canonical_cbor();
-    assert!(report_bytes.is_ok());
-    assert!(DivergenceReportV1::from_canonical_cbor(&report_bytes.unwrap_or_default()).is_ok());
+    report.report_digest = fixture_ok("compute divergence report digest", report.digest());
+    let report_bytes = fixture_ok(
+        "encode divergence report fixture",
+        report.to_canonical_cbor(),
+    );
+    fixture_ok(
+        "decode divergence report fixture",
+        DivergenceReportV1::from_canonical_cbor(&report_bytes),
+    );
 }
 
 #[test]

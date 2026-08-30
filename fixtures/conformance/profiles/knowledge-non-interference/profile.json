@@ -3,7 +3,18 @@
   "claim_layer": "knowledge-non-interference",
   "wire_code": 2,
   "subject_adapter": "exported-artifact",
-  "fixture_provider_manifest": "providers/knowledge-non-interference/provider.json",
+  "fixture_providers": [{
+    "manifest": "providers/knowledge-non-interference/provider.json",
+    "fixture_case_ids": [
+      "knowledge-non-interference-positive",
+      "knowledge-non-interference-denied",
+      "knowledge-non-interference-malformed",
+      "knowledge-non-interference-resource-exhaustion",
+      "knowledge-non-interference-deletion-redaction",
+      "knowledge-non-interference-downgrade",
+      "knowledge-non-interference-independent-evaluation"
+    ]
+  }],
   "fixture_root": "knowledge-non-interference",
   "fixtures": [
     {

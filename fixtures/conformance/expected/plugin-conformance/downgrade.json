@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "dbac48062f780ec52c0bb4d044151a2598d1bfa3389b120b18a29b55a751fdf7",
+  "input_blake3_digest": "e275ea861364cf959c0190a8eec28fc80e80d64bf177d5131bb50f9d121fe85d",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

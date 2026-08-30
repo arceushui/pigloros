@@ -34,6 +34,15 @@ const EXECUTION_MATRIX_PATH: &str = "authority/execution-matrix.json";
 const AUTHORITY_INVENTORY_PATH: &str = "authority/expected-authority-inventory.json";
 const TRUST_POLICY_SNAPSHOT_PATH: &str = "authority/trust-policy-snapshot.tps1";
 const PROFILE_SCHEMA_PATH: &str = "support/schema-cpf1-v1.cddl";
+const EVALUATOR_PROTOCOL_PATH: &str = "support/evaluator-protocol-v1.json";
+const EVALUATOR_REQUEST_SCHEMA_PATH: &str = "support/evaluator-request-v1.cddl";
+const EVALUATOR_REPORT_SCHEMA_PATH: &str = "support/evaluator-report-v1.cddl";
+const EVALUATOR_PROTOCOL_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/evaluator-protocol-v1.json");
+const EVALUATOR_REQUEST_SCHEMA_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/evaluator-request-v1.cddl");
+const EVALUATOR_REPORT_SCHEMA_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/evaluator-report-v1.cddl");
 const FIXTURE_CONTRACT_POLICY_PATH: &str = "support/fixture-family-contract.json";
 const LIMITATIONS_PATH: &str = "support/limitations.md";
 const SOURCE_PROVENANCE_PATH: &str = "support/source-provenance.json";
@@ -519,6 +528,7 @@ fn validate_profile_support_members(
                 }
             })
         })
+        .and_then(|()| validate_evaluator_support_members(profile, members))
         .and_then(|()| validate_fixture_provenance_members(profile, members))
         .and_then(|()| {
             member_by_role_and_path(
@@ -576,6 +586,43 @@ fn validate_profile_support_members(
                 }
             })
         })
+}
+
+fn validate_evaluator_support_members(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    [
+        (
+            EVALUATOR_PROTOCOL_PATH,
+            profile.evaluator_protocol.protocol_digest,
+            EVALUATOR_PROTOCOL_BYTES,
+        ),
+        (
+            EVALUATOR_REQUEST_SCHEMA_PATH,
+            profile.evaluator_protocol.request_schema_digest,
+            EVALUATOR_REQUEST_SCHEMA_BYTES,
+        ),
+        (
+            EVALUATOR_REPORT_SCHEMA_PATH,
+            profile.evaluator_protocol.report_schema_digest,
+            EVALUATOR_REPORT_SCHEMA_BYTES,
+        ),
+    ]
+    .into_iter()
+    .try_for_each(|(path, declared_digest, approved_bytes)| {
+        member_by_role_and_path(members, BundleMemberRoleV1::Schema, path).and_then(|member| {
+            let approved_digest = *blake3::hash(approved_bytes).as_bytes();
+            if member.bytes == approved_bytes
+                && member.digest == declared_digest
+                && declared_digest == approved_digest
+            {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            }
+        })
+    })
 }
 
 fn validate_execution_authority_members(
@@ -948,6 +995,9 @@ fn validate_member_closure(
         EXECUTION_MATRIX_PATH,
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
+        EVALUATOR_PROTOCOL_PATH,
+        EVALUATOR_REQUEST_SCHEMA_PATH,
+        EVALUATOR_REPORT_SCHEMA_PATH,
         SUPPORT_PACKAGE_MANIFEST_PATH,
         FIXTURE_CONTRACT_POLICY_PATH,
         "support/draft-execution-authority.json",

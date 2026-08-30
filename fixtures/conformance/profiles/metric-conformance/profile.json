@@ -3,7 +3,18 @@
   "claim_layer": "metric-conformance",
   "wire_code": 5,
   "subject_adapter": "exported-artifact",
-  "fixture_provider_manifest": "providers/metric-conformance/provider.json",
+  "fixture_providers": [{
+    "manifest": "providers/metric-conformance/provider.json",
+    "fixture_case_ids": [
+      "metric-conformance-positive",
+      "metric-conformance-denied",
+      "metric-conformance-malformed",
+      "metric-conformance-resource-exhaustion",
+      "metric-conformance-deletion-redaction",
+      "metric-conformance-downgrade",
+      "metric-conformance-independent-evaluation"
+    ]
+  }],
   "fixture_root": "metric-conformance",
   "fixtures": [
     {

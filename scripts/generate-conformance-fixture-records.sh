@@ -62,7 +62,7 @@ trap 'rm -rf "${generated_root}"' EXIT
 
 generated_count=0
 declare -A seen_expected_paths=()
-while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor encoded_payload operation; do
+while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor encoded_payload operation; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
@@ -71,8 +71,7 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
     echo "fixture paths must remain under inputs/, expected/, and oracles/: ${case_id}" >&2
     exit 1
   }
-  expected_schema_prefix="providers/${claim_layer}/schemas/"
-  [[ "${schema_path}" == "${expected_schema_prefix}${family}.schema.json" && "${schema_path}" != *".."* ]] || {
+  [[ "${schema_path}" == "${declared_schema_path}" && "${schema_path}" == providers/* && "${schema_path}" != *".."* ]] || {
     echo "fixture schema path must remain provider-owned: ${case_id}" >&2
     exit 1
   }
@@ -110,6 +109,21 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
       type == "object" and
       ((keys) - ["$schema", "additionalProperties", "const", "maximum", "minLength",
         "minimum", "pattern", "properties", "required", "type"] | length) == 0 and
+      ((has("type") | not) or
+        (.type == "array" or .type == "boolean" or .type == "integer" or
+         .type == "null" or .type == "number" or .type == "object" or
+         .type == "string")) and
+      ((has("required") | not) or
+        ((.required | type) == "array" and
+         all(.required[]; type == "string") and
+         ((.required | unique | length) == (.required | length)))) and
+      ((has("additionalProperties") | not) or
+        (.additionalProperties | type == "boolean")) and
+      ((has("minimum") | not) or (.minimum | type == "number")) and
+      ((has("maximum") | not) or (.maximum | type == "number")) and
+      ((has("minLength") | not) or
+        (.minLength | type == "number" and . >= 0 and floor == .)) and
+      ((has("pattern") | not) or (.pattern | type == "string")) and
       ((.properties // {}) | type == "object") and
       all((.properties // {})[]; supported_schema);
     supported_schema and
@@ -176,6 +190,60 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
       end
     ' > "${generated_input}"
 
+  if jq -e --slurpfile schema "${schema_file}" '
+    def has_json_type($expected):
+      if $expected == "integer" then
+        type == "number" and floor == .
+      else
+        type == $expected
+      end;
+    def validates($schema):
+      . as $value |
+      ((($schema | has("type")) | not) or has_json_type($schema.type)) and
+      ((($schema | has("const")) | not) or $value == $schema.const) and
+      ((($schema | has("minimum")) | not) or
+        (($value | type) != "number" or $value >= $schema.minimum)) and
+      ((($schema | has("maximum")) | not) or
+        (($value | type) != "number" or $value <= $schema.maximum)) and
+      ((($schema | has("minLength")) | not) or
+        (($value | type) != "string" or ($value | length) >= $schema.minLength)) and
+      ((($schema | has("pattern")) | not) or
+        (($value | type) != "string" or ($value | test($schema.pattern)))) and
+      ((($schema | has("required")) | not) or
+        (($value | type) != "object" or
+         all($schema.required[]; . as $required | $value | has($required)))) and
+      ((($schema | has("properties")) | not) or
+        (($value | type) != "object" or
+         all($schema.properties | to_entries[];
+           (.key as $key | .value as $property_schema |
+            (($value | has($key) | not) or
+             ($value[$key] | validates($property_schema))))))) and
+      ((if $schema | has("additionalProperties") then
+          $schema.additionalProperties
+        else
+          true
+        end) or
+        (($value | type) != "object" or
+         all($value | keys[];
+           . as $key | ($schema.properties // {}) | has($key))));
+    validates($schema[0])
+  ' "${generated_input}" >/dev/null; then
+    payload_matches_schema=true
+  else
+    payload_matches_schema=false
+  fi
+  if [[ "${family}" == "malformed" ]]; then
+    [[ "${payload_matches_schema}" == false ]] || {
+      echo "malformed fixture unexpectedly satisfies its provider schema: ${case_id}" >&2
+      exit 1
+    }
+  else
+    [[ "${payload_matches_schema}" == true ]] || {
+      echo "generated fixture does not satisfy its provider schema: ${case_id}" >&2
+      exit 1
+    }
+  fi
+
   input_blake3_digest="$(b3sum "${generated_input}" | awk '{print $1}')"
   if [[ "${oracle_kind}" == "canonical-output" ]]; then
     jq -c '{case_id,claim_layer,family,oracle:{kind:"canonical-output"},output:(.expected // {algorithm,expected_digest})}' \
@@ -213,18 +281,24 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
   generated_count=$((generated_count + 1))
 done < <(
   while IFS= read -r -d '' profile; do
-    provider_manifest="${fixture_root}/$(jq -r '.fixture_provider_manifest' "${profile}")"
-    jq -r --slurpfile provider "${provider_manifest}" '
-      $provider[0] as $provider |
-      .fixtures[] |
-      [
-        .case_id, .claim_layer, .family, .schema, .input, .expected, .oracle,
-        $provider.subject_adapter, $provider.provider_id, $provider.contract_version,
-        ($provider.abi_major | tostring), ($provider.abi_minor | tostring),
-        ($provider.fixture_payloads[.family] | @base64),
-        ($provider.fixture_operations[.family] // "")
-      ] | @tsv
-    ' "${profile}"
+    while IFS=$'\t' read -r provider_relative owned_case_ids; do
+      provider_manifest="${fixture_root}/${provider_relative}"
+      jq -r \
+        --argjson owned_case_ids "${owned_case_ids}" \
+        --slurpfile provider "${provider_manifest}" '
+        $provider[0] as $provider |
+        .fixtures[] |
+        select(.case_id as $case_id | $owned_case_ids | index($case_id)) |
+        [
+          .case_id, .claim_layer, .family, .schema, $provider.schemas[.family],
+          .input, .expected, .oracle,
+          $provider.subject_adapter, $provider.provider_id, $provider.contract_version,
+          ($provider.abi_major | tostring), ($provider.abi_minor | tostring),
+          ($provider.fixture_payloads[.family] | @base64),
+          ($provider.fixture_operations[.family] // "")
+        ] | @tsv
+      ' "${profile}"
+    done < <(jq -r '.fixture_providers[] | [.manifest, (.fixture_case_ids | tojson)] | @tsv' "${profile}")
   done < <(find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 | sort -z)
 )
 

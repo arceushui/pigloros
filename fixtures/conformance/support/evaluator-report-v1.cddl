@@ -1,0 +1,67 @@
+# CNR1 conformance report (deterministic, definite-length CBOR array)
+
+conformance-report-v1 = [
+  magic: "CNR1",
+  version: 1,
+  report-id: identifier-16,
+  subject-artifact-digest: digest,
+  profile-digest: digest,
+  normative-spec-digest: digest,
+  execution-profile-digest: digest,
+  fixture-bundle-digest: digest,
+  evaluator-source-digest: digest,
+  evaluator-binary-digest: digest,
+  evaluator-protocol-digest: digest,
+  implementation: implementation-identity,
+  independence: independence-evidence,
+  cases: [* case-outcome],
+  passed: uint,
+  failed: uint,
+  skipped: uint,
+  unavailable: uint,
+  not-applicable: uint,
+  replay-claim: 0..4,
+  redaction-state: 0..3,
+  limitations-digest: digest,
+  provenance-digest: digest,
+  report-digest: digest
+]
+
+implementation-identity = [
+  implementation-id: identifier,
+  source-digest: digest,
+  build-digest: digest,
+  binary-digest: digest,
+  public-contract-digest: digest,
+  organization-id: null / identifier
+]
+
+independence-evidence = [
+  technical-independent: bool,
+  authorship-independent: bool,
+  organizational-independent: bool,
+  declaration-digest: digest,
+  shared-code-audit-digest: digest,
+  reviewer-ids: [* identifier]
+]
+
+case-outcome = [
+  case-id: identifier,
+  fixture-digest: digest,
+  execution-profile-digest: digest,
+  mode: 0..3,
+  claim-layer: 0..6,
+  outcome: 0..4,
+  first-coordinate: null / bstr .size (1..128),
+  expected-digest: null / digest,
+  actual-digest: null / digest,
+  expected-error: null / 0..13,
+  actual-error: null / 0..13,
+  replay-claim: 0..4,
+  redaction-state: 0..3,
+  provenance-digest: digest
+]
+
+identifier = tstr .size (1..128)
+identifier-16 = bstr .size 16
+digest = bstr .size 32

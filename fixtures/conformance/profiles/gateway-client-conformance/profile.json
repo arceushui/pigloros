@@ -3,7 +3,18 @@
   "claim_layer": "gateway-client-conformance",
   "wire_code": 3,
   "subject_adapter": "public-gateway-protocol",
-  "fixture_provider_manifest": "providers/gateway-client-conformance/provider.json",
+  "fixture_providers": [{
+    "manifest": "providers/gateway-client-conformance/provider.json",
+    "fixture_case_ids": [
+      "gateway-client-conformance-positive",
+      "gateway-client-conformance-denied",
+      "gateway-client-conformance-malformed",
+      "gateway-client-conformance-resource-exhaustion",
+      "gateway-client-conformance-deletion-redaction",
+      "gateway-client-conformance-downgrade",
+      "gateway-client-conformance-independent-evaluation"
+    ]
+  }],
   "fixture_root": "gateway-client-conformance",
   "fixtures": [
     {

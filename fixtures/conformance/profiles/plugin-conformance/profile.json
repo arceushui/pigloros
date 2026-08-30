@@ -3,7 +3,18 @@
   "claim_layer": "plugin-conformance",
   "wire_code": 4,
   "subject_adapter": "public-plugin-protocol",
-  "fixture_provider_manifest": "providers/plugin-conformance/provider.json",
+  "fixture_providers": [{
+    "manifest": "providers/plugin-conformance/provider.json",
+    "fixture_case_ids": [
+      "plugin-conformance-positive",
+      "plugin-conformance-denied",
+      "plugin-conformance-malformed",
+      "plugin-conformance-resource-exhaustion",
+      "plugin-conformance-deletion-redaction",
+      "plugin-conformance-downgrade",
+      "plugin-conformance-independent-evaluation"
+    ]
+  }],
   "fixture_root": "plugin-conformance",
   "fixtures": [
     {
