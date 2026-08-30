@@ -891,6 +891,7 @@ fn coordinator_with_correction_provenance() -> Result<ErasureCoordinatorRecordV1
         receipts: Vec::new(),
         receipt_provenance: Vec::new(),
         administrative_resolutions: Vec::new(),
+        ..ErasureSupportingRecordsInputV1::default()
     })?;
     ErasureCoordinatorRecordV1::from_parts(
         ErasureCoordinatorRecordPartsV1 {

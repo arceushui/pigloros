@@ -432,15 +432,15 @@ pub(super) fn acknowledgement(
         replica_set: reference(owner + 30),
         replica_id: reference(owner + 40),
     };
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: reference(owner + 40),
+        command_identity: destruction_command_reference(reference(1), target),
+    })
+    .map_or(reference(0), |obligation| obligation.reference());
     ErasureAcknowledgementV1 {
-        obligation: ErasureObligationV1::new(ErasureObligationInputV1 {
-            category: ErasureInventoryCategoryV1::Artifact,
-            target,
-            owner: reference(owner + 40),
-            command_identity: destruction_command_reference(reference(1), target),
-        })
-        .expect("test obligation is valid")
-        .reference(),
+        obligation,
         target,
         owner: reference(owner + 40),
         evidence: reference(owner + 20),
@@ -665,29 +665,6 @@ pub(super) fn record_after_dispatch_intent(
         coordinator.dispatch_destruction(reference(1), reference(9)),
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
-    persisted
-        .load_record(reference(1))?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
-}
-
-pub(super) fn record_after_dispatch(
-    target: ErasureRequiredTargetV1,
-) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
-    let port = test_port(true, vec![target]);
-    let persisted = port.clone();
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
-    coordinator.submit(request()?, reference(3))?;
-    coordinator.authorize(reference(1), reference(9))?;
-    coordinator.freeze_inventory(
-        reference(1),
-        change(
-            ErasureLifecycleV1::AccessFrozen,
-            Some(10),
-            Vec::new(),
-            Vec::new(),
-        ),
-    )?;
-    coordinator.dispatch_destruction(reference(1), reference(9))?;
     persisted
         .load_record(reference(1))?
         .ok_or(ErasureErrorV1::ProvenanceMissing)
@@ -1918,12 +1895,6 @@ fn dispatch_intent_is_persisted_before_host_dispatch() -> Result<(), ErasureErro
 fn durable_record_envelope_round_trips_every_persisted_shape() -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let submitted = record_after_submit()?;
-    let authorized_state = submitted.state().transition(change(
-        ErasureLifecycleV1::Authorized,
-        None,
-        Vec::new(),
-        Vec::new(),
-    ))?;
     let records = [
         submitted,
         record_after_freeze(vec![target])?,
@@ -4239,6 +4210,7 @@ fn replacement_validation_accepts_idempotent_and_same_state_extensions(
     authorized_parts.state = authorized_state;
     authorized_parts.authorize_provenance = Some(reference(9));
     let authorized = ErasureCoordinatorRecordV1::from_parts(authorized_parts, reference(2))?;
+    assert_eq!(submitted.validate_replacement(&authorized), Ok(()));
 
     let frozen = record_after_freeze(vec![target])?;
     let intent = record_after_dispatch_intent(target)?;
