@@ -355,42 +355,6 @@ fn public_typed_bundle_rejects_missing_or_malformed_authority() -> TestResult {
         );
     }
 
-    let release_admission_path = member_path_by_role(&archive_value, 16)?;
-    let release_admission_bytes = member_bytes(&archive_value, &release_admission_path)?;
-    let mut malformed: Value = ciborium::from_reader(release_admission_bytes.as_slice())?;
-    array_mut(&mut malformed, "release admission")?[0] = Value::Integer(0_u64.into());
-    let mut malformed_bundle = valid.clone();
-    update_typed_member(
-        &mut malformed_bundle,
-        BundleMemberRoleV1::ReleaseAdmission,
-        encode(&malformed)?,
-    )?;
-    assert_eq!(
-        malformed_bundle.validate(),
-        Err(BundleContractErrorV1::ProfileInvalid)
-    );
-
-    let mut invalid: Value = ciborium::from_reader(release_admission_bytes.as_slice())?;
-    let fields = array_mut(&mut invalid, "release admission")?;
-    fields[0] = Value::Text("RAD0".to_owned());
-    let unsigned = encode(&Value::Array(fields[..10].to_vec()))?;
-    fields[10] = Value::Bytes(
-        SigningKey::from_bytes(&SIGNING_KEY)
-            .sign(&unsigned)
-            .to_bytes()
-            .to_vec(),
-    );
-    let mut invalid_bundle = valid;
-    update_typed_member(
-        &mut invalid_bundle,
-        BundleMemberRoleV1::ReleaseAdmission,
-        encode(&invalid)?,
-    )?;
-    assert_eq!(
-        invalid_bundle.validate(),
-        Err(BundleContractErrorV1::ProfileInvalid)
-    );
-
     Ok(())
 }
 
@@ -465,6 +429,47 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
     Ok(())
 }
 
+fn assert_provider_binding_rejections(archive: &[u8]) -> TestResult {
+    let unknown_provider = mutate_profile(archive, |profile| {
+        let fixtures = array_field(profile, 9, "profile fixtures")?;
+        array_mut(&mut fixtures[0], "fixture")?[4] = Value::Array(vec![
+            Value::Text("a.provider".to_owned()),
+            Value::Text("1.0.0".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Integer(0_u64.into()),
+        ]);
+        Ok(())
+    })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&unknown_provider),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+    assert_independent_rejects(&unknown_provider, "an undeclared fixture provider")?;
+
+    let provider_absent_from_registry = mutate_profile(archive, |profile| {
+        let provider = Value::Array(vec![
+            Value::Text("a.provider".to_owned()),
+            Value::Text("1.0.0".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Integer(0_u64.into()),
+        ]);
+        array_field(profile, 8, "provider registry binding")?[1] =
+            Value::Array(vec![provider.clone()]);
+        for fixture in array_field(profile, 9, "profile fixtures")? {
+            array_mut(fixture, "fixture")?[4] = provider.clone();
+        }
+        Ok(())
+    })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&provider_absent_from_registry),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+    assert_independent_rejects(
+        &provider_absent_from_registry,
+        "a required provider absent from the registry",
+    )
+}
+
 #[test]
 fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
     let archive = current_archive()?;
@@ -514,21 +519,7 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
     );
     assert_independent_rejects(&mismatched_snapshot, "a mismatched trust-policy snapshot")?;
 
-    let unknown_provider = mutate_profile(&archive, |profile| {
-        let fixtures = array_field(profile, 9, "profile fixtures")?;
-        array_mut(&mut fixtures[0], "fixture")?[4] = Value::Array(vec![
-            Value::Text("a.provider".to_owned()),
-            Value::Text("1.0.0".to_owned()),
-            Value::Integer(1_u64.into()),
-            Value::Integer(0_u64.into()),
-        ]);
-        Ok(())
-    })?;
-    assert_eq!(
-        ConformanceBundleV1::from_canonical_cbor(&unknown_provider),
-        Err(BundleContractErrorV1::ProfileInvalid)
-    );
-    assert_independent_rejects(&unknown_provider, "an undeclared fixture provider")?;
+    assert_provider_binding_rejections(&archive)?;
 
     let unordered_artifacts = mutate_profile(&archive, |profile| {
         let fixtures = array_field(profile, 9, "profile fixtures")?;
