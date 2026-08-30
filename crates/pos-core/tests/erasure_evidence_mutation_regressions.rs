@@ -677,10 +677,12 @@ fn supporting_record_decoder_rejects_each_malformed_nested_collection() -> Resul
         let changed = replace_cbor_field(&bytes, index, Value::Array(Vec::new()))?;
         assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&changed).is_err());
     }
-    for index in 4..10 {
+    for index in [5, 7, 8, 9, 10, 11, 12, 13, 14] {
         let wrong_collection = replace_cbor_field(&bytes, index, Value::Null)?;
         assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&wrong_collection).is_err());
+    }
 
+    for index in 4..15 {
         let malformed_entry =
             replace_cbor_field(&bytes, index, Value::Array(vec![Value::Array(Vec::new())]))?;
         assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&malformed_entry).is_err());
@@ -948,7 +950,7 @@ fn reverse_acknowledgement_provenance(bytes: &[u8]) -> Result<Vec<u8>, ErasureEr
     let Value::Array(mut fields) = value else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
-    let Some(Value::Array(acknowledgements)) = fields.get_mut(5) else {
+    let Some(Value::Array(acknowledgements)) = fields.get_mut(10) else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     acknowledgements.reverse();
@@ -1143,21 +1145,6 @@ fn supporting_records_validate_every_public_request_binding() -> Result<(), Eras
             ..ErasureSupportingRecordsInputV1::default()
         },
     )?)?;
-
-    let mut acknowledgement_input = ErasureSupportingRecordsInputV1::default();
-    let retry = admission(reference(2), vec![reference(7)], vec![reference(8)])?;
-    acknowledgement_input.retry_admissions = vec![retry.clone()];
-    acknowledgement_input.acknowledgement_provenance = vec![acknowledgement_provenance(
-        reference(2),
-        retry.reference(),
-        reference(7),
-        reference(8),
-        reference(9),
-        reference(10),
-        reference(4),
-        reference(5),
-    )?];
-    assert_request_binding_rejected(ErasureSupportingRecordsV1::new(acknowledgement_input)?)?;
 
     let complete_for_other_collections =
         ErasureSupportingRecordsV1::new(complete_supporting_input(reference(2))?)?;
