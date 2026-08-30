@@ -1542,6 +1542,34 @@ fn durable_terminal_record_checks_reject_independent_receipt_mismatches(
     Ok(())
 }
 
+fn assert_complete_trait_record(
+    persisted: &ErasureCoordinatorRecordV1,
+    submitted_request: &ErasureRequestV1,
+    acknowledgement: &ErasureAcknowledgementV1,
+) -> Result<(), ErasureErrorV1> {
+    assert_eq!(persisted.request(), submitted_request);
+    assert_eq!(persisted.state().lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(persisted.targets(), &[acknowledgement.target]);
+    assert_eq!(persisted.acknowledgements(), &[*acknowledgement]);
+    assert!(persisted.receipt().is_some());
+    assert!(persisted.receipt_input().is_some());
+    assert_eq!(persisted.authorize_provenance(), Some(reference(9)));
+    let freeze = persisted
+        .supporting_records()
+        .freeze_provenance()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let admission = persisted
+        .supporting_records()
+        .retry_admissions()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(freeze.evidence(), reference(9));
+    assert_eq!(persisted.freeze_provenance(), Some(freeze.reference()));
+    assert_eq!(admission.trust(), reference(9));
+    assert_eq!(persisted.dispatch_provenance(), Some(admission.reference()));
+    Ok(())
+}
+
 #[test]
 fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), ErasureErrorV1> {
     let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
@@ -1630,27 +1658,7 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
         .first()
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    assert_eq!(persisted.request(), &submitted_request);
-    assert_eq!(persisted.state().lifecycle(), ErasureLifecycleV1::Complete);
-    assert_eq!(persisted.targets(), &[acknowledgement.target]);
-    assert_eq!(persisted.acknowledgements(), &[acknowledgement]);
-    assert!(persisted.receipt().is_some());
-    assert!(persisted.receipt_input().is_some());
-    assert_eq!(persisted.authorize_provenance(), Some(reference(9)));
-    let freeze = persisted
-        .supporting_records()
-        .freeze_provenance()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let admission = persisted
-        .supporting_records()
-        .retry_admissions()
-        .first()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    assert_eq!(freeze.evidence(), reference(9));
-    assert_eq!(persisted.freeze_provenance(), Some(freeze.reference()));
-    assert_eq!(admission.trust(), reference(9));
-    assert_eq!(persisted.dispatch_provenance(), Some(admission.reference()));
-    Ok(())
+    assert_complete_trait_record(&persisted, &submitted_request, &acknowledgement)
 }
 
 #[test]

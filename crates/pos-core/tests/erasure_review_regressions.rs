@@ -51,7 +51,7 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
-fn inventory(owner: ErasureReferenceV1) -> ErasureInventoryResultV1 {
+const fn inventory(owner: ErasureReferenceV1) -> ErasureInventoryResultV1 {
     ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::Artifact,
         target: target(),
@@ -352,7 +352,7 @@ fn complete_receipt(
 
 fn terminal_supporting_records(
     receipt: ErasureReceiptV1,
-    receipt_provenance: ErasureReceiptProvenanceV1,
+    receipt_provenance: &ErasureReceiptProvenanceV1,
 ) -> Result<ErasureSupportingRecordsV1, ErasureErrorV1> {
     let request = reference(1);
     let admission = retry_admission(request, vec![reference(65)], vec![reference(66)])?;
@@ -384,7 +384,7 @@ fn terminal_supporting_records(
             },
         )?],
         receipts: vec![receipt],
-        receipt_provenance: vec![receipt_provenance],
+        receipt_provenance: vec![*receipt_provenance],
         ..ErasureSupportingRecordsInputV1::default()
     })
 }
@@ -395,11 +395,11 @@ fn supporting_ledger_binds_each_receipt_to_its_receipt_provenance() -> Result<()
     let receipt_provenance = receipt_provenance(reference(1), admission.reference())?;
     let owner = reference(70);
     let bound_receipt = complete_receipt(reference(1), receipt_provenance.reference(), owner)?;
-    assert!(terminal_supporting_records(bound_receipt, receipt_provenance).is_ok());
+    assert!(terminal_supporting_records(bound_receipt, &receipt_provenance).is_ok());
 
     let unbound_receipt = complete_receipt(reference(1), reference(71), owner)?;
     assert_eq!(
-        terminal_supporting_records(unbound_receipt, receipt_provenance),
+        terminal_supporting_records(unbound_receipt, &receipt_provenance),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -487,7 +487,7 @@ impl ErasurePersistencePortV1 for PublicPort {
     }
 }
 
-fn public_port(fail_commits: bool) -> PublicPort {
+const fn public_port(fail_commits: bool) -> PublicPort {
     PublicPort {
         records: Vec::new(),
         states: Vec::new(),
@@ -562,7 +562,7 @@ impl ErasureCoordinatorPortV1 for PublicPort {
     }
 }
 
-fn access_freeze_transition() -> ErasureStateTransitionV1 {
+const fn access_freeze_transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle: ErasureLifecycleV1::AccessFrozen,
         freeze_position: Some(10),
@@ -575,7 +575,7 @@ fn access_freeze_transition() -> ErasureStateTransitionV1 {
 }
 
 fn state_after_acknowledgements(
-    acknowledgements: [ErasureAcknowledgementV1; 2],
+    acknowledgements: &[ErasureAcknowledgementV1; 2],
 ) -> Result<ErasureStateV1, ErasureErrorV1> {
     let submitted_request = request()?;
     let request_reference = submitted_request.reference();
@@ -600,7 +600,7 @@ fn state_after_acknowledgements(
         authorization_provenance: reference(94),
     })?;
     coordinator.dispatch_attempt(request_reference, &admission)?;
-    for acknowledgement in acknowledgements {
+    for acknowledgement in acknowledgements.iter().copied() {
         coordinator.acknowledge(request_reference, acknowledgement)?;
     }
     coordinator
@@ -636,8 +636,8 @@ fn coordinator_acknowledgement_arrival_order_does_not_change_ers1_identity(
 ) -> Result<(), ErasureErrorV1> {
     let first = acknowledgement(reference(95), reference(96));
     let second = acknowledgement(reference(97), reference(98));
-    let forward = state_after_acknowledgements([first, second])?;
-    let reverse = state_after_acknowledgements([second, first])?;
+    let forward = state_after_acknowledgements(&[first, second])?;
+    let reverse = state_after_acknowledgements(&[second, first])?;
     assert_eq!(forward, reverse);
     assert_eq!(forward.state_digest(), reverse.state_digest());
     Ok(())
