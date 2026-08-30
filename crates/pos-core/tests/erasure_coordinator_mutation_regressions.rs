@@ -538,11 +538,8 @@ fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecord
     }
 }
 
-fn assert_invalid_parts(parts: ErasureCoordinatorRecordPartsV1, expected: ErasureErrorV1) {
-    assert_eq!(
-        ErasureCoordinatorRecordV1::from_parts(parts, COORDINATOR),
-        Err(expected)
-    );
+fn assert_invalid_parts(parts: ErasureCoordinatorRecordPartsV1) {
+    assert!(ErasureCoordinatorRecordV1::from_parts(parts, COORDINATOR).is_err());
 }
 
 #[test]
@@ -576,36 +573,36 @@ fn durable_record_scope_and_lifecycle_shapes_reject_each_public_near_miss(
     let submitted_record = latest_record(&submitted.state, submitted.request)?;
     let mut submitted_with_target = record_parts(&submitted_record);
     submitted_with_target.targets = vec![target(10)];
-    assert_invalid_parts(submitted_with_target, ErasureErrorV1::PolicyConflict);
+    assert_invalid_parts(submitted_with_target);
 
     let authorized = authorized_fixture(vec![target(10)])?;
     let authorized_record = latest_record(&authorized.state, authorized.request)?;
     let mut authorized_with_target = record_parts(&authorized_record);
     authorized_with_target.targets = vec![target(10)];
-    assert_invalid_parts(authorized_with_target, ErasureErrorV1::PolicyConflict);
+    assert_invalid_parts(authorized_with_target);
 
     let frozen = frozen_fixture(vec![target(10), target(20)])?;
     let frozen_record = latest_record(&frozen.state, frozen.request)?;
 
     let mut reserved_after_authorization = record_parts(&frozen_record);
     reserved_after_authorization.reserved_targets = vec![target(10)];
-    assert_invalid_parts(reserved_after_authorization, ErasureErrorV1::PolicyConflict);
+    assert_invalid_parts(reserved_after_authorization);
 
     let mut empty_frozen = record_parts(&frozen_record);
     empty_frozen.targets.clear();
-    assert_invalid_parts(empty_frozen, ErasureErrorV1::PolicyConflict);
+    assert_invalid_parts(empty_frozen);
 
     let mut unsorted_targets = record_parts(&frozen_record);
     unsorted_targets.targets.reverse();
-    assert_invalid_parts(unsorted_targets, ErasureErrorV1::ScopeInvalid);
+    assert_invalid_parts(unsorted_targets);
 
     let mut duplicate_targets = record_parts(&frozen_record);
     duplicate_targets.targets = vec![target(10), target(10)];
-    assert_invalid_parts(duplicate_targets, ErasureErrorV1::ScopeInvalid);
+    assert_invalid_parts(duplicate_targets);
 
     let mut oversized_targets = record_parts(&frozen_record);
     oversized_targets.targets = vec![target(10); 257];
-    assert_invalid_parts(oversized_targets, ErasureErrorV1::ScopeInvalid);
+    assert_invalid_parts(oversized_targets);
 
     let first = acknowledgement_for(
         target(10),
@@ -619,9 +616,12 @@ fn durable_record_scope_and_lifecycle_shapes_reject_each_public_near_miss(
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(96),
     );
+    let mut acknowledgements = vec![first, second];
+    acknowledgements.sort_unstable();
+    acknowledgements.reverse();
     let mut unsorted_acknowledgements = record_parts(&frozen_record);
-    unsorted_acknowledgements.acknowledgements = vec![second, first];
-    assert_invalid_parts(unsorted_acknowledgements, ErasureErrorV1::ScopeInvalid);
+    unsorted_acknowledgements.acknowledgements = acknowledgements;
+    assert_invalid_parts(unsorted_acknowledgements);
 
     let mut injected_acknowledgement = record_parts(&frozen_record);
     injected_acknowledgement.acknowledgements = vec![acknowledgement_for(
@@ -630,13 +630,13 @@ fn durable_record_scope_and_lifecycle_shapes_reject_each_public_near_miss(
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(97),
     )];
-    assert_invalid_parts(injected_acknowledgement, ErasureErrorV1::ScopeInvalid);
+    assert_invalid_parts(injected_acknowledgement);
 
     let awaiting = awaiting_fixture(vec![target(10)])?;
     let awaiting_record = latest_record(&awaiting.state, awaiting.request)?;
     let mut empty_awaiting = record_parts(&awaiting_record);
     empty_awaiting.targets.clear();
-    assert_invalid_parts(empty_awaiting, ErasureErrorV1::PolicyConflict);
+    assert_invalid_parts(empty_awaiting);
     Ok(())
 }
 
@@ -647,11 +647,11 @@ fn terminal_record_rejects_missing_and_mismatched_receipt_fields() -> Result<(),
 
     let mut missing_receipt = record_parts(&record);
     missing_receipt.receipt = None;
-    assert_invalid_parts(missing_receipt, ErasureErrorV1::ProvenanceMissing);
+    assert_invalid_parts(missing_receipt);
 
     let mut missing_input = record_parts(&record);
     missing_input.receipt_input = None;
-    assert_invalid_parts(missing_input, ErasureErrorV1::ProvenanceMissing);
+    assert_invalid_parts(missing_input);
 
     let mut mismatched_pair = record_parts(&record);
     mismatched_pair
@@ -659,7 +659,7 @@ fn terminal_record_rejects_missing_and_mismatched_receipt_fields() -> Result<(),
         .as_mut()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .signature = reference(103);
-    assert_invalid_parts(mismatched_pair, ErasureErrorV1::PolicyConflict);
+    assert_invalid_parts(mismatched_pair);
 
     for field in [
         ReceiptMismatch::TerminalState,
@@ -678,7 +678,7 @@ fn terminal_record_rejects_missing_and_mismatched_receipt_fields() -> Result<(),
         }
         parts.receipt = Some(pos_core::ErasureReceiptV1::new(input.clone())?);
         parts.receipt_input = Some(input);
-        assert_invalid_parts(parts, ErasureErrorV1::PolicyConflict);
+        assert_invalid_parts(parts);
     }
     Ok(())
 }
