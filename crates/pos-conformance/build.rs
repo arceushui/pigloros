@@ -1,14 +1,24 @@
+#[cfg(target_os = "linux")]
 use rustix::fs::{self as rustix_fs, Dir, FileType, Mode, OFlags, ResolveFlags, CWD};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
+#[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fmt::Write as _;
+#[cfg(not(target_os = "linux"))]
+use std::fs;
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(not(target_os = "linux"))]
+use std::io;
+#[cfg(target_os = "linux")]
 use std::io::{self, Read as _};
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 
@@ -33,7 +43,28 @@ const STATIC_SOURCE_PATHS: [&str; 14] = [
 
 struct CatalogRoot {
     source: PathBuf,
+    #[cfg(target_os = "linux")]
     directory: OwnedFd,
+    #[cfg(not(target_os = "linux"))]
+    canonical: PathBuf,
+}
+
+struct SourceSnapshots {
+    sha256_inventory: Vec<u8>,
+    sha256_entries: BTreeMap<String, [u8; 32]>,
+    blake3_entries: BTreeMap<String, [u8; 32]>,
+    sources: BTreeMap<String, Vec<u8>>,
+}
+
+impl SourceSnapshots {
+    fn bytes(&self, relative: &str, description: &str) -> Result<&[u8], io::Error> {
+        self.sources
+            .get(relative)
+            .map(Vec::as_slice)
+            .ok_or_else(|| {
+                invalid_data(format!("{description} is absent from the source snapshot"))
+            })
+    }
 }
 
 struct FixturePaths {
@@ -290,6 +321,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+#[cfg(target_os = "linux")]
 fn catalog_root(manifest_dir: &Path) -> Result<CatalogRoot, io::Error> {
     let source = manifest_dir.join("../../fixtures/conformance");
     let source_name = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
@@ -329,6 +361,43 @@ fn catalog_root(manifest_dir: &Path) -> Result<CatalogRoot, io::Error> {
     Ok(CatalogRoot { source, directory })
 }
 
+#[cfg(not(target_os = "linux"))]
+fn non_symlink_directory(path: &Path, description: &str) -> Result<(), io::Error> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        invalid_data(format!(
+            "{description} is unavailable at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(invalid_data(format!(
+            "{description} must not be a symlink: {}",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(invalid_data(format!(
+            "{description} must be a directory: {}",
+            path.display()
+        )))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn catalog_root(manifest_dir: &Path) -> Result<CatalogRoot, io::Error> {
+    let source = manifest_dir.join("../../fixtures/conformance");
+    non_symlink_directory(&source, "conformance fixture root")?;
+    let canonical = fs::canonicalize(&source).map_err(|error| {
+        invalid_data(format!(
+            "conformance fixture root cannot be canonicalized at {}: {error}",
+            source.display()
+        ))
+    })?;
+    Ok(CatalogRoot { source, canonical })
+}
+
 fn relative_components<'a>(
     relative: &'a str,
     description: &str,
@@ -347,6 +416,7 @@ fn relative_components<'a>(
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn open_fixture_relative(
     root: &CatalogRoot,
     relative: &str,
@@ -398,6 +468,7 @@ fn open_fixture_relative(
     Ok(opened)
 }
 
+#[cfg(target_os = "linux")]
 fn read_fixture_relative(
     root: &CatalogRoot,
     relative: &str,
@@ -411,6 +482,84 @@ fn read_fixture_relative(
         ))
     })?;
     Ok(bytes)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn non_symlink_relative_path(
+    root: &CatalogRoot,
+    relative: &str,
+    description: &str,
+    final_is_directory: bool,
+) -> Result<PathBuf, io::Error> {
+    let components = relative_components(relative, description)?;
+    let mut candidate = root.canonical.clone();
+    let final_index = components.len() - 1;
+    for (index, component) in components.iter().enumerate() {
+        candidate.push(component);
+        let component_description = format!("{description} path component");
+        let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+            invalid_data(format!(
+                "{component_description} is unavailable at {}: {error}",
+                candidate.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid_data(format!(
+                "{component_description} must not be a symlink: {}",
+                candidate.display()
+            )));
+        }
+        let is_final_component = index == final_index;
+        if is_final_component && final_is_directory {
+            if !metadata.is_dir() {
+                return Err(invalid_data(format!(
+                    "{description} must be a directory: {}",
+                    candidate.display()
+                )));
+            }
+        } else if is_final_component {
+            if !metadata.is_file() {
+                return Err(invalid_data(format!(
+                    "{description} must be a regular file: {}",
+                    candidate.display()
+                )));
+            }
+        } else if !metadata.is_dir() {
+            return Err(invalid_data(format!(
+                "{component_description} must be a directory: {}",
+                candidate.display()
+            )));
+        }
+    }
+    let canonical = fs::canonicalize(&candidate).map_err(|error| {
+        invalid_data(format!(
+            "{description} cannot be canonicalized at {}: {error}",
+            candidate.display()
+        ))
+    })?;
+    if canonical.starts_with(&root.canonical) {
+        Ok(canonical)
+    } else {
+        Err(invalid_data(format!(
+            "{description} escapes the conformance fixture root: {}",
+            candidate.display()
+        )))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_fixture_relative(
+    root: &CatalogRoot,
+    relative: &str,
+    description: &str,
+) -> Result<Vec<u8>, io::Error> {
+    let path = non_symlink_relative_path(root, relative, description, false)?;
+    fs::read(&path).map_err(|error| {
+        invalid_data(format!(
+            "{description} cannot be read at {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn checksum_digest(hex: &str, description: &str) -> Result<[u8; 32], io::Error> {
@@ -471,22 +620,51 @@ fn expected_source_paths(profiles: &[ProfilePaths]) -> BTreeSet<String> {
     paths
 }
 
-fn verify_source_inventory(
-    root: &CatalogRoot,
-    profiles: &[ProfilePaths],
-) -> Result<[u8; 32], io::Error> {
+fn source_snapshots(root: &CatalogRoot) -> Result<SourceSnapshots, io::Error> {
     let sha256_bytes = read_fixture_relative(root, "SHA256SUMS", "SHA-256 source inventory")?;
     let sha256_entries = checksum_manifest(&sha256_bytes, "SHA-256 source inventory")?;
+    if sha256_entries.contains_key("SHA256SUMS") {
+        return Err(invalid_data(
+            "SHA-256 source inventory must not declare itself",
+        ));
+    }
+    let sources = sha256_entries
+        .keys()
+        .map(|relative| {
+            read_fixture_relative(root, relative, "SHA-256 inventoried source")
+                .map(|bytes| (relative.clone(), bytes))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let blake3_bytes = sources
+        .get("BLAKE3SUMS")
+        .ok_or_else(|| invalid_data("SHA-256 source inventory omits BLAKE3SUMS"))?;
+    let blake3_entries = checksum_manifest(blake3_bytes, "BLAKE3 source inventory")?;
+    Ok(SourceSnapshots {
+        sha256_inventory: sha256_bytes,
+        sha256_entries,
+        blake3_entries,
+        sources,
+    })
+}
+
+fn verify_source_inventory(
+    snapshots: &SourceSnapshots,
+    profiles: &[ProfilePaths],
+) -> Result<[u8; 32], io::Error> {
     let expected_paths = expected_source_paths(profiles);
-    let declared_paths = sha256_entries.keys().cloned().collect::<BTreeSet<_>>();
+    let declared_paths = snapshots
+        .sha256_entries
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if declared_paths != expected_paths {
         return Err(invalid_data(
             "SHA-256 source inventory does not declare the complete materialization closure",
         ));
     }
-    for (relative, expected) in &sha256_entries {
-        let bytes = read_fixture_relative(root, relative, "SHA-256 inventoried source")?;
-        let actual: [u8; 32] = Sha256::digest(&bytes).into();
+    for (relative, expected) in &snapshots.sha256_entries {
+        let bytes = snapshots.bytes(relative, "SHA-256 inventoried source")?;
+        let actual: [u8; 32] = Sha256::digest(bytes).into();
         if &actual != expected {
             return Err(invalid_data(format!(
                 "SHA-256 source inventory digest mismatch for {relative}"
@@ -494,24 +672,28 @@ fn verify_source_inventory(
         }
     }
 
-    let blake3_bytes = read_fixture_relative(root, "BLAKE3SUMS", "BLAKE3 source inventory")?;
-    let blake3_entries = checksum_manifest(&blake3_bytes, "BLAKE3 source inventory")?;
     let mut blake3_paths = expected_paths;
     blake3_paths.remove("BLAKE3SUMS");
-    if blake3_entries.keys().cloned().collect::<BTreeSet<_>>() != blake3_paths {
+    if snapshots
+        .blake3_entries
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        != blake3_paths
+    {
         return Err(invalid_data(
             "BLAKE3 source inventory does not declare the complete materialization closure",
         ));
     }
-    for (relative, expected) in blake3_entries {
-        let bytes = read_fixture_relative(root, &relative, "BLAKE3 inventoried source")?;
-        if blake3::hash(&bytes).as_bytes() != &expected {
+    for (relative, expected) in &snapshots.blake3_entries {
+        let bytes = snapshots.bytes(relative, "BLAKE3 inventoried source")?;
+        if blake3::hash(bytes).as_bytes() != expected {
             return Err(invalid_data(format!(
                 "BLAKE3 source inventory digest mismatch for {relative}"
             )));
         }
     }
-    Ok(Sha256::digest(&sha256_bytes).into())
+    Ok(Sha256::digest(&snapshots.sha256_inventory).into())
 }
 
 fn json_field<'a>(value: &'a Value, field: &str) -> Result<&'a Value, io::Error> {
@@ -690,18 +872,21 @@ fn fixture_provider(provider: &Value) -> Result<FixtureProvider, io::Error> {
 }
 
 fn relative_asset(
-    root: &CatalogRoot,
+    snapshots: &SourceSnapshots,
     value: &Value,
     field: &str,
 ) -> Result<FixtureAsset, io::Error> {
     let relative = json_text(value, field)?;
     let description = format!("profile catalog {field}");
-    let bytes = read_fixture_relative(root, &relative, &description)?;
+    let bytes = snapshots.bytes(&relative, &description)?.to_vec();
     Ok(FixtureAsset { relative, bytes })
 }
 
-fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Box<dyn Error>> {
-    let profile_record = read_fixture_relative(root, &profile, "profile manifest")?;
+fn profile_paths(
+    snapshots: &SourceSnapshots,
+    profile: String,
+) -> Result<ProfilePaths, Box<dyn Error>> {
+    let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
     let profile_value: Value = serde_json::from_slice(&profile_record)?;
     let profile_id = json_text(&profile_value, "profile_id")?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
@@ -709,7 +894,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
     let subject_adapter = json_text(&profile_value, "subject_adapter")?;
     let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
     let fixture_root = json_text(&profile_value, "fixture_root")?;
-    let provider_manifest = relative_asset(root, &profile_value, "fixture_provider_manifest")?;
+    let provider_manifest = relative_asset(snapshots, &profile_value, "fixture_provider_manifest")?;
     let provider_value: Value = serde_json::from_slice(&provider_manifest.bytes)?;
     validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
     let fixture_provider = fixture_provider(&provider_value)?;
@@ -744,7 +929,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
                 )));
             }
             let schema_path = json_text(fixture, "schema")?;
-            let schema = relative_asset(root, fixture, "schema")?;
+            let schema = relative_asset(snapshots, fixture, "schema")?;
             let expected_schema = provider_schemas
                 .get(family.catalog_name())
                 .and_then(Value::as_str)
@@ -760,9 +945,9 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
                     family.catalog_name()
                 )));
             }
-            let input = relative_asset(root, fixture, "input")?;
-            let expected = relative_asset(root, fixture, "expected")?;
-            let oracle = relative_asset(root, fixture, "oracle")?;
+            let input = relative_asset(snapshots, fixture, "input")?;
+            let expected = relative_asset(snapshots, fixture, "expected")?;
+            let oracle = relative_asset(snapshots, fixture, "oracle")?;
             let strict_oracle = validate_fixture_records(
                 fixture,
                 &provider_value,
@@ -812,7 +997,8 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
     })
 }
 
-fn discover_profiles(root: &CatalogRoot) -> Result<Vec<ProfilePaths>, Box<dyn Error>> {
+#[cfg(target_os = "linux")]
+fn profile_manifests(root: &CatalogRoot) -> Result<Vec<String>, Box<dyn Error>> {
     let profiles_directory = open_fixture_relative(root, "profiles", "profile root", true)?;
     let mut profile_manifests = Vec::new();
     for entry in Dir::read_from(&profiles_directory)
@@ -829,6 +1015,33 @@ fn discover_profiles(root: &CatalogRoot) -> Result<Vec<ProfilePaths>, Box<dyn Er
         let _opened_directory = open_fixture_relative(root, &directory, "profile directory", true)?;
         profile_manifests.push(format!("{directory}/profile.json"));
     }
+    Ok(profile_manifests)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn profile_manifests(root: &CatalogRoot) -> Result<Vec<String>, Box<dyn Error>> {
+    let profiles_directory = non_symlink_relative_path(root, "profiles", "profile root", true)?;
+    fs::read_dir(&profiles_directory)?
+        .map(|entry| {
+            let entry = entry?;
+            let entry_name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| invalid_data("profile directory name must be UTF-8"))?;
+            let directory = format!("profiles/{entry_name}");
+            let _opened_directory =
+                non_symlink_relative_path(root, &directory, "profile directory", true)?;
+            Ok(format!("{directory}/profile.json"))
+        })
+        .collect::<Result<Vec<_>, io::Error>>()
+        .map_err(Box::<dyn Error>::from)
+}
+
+fn discover_profiles(
+    root: &CatalogRoot,
+    snapshots: &SourceSnapshots,
+) -> Result<Vec<ProfilePaths>, Box<dyn Error>> {
+    let profile_manifests = profile_manifests(root)?;
     if profile_manifests.len() != PROFILE_COUNT {
         return Err(invalid_data(format!(
             "profile root must contain exactly {PROFILE_COUNT} profile directories, found {}",
@@ -838,7 +1051,7 @@ fn discover_profiles(root: &CatalogRoot) -> Result<Vec<ProfilePaths>, Box<dyn Er
     }
     let mut profiles = profile_manifests
         .into_iter()
-        .map(|profile| profile_paths(root, profile))
+        .map(|profile| profile_paths(snapshots, profile))
         .collect::<Result<Vec<_>, _>>()?;
     profiles.sort_unstable_by_key(|profile| profile.wire_code);
     if profiles
@@ -1055,9 +1268,9 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
     Ok(generated)
 }
 
-fn draft_authority_public_key(root: &CatalogRoot) -> Result<[u8; 32], io::Error> {
+fn draft_authority_public_key(snapshots: &SourceSnapshots) -> Result<[u8; 32], io::Error> {
     let relative = "support/draft-execution-authority.json";
-    let bytes = read_fixture_relative(root, relative, "Draft authority declaration")?;
+    let bytes = snapshots.bytes(relative, "Draft authority declaration")?;
     let declaration: DraftAuthorityDeclaration =
         serde_json::from_slice(&bytes).map_err(|error| {
             invalid_data(format!(
@@ -1101,29 +1314,111 @@ fn draft_authority_public_key(root: &CatalogRoot) -> Result<[u8; 32], io::Error>
     Ok(key)
 }
 
-fn emit_build_contract(key: [u8; 32], source_inventory_digest: [u8; 32]) -> String {
-    format!(
-        "const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n\
-         const SOURCE_INVENTORY_DIGEST: [u8; 32] = {source_inventory_digest:?};\n"
-    )
+fn emit_draft_authority(key: [u8; 32]) -> String {
+    format!("const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n")
 }
 
-fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
-    let mut paths = BTreeSet::from([root.source.join("profiles")]);
-    for profile in profiles {
-        let profile_path = root.source.join(&profile.profile);
-        if let Some(profile_directory) = profile_path.parent() {
-            paths.insert(profile_directory.to_owned());
-        }
-        paths.insert(profile_path);
-        paths.insert(root.source.join(&profile.provider_manifest.relative));
-        for fixture in &profile.fixtures {
-            paths.insert(root.source.join(&fixture.schema.relative));
-            paths.insert(root.source.join(&fixture.input.relative));
-            paths.insert(root.source.join(&fixture.expected.relative));
-            paths.insert(root.source.join(&fixture.oracle.relative));
-        }
+fn emit_byte_constant(
+    generated: &mut String,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), std::fmt::Error> {
+    writeln!(generated, "const {name}: &[u8] = &{bytes:?};")
+}
+
+fn emit_bundle_contract_assets(snapshots: &SourceSnapshots) -> Result<String, Box<dyn Error>> {
+    let mut generated = String::new();
+    for (name, relative) in [
+        ("EXECUTION_MATRIX_BYTES_V1", "matrix/execution-matrix.json"),
+        (
+            "AUTHORITY_INVENTORY_BYTES_V1",
+            "expected-authority/inventory.json",
+        ),
+        (
+            "DRAFT_AUTHORITY_DECLARATION_BYTES_V1",
+            "support/draft-execution-authority.json",
+        ),
+    ] {
+        emit_byte_constant(
+            &mut generated,
+            name,
+            snapshots.bytes(relative, "bundle-contract source")?,
+        )?;
     }
+    Ok(generated)
+}
+
+fn emit_materialization_assets(
+    snapshots: &SourceSnapshots,
+    key: [u8; 32],
+    source_inventory_digest: [u8; 32],
+) -> Result<String, Box<dyn Error>> {
+    let mut generated = format!(
+        "const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n\
+         const SOURCE_INVENTORY_DIGEST: [u8; 32] = {source_inventory_digest:?};\n"
+    );
+    for (name, relative) in [
+        (
+            "MATERIALIZATION_AUTHORITY_INVENTORY_BYTES",
+            "expected-authority/inventory.json",
+        ),
+        (
+            "MATERIALIZATION_EXECUTION_MATRIX_BYTES",
+            "matrix/execution-matrix.json",
+        ),
+        ("MATERIALIZATION_LICENSE_BYTES", "support/LICENSE"),
+        ("MATERIALIZATION_NOTICE_BYTES", "support/NOTICE"),
+        (
+            "MATERIALIZATION_BUILD_PROVENANCE_BYTES",
+            "support/build-provenance.json",
+        ),
+        (
+            "MATERIALIZATION_DRAFT_AUTHORITY_DECLARATION_BYTES",
+            "support/draft-execution-authority.json",
+        ),
+        (
+            "MATERIALIZATION_FIXTURE_CONTRACT_POLICY_BYTES",
+            "support/fixture-family-contract.json",
+        ),
+        (
+            "MATERIALIZATION_LIMITATIONS_BYTES",
+            "support/limitations.md",
+        ),
+        (
+            "MATERIALIZATION_NORMATIVE_REQUIREMENTS_BYTES",
+            "support/normative-requirements.md",
+        ),
+        (
+            "MATERIALIZATION_PUBLICATION_REVIEW_BYTES",
+            "support/publication-review.json",
+        ),
+        ("MATERIALIZATION_SBOM_BYTES", "support/sbom.json"),
+        (
+            "MATERIALIZATION_PROFILE_SCHEMA_BYTES",
+            "support/schema-cpf1-v1.cddl",
+        ),
+        (
+            "MATERIALIZATION_SOURCE_PROVENANCE_BYTES",
+            "support/source-provenance.json",
+        ),
+    ] {
+        emit_byte_constant(
+            &mut generated,
+            name,
+            snapshots.bytes(relative, "materialization source")?,
+        )?;
+    }
+    Ok(generated)
+}
+
+fn emit_rerun_directives(root: &CatalogRoot, snapshots: &SourceSnapshots) {
+    let mut paths = BTreeSet::from([root.source.join("profiles"), root.source.join("SHA256SUMS")]);
+    paths.extend(
+        snapshots
+            .sources
+            .keys()
+            .map(|relative| root.source.join(relative)),
+    );
     for path in paths {
         println!("cargo:rerun-if-changed={}", path.display());
     }
@@ -1135,16 +1430,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or_else(|| invalid_data("CARGO_MANIFEST_DIR is unavailable"))?,
     );
     let root = catalog_root(&manifest_dir)?;
-    let profiles = discover_profiles(&root)?;
-    let source_inventory_digest = verify_source_inventory(&root, &profiles)?;
-    let draft_authority_key = draft_authority_public_key(&root)?;
-    emit_rerun_directives(&root, &profiles);
-    println!(
-        "cargo:rerun-if-changed={}",
-        root.source
-            .join("support/draft-execution-authority.json")
-            .display()
-    );
+    let snapshots = source_snapshots(&root)?;
+    let profiles = discover_profiles(&root, &snapshots)?;
+    let source_inventory_digest = verify_source_inventory(&snapshots, &profiles)?;
+    let draft_authority_key = draft_authority_public_key(&snapshots)?;
+    emit_rerun_directives(&root, &snapshots);
     let out_dir = PathBuf::from(
         env::var_os("OUT_DIR").ok_or_else(|| invalid_data("OUT_DIR is unavailable"))?,
     );
@@ -1154,7 +1444,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     std::fs::write(
         out_dir.join("draft_authority.rs"),
-        emit_build_contract(draft_authority_key, source_inventory_digest),
+        emit_draft_authority(draft_authority_key),
+    )?;
+    std::fs::write(
+        out_dir.join("bundle_contract_assets.rs"),
+        emit_bundle_contract_assets(&snapshots)?,
+    )?;
+    std::fs::write(
+        out_dir.join("materialization_assets.rs"),
+        emit_materialization_assets(&snapshots, draft_authority_key, source_inventory_digest)?,
     )?;
     Ok(())
 }

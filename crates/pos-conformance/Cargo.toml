@@ -10,14 +10,8 @@ publish.workspace = true
 blake3 = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
-libc = { workspace = true }
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
-rustix = { version = "1.1.4", default-features = false, features = [
-  "std",
-  "fs",
-  "process",
-] }
 sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,10 +19,22 @@ thiserror = { workspace = true }
 
 [build-dependencies]
 blake3 = { workspace = true }
-rustix = { version = "1.1.4", default-features = false, features = ["std", "fs"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = [
+  "std",
+  "fs",
+  "process",
+] }
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["std", "fs"] }
 
 [lints]
 workspace = true

@@ -21,6 +21,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error as ThisError;
 
+#[cfg(target_os = "linux")]
 include!("materialize-conformance-bundles/atomic_publication.rs");
 
 const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
@@ -64,23 +65,46 @@ enum PreparedMaterializationCommand {
 
 #[derive(Debug, ThisError)]
 enum MaterializationError {
+    #[cfg(target_os = "linux")]
     #[error("destination already exists")]
     DestinationExists,
+    #[cfg(target_os = "linux")]
     #[error("untrusted output directory")]
     UntrustedOutputDirectory,
+    #[cfg(target_os = "linux")]
     #[error("symbolic link detected in output path")]
     SymlinkDetected,
     #[error("atomic publication is unsupported")]
     AtomicPublicationUnsupported,
+    #[cfg(target_os = "linux")]
     #[error("durability synchronization failed")]
     DurabilitySyncFailed,
+    #[cfg(target_os = "linux")]
     #[error("staged archive digest mismatch")]
     ArchiveDigestMismatch,
     #[error("destination is not addressed by the source inventory digest")]
     SourceInventoryAddressMismatch,
 }
 
-include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
+#[cfg(not(target_os = "linux"))]
+struct AtomicPublication;
+
+#[cfg(not(target_os = "linux"))]
+impl AtomicPublication {
+    const fn prepare(_destination: &Path) -> Result<Self, MaterializationError> {
+        Err(MaterializationError::AtomicPublicationUnsupported)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn publish_materialized_tree(
+    _publication: AtomicPublication,
+    _files: &[MaterializedFile],
+) -> Result<(), MaterializationError> {
+    Err(MaterializationError::AtomicPublicationUnsupported)
+}
+
+include!(concat!(env!("OUT_DIR"), "/materialization_assets.rs"));
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum CatalogFixtureFamily {
@@ -160,10 +184,7 @@ impl DraftReproducibilityClass {
 }
 
 fn draft_authority() -> Result<DraftAuthorityDeclaration, Box<dyn Error>> {
-    serde_json::from_slice(include_bytes!(
-        "../../../../fixtures/conformance/support/draft-execution-authority.json"
-    ))
-    .map_err(Into::into)
+    serde_json::from_slice(MATERIALIZATION_DRAFT_AUTHORITY_DECLARATION_BYTES).map_err(Into::into)
 }
 
 fn authority_signing_key(expected_public_key: [u8; 32]) -> Result<SigningKey, Box<dyn Error>> {
@@ -476,37 +497,33 @@ fn package_support_artifacts() -> [PublicArtifact; 7] {
         public_artifact(
             "support/LICENSE",
             "text/plain",
-            include_bytes!("../../../../fixtures/conformance/support/LICENSE"),
+            MATERIALIZATION_LICENSE_BYTES,
         ),
-        public_artifact(
-            "support/NOTICE",
-            "text/plain",
-            include_bytes!("../../../../fixtures/conformance/support/NOTICE"),
-        ),
+        public_artifact("support/NOTICE", "text/plain", MATERIALIZATION_NOTICE_BYTES),
         public_artifact(
             "support/sbom.json",
             "application/json",
-            include_bytes!("../../../../fixtures/conformance/support/sbom.json"),
+            MATERIALIZATION_SBOM_BYTES,
         ),
         public_artifact(
             "support/source-provenance.json",
             "application/json",
-            include_bytes!("../../../../fixtures/conformance/support/source-provenance.json"),
+            MATERIALIZATION_SOURCE_PROVENANCE_BYTES,
         ),
         public_artifact(
             "support/build-provenance.json",
             "application/json",
-            include_bytes!("../../../../fixtures/conformance/support/build-provenance.json"),
+            MATERIALIZATION_BUILD_PROVENANCE_BYTES,
         ),
         public_artifact(
             "support/publication-review.json",
             "application/json",
-            include_bytes!("../../../../fixtures/conformance/support/publication-review.json"),
+            MATERIALIZATION_PUBLICATION_REVIEW_BYTES,
         ),
         public_artifact(
             "support/limitations.md",
             "text/markdown",
-            include_bytes!("../../../../fixtures/conformance/support/limitations.md"),
+            MATERIALIZATION_LIMITATIONS_BYTES,
         ),
     ]
 }
@@ -712,8 +729,7 @@ fn execute_command(
 }
 
 fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
-    let inventory_bytes =
-        include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
+    let inventory_bytes = MATERIALIZATION_AUTHORITY_INVENTORY_BYTES;
     let catalog = layer_catalog();
     provider_catalog(&catalog).and_then(|providers| {
         let context = MaterializationContext {
@@ -979,17 +995,13 @@ fn output_checksum_inventory(files: &[MaterializedFile]) -> MaterializedFile {
 fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> FixtureContext {
     let profile_record_digest =
         labeled_digest("PiglorOS.CPF1ProfileRecord.v1", profile_record_bytes);
-    let normative =
-        include_bytes!("../../../../fixtures/conformance/support/normative-requirements.md");
-    let notice = include_bytes!("../../../../fixtures/conformance/support/NOTICE");
-    let sbom = include_bytes!("../../../../fixtures/conformance/support/sbom.json");
-    let source_provenance =
-        include_bytes!("../../../../fixtures/conformance/support/source-provenance.json");
-    let build_provenance =
-        include_bytes!("../../../../fixtures/conformance/support/build-provenance.json");
-    let publication_review =
-        include_bytes!("../../../../fixtures/conformance/support/publication-review.json");
-    let limitations = include_bytes!("../../../../fixtures/conformance/support/limitations.md");
+    let normative = MATERIALIZATION_NORMATIVE_REQUIREMENTS_BYTES;
+    let notice = MATERIALIZATION_NOTICE_BYTES;
+    let sbom = MATERIALIZATION_SBOM_BYTES;
+    let source_provenance = MATERIALIZATION_SOURCE_PROVENANCE_BYTES;
+    let build_provenance = MATERIALIZATION_BUILD_PROVENANCE_BYTES;
+    let publication_review = MATERIALIZATION_PUBLICATION_REVIEW_BYTES;
+    let limitations = MATERIALIZATION_LIMITATIONS_BYTES;
     let notice_digest = *blake3::hash(notice).as_bytes();
     let sbom_digest = *blake3::hash(sbom).as_bytes();
     let limitations_digest = *blake3::hash(limitations).as_bytes();
@@ -1071,10 +1083,8 @@ fn profile_from_catalog(
             .and_then(|mut execution_profile_digests| {
                 execution_profile_digests.sort_unstable();
                 trust_policy_snapshot_digest().map(|snapshot_digest| {
-                    let execution_matrix_digest = *blake3::hash(include_bytes!(
-                        "../../../../fixtures/conformance/matrix/execution-matrix.json"
-                    ))
-                    .as_bytes();
+                    let execution_matrix_digest =
+                        *blake3::hash(MATERIALIZATION_EXECUTION_MATRIX_BYTES).as_bytes();
                     let mut profile = ConformanceProfileV1 {
                         profile_id: layer.profile_id.to_owned(),
                         semantic_version: "1.0.0".to_owned(),
@@ -1096,9 +1106,9 @@ fn profile_from_catalog(
                                 layer.profile_record,
                             ),
                         },
-                        fixture_contract_policy_digest: *blake3::hash(include_bytes!(
-                            "../../../../fixtures/conformance/support/fixture-family-contract.json"
-                        ))
+                        fixture_contract_policy_digest: *blake3::hash(
+                            MATERIALIZATION_FIXTURE_CONTRACT_POLICY_BYTES,
+                        )
                         .as_bytes(),
                         limitations_digest: context.limitations_digest,
                         provenance_digest: context.publication_review_digest,
@@ -1401,46 +1411,42 @@ fn append_supporting_members(
     let support = [
         (
             "support/normative-requirements.md",
-            include_bytes!("../../../../fixtures/conformance/support/normative-requirements.md")
-                .as_slice(),
+            MATERIALIZATION_NORMATIVE_REQUIREMENTS_BYTES,
             BundleMemberRoleV1::NormativeSpecification,
         ),
         (
             "support/LICENSE",
-            include_bytes!("../../../../fixtures/conformance/support/LICENSE").as_slice(),
+            MATERIALIZATION_LICENSE_BYTES,
             BundleMemberRoleV1::Licence,
         ),
         (
             "support/NOTICE",
-            include_bytes!("../../../../fixtures/conformance/support/NOTICE").as_slice(),
+            MATERIALIZATION_NOTICE_BYTES,
             BundleMemberRoleV1::Notice,
         ),
         (
             "support/sbom.json",
-            include_bytes!("../../../../fixtures/conformance/support/sbom.json").as_slice(),
+            MATERIALIZATION_SBOM_BYTES,
             BundleMemberRoleV1::Sbom,
         ),
         (
             "support/source-provenance.json",
-            include_bytes!("../../../../fixtures/conformance/support/source-provenance.json")
-                .as_slice(),
+            MATERIALIZATION_SOURCE_PROVENANCE_BYTES,
             BundleMemberRoleV1::Provenance,
         ),
         (
             "support/build-provenance.json",
-            include_bytes!("../../../../fixtures/conformance/support/build-provenance.json")
-                .as_slice(),
+            MATERIALIZATION_BUILD_PROVENANCE_BYTES,
             BundleMemberRoleV1::Provenance,
         ),
         (
             "support/publication-review.json",
-            include_bytes!("../../../../fixtures/conformance/support/publication-review.json")
-                .as_slice(),
+            MATERIALIZATION_PUBLICATION_REVIEW_BYTES,
             BundleMemberRoleV1::Provenance,
         ),
         (
             "support/limitations.md",
-            include_bytes!("../../../../fixtures/conformance/support/limitations.md").as_slice(),
+            MATERIALIZATION_LIMITATIONS_BYTES,
             BundleMemberRoleV1::Limitations,
         ),
     ];
@@ -1449,19 +1455,17 @@ fn append_supporting_members(
     }
     members.push(BundleMemberV1::supporting(
         "support/schema-cpf1-v1.cddl",
-        include_bytes!("../../../../fixtures/conformance/support/schema-cpf1-v1.cddl").to_vec(),
+        MATERIALIZATION_PROFILE_SCHEMA_BYTES.to_vec(),
         BundleMemberRoleV1::Schema,
     ));
     members.push(BundleMemberV1::supporting(
         "support/fixture-family-contract.json",
-        include_bytes!("../../../../fixtures/conformance/support/fixture-family-contract.json")
-            .to_vec(),
+        MATERIALIZATION_FIXTURE_CONTRACT_POLICY_BYTES.to_vec(),
         BundleMemberRoleV1::FixtureContractPolicy,
     ));
     members.push(BundleMemberV1::supporting(
         "support/draft-execution-authority.json",
-        include_bytes!("../../../../fixtures/conformance/support/draft-execution-authority.json")
-            .to_vec(),
+        MATERIALIZATION_DRAFT_AUTHORITY_DECLARATION_BYTES.to_vec(),
         BundleMemberRoleV1::AuthorityDeclaration,
     ));
     for schema in providers
@@ -1477,9 +1481,7 @@ fn append_supporting_members(
     }
     let inventory = BundleMemberV1::authority_inventory(inventory_bytes.to_vec());
     members.push(inventory);
-    let matrix = BundleMemberV1::execution_matrix(
-        include_bytes!("../../../../fixtures/conformance/matrix/execution-matrix.json").to_vec(),
-    );
+    let matrix = BundleMemberV1::execution_matrix(MATERIALIZATION_EXECUTION_MATRIX_BYTES.to_vec());
     members.push(matrix);
     append_draft_authority_members(members, profile, mode).map(|()| {
         members.push(BundleMemberV1::fixture_provider_registry(

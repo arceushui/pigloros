@@ -38,12 +38,7 @@ const BUILD_PROVENANCE_PATH: &str = "support/build-provenance.json";
 const PUBLICATION_REVIEW_PATH: &str = "support/publication-review.json";
 const NOTICE_PATH: &str = "support/NOTICE";
 const SBOM_PATH: &str = "support/sbom.json";
-const EXECUTION_MATRIX_BYTES_V1: &[u8] =
-    include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
-const AUTHORITY_INVENTORY_BYTES_V1: &[u8] =
-    include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
-const DRAFT_AUTHORITY_DECLARATION_BYTES_V1: &[u8] =
-    include_bytes!("../../../fixtures/conformance/support/draft-execution-authority.json");
+include!(concat!(env!("OUT_DIR"), "/bundle_contract_assets.rs"));
 
 #[derive(serde::Deserialize)]
 struct DraftAuthorityContract {
