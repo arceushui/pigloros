@@ -19,7 +19,7 @@ use std::io::Cursor;
 mod bundle_contract;
 mod profile_contract;
 mod provider_contract;
-mod wire_syntax;
+pub(crate) mod wire_syntax;
 
 pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
