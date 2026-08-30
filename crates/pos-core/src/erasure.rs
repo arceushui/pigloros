@@ -5073,26 +5073,31 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         let freeze_position = record.state.freeze_position();
         let (outcome, acknowledgement_references) =
             Self::attempt_outcome(record, &admission, lifecycle, input.issue_position)?;
-        let terminal = record.state.transition(ErasureStateTransitionV1 {
-            lifecycle,
-            freeze_position,
-            pending_owners,
-            failed_owners,
-            acknowledged_targets: if complete {
-                record.targets.clone()
-            } else {
-                Vec::new()
-            },
-            replay_claim,
-            provenance: outcome.reference(),
-        })?;
+        let (terminal, receipt_provenance) = record
+            .state
+            .transition(ErasureStateTransitionV1 {
+                lifecycle,
+                freeze_position,
+                pending_owners,
+                failed_owners,
+                acknowledged_targets: if complete {
+                    record.targets.clone()
+                } else {
+                    Vec::new()
+                },
+                replay_claim,
+                provenance: outcome.reference(),
+            })
+            .and_then(|terminal| {
+                Self::receipt_provenance_for_attempt(
+                    &admission,
+                    terminal.state_digest(),
+                    &acknowledgement_references,
+                    input.issue_position,
+                )
+                .map(|provenance| (terminal, provenance))
+            })?;
         record.state = terminal;
-        let receipt_provenance = Self::receipt_provenance_for_attempt(
-            &admission,
-            record.state.state_digest(),
-            &acknowledgement_references,
-            input.issue_position,
-        )?;
         let mut normalized =
             Self::normalize_receipt_input(request, self.coordinator, record, input.clone())?;
         normalized.policy = admission.policy();
