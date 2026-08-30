@@ -4306,13 +4306,14 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
     }
 
     let mut index = 0;
-    item(bytes, &mut index, 0).and_then(|()| {
-        if index == bytes.len() {
-            Ok(())
-        } else {
-            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-        }
-    })
+    let parsed = item(bytes, &mut index, 0);
+    if parsed.is_err() {
+        parsed
+    } else if index == bytes.len() {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+    }
 }
 fn array(value: &Value, width: usize) -> Result<&[Value], BundleContractErrorV1> {
     match value {
