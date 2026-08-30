@@ -19,6 +19,26 @@ use pos_core::{
     ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
 };
 
+fn replace_cbor_field(
+    bytes: &[u8],
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, ErasureErrorV1> {
+    let Value::Array(mut fields) =
+        ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?
+    else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let field = fields
+        .get_mut(index)
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    *field = replacement;
+    let mut changed = Vec::new();
+    ciborium::into_writer(&Value::Array(fields), &mut changed)
+        .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    Ok(changed)
+}
+
 const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
@@ -236,6 +256,7 @@ fn freeze_failure_binds_error_encoding_and_content_address() -> Result<(), Erasu
         reference(3),
     ))?;
     assert_eq!(record.error(), ErasureErrorV1::ScopeInvalid);
+    assert_eq!(record.evidence(), reference(3));
     assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
@@ -265,6 +286,45 @@ fn freeze_failure_binds_error_encoding_and_content_address() -> Result<(), Erasu
             reference(3),
         )),
         Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn evidence_decoders_reject_each_malformed_public_field() -> Result<(), ErasureErrorV1> {
+    let scope = scope_commitment(reference(1), vec![reference(2)], reference(3), None)?;
+    let scope_bytes = scope.to_canonical_cbor()?;
+    for index in [0, 2, 3, 4, 5] {
+        let changed = replace_cbor_field(&scope_bytes, index, Value::Null)?;
+        assert!(ErasureScopeCommitmentV1::from_canonical_cbor(&changed).is_err());
+    }
+
+    let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
+        reference(1),
+        scope.reference(),
+        reference(4),
+        None,
+    ))?;
+    let freeze_bytes = freeze.to_canonical_cbor()?;
+    for index in [0, 2, 3, 4, 5, 6] {
+        let changed = replace_cbor_field(&freeze_bytes, index, Value::Null)?;
+        assert!(ErasureFreezeProvenanceV1::from_canonical_cbor(&changed).is_err());
+    }
+
+    let failure = ErasureFreezeFailureV1::new(freeze_failure_input(
+        reference(1),
+        ErasureErrorV1::ScopeInvalid,
+        reference(4),
+    ))?;
+    let failure_bytes = failure.to_canonical_cbor()?;
+    for index in [0, 2, 3, 4, 5] {
+        let changed = replace_cbor_field(&failure_bytes, index, Value::Null)?;
+        assert!(ErasureFreezeFailureV1::from_canonical_cbor(&changed).is_err());
+    }
+    let unknown_error = replace_cbor_field(&failure_bytes, 3, Value::Integer(99.into()))?;
+    assert_eq!(
+        ErasureFreezeFailureV1::from_canonical_cbor(&unknown_error),
+        Err(ErasureErrorV1::InvalidEncoding)
     );
     Ok(())
 }
@@ -463,6 +523,43 @@ fn complete_supporting_input(
 }
 
 #[test]
+fn supporting_records_roundtrip_every_populated_collection() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let scope = scope_commitment(request, vec![reference(2)], reference(3), None)?;
+    let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
+        request,
+        scope.reference(),
+        reference(4),
+        None,
+    ))?;
+    let mut input = complete_supporting_input(request)?;
+    input.scope_commitment = Some(scope);
+    input.freeze_provenance = Some(freeze);
+    let records = ErasureSupportingRecordsV1::new(input)?;
+    roundtrip(
+        &records,
+        ErasureSupportingRecordsV1::to_canonical_cbor,
+        ErasureSupportingRecordsV1::from_canonical_cbor,
+    )?;
+
+    let failure = ErasureFreezeFailureV1::new(freeze_failure_input(
+        request,
+        ErasureErrorV1::ScopeInvalid,
+        reference(5),
+    ))?;
+    let failed = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        freeze_failure: Some(failure),
+        ..ErasureSupportingRecordsInputV1::default()
+    })?;
+    roundtrip(
+        &failed,
+        ErasureSupportingRecordsV1::to_canonical_cbor,
+        ErasureSupportingRecordsV1::from_canonical_cbor,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), ErasureErrorV1> {
     let scope = scope_commitment(reference(1), vec![reference(2)], reference(3), None)?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
@@ -507,6 +604,50 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
             ..ErasureSupportingRecordsInputV1::default()
         }),
         Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
+        reference(1),
+        reference(6),
+        reference(4),
+        None,
+    ))?;
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            freeze_provenance: Some(freeze),
+            ..ErasureSupportingRecordsInputV1::default()
+        }),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let scope = scope_commitment(reference(1), vec![reference(2)], reference(3), None)?;
+    let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
+        reference(1),
+        scope.reference(),
+        reference(4),
+        None,
+    ))?;
+    let failure = ErasureFreezeFailureV1::new(freeze_failure_input(
+        reference(1),
+        ErasureErrorV1::ScopeInvalid,
+        reference(5),
+    ))?;
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            scope_commitment: Some(scope.clone()),
+            freeze_provenance: Some(freeze),
+            freeze_failure: Some(failure),
+            ..ErasureSupportingRecordsInputV1::default()
+        }),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            scope_commitment: Some(scope),
+            freeze_failure: Some(failure),
+            ..ErasureSupportingRecordsInputV1::default()
+        }),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
 }
