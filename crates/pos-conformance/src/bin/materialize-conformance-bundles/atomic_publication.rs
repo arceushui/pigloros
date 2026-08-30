@@ -764,7 +764,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            map_open_error(Errno::ACCES),
+            map_open_error(Errno::ACCESS),
             MaterializationError::UntrustedOutputDirectory
         ));
         assert!(matches!(
@@ -772,7 +772,7 @@ mod tests {
             MaterializationError::DestinationExists
         ));
         assert!(matches!(
-            map_publish_error(Errno::ACCES),
+            map_publish_error(Errno::ACCESS),
             MaterializationError::UntrustedOutputDirectory
         ));
         assert!(matches!(
@@ -784,7 +784,7 @@ mod tests {
             MaterializationError::SymlinkDetected
         ));
         assert!(matches!(
-            map_cleanup_error(Errno::ACCES),
+            map_cleanup_error(Errno::ACCESS),
             MaterializationError::UntrustedOutputDirectory
         ));
     }
