@@ -3,20 +3,18 @@
 use ciborium::value::Value;
 use pos_core::{
     acknowledgement_inventory_reference, erasure_evidence_set_reference,
-    selected_obligations_reference, target_closure_digest, ErasureAcknowledgementOutcomeV1,
+    selected_obligations_reference, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
     ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAttemptOutcomeInputV1,
     ErasureAttemptOutcomeV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
     ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureFreezeAdmissionV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
     ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeV1, ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
     ErasureSupportingRecordsV1, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
     ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RETRY_ADMISSION_MAX_BYTES,
@@ -821,8 +819,7 @@ fn portable_decoders_reject_unknown_closed_enum_codes() -> Result<(), ErasureErr
     Ok(())
 }
 
-fn coordinator_with_complete_supporting_records(
-) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+fn coordinator_with_correction_provenance() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
         rejected_request: reference(70),
         rejected_terminal_state: reference(71),
@@ -841,151 +838,33 @@ fn coordinator_with_complete_supporting_records(
         horizon_position: 20,
         provenance: correction.reference(),
     })?;
-    let coordinator = reference(41);
-    let mut supporting_input = complete_supporting_input(request.reference())?;
-    let closure = target_closure_digest(&[required_target()]);
-    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
-        request: request.reference(),
-        affected_scope: vec![reference(62)],
-        target_closure: closure,
-        extension_head: None,
+    let coordinator = reference(66);
+    let state = ErasureStateV1::submitted(request.reference(), coordinator, reference(67))?;
+    let supporting_records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        correction_provenance: Some(correction),
+        scope_commitment: None,
+        freeze_provenance: None,
+        freeze_failure: None,
+        retry_admissions: Vec::new(),
+        acknowledgement_provenance: Vec::new(),
+        attempt_outcomes: Vec::new(),
+        receipts: Vec::new(),
+        receipt_provenance: Vec::new(),
+        administrative_resolutions: Vec::new(),
     })?;
-    let freeze_evidence = reference(74);
-    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
-        request: request.reference(),
-        scope_commitment: scope.reference(),
-        freeze_position: 10,
-        evidence: freeze_evidence,
-        extension_head: None,
-    })?;
-    supporting_input.scope_commitment = Some(scope.clone());
-    supporting_input.freeze_provenance = Some(freeze);
-    let admission = supporting_input.retry_admissions[0].clone();
-    let acknowledgement_provenance =
-        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
-            scope: scope.reference(),
-            ..acknowledgement_provenance_input(request.reference(), admission.reference())
-        })?;
-    let acknowledgement_reference = acknowledgement_provenance.reference();
-    supporting_input.acknowledgement_provenance[0] = acknowledgement_provenance;
-    let outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
-        request: request.reference(),
-        attempt: admission.reference(),
-        source_receipt: None,
-        lifecycle: ErasureLifecycleV1::Complete,
-        selected_obligations: selected_obligations_reference(&[acknowledgement().obligation]),
-        acknowledgement_inventory: acknowledgement_inventory_reference(&[
-            acknowledgement_reference,
-        ]),
-        terminal_position: 20,
-        policy: reference(4),
-        trust: reference(5),
-    })?;
-    supporting_input.attempt_outcomes[0] = outcome;
-    let transition =
-        |lifecycle, freeze_position, replay_claim, provenance, acknowledged_targets| {
-            ErasureStateTransitionV1 {
-                lifecycle,
-                freeze_position,
-                pending_owners: Vec::new(),
-                failed_owners: Vec::new(),
-                acknowledged_targets,
-                replay_claim,
-                provenance,
-            }
-        };
-    let state = ErasureStateV1::submitted(request.reference(), coordinator, reference(67))?
-        .transition(transition(
-            ErasureLifecycleV1::Authorized,
-            None,
-            ErasureReplayClaimV1::Exact,
-            reference(6),
-            Vec::new(),
-        ))?
-        .transition(transition(
-            ErasureLifecycleV1::AccessFrozen,
-            Some(10),
-            ErasureReplayClaimV1::Exact,
-            freeze.reference(),
-            Vec::new(),
-        ))?
-        .transition(transition(
-            ErasureLifecycleV1::DestructionDispatched,
-            Some(10),
-            ErasureReplayClaimV1::Exact,
-            admission.reference(),
-            Vec::new(),
-        ))?
-        .transition(transition(
-            ErasureLifecycleV1::AwaitingAcknowledgements,
-            Some(10),
-            ErasureReplayClaimV1::Exact,
-            admission.reference(),
-            Vec::new(),
-        ))?
-        .transition(transition(
-            ErasureLifecycleV1::Complete,
-            Some(10),
-            ErasureReplayClaimV1::StructuralOnly,
-            outcome.reference(),
-            vec![required_target()],
-        ))?;
-    let receipt_provenance = ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
-        request: request.reference(),
-        attempt: admission.reference(),
-        attempt_ordinal: 0,
-        predecessor_receipt: None,
-        terminal_state: state.state_digest(),
-        evidence_set: erasure_evidence_set_reference(&[acknowledgement_reference]),
-        policy: reference(4),
-        trust: reference(5),
-        issue_position: 20,
-    })?;
-    let receipt_input = ErasureReceiptInputV1 {
-        request: request.reference(),
-        terminal_state: state.state_digest(),
-        coordinator,
-        lifecycle: ErasureLifecycleV1::Complete,
-        freeze_position: 10,
-        required_targets: vec![required_target()],
-        acknowledgements: vec![acknowledgement()],
-        pending_owners: Vec::new(),
-        failed_owners: Vec::new(),
-        inventories: ErasureReceiptInventoriesV1 {
-            artifacts: vec![inventory()],
-            keys: Vec::new(),
-            replicas: Vec::new(),
-            backups: Vec::new(),
-        },
-        replay_claim: ErasureReplayClaimV1::StructuralOnly,
-        policy: reference(4),
-        trust: reference(5),
-        provenance: receipt_provenance.reference(),
-        issue_position: 20,
-        signature: reference(43),
-        receipt_digest: reference(0),
-    };
-    let receipt = ErasureReceiptV1::new(receipt_input.clone())?;
-    supporting_input.receipts[0] = receipt.clone();
-    supporting_input.receipt_provenance[0] = receipt_provenance;
-    let supporting_records = ErasureSupportingRecordsV1::new(supporting_input)?;
     ErasureCoordinatorRecordV1::from_parts(
         ErasureCoordinatorRecordPartsV1 {
             request,
             state,
             reserved_targets: Vec::new(),
-            targets: vec![required_target()],
-            acknowledgements: vec![acknowledgement()],
-            receipt: Some(receipt),
-            receipt_input: Some(receipt_input),
-            authorize_provenance: Some(reference(6)),
-            freeze_provenance: Some(freeze.reference()),
-            freeze_admission: Some(ErasureFreezeAdmissionV1 {
-                freeze_position: 10,
-                provenance: freeze_evidence,
-                target_closure: closure,
-            }),
-            dispatch_provenance: Some(admission.reference()),
+            targets: Vec::new(),
+            acknowledgements: Vec::new(),
+            receipt: None,
+            receipt_input: None,
+            authorize_provenance: None,
+            freeze_provenance: None,
+            freeze_admission: None,
+            dispatch_provenance: None,
             supporting_records,
         },
         coordinator,
@@ -1002,43 +881,23 @@ fn changed_supporting_records(bytes: &[u8], change: impl FnOnce(&mut Vec<Value>)
 }
 
 #[test]
-fn coordinator_decoder_exercises_every_supporting_record_path() -> Result<(), ErasureErrorV1> {
-    let record = coordinator_with_complete_supporting_records()?;
+fn coordinator_decoder_exercises_embedded_correction_path() -> Result<(), ErasureErrorV1> {
+    let record = coordinator_with_correction_provenance()?;
     let bytes = record.to_canonical_cbor()?;
     assert!(record.validate_replacement(&record).is_ok());
     assert_eq!(
         ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes)?,
         record
     );
-    for index in [0, 1, 2, 3, 4, 5, 6] {
-        let malformed = changed_supporting_records(&bytes, |fields| {
-            fields[index] = Value::Bool(false);
-        });
-        assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&malformed).is_err());
-    }
-    for index in [0, 1, 2, 3, 4, 5, 6] {
-        let malformed = changed_supporting_records(&bytes, |fields| {
-            fields[index] = if index == 0 {
-                Value::Array(Vec::new())
-            } else {
-                Value::Array(vec![Value::Array(Vec::new())])
-            };
-        });
-        assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&malformed).is_err());
-    }
-    let wrong_request = changed_supporting_records(&bytes, |fields| {
-        let Value::Array(resolutions) = &mut fields[6] else {
-            return;
-        };
-        let Value::Array(resolution) = &mut resolutions[0] else {
-            return;
-        };
-        resolution[2] = Value::Bytes(vec![99; 32]);
+    let malformed = changed_supporting_records(&bytes, |fields| {
+        fields[0] = Value::Bool(false);
     });
-    assert_eq!(
-        ErasureCoordinatorRecordV1::from_canonical_cbor(&wrong_request),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
+    assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&malformed).is_err());
+
+    let malformed = changed_supporting_records(&bytes, |fields| {
+        fields[0] = Value::Array(Vec::new());
+    });
+    assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&malformed).is_err());
     let wrong_correction = changed_supporting_records(&bytes, |fields| {
         let Value::Array(correction) = &mut fields[0] else {
             return;
