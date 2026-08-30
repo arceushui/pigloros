@@ -233,6 +233,57 @@ fn mutate_member(
     encode(&archive)
 }
 
+fn mutate_release_admission(
+    original: &[u8],
+    path: &str,
+    mutate: impl FnOnce(&mut Vec<Value>) -> TestResult,
+) -> TestResult<Vec<u8>> {
+    let mut archive: Value = ciborium::from_reader(original)?;
+    let original_bytes = member_bytes(&archive, path)?;
+    let original_digest = blake3::hash(&original_bytes).as_bytes().to_vec();
+    let mut admission: Value = ciborium::from_reader(original_bytes.as_slice())?;
+    mutate(array_mut(&mut admission, "release admission")?)?;
+    let updated_bytes = encode(&admission)?;
+    let updated_digest = blake3::hash(&updated_bytes).as_bytes().to_vec();
+    replace_member_bytes(array_mut(&mut archive, "archive")?, path, &updated_bytes)?;
+
+    let profile_bytes = member_bytes(&archive, PROFILE_PATH)?;
+    let mut profile: Value = ciborium::from_reader(profile_bytes.as_slice())?;
+    let profile_digest = {
+        let fields = array_mut(&mut profile, "profile")?;
+        let fixtures = array_field(fields, 9, "profile fixtures")?;
+        let mut replaced = false;
+        for fixture in fixtures {
+            let fixture_fields = array_mut(fixture, "fixture")?;
+            if fixture_fields[20] == Value::Bytes(original_digest.clone()) {
+                fixture_fields[20] = Value::Bytes(updated_digest.clone());
+                replaced = true;
+            }
+        }
+        if !replaced {
+            return Err("release admission is not referenced by a fixture".into());
+        }
+        refresh_fixture_digests(fields)?;
+        fields[17] = Value::Bytes(
+            contract_digest(b"PiglorOS.ConformanceProfile.v1", &fields[..17])?.to_vec(),
+        );
+        match &fields[17] {
+            Value::Bytes(digest) => digest.clone(),
+            _ => return Err("profile digest is not bytes".into()),
+        }
+    };
+    let updated_profile = encode(&profile)?;
+    replace_member_bytes(
+        array_mut(&mut archive, "archive")?,
+        PROFILE_PATH,
+        &updated_profile,
+    )?;
+    array_field(array_mut(&mut archive, "archive")?, 0, "manifest")?[3] =
+        Value::Bytes(profile_digest);
+    resign_archive(&mut archive)?;
+    encode(&archive)
+}
+
 fn refresh_fixture_digests(profile: &mut [Value]) -> TestResult {
     let fixtures = array_field(profile, 9, "profile fixtures")?;
     for fixture in fixtures {
@@ -404,26 +455,36 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
         assert_independent_rejects(&malformed, "a malformed authority record")?;
     }
 
-    let malformed_release_admission = mutate_member(&archive, &release_admission_path, |fields| {
-        fields[0] = Value::Integer(0_u64.into());
-        Ok(())
-    })?;
+    let malformed_release_admission =
+        mutate_release_admission(&archive, &release_admission_path, |fields| {
+            fields[0] = Value::Integer(0_u64.into());
+            Ok(())
+        })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&malformed_release_admission),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
     assert_independent_rejects(
         &malformed_release_admission,
         "a malformed release admission",
     )?;
 
-    let invalid_release_admission = mutate_member(&archive, &release_admission_path, |fields| {
-        fields[0] = Value::Text("RAD0".to_owned());
-        let unsigned = encode(&Value::Array(fields[..10].to_vec()))?;
-        fields[10] = Value::Bytes(
-            SigningKey::from_bytes(&SIGNING_KEY)
-                .sign(&unsigned)
-                .to_bytes()
-                .to_vec(),
-        );
-        Ok(())
-    })?;
+    let invalid_release_admission =
+        mutate_release_admission(&archive, &release_admission_path, |fields| {
+            fields[0] = Value::Text("RAD0".to_owned());
+            let unsigned = encode(&Value::Array(fields[..10].to_vec()))?;
+            fields[10] = Value::Bytes(
+                SigningKey::from_bytes(&SIGNING_KEY)
+                    .sign(&unsigned)
+                    .to_bytes()
+                    .to_vec(),
+            );
+            Ok(())
+        })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&invalid_release_admission),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
     assert_independent_rejects(&invalid_release_admission, "a re-signed invalid admission")?;
 
     Ok(())
