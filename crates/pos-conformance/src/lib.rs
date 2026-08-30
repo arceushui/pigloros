@@ -1196,8 +1196,7 @@ impl ConformanceReportV1 {
     /// not a complete, self-consistent report.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, EvidenceError> {
         self.validate()?;
-        let bytes = strict_codec::encode_conformance_report(self)
-            .map_err(|_| EvidenceError::InvalidConformanceReport)?;
+        let bytes = strict_codec::encode_conformance_report(self).map_err(EvidenceError::from)?;
         if bytes.len() > 16 * 1024 * 1024 {
             Err(EvidenceError::InvalidConformanceReport)
         } else {
@@ -1225,8 +1224,7 @@ impl ConformanceReportV1 {
     /// Returns [`EvidenceError::InvalidConformanceReport`] when the fields
     /// cannot be represented by the strict canonical codec.
     pub fn digest(&self) -> Result<[u8; 32], EvidenceError> {
-        strict_codec::conformance_report_digest(self)
-            .map_err(|_| EvidenceError::InvalidConformanceReport)
+        strict_codec::conformance_report_digest(self).map_err(Into::into)
     }
 }
 
@@ -1526,10 +1524,9 @@ impl VerificationResultV1 {
     /// Compute the result digest over fields `0..16`.
     ///
     /// # Errors
-    /// This operation currently cannot fail because VRR1 digests are encoded
-    /// into an in-memory byte vector.
+    /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::verification_result_digest(self))
+        strict_codec::verification_result_digest(self).map_err(Into::into)
     }
 }
 
@@ -1557,10 +1554,21 @@ impl DivergenceReportV1 {
     /// Compute the divergence digest over fields `0..20`.
     ///
     /// # Errors
-    /// This operation currently cannot fail because DVR1 digests are encoded
-    /// into an in-memory byte vector.
+    /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::divergence_report_digest(self))
+        strict_codec::divergence_report_digest(self).map_err(Into::into)
+    }
+}
+
+impl From<strict_codec::StrictCborError> for pos_core::CoreError {
+    fn from(error: strict_codec::StrictCborError) -> Self {
+        Self::Serialization(error.to_string())
+    }
+}
+
+impl From<strict_codec::StrictCborError> for EvidenceError {
+    fn from(_: strict_codec::StrictCborError) -> Self {
+        Self::InvalidConformanceReport
     }
 }
 
@@ -1689,8 +1697,11 @@ pub mod strict_codec {
     fn encode_value(value: &Value) -> Result<Vec<u8>, StrictCborError> {
         validate_value(value)?;
         let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes)
-            .expect("encoding validated CBOR into an in-memory vector cannot fail");
+        if ciborium::into_writer(value, &mut bytes).is_err() {
+            return Err(StrictCborError::Serialization(
+                "in-memory CBOR writer failed".to_owned(),
+            ));
+        }
         Ok(bytes)
     }
 
@@ -1707,20 +1718,22 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
-        let expected_digest = verification_result_digest(&result);
-        if result.result_digest == expected_digest {
-            validate_verification_result(&result).map(|()| result)
-        } else {
-            Err(StrictCborError::InvalidField {
-                field: "verification_result_digest".to_owned(),
-            })
-        }
+        verification_result_digest(&result).and_then(|expected_digest| {
+            if result.result_digest == expected_digest {
+                validate_verification_result(&result).map(|()| result)
+            } else {
+                Err(StrictCborError::InvalidField {
+                    field: "verification_result_digest".to_owned(),
+                })
+            }
+        })
     }
 
-    pub(crate) fn verification_result_digest(result: &VerificationResultV1) -> [u8; 32] {
-        let bytes = encode_value(&encode_verification_result_value(result, false))
-            .expect("a constructed VRR1 value satisfies the strict CBOR subset");
-        domain_digest(b"PiglorOS.VerificationResult.v1", &bytes)
+    pub(crate) fn verification_result_digest(
+        result: &VerificationResultV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        encode_value(&encode_verification_result_value(result, false))
+            .map(|bytes| domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
     }
 
     fn encode_verification_result_value(
@@ -1921,20 +1934,22 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
-        let expected_digest = divergence_report_digest(&report);
-        if report.report_digest == expected_digest {
-            validate_divergence_report(&report).map(|()| report)
-        } else {
-            Err(StrictCborError::InvalidField {
-                field: "divergence_report_digest".to_owned(),
-            })
-        }
+        divergence_report_digest(&report).and_then(|expected_digest| {
+            if report.report_digest == expected_digest {
+                validate_divergence_report(&report).map(|()| report)
+            } else {
+                Err(StrictCborError::InvalidField {
+                    field: "divergence_report_digest".to_owned(),
+                })
+            }
+        })
     }
 
-    pub(crate) fn divergence_report_digest(report: &DivergenceReportV1) -> [u8; 32] {
-        let bytes = encode_value(&encode_divergence_report_value(report, false))
-            .expect("a constructed DVR1 value satisfies the strict CBOR subset");
-        domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes)
+    pub(crate) fn divergence_report_digest(
+        report: &DivergenceReportV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        encode_value(&encode_divergence_report_value(report, false))
+            .map(|bytes| domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -4039,7 +4054,8 @@ pub mod strict_codec {
                 ..error.clone()
             });
             assert!(validate_verification_result(&invalid_semantics).is_err());
-            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics);
+            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics)
+                .map_err(|error| error.to_string())?;
             let invalid_semantics_bytes =
                 encode_value(&encode_verification_result_value(&invalid_semantics, true))
                     .unwrap_or_default();

@@ -1300,6 +1300,7 @@ fn public_record_rejections_cover_semantic_boundaries() {
     for mutate in invalid_reports {
         let mut invalid = report.clone();
         mutate(&mut invalid);
+        invalid.report_digest = ok(invalid.digest());
         let encoded = ok(invalid.to_canonical_cbor());
         expect_err(&DivergenceReportV1::from_canonical_cbor(&encoded));
     }

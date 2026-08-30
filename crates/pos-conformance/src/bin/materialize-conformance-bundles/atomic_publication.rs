@@ -48,7 +48,7 @@ impl AtomicPublication {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         let destination_name = CString::new(destination_name)
-            .expect("a hexadecimal source-inventory digest contains no NUL byte");
+            .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
         let effective_uid = effective_uid();
         open_trusted_parent(parent_path, effective_uid).and_then(|(parent, parent_identity)| {
             create_private_staging(&parent, parent_identity, effective_uid).map(
@@ -311,10 +311,10 @@ fn random_staging_name() -> Result<CString, MaterializationError> {
     File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut random))
         .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
-        .map(|()| {
+        .and_then(|()| {
             let suffix = blake3::hash(&random).to_hex();
             CString::new(format!(".pigloros-conformance-staging-{suffix}"))
-                .expect("a hexadecimal random suffix contains no NUL byte")
+                .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
         })
 }
 
