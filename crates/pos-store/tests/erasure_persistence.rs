@@ -184,7 +184,7 @@ fn supporting_records_with(
 ) -> Result<ErasureSupportingRecordsV1, ErasureErrorV1> {
     ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
         correction_provenance: records.correction_provenance().cloned(),
-        authorization_rejection: records.authorization_rejection().cloned(),
+        authorization_rejection: records.authorization_rejection(),
         scope_commitment: records.scope_commitment().cloned(),
         freeze_provenance: records.freeze_provenance(),
         freeze_failure: records.freeze_failure(),
@@ -216,18 +216,23 @@ const fn target(value: u8) -> ErasureRequiredTargetV1 {
     }
 }
 
-fn acknowledgement(target: ErasureRequiredTargetV1, evidence: u8) -> ErasureAcknowledgementV1 {
-    ErasureAcknowledgementV1 {
-        obligation: pos_core::inventory_obligation_reference(
-            ErasureInventoryCategoryV1::Artifact,
-            target,
-            category_scoped_owner(target),
-        ),
+fn acknowledgement(
+    target: ErasureRequiredTargetV1,
+    evidence: u8,
+) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: category_scoped_owner(target),
+        command_identity: destruction_command_reference(reference(1), target),
+    })?;
+    Ok(ErasureAcknowledgementV1 {
+        obligation: obligation.reference(),
         target,
         owner: category_scoped_owner(target),
         evidence: reference(evidence),
         outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-    }
+    })
 }
 
 const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 {
@@ -377,7 +382,7 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
             freeze_position: requested.freeze_position.unwrap_or(10),
             host_evidence: requested.provenance,
         })?;
-        Ok(ErasureAtomicFreezeResultV1::Admitted(admission))
+        Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)))
     }
 
     fn dispatch_destruction(
@@ -635,11 +640,11 @@ fn run_full_lifecycle<S: ErasurePersistencePortV1>(
     coordinator.authorize(reference(1), reference(8))?;
     coordinator.freeze_inventory(reference(1), transition())?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
-    let second_ack = acknowledgement(second, 61);
-    let first_ack = acknowledgement(first, 60);
+    let second_ack = acknowledgement(second, 61)?;
+    let first_ack = acknowledgement(first, 60)?;
     coordinator.acknowledge(reference(1), second_ack)?;
     coordinator.acknowledge(reference(1), first_ack)?;
-    let receipt = coordinator.finalize(reference(1), full_receipt_input(first, second))?;
+    let receipt = coordinator.finalize(reference(1), full_receipt_input(first, second)?)?;
     Ok((shared, receipt))
 }
 
@@ -682,15 +687,15 @@ where
 fn full_receipt_input(
     first: ErasureRequiredTargetV1,
     second: ErasureRequiredTargetV1,
-) -> ErasureReceiptInputV1 {
-    ErasureReceiptInputV1 {
+) -> Result<ErasureReceiptInputV1, ErasureErrorV1> {
+    Ok(ErasureReceiptInputV1 {
         request: reference(99),
         terminal_state: reference(98),
         coordinator: reference(97),
         lifecycle: ErasureLifecycleV1::Complete,
         freeze_position: 0,
-        acknowledgements: vec![acknowledgement(first, 60), acknowledgement(second, 61)],
-        required_targets: vec![second, first],
+        acknowledgements: vec![acknowledgement(first, 60)?, acknowledgement(second, 61)?],
+        frozen_targets: vec![second, first],
         pending_owners: Vec::new(),
         failed_owners: Vec::new(),
         inventories: ErasureReceiptInventoriesV1 {
@@ -709,7 +714,7 @@ fn full_receipt_input(
         issue_position: 11,
         signature: reference(73),
         receipt_digest: reference(74),
-    }
+    })
 }
 
 fn run_partial_lifecycle<S: ErasurePersistencePortV1>(
@@ -737,7 +742,7 @@ fn run_partial_lifecycle<S: ErasurePersistencePortV1>(
             lifecycle: ErasureLifecycleV1::PartialFailure,
             freeze_position: 0,
             acknowledgements: Vec::new(),
-            required_targets: vec![target],
+            frozen_targets: vec![target],
             pending_owners: vec![target.replica_id],
             failed_owners: Vec::new(),
             inventories: ErasureReceiptInventoriesV1 {
@@ -847,8 +852,8 @@ fn memory_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
     assert_eq!(record.acknowledgements().len(), 2);
     assert_eq!(receipt.acknowledgements().len(), 2);
     let mut expected_acknowledgements = vec![
-        acknowledgement(target(10), 60),
-        acknowledgement(target(20), 61),
+        acknowledgement(target(10), 60)?,
+        acknowledgement(target(20), 61)?,
     ];
     expected_acknowledgements.sort_unstable();
     assert_eq!(
@@ -1025,8 +1030,8 @@ fn sqlite_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
     assert_eq!(record.state().lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(record.receipt(), Some(&receipt));
     let mut expected_acknowledgements = vec![
-        acknowledgement(target(10), 60),
-        acknowledgement(target(20), 61),
+        acknowledgement(target(10), 60)?,
+        acknowledgement(target(20), 61)?,
     ];
     expected_acknowledgements.sort_unstable();
     assert_eq!(
@@ -1180,7 +1185,7 @@ fn sqlite_erasure_terminal_retry_survives_reopen_with_noncanonical_inventory_ord
     );
 
     assert_eq!(
-        coordinator.finalize(reference(1), full_receipt_input(target(10), target(20)))?,
+        coordinator.finalize(reference(1), full_receipt_input(target(10), target(20))?,)?,
         receipt
     );
     Ok(())

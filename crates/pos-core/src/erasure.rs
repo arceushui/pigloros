@@ -1809,7 +1809,7 @@ impl ErasureSupportingRecordsV1 {
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            let category = obligation.category().code() as usize;
+            let category = obligation.category().index();
             category_counts[category] = category_counts[category].saturating_add(1);
             command_owner_pairs.push((obligation.command_identity(), obligation.owner()));
             category_target_pairs.push((obligation.category(), obligation.target()));
@@ -1918,8 +1918,10 @@ impl ErasureSupportingRecordsV1 {
             let mut positive = None;
             for provenance in &self.acknowledgement_provenance {
                 let ordinal = self.admission_ordinal(provenance.attempt())?;
-                if ordinal > admission.attempt_ordinal()
-                    || provenance.obligation() != obligation.reference()
+                let is_later_attempt = ordinal > admission.attempt_ordinal();
+                let is_other_obligation = provenance.obligation() != obligation.reference();
+                if is_later_attempt
+                    || is_other_obligation
                     || provenance.owner() != obligation.owner()
                     || provenance.outcome() != ErasureAcknowledgementOutcomeV1::Acknowledged
                 {
@@ -2058,9 +2060,10 @@ impl ErasureSupportingRecordsV1 {
                     *obligation == acknowledgement.obligation()
                         && *command == acknowledgement.command()
                 });
+            let command_differs = obligation.command_identity() != acknowledgement.command();
             if admission.request() != acknowledgement.request()
                 || !command_matches_obligation
-                || obligation.command_identity() != acknowledgement.command()
+                || command_differs
                 || obligation.owner() != acknowledgement.owner()
                 || admission.policy() != acknowledgement.policy()
                 || admission.trust() != acknowledgement.trust()
@@ -2736,6 +2739,14 @@ pub enum ErasureInventoryCategoryV1 {
 
 impl ErasureInventoryCategoryV1 {
     const fn code(self) -> u64 {
+        match self {
+            Self::Artifact => 0,
+            Self::Key => 1,
+            Self::Replica => 2,
+            Self::Backup => 3,
+        }
+    }
+    const fn index(self) -> usize {
         match self {
             Self::Artifact => 0,
             Self::Key => 1,
@@ -4459,7 +4470,7 @@ impl ErasureAtomicFreezeAdmissionV1 {
             {
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
-            let category = obligation.category().code() as usize;
+            let category = obligation.category().index();
             categories[category] = categories[category].saturating_add(1);
             if categories[category] > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
                 return Err(ErasureErrorV1::ScopeInvalid);
@@ -4527,7 +4538,7 @@ impl ErasureAtomicFreezeAdmissionV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ErasureAtomicFreezeResultV1 {
     /// The host froze one exact scope, target closure, and obligation matrix.
-    Admitted(ErasureAtomicFreezeAdmissionV1),
+    Admitted(Box<ErasureAtomicFreezeAdmissionV1>),
     /// The host rejected freeze/scope work with durable canonical provenance.
     Rejected(ErasureFreezeFailureV1),
 }
@@ -5312,6 +5323,24 @@ impl ErasureCoordinatorRecordV1 {
         &self,
         lifecycle: ErasureLifecycleV1,
     ) -> Result<(), ErasureErrorV1> {
+        self.validate_supporting_evidence_shape(lifecycle)?;
+        self.validate_attempt_evidence_shape(lifecycle)?;
+        if matches!(
+            lifecycle,
+            ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
+        ) {
+            let latest_receipt = self.supporting_records.receipts().last();
+            if latest_receipt != self.receipt.as_ref() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_supporting_evidence_shape(
+        &self,
+        lifecycle: ErasureLifecycleV1,
+    ) -> Result<(), ErasureErrorV1> {
         let scope = self.supporting_records.scope_commitment();
         let freeze = self.supporting_records.freeze_provenance();
         let failure = self.supporting_records.freeze_failure();
@@ -5385,6 +5414,13 @@ impl ErasureCoordinatorRecordV1 {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn validate_attempt_evidence_shape(
+        &self,
+        lifecycle: ErasureLifecycleV1,
+    ) -> Result<(), ErasureErrorV1> {
         let has_attempt_evidence = !self.supporting_records.retry_admissions().is_empty();
         if matches!(
             lifecycle,
@@ -5425,15 +5461,6 @@ impl ErasureCoordinatorRecordV1 {
             if self.state.provenance() != admission.reference()
                 || self.dispatch_provenance != Some(admission.reference())
             {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
-        ) {
-            let latest_receipt = self.supporting_records.receipts().last();
-            if latest_receipt != self.receipt.as_ref() {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
@@ -5740,6 +5767,24 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         transition: ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        let ErasureStateTransitionV1 {
+            lifecycle,
+            freeze_position,
+            pending_owners,
+            failed_owners,
+            acknowledged_targets,
+            replay_claim,
+            provenance,
+        } = transition;
+        let transition = ErasureStateTransitionV1 {
+            lifecycle,
+            freeze_position,
+            pending_owners,
+            failed_owners,
+            acknowledged_targets,
+            replay_claim,
+            provenance,
+        };
         self.record(request).and_then(|mut record| {
             if record.state.lifecycle() == ErasureLifecycleV1::Rejected
                 && record.supporting_records.freeze_failure().is_some()
@@ -5765,7 +5810,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     self.persist_freeze_rejection(&mut record, failure)
                 }
                 ErasureAtomicFreezeResultV1::Admitted(admission) => {
-                    self.persist_atomic_freeze(&mut record, admission)
+                    self.persist_atomic_freeze(&mut record, &admission)
                 }
             }
         })
@@ -5774,7 +5819,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     fn persist_atomic_freeze(
         &mut self,
         record: &mut ErasureCoordinatorRecordV1,
-        admission: ErasureAtomicFreezeAdmissionV1,
+        admission: &ErasureAtomicFreezeAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let request = record.request.reference();
         if admission.scope().request != request
@@ -6592,3 +6637,8 @@ use codec::{
     state_from_fields, state_value, strictly_increasing, supporting_records_from_value,
     supporting_records_value, weakest_inventory_claim,
 };
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "erasure_tests.rs"]
+mod tests;

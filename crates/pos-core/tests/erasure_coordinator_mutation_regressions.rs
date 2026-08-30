@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
-    destruction_command_reference, inventory_obligation_reference, ErasureAcknowledgementOutcomeV1,
+    destruction_command_reference, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
@@ -106,22 +106,25 @@ const fn inventory_for(
 }
 
 fn acknowledgement_for(
+    request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
     owner: ErasureReferenceV1,
     outcome: ErasureAcknowledgementOutcomeV1,
     evidence: ErasureReferenceV1,
-) -> ErasureAcknowledgementV1 {
-    ErasureAcknowledgementV1 {
-        obligation: inventory_obligation_reference(
-            ErasureInventoryCategoryV1::Artifact,
-            target,
-            owner,
-        ),
+) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner,
+        command_identity: destruction_command_reference(request, target),
+    })?;
+    Ok(ErasureAcknowledgementV1 {
+        obligation: obligation.reference(),
         target,
         owner,
         evidence,
         outcome,
-    }
+    })
 }
 
 fn acknowledgement_provenance(
@@ -156,7 +159,13 @@ fn retry_admission(
         request,
         attempt_ordinal,
         source_receipt,
-        unresolved_obligations: vec![inventory_for(target, owner).obligation_reference()],
+        unresolved_obligations: vec![ErasureObligationV1::new(ErasureObligationInputV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target,
+            owner,
+            command_identity: destruction_command_reference(request, target),
+        })?
+        .reference()],
         command_identities: vec![destruction_command_reference(request, target)],
         policy: reference(6),
         trust: reference(94),
@@ -496,6 +505,7 @@ impl ErasureCoordinatorPortV1 for SharedPort {
             state.mismatched_freeze_closure,
             state.lineage_rule,
         )
+        .map(Box::new)
         .map(ErasureAtomicFreezeResultV1::Admitted)
     }
 
@@ -602,11 +612,12 @@ fn complete_fixture() -> Result<Fixture, ErasureErrorV1> {
     let target = target(10);
     let mut fixture = awaiting_fixture(vec![target])?;
     let acknowledgement = acknowledgement_for(
+        fixture.request,
         target,
         target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
-    );
+    )?;
     fixture
         .machine
         .acknowledge(fixture.request, acknowledgement)?;
@@ -627,11 +638,12 @@ fn partial_failure_fixture() -> Result<Fixture, ErasureErrorV1> {
     let target = target(10);
     let mut fixture = awaiting_fixture(vec![target])?;
     let acknowledgement = acknowledgement_for(
+        fixture.request,
         target,
         target.replica_id,
         ErasureAcknowledgementOutcomeV1::Negative,
         reference(96),
-    );
+    )?;
     fixture
         .machine
         .acknowledge(fixture.request, acknowledgement)?;
@@ -783,17 +795,19 @@ fn durable_record_scope_and_lifecycle_shapes_reject_each_public_near_miss(
     assert_invalid_parts(oversized_targets);
 
     let first = acknowledgement_for(
+        frozen.request,
         target(10),
         target(10).replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
-    );
+    )?;
     let second = acknowledgement_for(
+        frozen.request,
         target(20),
         target(20).replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(96),
-    );
+    )?;
     let mut acknowledgements = vec![first, second];
     acknowledgements.sort_unstable();
     acknowledgements.reverse();
@@ -803,11 +817,12 @@ fn durable_record_scope_and_lifecycle_shapes_reject_each_public_near_miss(
 
     let mut injected_acknowledgement = record_parts(&frozen_record);
     injected_acknowledgement.acknowledgements = vec![acknowledgement_for(
+        frozen.request,
         target(30),
         target(30).replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(97),
-    )];
+    )?];
     assert_invalid_parts(injected_acknowledgement);
 
     let awaiting = awaiting_fixture(vec![target(10)])?;
@@ -925,11 +940,12 @@ fn supporting_records_bind_minimal_acknowledgement_trust_and_record_request(
     let target = target(10);
     let admission = retry_admission(request, target, 0, None, u64::MAX)?;
     let acknowledgement = acknowledgement_for(
+        request,
         target,
         target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
-    );
+    )?;
     let wrong_trust =
         ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
             request,
@@ -1002,11 +1018,12 @@ fn replacement_validation_accepts_each_same_state_persistence_extension(
     let mut complete = awaiting_fixture(vec![target(10)])?;
     let before_acknowledgement = latest_record(&complete.state, complete.request)?;
     let acknowledgement = acknowledgement_for(
+        complete.request,
         target(10),
         target(10).replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
-    );
+    )?;
     complete
         .machine
         .acknowledge(complete.request, acknowledgement)?;
@@ -1042,13 +1059,14 @@ fn coordinator_propagates_attempt_dispatch_acknowledgement_and_receipt_failures(
         Err(ErasureErrorV1::Unauthorized)
     );
 
+    let mut acknowledge = awaiting_fixture(vec![target])?;
     let acknowledgement = acknowledgement_for(
+        acknowledge.request,
         target,
         target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
-    );
-    let mut acknowledge = awaiting_fixture(vec![target])?;
+    )?;
     acknowledge.state.borrow_mut().acknowledgement_error = Some(ErasureErrorV1::Unauthorized);
     assert_eq!(
         acknowledge
@@ -1086,9 +1104,13 @@ fn dispatch_rejects_a_command_outside_the_frozen_closure() -> Result<(), Erasure
         request: fixture.request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: vec![
-            inventory_for(target, target.replica_id).obligation_reference()
-        ],
+        unresolved_obligations: vec![ErasureObligationV1::new(ErasureObligationInputV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target,
+            owner: target.replica_id,
+            command_identity: destruction_command_reference(fixture.request, target),
+        })?
+        .reference()],
         command_identities: vec![reference(99)],
         policy: reference(6),
         trust: reference(94),
@@ -1115,11 +1137,12 @@ fn active_retry_can_commit_a_new_partial_failure_receipt() -> Result<(), Erasure
     let retry = retry_admission(fixture.request, target, 1, Some(source_receipt), 20)?;
     fixture.machine.dispatch_attempt(fixture.request, &retry)?;
     let retry_acknowledgement = acknowledgement_for(
+        fixture.request,
         target,
         target.replica_id,
         ErasureAcknowledgementOutcomeV1::Negative,
         reference(97),
-    );
+    )?;
     fixture
         .machine
         .acknowledge(fixture.request, retry_acknowledgement)?;
@@ -1377,11 +1400,12 @@ fn supporting_lifecycle_rejects_evidence_at_the_wrong_boundary() -> Result<(), E
     let mut access_frozen_parts = record_parts(&frozen_record);
     let access_admission = retry_admission(frozen.request, target(10), 0, None, u64::MAX)?;
     let access_acknowledgement = acknowledgement_for(
+        frozen.request,
         target(10),
         target(10).replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(97),
-    );
+    )?;
     let access_provenance = acknowledgement_provenance(
         frozen.request,
         &access_admission,
@@ -1597,20 +1621,22 @@ fn acknowledgement_requires_a_unique_admitted_obligation_owner_pair() -> Result<
     let target = target(10);
     let mut accepted = awaiting_fixture(vec![target])?;
     let acknowledgement = acknowledgement_for(
+        accepted.request,
         target,
         target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
-    );
+    )?;
     accepted
         .machine
         .acknowledge(accepted.request, acknowledgement)?;
     let conflicting = acknowledgement_for(
+        accepted.request,
         target,
         target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(96),
-    );
+    )?;
     assert_eq!(
         accepted.machine.acknowledge(accepted.request, conflicting),
         Err(ErasureErrorV1::PolicyConflict)
@@ -1675,17 +1701,19 @@ fn coordinator_rejects_duplicate_acknowledgement_identity_by_owner() -> Result<(
     let fixture = frozen_fixture(vec![first_target, second_target])?;
     let frozen = latest_record(&fixture.state, fixture.request)?;
     let first = acknowledgement_for(
+        fixture.request,
         first_target,
         first_target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
-    );
+    )?;
     let mut second = acknowledgement_for(
+        fixture.request,
         second_target,
         first_target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(96),
-    );
+    )?;
     second.obligation = first.obligation;
     let mut parts = record_parts(&frozen);
     parts.acknowledgements = vec![first, second];

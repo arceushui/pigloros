@@ -2,21 +2,24 @@
 
 use ciborium::value::Value;
 use pos_core::{
-    acknowledgement_inventory_reference, erasure_evidence_set_reference,
-    selected_obligations_reference, ErasureAcknowledgementOutcomeV1,
-    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
-    ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
-    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAttemptOutcomeInputV1,
-    ErasureAttemptOutcomeV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
-    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
-    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
-    ErasureSupportingRecordsV1, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
-    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    acknowledgement_inventory_reference, destruction_command_reference,
+    erasure_evidence_set_reference, selected_obligations_reference,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
+    ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
+    ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureCoordinatorRecordPartsV1,
+    ErasureCoordinatorRecordV1, ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1,
+    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
+    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
+    ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RETRY_ADMISSION_MAX_BYTES,
 };
 
@@ -74,18 +77,38 @@ const fn required_target() -> ErasureRequiredTargetV1 {
     }
 }
 
-fn acknowledgement() -> ErasureAcknowledgementV1 {
-    ErasureAcknowledgementV1 {
-        obligation: pos_core::inventory_obligation_reference(
-            ErasureInventoryCategoryV1::Artifact,
-            required_target(),
-            reference(36),
-        ),
+fn obligation(request: ErasureReferenceV1) -> Result<ErasureObligationV1, ErasureErrorV1> {
+    let target = required_target();
+    ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: reference(36),
+        command_identity: destruction_command_reference(request, target),
+    })
+}
+
+fn scope_commitment(
+    request: ErasureReferenceV1,
+) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+    ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(2)],
+        target_closure: pos_core::erasure::target_closure_digest(&[required_target()]),
+        lineage_rule: None,
+    })
+}
+
+fn acknowledgement(
+    request: ErasureReferenceV1,
+) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
+    let obligation = obligation(request)?;
+    Ok(ErasureAcknowledgementV1 {
+        obligation: obligation.reference(),
         target: required_target(),
         owner: reference(36),
         evidence: reference(34),
         outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-    }
+    })
 }
 
 const fn inventory() -> ErasureInventoryResultV1 {
@@ -115,7 +138,7 @@ fn complete_receipt(
         lifecycle: ErasureLifecycleV1::Complete,
         freeze_position: 10,
         frozen_targets: vec![required_target()],
-        acknowledgements: vec![acknowledgement()],
+        acknowledgements: vec![acknowledgement(request)?],
         pending_owners: Vec::new(),
         failed_owners: Vec::new(),
         inventories: ErasureReceiptInventoriesV1 {
@@ -137,12 +160,13 @@ fn complete_receipt(
 fn initial_admission(
     request: ErasureReferenceV1,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+    let obligation = obligation(request)?;
     ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
         request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: vec![acknowledgement().obligation],
-        command_identities: vec![reference(3)],
+        unresolved_obligations: vec![obligation.reference()],
+        command_identities: vec![obligation.command_identity()],
         policy: reference(4),
         trust: reference(5),
         admitted_position: 10,
@@ -154,30 +178,33 @@ fn initial_admission(
 fn acknowledgement_provenance_input(
     request: ErasureReferenceV1,
     attempt: ErasureReferenceV1,
-) -> ErasureAcknowledgementProvenanceInputV1 {
-    ErasureAcknowledgementProvenanceInputV1 {
+) -> Result<ErasureAcknowledgementProvenanceInputV1, ErasureErrorV1> {
+    let acknowledgement = acknowledgement(request)?;
+    let obligation = obligation(request)?;
+    Ok(ErasureAcknowledgementProvenanceInputV1 {
         request,
-        command: reference(3),
+        command: obligation.command_identity(),
         attempt,
-        obligation: acknowledgement().obligation,
-        owner: acknowledgement().owner,
-        scope: reference(44),
+        obligation: acknowledgement.obligation,
+        owner: acknowledgement.owner,
+        scope: scope_commitment(request)?.reference(),
         outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
         evidence: reference(34),
         policy: reference(4),
         trust: reference(5),
-    }
+    })
 }
 
 fn administrative_resolution(
     request: ErasureReferenceV1,
+    scope_commitment: ErasureReferenceV1,
     predecessor_resolution: Option<ErasureReferenceV1>,
 ) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
     ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
         request,
         affected_digests: vec![reference(48)],
         action: ErasureAdministrativeResolutionActionV1::CloseContainment,
-        scope_commitment: reference(49),
+        scope_commitment,
         policy: reference(4),
         trust: reference(5),
         principal: reference(50),
@@ -197,10 +224,18 @@ fn complete_supporting_input(
         correction_reason: reference(72),
         authorization_provenance: reference(73),
     })?;
+    let obligation = obligation(request)?;
+    let scope = scope_commitment(request)?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
     let admission = initial_admission(request)?;
     let attempt = admission.reference();
     let acknowledgement_provenance = ErasureAcknowledgementProvenanceV1::new(
-        acknowledgement_provenance_input(request, attempt),
+        acknowledgement_provenance_input(request, attempt)?,
     )?;
     let acknowledgement_reference = acknowledgement_provenance.reference();
     let receipt_provenance = ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
@@ -217,9 +252,9 @@ fn complete_supporting_input(
     let receipt = complete_receipt(request, receipt_provenance.reference())?;
     Ok(ErasureSupportingRecordsInputV1 {
         correction_provenance: Some(correction),
-        scope_commitment: None,
-        freeze_provenance: None,
-        freeze_failure: None,
+        scope_commitment: Some(scope.clone()),
+        obligations: vec![obligation],
+        obligation_set: Some(obligation_set),
         retry_admissions: vec![admission],
         acknowledgement_provenance: vec![acknowledgement_provenance],
         attempt_outcomes: vec![ErasureAttemptOutcomeV1::new(
@@ -229,7 +264,7 @@ fn complete_supporting_input(
                 source_receipt: None,
                 lifecycle: ErasureLifecycleV1::Complete,
                 selected_obligations: selected_obligations_reference(&[
-                    acknowledgement().obligation
+                    acknowledgement(request)?.obligation
                 ]),
                 acknowledgement_inventory: acknowledgement_inventory_reference(&[
                     acknowledgement_reference,
@@ -241,7 +276,12 @@ fn complete_supporting_input(
         )?],
         receipts: vec![receipt],
         receipt_provenance: vec![receipt_provenance],
-        administrative_resolutions: vec![administrative_resolution(request, None)?],
+        administrative_resolutions: vec![administrative_resolution(
+            request,
+            scope.reference(),
+            None,
+        )?],
+        ..ErasureSupportingRecordsInputV1::default()
     })
 }
 
@@ -1032,7 +1072,7 @@ fn supporting_ledger_rejects_acknowledgement_and_resolution_forks() -> Result<()
     wrong_command.acknowledgement_provenance[0] =
         ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
             command: reference(99),
-            ..acknowledgement_provenance_input(reference(1), attempt)
+            ..acknowledgement_provenance_input(reference(1), attempt)?
         })?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(wrong_command),
@@ -1045,7 +1085,7 @@ fn supporting_ledger_rejects_acknowledgement_and_resolution_forks() -> Result<()
         .push(ErasureAcknowledgementProvenanceV1::new(
             ErasureAcknowledgementProvenanceInputV1 {
                 evidence: reference(98),
-                ..acknowledgement_provenance_input(reference(1), attempt)
+                ..acknowledgement_provenance_input(reference(1), attempt)?
             },
         )?);
     assert_eq!(
@@ -1054,8 +1094,11 @@ fn supporting_ledger_rejects_acknowledgement_and_resolution_forks() -> Result<()
     );
 
     let mut resolution_fork = input;
-    resolution_fork.administrative_resolutions[0] =
-        administrative_resolution(reference(1), Some(reference(99)))?;
+    resolution_fork.administrative_resolutions[0] = administrative_resolution(
+        reference(1),
+        scope_commitment(reference(1))?.reference(),
+        Some(reference(99)),
+    )?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(resolution_fork),
         Err(ErasureErrorV1::PolicyConflict)
@@ -1071,19 +1114,19 @@ fn supporting_acknowledgements_fail_closed_at_each_admission_binding() -> Result
     let variants = [
         ErasureAcknowledgementProvenanceInputV1 {
             attempt: reference(99),
-            ..acknowledgement_provenance_input(reference(1), attempt)
+            ..acknowledgement_provenance_input(reference(1), attempt)?
         },
         ErasureAcknowledgementProvenanceInputV1 {
             request: reference(99),
-            ..acknowledgement_provenance_input(reference(1), attempt)
+            ..acknowledgement_provenance_input(reference(1), attempt)?
         },
         ErasureAcknowledgementProvenanceInputV1 {
             policy: reference(99),
-            ..acknowledgement_provenance_input(reference(1), attempt)
+            ..acknowledgement_provenance_input(reference(1), attempt)?
         },
         ErasureAcknowledgementProvenanceInputV1 {
             trust: reference(99),
-            ..acknowledgement_provenance_input(reference(1), attempt)
+            ..acknowledgement_provenance_input(reference(1), attempt)?
         },
     ];
     for variant in variants {
@@ -1103,7 +1146,11 @@ fn supporting_resolution_chain_accepts_an_exact_predecessor() -> Result<(), Eras
     let predecessor = input.administrative_resolutions[0].reference();
     input
         .administrative_resolutions
-        .push(administrative_resolution(reference(1), Some(predecessor))?);
+        .push(administrative_resolution(
+            reference(1),
+            scope_commitment(reference(1))?.reference(),
+            Some(predecessor),
+        )?);
     assert!(ErasureSupportingRecordsV1::new(input).is_ok());
     Ok(())
 }

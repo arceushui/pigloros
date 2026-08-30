@@ -128,7 +128,7 @@ impl ErasureCoordinatorPortV1 for PublicPort {
             policy: reference(5),
             trust: reference(3),
         })?;
-        Ok(ErasureAtomicFreezeResultV1::Admitted(
+        Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(
             ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
                 targets: vec![self.target],
                 scope: ErasureScopeCommitmentInputV1 {
@@ -142,7 +142,7 @@ impl ErasureCoordinatorPortV1 for PublicPort {
                 freeze_position: 10,
                 host_evidence: reference(9),
             })?,
-        ))
+        )))
     }
 
     fn dispatch_destruction(

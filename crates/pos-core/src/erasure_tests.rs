@@ -136,7 +136,7 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
             return Err(error);
         }
         if let Some(admission) = self.freeze_reservation.borrow().as_ref().cloned() {
-            return Ok(ErasureAtomicFreezeResultV1::Admitted(admission));
+            return Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)));
         }
         if self.frozen_targets_error.is_some() {
             return Err(self
@@ -188,7 +188,7 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         self.freeze_reservation
             .borrow_mut()
             .replace(admission.clone());
-        Ok(ErasureAtomicFreezeResultV1::Admitted(admission))
+        Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)))
     }
     fn dispatch_destruction(
         &self,
@@ -2492,8 +2492,13 @@ fn receipt_inventory_encoding() -> Result<Vec<u8>, ErasureErrorV1> {
         ErasureInventoryCategoryV1::Artifact,
         ErasureInventoryCategoryV1::Artifact,
     ]) {
-        acknowledgement.obligation =
-            inventory_obligation_reference(category, acknowledgement.target, acknowledgement.owner);
+        acknowledgement.obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+            category,
+            target: acknowledgement.target,
+            owner: acknowledgement.owner,
+            command_identity: destruction_command_reference(reference(1), acknowledgement.target),
+        })?
+        .reference();
     }
     let mut input = receipt_input(
         ErasureLifecycleV1::Complete,
