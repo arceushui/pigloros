@@ -4782,7 +4782,13 @@ impl ErasureCoordinatorRecordV1 {
         if !targets_continue {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        if next.scope_extension_ledger != self.scope_extension_ledger
+        let initializes_scope_extension_ledger = self.state.lifecycle()
+            == ErasureLifecycleV1::Authorized
+            && next.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
+            && self.scope_extension_ledger.is_none()
+            && next.scope_extension_ledger.is_some();
+        if (next.scope_extension_ledger != self.scope_extension_ledger
+            && !initializes_scope_extension_ledger)
             || next.administrative_resolution_head != self.administrative_resolution_head
         {
             return Err(ErasureErrorV1::PolicyConflict);
