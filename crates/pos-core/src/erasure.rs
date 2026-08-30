@@ -3584,8 +3584,12 @@ impl ErasureCoordinatorRecordV1 {
     /// a permitted monotonic update.
     pub fn validate_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
         let coordinator = self.state.coordinator();
-        self.validate(coordinator)?;
-        next.validate(coordinator)?;
+        self.validate(coordinator)
+            .and_then(|()| next.validate(coordinator))
+            .and_then(|()| self.validate_replacement_fields(next))
+    }
+
+    fn validate_replacement_fields(&self, next: &Self) -> Result<(), ErasureErrorV1> {
         if self.request != next.request {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -4618,29 +4622,40 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         error: ErasureErrorV1,
         evidence: ErasureReferenceV1,
     ) -> Result<T, ErasureErrorV1> {
-        let authorization_provenance = record
-            .authorize_provenance
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
-            request: record.request.reference(),
-            error,
-            authorization_provenance,
-            evidence,
-        })?;
+        let request = record.request.reference();
         let replay_claim = record.state.replay_claim();
-        record.state = record.state.transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::Rejected,
-            freeze_position: None,
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim,
-            provenance: failure.reference(),
-        })?;
-        record.reserved_targets.clear();
-        record.supporting_records.freeze_failure = Some(failure);
-        self.commit(record.clone())?;
-        Err(error)
+        record
+            .authorize_provenance
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|authorization_provenance| {
+                ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+                    request,
+                    error,
+                    authorization_provenance,
+                    evidence,
+                })
+            })
+            .and_then(|failure| {
+                record
+                    .state
+                    .transition(ErasureStateTransitionV1 {
+                        lifecycle: ErasureLifecycleV1::Rejected,
+                        freeze_position: None,
+                        pending_owners: Vec::new(),
+                        failed_owners: Vec::new(),
+                        acknowledged_targets: Vec::new(),
+                        replay_claim,
+                        provenance: failure.reference(),
+                    })
+                    .map(|state| (failure, state))
+            })
+            .and_then(|(failure, state)| {
+                record.state = state;
+                record.reserved_targets.clear();
+                record.supporting_records.freeze_failure = Some(failure);
+                self.commit(record.clone())
+            })
+            .and_then(|()| Err(error))
     }
     /// Dispatch the frozen closure through the host-owned idempotent port.
     ///
@@ -4787,7 +4802,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .copied()
             .map(|target| destruction_command_reference(request, target))
             .collect::<Vec<_>>();
-        let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
             request,
             attempt_ordinal: 0,
             source_receipt: None,
@@ -4798,8 +4813,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             admitted_position: record.request.request_position(),
             deadline_position: u64::MAX,
             authorization_provenance: provenance,
-        })?;
-        self.dispatch_attempt(request, &admission)
+        })
+        .and_then(|admission| self.dispatch_attempt(request, &admission))
     }
     /// Persist one frozen-closure acknowledgement; an exact retry is idempotent.
     ///
@@ -4976,7 +4991,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .filter(|provenance| provenance.attempt() == admission.reference())
             .map(ErasureAcknowledgementProvenanceV1::reference)
             .collect::<Vec<_>>();
-        let outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
+        ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
             request: record.request.reference(),
             attempt: admission.reference(),
             source_receipt: admission.source_receipt(),
@@ -4988,8 +5003,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             terminal_position,
             policy: admission.policy(),
             trust: admission.trust(),
-        })?;
-        Ok((outcome, acknowledgements))
+        })
+        .map(|outcome| (outcome, acknowledgements))
     }
 
     fn receipt_provenance_for_attempt(
@@ -5846,6 +5861,161 @@ mod erasure_coverage_tests {
         assert_eq!(
             missing_scope.validate_supporting_lifecycle(ErasureLifecycleV1::AccessFrozen),
             Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_invariant_helpers_reject_corrupted_internal_records() -> Result<(), ErasureErrorV1> {
+        let fixtures = replacement_fixtures()?;
+
+        let mut invalid_current = fixtures.submitted.clone();
+        invalid_current.state.coordinator = ErasureReferenceV1::from_digest([80; 32]);
+        assert_eq!(
+            invalid_current.validate_replacement(&fixtures.authorized),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut invalid_reservation = fixtures.reserved.clone();
+        invalid_reservation.authorize_provenance = Some(ErasureReferenceV1::from_digest([81; 32]));
+        assert_eq!(
+            fixtures
+                .authorized
+                .validate_same_state_replacement(&invalid_reservation),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let mut partial = fixtures.acknowledged.clone();
+        partial.state.lifecycle = ErasureLifecycleV1::PartialFailure;
+        let mut invalid_retry = partial.clone();
+        invalid_retry.acknowledgements.clear();
+        invalid_retry.supporting_records.retry_admissions.push(
+            partial
+                .supporting_records
+                .retry_admissions
+                .last()
+                .cloned()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+        );
+        invalid_retry.authorize_provenance = Some(ErasureReferenceV1::from_digest([82; 32]));
+        assert_eq!(
+            partial.validate_same_state_replacement(&invalid_retry),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let acknowledgement = fixtures
+            .acknowledged
+            .acknowledgements
+            .first()
+            .copied()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let mut missing_scope = fixtures.acknowledged;
+        missing_scope.supporting_records.scope_commitment = None;
+        assert!(!missing_scope.acknowledgement_has_provenance(&acknowledgement));
+
+        let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+            request: fixtures.submitted.request.reference(),
+            error: ErasureErrorV1::AccessFreezeFailed,
+            authorization_provenance: ErasureReferenceV1::from_digest([83; 32]),
+            evidence: ErasureReferenceV1::from_digest([84; 32]),
+        })?;
+        let mut rejected = fixtures.submitted;
+        rejected.supporting_records.freeze_failure = Some(failure);
+        rejected.authorize_provenance = None;
+        assert_eq!(
+            rejected.validate_supporting_lifecycle(ErasureLifecycleV1::Rejected),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        rejected.authorize_provenance = Some(ErasureReferenceV1::from_digest([83; 32]));
+        assert_eq!(
+            rejected.validate_supporting_lifecycle(ErasureLifecycleV1::Rejected),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_inventory_obligations_are_rejected() {
+        let target =
+            tests::acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+        let result = ErasureInventoryResultV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target,
+            transition: ErasureArtifactTransitionV1 {
+                from: ErasureReplayClaimV1::Exact,
+                to: ErasureReplayClaimV1::StructuralOnly,
+                reason: ErasureReferenceV1::from_digest([85; 32]),
+                owner: target.replica_id,
+                acknowledgements: ErasureReferenceV1::from_digest([86; 32]),
+                provenance: ErasureReferenceV1::from_digest([87; 32]),
+            },
+            retained_disclosure: ErasureReferenceV1::from_digest([88; 32]),
+        };
+        let inventories = ErasureReceiptInventoriesV1 {
+            artifacts: vec![result, result],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        };
+        assert_eq!(
+            inventory_obligations(&inventories),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
+
+    #[test]
+    fn replacement_field_validation_rejects_non_monotonic_evidence() -> Result<(), ErasureErrorV1> {
+        let fixtures = replacement_fixtures()?;
+
+        let mut removed_supporting = fixtures.dispatched.clone();
+        removed_supporting.supporting_records = ErasureSupportingRecordsV1::default();
+        assert_eq!(
+            fixtures
+                .frozen
+                .validate_replacement_fields(&removed_supporting),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let mut lower_freeze = fixtures.dispatched.clone();
+        lower_freeze.state.freeze_position = Some(9);
+        assert_eq!(
+            fixtures.frozen.validate_replacement_fields(&lower_freeze),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let mut stronger_claim = fixtures.dispatched;
+        stronger_claim.state.replay_claim = ErasureReplayClaimV1::Exact;
+        assert_eq!(
+            fixtures.frozen.validate_replacement_fields(&stronger_claim),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_validation_accepts_nonterminal_and_active_retry_shapes(
+    ) -> Result<(), ErasureErrorV1> {
+        let submitted = tests::record_after_submit()?;
+        assert_eq!(
+            submitted.validate_terminal(ErasureLifecycleV1::Submitted, coordinator()),
+            Ok(())
+        );
+
+        let mut active_retry = tests::complete_record()?;
+        let admission = active_retry
+            .supporting_records
+            .retry_admissions
+            .last()
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        active_retry
+            .supporting_records
+            .retry_admissions
+            .push(admission);
+        active_retry.acknowledgements.clear();
+        assert_eq!(
+            active_retry.validate_terminal(active_retry.state.lifecycle(), coordinator()),
+            Ok(())
         );
         Ok(())
     }
