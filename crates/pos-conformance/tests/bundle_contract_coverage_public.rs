@@ -9,7 +9,8 @@ use support::{
     array_field, array_mut, assert_independent_rejects, current_archive as materialized_archive,
     encode_value as encode, member_bytes, member_path_by_role, mutate_archive,
     mutate_draft_evidence, mutate_member, mutate_profile, mutate_release_admission,
-    replace_archive_member_bytes as replace_member_bytes, update_typed_member,
+    mutate_selected_fixture, replace_archive_member_bytes as replace_member_bytes,
+    update_typed_member,
 };
 use support::{
     ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField,
@@ -84,41 +85,21 @@ fn public_verifiers_reject_non_pending_or_unbound_draft_evidence() -> TestResult
 #[test]
 fn public_verifiers_require_one_draft_evidence_record_per_fixture() -> TestResult {
     let archive = current_archive()?;
-    let evidence_path = {
-        let archive_value: Value = ciborium::from_reader(archive.as_slice())?;
-        member_path_by_role(&archive_value, 17)?
-    };
-    let without_profile_declaration = mutate_profile(&archive, |profile| {
-        let fixtures = array_field(profile, ProfileField::Fixtures.index(), "profile fixtures")?;
-        let fixture = fixtures
-            .iter_mut()
-            .find(|fixture| {
-                let Value::Array(fields) = fixture else {
-                    return false;
-                };
-                matches!(
-                    fields.get(FixtureField::Auxiliary.index()),
-                    Some(Value::Array(auxiliary)) if auxiliary.iter().any(|descriptor| {
-                        matches!(
-                            descriptor,
-                            Value::Array(fields)
-                                if matches!(
-                                    fields.get(ArtifactDescriptorField::Path.index()),
-                                    Some(Value::Text(path)) if path == &evidence_path
-                                )
-                        )
-                    })
-                )
-            })
-            .ok_or("profile fixture does not declare the evidence member")?;
-        let fields = array_mut(fixture, "fixture")?;
+    let without_profile_declaration = mutate_selected_fixture(&archive, |fields| {
         array_field(
             fields,
             FixtureField::Auxiliary.index(),
             "fixture auxiliary artifacts",
         )?
         .retain(|descriptor| {
-            !matches!(descriptor, Value::Array(fields) if fields.get(ArtifactDescriptorField::Path.index()) == Some(&Value::Text(evidence_path.clone())))
+            !matches!(
+                descriptor,
+                Value::Array(fields)
+                    if matches!(
+                        fields.get(ArtifactDescriptorField::Path.index()),
+                        Some(Value::Text(path)) if path.starts_with("evidence/")
+                    )
+            )
         });
         Ok(())
     })?;

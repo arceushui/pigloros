@@ -41,6 +41,7 @@ impl ArchiveField {
 
 #[derive(Clone, Copy)]
 pub enum ManifestField {
+    Mode,
     ProfileDigest,
     MemberDescriptors,
 }
@@ -50,6 +51,7 @@ impl ManifestField {
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
+            Self::Mode => 2,
             Self::ProfileDigest => 3,
             Self::MemberDescriptors => 4,
         }
@@ -602,6 +604,56 @@ pub fn refresh_fixture_digests(profile: &mut [Value]) -> TestResult {
     Ok(())
 }
 
+fn archive_mode(archive: &Value) -> TestResult<Value> {
+    let Value::Array(archive_fields) = archive else {
+        return Err("archive is not an array".into());
+    };
+    let Some(Value::Array(manifest)) = archive_fields.get(ArchiveField::Manifest.index()) else {
+        return Err("archive manifest is not an array".into());
+    };
+    manifest
+        .get(ManifestField::Mode.index())
+        .cloned()
+        .ok_or_else(|| "archive mode is absent".into())
+}
+
+fn selected_fixture_fields<'a>(
+    profile: &'a mut [Value],
+    mode: &Value,
+) -> TestResult<&'a mut Vec<Value>> {
+    let fixtures = array_field(profile, ProfileField::Fixtures.index(), "profile fixtures")?;
+    let fixture = fixtures
+        .iter_mut()
+        .find(|fixture| {
+            matches!(
+                fixture,
+                Value::Array(fields)
+                    if matches!(
+                        fields.get(FixtureField::Modes.index()),
+                        Some(Value::Array(modes)) if modes.contains(mode)
+                    )
+            )
+        })
+        .ok_or("profile has no fixture selected by the archive mode")?;
+    array_mut(fixture, "selected fixture")
+}
+
+/// Mutates one fixture selected by the archive's public execution mode.
+///
+/// # Errors
+///
+/// Returns an error when the archive/profile is malformed or has no selected fixture.
+pub fn mutate_selected_fixture(
+    original: &[u8],
+    mutate: impl FnOnce(&mut Vec<Value>) -> TestResult,
+) -> TestResult<Vec<u8>> {
+    let archive: Value = ciborium::from_reader(original)?;
+    let mode = archive_mode(&archive)?;
+    mutate_profile(original, |profile| {
+        mutate(selected_fixture_fields(profile, &mode)?)
+    })
+}
+
 /// Mutates, re-signs, and encodes an archive through its public representation.
 ///
 /// # Errors
@@ -714,17 +766,12 @@ pub fn mutate_draft_evidence(
     mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> TestResult,
 ) -> TestResult<Vec<u8>> {
     let mut archive: Value = ciborium::from_reader(original)?;
+    let mode = archive_mode(&archive)?;
     let profile_bytes = member_bytes(&archive, PROFILE_MEMBER_PATH)?;
     let mut profile: Value = ciborium::from_reader(profile_bytes.as_slice())?;
     let evidence_path = {
         let profile_fields = array_mut(&mut profile, "profile")?;
-        let fixtures = array_field(
-            profile_fields,
-            ProfileField::Fixtures.index(),
-            "profile fixtures",
-        )?;
-        let fixture = fixtures.first_mut().ok_or("profile fixture is absent")?;
-        let fixture_fields = array_mut(fixture, "fixture")?;
+        let fixture_fields = selected_fixture_fields(profile_fields, &mode)?;
         let auxiliary = array_field(
             fixture_fields,
             FixtureField::Auxiliary.index(),
@@ -752,13 +799,7 @@ pub fn mutate_draft_evidence(
     let updated_evidence = serde_json::to_vec(&evidence)?;
     let profile_digest = {
         let profile_fields = array_mut(&mut profile, "profile")?;
-        let fixtures = array_field(
-            profile_fields,
-            ProfileField::Fixtures.index(),
-            "profile fixtures",
-        )?;
-        let fixture = fixtures.first_mut().ok_or("profile fixture is absent")?;
-        let fixture_fields = array_mut(fixture, "fixture")?;
+        let fixture_fields = selected_fixture_fields(profile_fields, &mode)?;
         let auxiliary = array_field(
             fixture_fields,
             FixtureField::Auxiliary.index(),

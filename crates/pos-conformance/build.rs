@@ -917,11 +917,7 @@ fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyC
             "fixture-family contract version is unsupported",
         ));
     }
-    if contract.families.len() != FIXTURES_PER_PROFILE {
-        Err(invalid_data(
-            "fixture-family contract must declare exactly seven families",
-        ))
-    } else {
+    if contract.families.len() == FIXTURES_PER_PROFILE {
         let mut canonical_order = Vec::with_capacity(FIXTURES_PER_PROFILE);
         let mut declarations = BTreeMap::new();
         for family in contract.families {
@@ -937,6 +933,10 @@ fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyC
             canonical_order,
             declarations,
         })
+    } else {
+        Err(invalid_data(
+            "fixture-family contract must declare exactly seven families",
+        ))
     }
 }
 
@@ -1035,12 +1035,11 @@ fn profile_fixtures(
                 .get(&family)
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    invalid_data(format!("provider manifest is missing schema {}", family))
+                    invalid_data(format!("provider manifest is missing schema {family}"))
                 })?;
             if schema.relative != expected_schema {
                 return Err(invalid_data(format!(
-                    "profile fixture schema does not match family {}",
-                    family
+                    "profile fixture schema does not match family {family}"
                 )));
             }
             let input = relative_asset(snapshots, fixture, "input")?;
@@ -1050,7 +1049,7 @@ fn profile_fixtures(
             let family_declaration = family_contract
                 .declarations
                 .get(&family)
-                .ok_or_else(|| invalid_data(format!("fixture-family contract omits {}", family)))?;
+                .ok_or_else(|| invalid_data(format!("fixture-family contract omits {family}")))?;
             Ok(FixturePaths {
                 case_id,
                 family_variant,
