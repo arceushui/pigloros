@@ -1170,20 +1170,33 @@ impl ErasureSupportingRecordsV1 {
     }
 
     fn validate(&self) -> Result<(), ErasureErrorV1> {
-        if self.retry_admissions.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
-            || self.attempt_outcomes.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
-            || self.receipts.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
-            || self.receipt_provenance.len() > ERASURE_MAX_ATTEMPT_OUTCOMES
-            || self.administrative_resolutions.len() > ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS
-            || self.acknowledgement_provenance.len() > ERASURE_MAX_INVENTORY_RESULTS
+        // Attempt-scoped collection lengths are already bounded by admission
+        // ordinals and the cardinality checks below. These two collections can
+        // grow independently, so enforce their bounds directly.
+        if self
+            .administrative_resolutions
+            .get(ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)
+            .is_some()
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        if self.attempt_outcomes.len() != self.receipts.len()
-            || self.receipts.len() != self.receipt_provenance.len()
-            || self.retry_admissions.len() < self.attempt_outcomes.len()
-            || self.retry_admissions.len() > self.attempt_outcomes.len().saturating_add(1)
+        if self
+            .acknowledgement_provenance
+            .get(ERASURE_MAX_INVENTORY_RESULTS)
+            .is_some()
         {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if self.attempt_outcomes.len() != self.receipts.len() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if self.receipts.len() != self.receipt_provenance.len() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if self.retry_admissions.len() < self.attempt_outcomes.len() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if self.retry_admissions.len() > self.attempt_outcomes.len().saturating_add(1) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         self.validate_attempt_chain()?;
@@ -1325,21 +1338,23 @@ impl ErasureSupportingRecordsV1 {
     }
 
     fn is_prefix_of(&self, next: &Self) -> bool {
-        option_is_unchanged(
-            self.correction_provenance.as_ref(),
-            next.correction_provenance.as_ref(),
-        ) && next.retry_admissions.starts_with(&self.retry_admissions)
-            && next
-                .acknowledgement_provenance
-                .starts_with(&self.acknowledgement_provenance)
-            && next.attempt_outcomes.starts_with(&self.attempt_outcomes)
-            && next.receipts.starts_with(&self.receipts)
-            && next
-                .receipt_provenance
-                .starts_with(&self.receipt_provenance)
-            && next
-                .administrative_resolutions
-                .starts_with(&self.administrative_resolutions)
+        [
+            option_is_unchanged(
+                self.correction_provenance.as_ref(),
+                next.correction_provenance.as_ref(),
+            ),
+            next.retry_admissions.starts_with(&self.retry_admissions),
+            next.acknowledgement_provenance
+                .starts_with(&self.acknowledgement_provenance),
+            next.attempt_outcomes.starts_with(&self.attempt_outcomes),
+            next.receipts.starts_with(&self.receipts),
+            next.receipt_provenance
+                .starts_with(&self.receipt_provenance),
+            next.administrative_resolutions
+                .starts_with(&self.administrative_resolutions),
+        ]
+        .into_iter()
+        .all(std::convert::identity)
     }
 }
 
@@ -1480,15 +1495,29 @@ impl ErasureAdministrativeResolutionV1 {
 fn normalize_retry_admission(
     input: &mut ErasureRetryAdmissionInputV1,
 ) -> Result<(), ErasureErrorV1> {
-    if input.attempt_ordinal >= ERASURE_MAX_ATTEMPT_OUTCOMES as u64
-        || (input.attempt_ordinal == 0) != input.source_receipt.is_none()
-        || input.deadline_position < input.admitted_position
+    if !(0..ERASURE_MAX_ATTEMPT_OUTCOMES as u64).contains(&input.attempt_ordinal) {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    if (input.attempt_ordinal == 0) != input.source_receipt.is_none() {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    if input
+        .deadline_position
+        .checked_sub(input.admitted_position)
+        .is_none()
     {
         return Err(ErasureErrorV1::PolicyConflict);
     }
-    if input.unresolved_obligations.is_empty()
-        || input.unresolved_obligations.len() != input.command_identities.len()
-        || input.unresolved_obligations.len() > ERASURE_MAX_INVENTORY_RESULTS
+    if input.unresolved_obligations.is_empty() {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    if input.unresolved_obligations.len() != input.command_identities.len() {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    if input
+        .unresolved_obligations
+        .get(ERASURE_MAX_INVENTORY_RESULTS)
+        .is_some()
     {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
@@ -2567,7 +2596,11 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
     current: ErasureStateV1,
     resolver: &R,
 ) -> Result<(), ErasureErrorV1> {
-    verify_predecessor_chain_bounded(current, resolver, ERASURE_MAX_ATTEMPT_OUTCOMES + 8)
+    verify_predecessor_chain_bounded(
+        current,
+        resolver,
+        ERASURE_MAX_ATTEMPT_OUTCOMES.saturating_add(8),
+    )
 }
 
 fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1>(
@@ -4369,6 +4402,23 @@ mod erasure_coverage_tests {
     #[test]
     fn erasure_record_limit_matches_the_public_contract() {
         assert_eq!(ERASURE_COORDINATOR_RECORD_MAX_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn supporting_evidence_prefix_rejects_removed_correction_provenance(
+    ) -> Result<(), ErasureErrorV1> {
+        let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: ErasureReferenceV1::from_digest([3; 32]),
+            rejected_terminal_state: ErasureReferenceV1::from_digest([4; 32]),
+            correction_reason: ErasureReferenceV1::from_digest([5; 32]),
+            authorization_provenance: ErasureReferenceV1::from_digest([6; 32]),
+        })?;
+        let with_correction = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            correction_provenance: Some(correction),
+            ..ErasureSupportingRecordsInputV1::default()
+        })?;
+        assert!(!with_correction.is_prefix_of(&ErasureSupportingRecordsV1::default()));
+        Ok(())
     }
 
     fn transition(

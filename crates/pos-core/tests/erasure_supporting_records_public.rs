@@ -235,6 +235,7 @@ fn correction_provenance_roundtrips_and_rejects_shape_changes() -> Result<(), Er
         correction_reason: reference(3),
         authorization_provenance: reference(4),
     })?;
+    assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureCorrectionProvenanceV1::to_canonical_cbor,
@@ -281,6 +282,7 @@ fn retry_input() -> ErasureRetryAdmissionInputV1 {
 fn retry_admission_normalizes_pairs_and_preserves_all_identity_fields() -> Result<(), ErasureErrorV1>
 {
     let record = ErasureRetryAdmissionV1::new(retry_input())?;
+    assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureRetryAdmissionV1::to_canonical_cbor,
@@ -326,6 +328,17 @@ fn retry_admission_rejects_invalid_ordinals_deadlines_and_obligation_sets() {
     expired_before_admission.deadline_position = 19;
     assert_eq!(
         ErasureRetryAdmissionV1::new(expired_before_admission),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut deadline_at_admission = retry_input();
+    deadline_at_admission.deadline_position = deadline_at_admission.admitted_position;
+    assert!(ErasureRetryAdmissionV1::new(deadline_at_admission).is_ok());
+
+    let mut ordinal_at_bound = retry_input();
+    ordinal_at_bound.attempt_ordinal = ERASURE_MAX_ATTEMPT_OUTCOMES as u64;
+    assert_eq!(
+        ErasureRetryAdmissionV1::new(ordinal_at_bound),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
@@ -375,6 +388,7 @@ fn acknowledgement_provenance_roundtrips_with_attempt_scoped_identity() -> Resul
             policy: reference(8),
             trust: reference(9),
         })?;
+    assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureAcknowledgementProvenanceV1::to_canonical_cbor,
@@ -421,6 +435,7 @@ fn attempt_outcome_accepts_only_attempt_terminal_destruction_results() -> Result
         trust: reference(7),
     };
     let record = ErasureAttemptOutcomeV1::new(input)?;
+    assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureAttemptOutcomeV1::to_canonical_cbor,
@@ -465,6 +480,7 @@ fn receipt_provenance_enforces_the_nonbranching_ordinal_shape() -> Result<(), Er
         issue_position: 50,
     };
     let record = ErasureReceiptProvenanceV1::new(input)?;
+    assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureReceiptProvenanceV1::to_canonical_cbor,
@@ -519,6 +535,7 @@ fn administrative_resolution_normalizes_evidence_and_rejects_duplicates(
         predecessor_resolution: Some(reference(11)),
     };
     let record = ErasureAdministrativeResolutionV1::new(input.clone())?;
+    assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureAdministrativeResolutionV1::to_canonical_cbor,
@@ -582,6 +599,9 @@ fn lifecycle_distinguishes_request_terminality_from_attempt_terminality() {
 
 #[test]
 fn supporting_record_decoders_enforce_their_public_size_bounds() {
+    assert_eq!(ERASURE_PORTABLE_RECORD_MAX_BYTES, 1_048_576);
+    assert_eq!(ERASURE_RETRY_ADMISSION_MAX_BYTES, 16_777_216);
+
     let oversized = vec![0; ERASURE_PORTABLE_RECORD_MAX_BYTES + 1];
     assert_eq!(
         ErasureCorrectionProvenanceV1::from_canonical_cbor(&oversized),
@@ -675,6 +695,19 @@ fn supporting_records_accept_one_active_attempt_and_a_nonbranching_resolution(
         ..ErasureSupportingRecordsInputV1::default()
     })?;
     assert_eq!(duplicate_arrival, records);
+    Ok(())
+}
+
+#[test]
+fn complete_supporting_records_expose_every_persisted_collection() -> Result<(), ErasureErrorV1> {
+    let records = ErasureSupportingRecordsV1::new(complete_supporting_input(reference(1))?)?;
+    assert!(records.correction_provenance().is_some());
+    assert_eq!(records.retry_admissions().len(), 1);
+    assert_eq!(records.acknowledgement_provenance().len(), 1);
+    assert_eq!(records.attempt_outcomes().len(), 1);
+    assert_eq!(records.receipts().len(), 1);
+    assert_eq!(records.receipt_provenance().len(), 1);
+    assert_eq!(records.administrative_resolutions().len(), 1);
     Ok(())
 }
 
