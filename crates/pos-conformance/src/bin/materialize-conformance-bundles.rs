@@ -1853,123 +1853,122 @@ fn append_draft_release_admissions(
 }
 
 #[cfg(test)]
-mod catalog_tests {
-    use super::*;
-
-    fn first_catalog_input() -> Result<CatalogEntryInput, Box<dyn Error>> {
-        catalog_entry_input(&LAYER_SOURCES[0])
-    }
-
-    #[test]
-    fn embedded_catalog_uses_manifest_owned_identity_modes_and_fixtures(
-    ) -> Result<(), Box<dyn Error>> {
-        let catalog = layer_catalog()?;
-        assert_eq!(catalog.entries.len(), 7);
-        assert_eq!(catalog.bundle_modes, CatalogBundleMode::ALL);
-        assert!(catalog.entries.iter().all(|entry| {
-            entry.name == entry.claim_layer.catalog_name()
-                && entry.bundle_modes == CatalogBundleMode::ALL
-                && entry.execution_profiles == CatalogExecutionProfile::ALL
-                && entry.fixtures.len() == CatalogFixtureFamily::ALL.len()
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn catalog_identity_rejects_each_conflicting_manifest_field() -> Result<(), Box<dyn Error>> {
-        let mut input = first_catalog_input()?;
-        input.record.claim_layer = "replay-conformance".to_owned();
-        assert!(catalog_identity(&input.record).is_err());
-
-        let mut input = first_catalog_input()?;
-        input.record.fixture_root = "other-root".to_owned();
-        assert!(catalog_identity(&input.record).is_err());
-
-        let mut input = first_catalog_input()?;
-        input.record.wire_code = u8::MAX;
-        assert!(catalog_identity(&input.record).is_err());
-
-        let mut input = first_catalog_input()?;
-        input.record.subject_adapter = "private-helper".to_owned();
-        assert!(catalog_identity(&input.record).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn catalog_fixture_rejects_conflicting_public_records() -> Result<(), Box<dyn Error>> {
-        let input = first_catalog_input()?;
-        let record = &input.record.fixtures[0];
-        let contract = input
-            .fixture_provider
-            .fixture_contracts
-            .get(&record.family)
-            .ok_or("fixture contract is absent")?;
-        let source = &LAYER_SOURCES[0].fixtures[0];
-        let provider_contract = format!(
-            "{}@{}",
-            input.fixture_provider.provider_id, input.fixture_provider.contract_version
-        );
-        let operation = input
-            .fixture_provider
-            .fixture_operations
-            .get(&record.family)
-            .and_then(|value| value.as_deref());
-        assert!(catalog_fixture(
-            record,
-            source,
-            contract,
-            &provider_contract,
-            &input.record.subject_adapter,
-            operation,
-        )
-        .is_ok());
-        assert!(catalog_fixture(
-            record,
-            source,
-            contract,
-            "wrong-provider@1.0.0",
-            &input.record.subject_adapter,
-            operation,
-        )
-        .is_err());
-        assert!(catalog_fixture(
-            record,
-            source,
-            contract,
-            &provider_contract,
-            &input.record.subject_adapter,
-            Some("wrong-operation"),
-        )
-        .is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn catalog_entry_rejects_profile_and_provider_drift() -> Result<(), Box<dyn Error>> {
-        let source = &LAYER_SOURCES[0];
-        let mut profile: serde_json::Value = serde_json::from_slice(source.profile_record)?;
-        profile["bundle_modes"] = serde_json::json!(["air-gapped", "local"]);
-        let profile = Box::leak(serde_json::to_vec(&profile)?.into_boxed_slice());
-        let changed = LayerSource {
-            profile_record: profile,
-            provider_record: source.provider_record,
-            fixtures: source.fixtures,
-        };
-        assert!(catalog_entry(&changed).is_err());
-
-        let mut provider: serde_json::Value = serde_json::from_slice(source.provider_record)?;
-        provider["claim_layer"] = serde_json::Value::String("replay-conformance".to_owned());
-        let provider = Box::leak(serde_json::to_vec(&provider)?.into_boxed_slice());
-        let changed = LayerSource {
-            profile_record: source.profile_record,
-            provider_record: provider,
-            fixtures: source.fixtures,
-        };
-        assert!(catalog_entry(&changed).is_err());
-        Ok(())
-    }
+fn first_catalog_input() -> Result<CatalogEntryInput, Box<dyn Error>> {
+    catalog_entry_input(&LAYER_SOURCES[0])
 }
 
+#[cfg(test)]
+#[test]
+fn embedded_catalog_uses_manifest_owned_identity_modes_and_fixtures() -> Result<(), Box<dyn Error>>
+{
+    let catalog = layer_catalog()?;
+    assert_eq!(catalog.entries.len(), 7);
+    assert_eq!(catalog.bundle_modes, CatalogBundleMode::ALL);
+    assert!(catalog.entries.iter().all(|entry| {
+        entry.name == entry.claim_layer.catalog_name()
+            && entry.bundle_modes == CatalogBundleMode::ALL
+            && entry.execution_profiles == CatalogExecutionProfile::ALL
+            && entry.fixtures.len() == CatalogFixtureFamily::ALL.len()
+    }));
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn catalog_identity_rejects_each_conflicting_manifest_field() -> Result<(), Box<dyn Error>> {
+    let mut input = first_catalog_input()?;
+    input.record.claim_layer = "replay-conformance".to_owned();
+    assert!(catalog_identity(&input.record).is_err());
+
+    let mut input = first_catalog_input()?;
+    input.record.fixture_root = "other-root".to_owned();
+    assert!(catalog_identity(&input.record).is_err());
+
+    let mut input = first_catalog_input()?;
+    input.record.wire_code = u8::MAX;
+    assert!(catalog_identity(&input.record).is_err());
+
+    let mut input = first_catalog_input()?;
+    input.record.subject_adapter = "private-helper".to_owned();
+    assert!(catalog_identity(&input.record).is_err());
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn catalog_fixture_rejects_conflicting_public_records() -> Result<(), Box<dyn Error>> {
+    let input = first_catalog_input()?;
+    let record = &input.record.fixtures[0];
+    let contract = input
+        .fixture_provider
+        .fixture_contracts
+        .get(&record.family)
+        .ok_or("fixture contract is absent")?;
+    let source = &LAYER_SOURCES[0].fixtures[0];
+    let provider_contract = format!(
+        "{}@{}",
+        input.fixture_provider.provider_id, input.fixture_provider.contract_version
+    );
+    let operation = input
+        .fixture_provider
+        .fixture_operations
+        .get(&record.family)
+        .and_then(|value| value.as_deref());
+    assert!(catalog_fixture(
+        record,
+        source,
+        contract,
+        &provider_contract,
+        &input.record.subject_adapter,
+        operation,
+    )
+    .is_ok());
+    assert!(catalog_fixture(
+        record,
+        source,
+        contract,
+        "wrong-provider@1.0.0",
+        &input.record.subject_adapter,
+        operation,
+    )
+    .is_err());
+    assert!(catalog_fixture(
+        record,
+        source,
+        contract,
+        &provider_contract,
+        &input.record.subject_adapter,
+        Some("wrong-operation"),
+    )
+    .is_err());
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn catalog_entry_rejects_profile_and_provider_drift() -> Result<(), Box<dyn Error>> {
+    let source = &LAYER_SOURCES[0];
+    let mut profile: serde_json::Value = serde_json::from_slice(source.profile_record)?;
+    profile["bundle_modes"] = serde_json::json!(["air-gapped", "local"]);
+    let profile = Box::leak(serde_json::to_vec(&profile)?.into_boxed_slice());
+    let changed = LayerSource {
+        profile_record: profile,
+        provider_record: source.provider_record,
+        fixtures: source.fixtures,
+    };
+    assert!(catalog_entry(&changed).is_err());
+
+    let mut provider: serde_json::Value = serde_json::from_slice(source.provider_record)?;
+    provider["claim_layer"] = serde_json::Value::String("replay-conformance".to_owned());
+    let provider = Box::leak(serde_json::to_vec(&provider)?.into_boxed_slice());
+    let changed = LayerSource {
+        profile_record: source.profile_record,
+        provider_record: provider,
+        fixtures: source.fixtures,
+    };
+    assert!(catalog_entry(&changed).is_err());
+    Ok(())
+}
 fn verify_public_archive(
     archive_bytes: &[u8],
     release_filename: &str,

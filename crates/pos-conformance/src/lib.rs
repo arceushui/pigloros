@@ -4970,7 +4970,7 @@ pub mod strict_codec {
 
         #[cfg_attr(coverage_nightly, coverage(off))]
         pub fn exercise_for_coverage(evidence: &MoatProofEvidenceV1) {
-            strict_codec_coverage_cases!(evidence);
+            let _ = strict_codec_coverage_cases!(evidence);
         }
     }
 
