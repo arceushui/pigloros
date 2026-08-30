@@ -62,7 +62,7 @@ const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 
             from: ErasureReplayClaimV1::Exact,
             to: ErasureReplayClaimV1::StructuralOnly,
             reason: reference(20),
-            owner: reference(21),
+            owner: target.replica_id,
             acknowledgements: reference(22),
             provenance: reference(23),
         },
