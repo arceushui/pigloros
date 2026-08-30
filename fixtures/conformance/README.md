@@ -17,6 +17,13 @@ from those manifests; the materializer then parses and cross-checks identities
 from the profile, provider, input, oracle, and evidence-status records instead of maintaining a
 second fixture or layer inventory in source code.
 
+`support/fixture-family-contract.json` is the one shared source for the
+seven family payload templates and oracle kinds. Each provider manifest owns
+its provider ID, contract version, ABI, subject adapter, and operation mapping;
+the generation and verification scripts combine those provider-owned values
+with the shared family contract. No script carries an adapter allowlist,
+provider version literal, or a second family catalog.
+
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be

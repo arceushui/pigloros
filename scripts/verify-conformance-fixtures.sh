@@ -2,6 +2,7 @@
 set -euo pipefail
 
 fixture_root="${1:-fixtures/conformance}"
+family_contract="${fixture_root}/support/fixture-family-contract.json"
 
 command -v b3sum >/dev/null || {
   echo "b3sum is required to independently verify BLAKE3 authority digests" >&2
@@ -12,10 +13,34 @@ command -v jq >/dev/null || {
   exit 1
 }
 
-if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/oracles" || ! -d "${fixture_root}/providers" || ! -d "${fixture_root}/support" ]]; then
+if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/oracles" || ! -d "${fixture_root}/providers" || ! -d "${fixture_root}/support" || ! -s "${family_contract}" ]]; then
   echo "missing conformance fixture directories under ${fixture_root}" >&2
   exit 1
 fi
+
+jq -e '
+  .magic == "FFM1" and .version == 1 and
+  (.families | type == "array" and length > 0) and
+  ([.families[].name] as $names |
+    ($names | all(type == "string" and length > 0)) and
+    ($names | unique | length == ($names | length))) and
+  all(.families[];
+    (.operation == "required" or .operation == "optional") and
+    (.oracle.kind == "canonical-output" or .oracle.kind == "namespaced-failure") and
+    (if .oracle.kind == "namespaced-failure" then
+       (.oracle.code_id | type == "string" and length > 0)
+     else
+       (has("code_id") | not)
+     end) and
+    (.input_with_operation | type == "object") and
+    (if .operation == "optional" then (.input_without_operation | type == "object") else true end)
+  )
+' "${family_contract}" >/dev/null || {
+  echo "invalid canonical fixture-family contract" >&2
+  exit 1
+}
+family_names="$(jq -c '[.families[].name]' "${family_contract}")"
+family_count="$(jq '.families | length' "${family_contract}")"
 
 matrix_path="${fixture_root}/matrix/execution-matrix.json"
 authority_path="${fixture_root}/expected-authority/inventory.json"
@@ -139,20 +164,17 @@ for layer in "${profile_layers[@]}"; do
     --arg matrix_blake3 "${matrix_blake3_digest}" \
     --argjson wire_code "${wire_code}" \
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
+    --argjson family_names "${family_names}" \
+    --argjson family_count "${family_count}" \
     '.claim_layer == $layer and
       .wire_code == $wire_code and .fixture_root == $layer and
-      (.subject_adapter == "exported-artifact" or
-       .subject_adapter == "public-gateway-protocol" or
-       .subject_adapter == "public-plugin-protocol") and
+      (.subject_adapter | type == "string" and length > 0) and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
-      (.fixtures | length == 7) and
+      (.fixtures | length == $family_count) and
       all(.fixtures[]; .claim_layer == $layer) and
       all(.fixtures[]; .schema == ("providers/" + $layer + "/schemas/" + .family + ".schema.json")) and
-      [.fixtures[].family] == [
-        "positive", "denied", "malformed", "resource-exhaustion",
-        "deletion-redaction", "downgrade", "independent-evaluation"
-      ] and
+      [.fixtures[].family] == $family_names and
       .fixture_provider_manifest == ("providers/" + $layer + "/provider.json") and
       (if $layer == "knowledge-non-interference" then
         .adr_059_execution_matrix == $matrix and
@@ -171,30 +193,44 @@ for layer in "${profile_layers[@]}"; do
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
   }
-  subject_adapter="$(jq -r '.subject_adapter' "${profile}")"
   provider_manifest="${fixture_root}/$(jq -r '.fixture_provider_manifest' "${profile}")"
   [[ -s "${provider_manifest}" ]] || {
     echo "missing provider manifest for ${layer}" >&2
     exit 1
   }
-  jq -e --arg layer "${layer}" --arg subject_adapter "${subject_adapter}" \
-    '.claim_layer == $layer and .subject_adapter == $subject_adapter and
+  jq -e --arg layer "${layer}" --argjson family_names "${family_names}" --argjson family_count "${family_count}" \
+    '.claim_layer == $layer and
      (.provider_id | type == "string" and length > 0) and
      (.contract_version | type == "string" and length > 0) and
      (.abi_major | type == "number") and (.abi_minor | type == "number") and
      (.package_path | type == "string" and length > 0) and
-     (.fixture_operations | keys | sort) == ([
-       "positive", "denied", "malformed", "resource-exhaustion",
-       "deletion-redaction", "downgrade", "independent-evaluation"
-     ] | sort) and
+     (.subject_adapter | type == "string" and length > 0) and
+     (.fixture_operations | keys | sort) == ($family_names | sort) and
      all(.fixture_operations[]; . == null or (type == "string" and length > 0)) and
-     (.schemas | length == 7)' "${provider_manifest}" >/dev/null || {
+     (.schemas | length == $family_count)' "${provider_manifest}" >/dev/null || {
     echo "invalid provider manifest for ${layer}" >&2
     exit 1
   }
   provider_id="$(jq -r '.provider_id' "${provider_manifest}")"
+  contract_version="$(jq -r '.contract_version' "${provider_manifest}")"
+  subject_adapter="$(jq -r '.subject_adapter' "${provider_manifest}")"
+  jq -e --arg subject_adapter "${subject_adapter}" '.subject_adapter == $subject_adapter' "${profile}" >/dev/null || {
+    echo "profile subject adapter does not match its provider manifest: ${layer}" >&2
+    exit 1
+  }
   while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path oracle_path; do
     fixture_operation="$(jq -r --arg family "${family}" '.fixture_operations[$family] // ""' "${provider_manifest}")"
+    family_metadata="$(jq -ce --arg family "${family}" '.families[] | select(.name == $family)' "${family_contract}")" || {
+      echo "profile declares an unknown fixture family: ${case_id}" >&2
+      exit 1
+    }
+    operation_requirement="$(jq -r '.operation' <<<"${family_metadata}")"
+    oracle_kind="$(jq -r '.oracle.kind' <<<"${family_metadata}")"
+    oracle_code_id="$(jq -r '.oracle.code_id // empty' <<<"${family_metadata}")"
+    [[ "${operation_requirement}" != "required" || -n "${fixture_operation}" ]] || {
+      echo "provider omits required fixture operation: ${case_id}" >&2
+      exit 1
+    }
     for path in "${schema_path}" "${input_path}" "${expected_path}" "${oracle_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
         echo "unsafe profile fixture path for ${layer}: ${path}" >&2
@@ -222,7 +258,7 @@ for layer in "${profile_layers[@]}"; do
       --arg case_id "${case_id}" \
       --arg fixture_layer "${fixture_layer}" \
       --arg family "${family}" \
-      --arg provider_contract "${provider_id}@1.0.0" \
+      --arg provider_contract "${provider_id}@${contract_version}" \
       --arg subject_adapter "${subject_adapter}" \
       --arg fixture_operation "${fixture_operation}" \
       '.case_id == $case_id and .claim_layer == $fixture_layer and
@@ -254,13 +290,15 @@ for layer in "${profile_layers[@]}"; do
       echo "invalid pending evidence-status record for ${layer}: ${expected_path}" >&2
       exit 1
     }
-    jq -e --arg provider_id "${provider_id}" \
-      'if .oracle.kind == "canonical-output" then
+    jq -e --arg provider_id "${provider_id}" --arg contract_version "${contract_version}" --arg oracle_kind "${oracle_kind}" --arg oracle_code_id "${oracle_code_id}" \
+      'if $oracle_kind == "canonical-output" then
+         .oracle.kind == $oracle_kind and
          has("output") and (.output != null)
-       elif .oracle.kind == "namespaced-failure" then
+       elif $oracle_kind == "namespaced-failure" then
+         .oracle.kind == $oracle_kind and
          (.oracle.owner_id == $provider_id) and
-         (.oracle.contract_version == "1.0.0") and
-         (.oracle.code_id | type == "string" and length > 0) and
+         (.oracle.contract_version == $contract_version) and
+         (.oracle.code_id == $oracle_code_id) and
          (has("output") | not)
        else false end' \
       "${fixture_root}/${oracle_path}" >/dev/null || {
@@ -473,6 +511,7 @@ expected_support=(
   "${fixture_root}/support/LICENSE"
   "${fixture_root}/support/NOTICE"
   "${fixture_root}/support/build-provenance.json"
+  "${fixture_root}/support/fixture-family-contract.json"
   "${fixture_root}/support/limitations.md"
   "${fixture_root}/support/normative-requirements.md"
   "${fixture_root}/support/publication-review.json"

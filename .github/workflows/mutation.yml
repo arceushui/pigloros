@@ -10,6 +10,7 @@ on:
       - >-
         **/Cargo.toml
       - Cargo.lock
+      - fixtures/conformance/**
       - .github/workflows/mutation.yml
   workflow_dispatch:
 
