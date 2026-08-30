@@ -222,6 +222,12 @@ impl FixtureField {
     }
 }
 
+#[test]
+fn shared_named_wire_fields_cover_cross_suite_variants() {
+    assert_eq!(ArtifactDescriptorField::MediaType.index(), 1);
+    assert_eq!(ProviderBindingField::RegistryDescriptor.index(), 0);
+}
+
 pub(crate) struct TemporaryOutput(pub PathBuf);
 
 impl Drop for TemporaryOutput {

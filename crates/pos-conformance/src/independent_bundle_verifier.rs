@@ -217,16 +217,16 @@ impl RawClaimLayer {
         })
     }
 
-    const fn catalog_name(self) -> &'static str {
+    const fn catalog_name(self) -> Result<&'static str, BundleContractErrorV1> {
         match self.0 {
-            0 => "artifact-integrity",
-            1 => "replay-conformance",
-            2 => "knowledge-non-interference",
-            3 => "gateway-client-conformance",
-            4 => "plugin-conformance",
-            5 => "metric-conformance",
-            6 => "empirical-evaluation",
-            _ => unreachable!(),
+            0 => Ok("artifact-integrity"),
+            1 => Ok("replay-conformance"),
+            2 => Ok("knowledge-non-interference"),
+            3 => Ok("gateway-client-conformance"),
+            4 => Ok("plugin-conformance"),
+            5 => Ok("metric-conformance"),
+            6 => Ok("empirical-evaluation"),
+            _ => Err(BundleContractErrorV1::ProfileInvalid),
         }
     }
 }
@@ -1951,13 +1951,15 @@ fn raw_validate_draft_evidence(
     }
     raw_member(members, &evidence[0].path, RawMemberRole::EvidenceStatus).and_then(|member| {
         raw_artifact_matches_member(evidence[0], member).and_then(|()| {
-            raw_validate_draft_evidence_json(
-                member.bytes,
-                &fixture.case_id,
-                fixture.claim_layer.catalog_name(),
-                fixture.family.catalog_name(),
-                *blake3::hash(payload.bytes).as_bytes(),
-            )
+            fixture.claim_layer.catalog_name().and_then(|claim_layer| {
+                raw_validate_draft_evidence_json(
+                    member.bytes,
+                    &fixture.case_id,
+                    claim_layer,
+                    fixture.family.catalog_name(),
+                    *blake3::hash(payload.bytes).as_bytes(),
+                )
+            })
         })
     })
 }

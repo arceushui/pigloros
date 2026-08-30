@@ -6958,6 +6958,8 @@ pub mod tests {
 
     #[test]
     fn verifier_accepts_host_closure_and_rejects_each_host_closure_boundary() {
+        type HostClosureMutation = fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>);
+
         fn host_fixture() -> MoatProofEvidenceV1 {
             let mut value = evidence();
             value.host_closure.closure_event_type =
@@ -6969,7 +6971,6 @@ pub mod tests {
 
         assert_eq!(verify_evidence(&host_fixture()), Ok(()));
 
-        type HostClosureMutation = fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>);
         let cases: [(HostClosureMutation, EvidenceError); 9] = [
             (
                 |audit, _| audit.subject.clear(),
