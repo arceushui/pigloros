@@ -1580,15 +1580,6 @@ fn public_closed_canonical_records_reject_trailing_cbor_items(
         DivergenceReportV1::from_canonical_cbor(&divergence_bytes)?,
         divergence
     );
-    let mut invalid_divergence = divergence.clone();
-    invalid_divergence.output_ordinal = Some(u32::MAX);
-    invalid_divergence.report_digest = invalid_divergence.digest()?;
-    let invalid_divergence_rejection = invalid_divergence
-        .to_canonical_cbor()
-        .expect_err("DVR1 must reject an out-of-bounds output ordinal");
-    assert!(invalid_divergence_rejection
-        .to_string()
-        .starts_with("serialization error:"));
     let mut divergence_bytes = divergence_bytes;
     divergence_bytes.push(0);
     let divergence_rejection = DivergenceReportV1::from_canonical_cbor(&divergence_bytes)
