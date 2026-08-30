@@ -1,6 +1,9 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use pos_conformance::{verify_archive_release_filename, MAX_CONFORMANCE_BUNDLE_BYTES_V1};
+use pos_conformance::{
+    verify_archive_release_filename, verify_release_tree_independently,
+    MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+};
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
@@ -20,20 +23,26 @@ fn run(mut arguments: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Erro
     if paths.is_empty() {
         return Err("usage: verify-conformance-bundle <archive>...".into());
     }
-    for path in paths {
-        verify_path(Path::new(&path))?;
-    }
-    Ok(())
+    paths
+        .iter()
+        .map(|path| read_verified_archive(Path::new(path)))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|archives| {
+            let archive_refs = archives.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            verify_release_tree_independently(&archive_refs).map_err(Into::into)
+        })
 }
 
-fn verify_path(path: &Path) -> Result<(), Box<dyn Error>> {
+fn read_verified_archive(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     let (file, declared_len) = open_regular_file(path)?;
     let bytes = read_bounded(file, declared_len, MAX_CONFORMANCE_BUNDLE_BYTES_V1)?;
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("conformance archive filename is not canonical UTF-8")?;
-    verify_archive_release_filename(&bytes, filename).map_err(Into::into)
+    verify_archive_release_filename(&bytes, filename)
+        .map_err(Box::<dyn Error>::from)
+        .map(|()| bytes)
 }
 
 fn open_regular_file(path: &Path) -> Result<(File, u64), Box<dyn Error>> {

@@ -35,6 +35,10 @@ const BUILD_PROVENANCE_PATH: &str = "support/build-provenance.json";
 const PUBLICATION_REVIEW_PATH: &str = "support/publication-review.json";
 const NOTICE_PATH: &str = "support/NOTICE";
 const SBOM_PATH: &str = "support/sbom.json";
+const EXECUTION_MATRIX_BYTES_V1: &[u8] =
+    include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
+const AUTHORITY_INVENTORY_BYTES_V1: &[u8] =
+    include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum BundleContractErrorV1 {
@@ -1305,7 +1309,37 @@ fn raw_profile_support_members(
         }
     }
     raw_fixture_provenance_members(&profile.fixtures, members)
-        .and_then(|()| raw_member(members, AUTHORITY_INVENTORY_PATH, 10).map(|_| ()))
+        .and_then(|()| {
+            raw_authority_member_matches(
+                members,
+                EXECUTION_MATRIX_PATH,
+                11,
+                EXECUTION_MATRIX_BYTES_V1,
+            )
+        })
+        .and_then(|()| {
+            raw_authority_member_matches(
+                members,
+                AUTHORITY_INVENTORY_PATH,
+                10,
+                AUTHORITY_INVENTORY_BYTES_V1,
+            )
+        })
+}
+
+fn raw_authority_member_matches(
+    members: &[RawArchiveMember<'_>],
+    path: &str,
+    role: u64,
+    approved_bytes: &[u8],
+) -> Result<(), BundleContractErrorV1> {
+    raw_member(members, path, role).and_then(|member| {
+        if member.bytes == approved_bytes {
+            Ok(())
+        } else {
+            Err(BundleContractErrorV1::ProfileInvalid)
+        }
+    })
 }
 
 fn raw_fixture_provenance_members(

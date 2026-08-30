@@ -49,7 +49,10 @@ const BUILD_PROVENANCE_BYTES: &[u8] = br#"{"builder":"public"}"#;
 const PUBLICATION_REVIEW_BYTES: &[u8] = br#"{"review_status":"pending"}"#;
 const LIMITATIONS_BYTES: &[u8] = b"# Limitations\n";
 const NORMATIVE_BYTES: &[u8] = b"normative contract";
-const MATRIX_BYTES: &[u8] = b"execution matrix";
+const MATRIX_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
+const AUTHORITY_INVENTORY_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
 const PROFILE_SCHEMA_BYTES: &[u8] = b"cpf1 schema";
 const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
 const PAYLOAD_BYTES: &[u8] = b"public fixture payload";
@@ -427,7 +430,7 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
             PROFILE_SCHEMA_BYTES.to_vec(),
             BundleMemberRoleV1::Schema,
         ),
-        BundleMemberV1::authority_inventory(b"authority inventory".to_vec()),
+        BundleMemberV1::authority_inventory(AUTHORITY_INVENTORY_BYTES.to_vec()),
         BundleMemberV1::execution_matrix(MATRIX_BYTES.to_vec()),
         BundleMemberV1::fixture_provider_package(package_path, package_bytes),
         BundleMemberV1::fixture_provider_registry(registry_bytes),
@@ -445,6 +448,35 @@ fn signed_current_bundle(mode: BundleModeV1) -> TestResult<ConformanceBundleV1> 
     ConformanceBundleV1::materialize(&inputs.profile, mode, inputs.members, inputs.expected)
         .and_then(|bundle| bundle.sign(&SigningKey::from_bytes(&[7; 32])))
         .map_err(Into::into)
+}
+
+fn signed_bundle_with_authority(
+    matrix_bytes: Vec<u8>,
+    inventory_bytes: Vec<u8>,
+) -> TestResult<Vec<u8>> {
+    let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+    inputs.profile.execution_matrix_digest = *blake3::hash(&matrix_bytes).as_bytes();
+    inputs.profile.profile_digest = inputs.profile.digest();
+    for member in &mut inputs.members {
+        let replacement = match member.role {
+            BundleMemberRoleV1::ExecutionMatrix => Some(&matrix_bytes),
+            BundleMemberRoleV1::AuthorityInventory => Some(&inventory_bytes),
+            _ => None,
+        };
+        if let Some(bytes) = replacement {
+            member.bytes.clone_from(bytes);
+            member.digest = *blake3::hash(bytes).as_bytes();
+        }
+    }
+    ConformanceBundleV1::materialize(
+        &inputs.profile,
+        BundleModeV1::Local,
+        inputs.members,
+        inputs.expected,
+    )?
+    .sign(&SigningKey::from_bytes(&[7; 32]))?
+    .to_canonical_cbor()
+    .map_err(Into::into)
 }
 
 fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
@@ -1316,7 +1348,8 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
     );
     let verifier = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
         .ok_or("verifier binary path is unavailable")?;
-    assert!(Command::new(verifier).args(&archives).status()?.success());
+    assert!(Command::new(&verifier).args(&archives).status()?.success());
+    assert!(!Command::new(verifier).arg(&archives[0]).status()?.success());
     Ok(())
 }
 
@@ -3336,6 +3369,29 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
         Ok(())
     })?;
     assert_archive_rejected_by_both(&undeclared_package, "undeclared provider package");
+
+    let mut matrix: serde_json::Value = serde_json::from_slice(MATRIX_BYTES)?;
+    matrix["case_count"] = serde_json::Value::from(191);
+    let invalid_matrix = signed_bundle_with_authority(
+        serde_json::to_vec_pretty(&matrix)?,
+        AUTHORITY_INVENTORY_BYTES.to_vec(),
+    )?;
+    assert_eq!(
+        verify_archive_independently(&invalid_matrix),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+
+    let mut inventory: serde_json::Value = serde_json::from_slice(AUTHORITY_INVENTORY_BYTES)?;
+    inventory["entries"][0]["materialization_status"] =
+        serde_json::Value::String("materialized".to_owned());
+    let invalid_inventory = signed_bundle_with_authority(
+        MATRIX_BYTES.to_vec(),
+        serde_json::to_vec_pretty(&inventory)?,
+    )?;
+    assert_eq!(
+        verify_archive_independently(&invalid_inventory),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
     Ok(())
 }
 
