@@ -1560,18 +1560,6 @@ impl DivergenceReportV1 {
     }
 }
 
-impl From<strict_codec::StrictCborError> for pos_core::CoreError {
-    fn from(error: strict_codec::StrictCborError) -> Self {
-        Self::Serialization(error.to_string())
-    }
-}
-
-impl From<strict_codec::StrictCborError> for EvidenceError {
-    fn from(_: strict_codec::StrictCborError) -> Self {
-        Self::InvalidConformanceReport
-    }
-}
-
 fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<[u8; 32], pos_core::CoreError> {
     pos_crypto::canonical::encode(value).map(|bytes| {
         let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());

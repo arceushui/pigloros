@@ -1217,7 +1217,6 @@ fn public_record_variants_round_trip_at_the_wire_seam() {
 }
 
 #[test]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn public_record_rejections_cover_semantic_boundaries() {
     let mut invalid_evidence = public_evidence_fixture();
     invalid_evidence.format_version += 1;

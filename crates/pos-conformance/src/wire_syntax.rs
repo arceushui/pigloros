@@ -1,3 +1,15 @@
+impl From<crate::strict_codec::StrictCborError> for pos_core::CoreError {
+    fn from(error: crate::strict_codec::StrictCborError) -> Self {
+        Self::Serialization(error.to_string())
+    }
+}
+
+impl From<crate::strict_codec::StrictCborError> for crate::EvidenceError {
+    fn from(_: crate::strict_codec::StrictCborError) -> Self {
+        Self::InvalidConformanceReport
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CborPreflightError {
     InvalidEncoding,

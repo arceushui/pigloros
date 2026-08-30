@@ -41,14 +41,32 @@ struct RelativeFilePath {
 struct VerifiedPublication(AtomicPublication);
 
 #[cfg(target_os = "linux")]
+struct PendingStaging<'a> {
+    parent: &'a OwnedFd,
+    name: &'a CStr,
+    armed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PendingStaging<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            drop(fs::unlinkat(self.parent, self.name, AtFlags::REMOVEDIR));
+            drop(fs::fsync(self.parent));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl AtomicPublication {
-    fn prepare(destination: &Path, destination_name: &str) -> Result<Self, MaterializationError> {
+    fn prepare(
+        destination: &Path,
+        destination_name: CString,
+    ) -> Result<Self, MaterializationError> {
         let parent_path = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let destination_name = CString::new(destination_name)
-            .map_err(|_| MaterializationError::AtomicPublicationUnsupported)?;
         let effective_uid = effective_uid();
         open_trusted_parent(parent_path, effective_uid).and_then(|(parent, parent_identity)| {
             create_private_staging(&parent, parent_identity, effective_uid).map(
@@ -254,55 +272,24 @@ fn configure_private_staging(
     parent_identity: DirectoryIdentity,
     effective_uid: u32,
 ) -> Result<(CString, OwnedFd, DirectoryIdentity), MaterializationError> {
-    let configured = open_directory(parent, staging_name).and_then(|staging| {
-        configure_open_staging(
-            parent,
-            staging_name,
-            &staging,
-            parent_identity,
-            effective_uid,
-        )
-        .map(|identity| (staging, identity))
-    });
-    match configured {
-        Ok((staging, identity)) => Ok((staging_name.clone(), staging, identity)),
-        Err(error) => cleanup_failed_staging(parent, staging_name, error),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn configure_open_staging(
-    parent: &OwnedFd,
-    staging_name: &CStr,
-    staging: &OwnedFd,
-    parent_identity: DirectoryIdentity,
-    effective_uid: u32,
-) -> Result<DirectoryIdentity, MaterializationError> {
-    fs::fchmod(staging, Mode::from_raw_mode(0o700)).map_err(map_sync_error)?;
-    sync_fd(staging)?;
-    staging_identity(
+    let mut pending = PendingStaging {
+        parent,
+        name: staging_name,
+        armed: true,
+    };
+    let staging = open_directory(parent, staging_name)?;
+    fs::fchmod(&staging, Mode::from_raw_mode(0o700))
+        .map_err(|_| MaterializationError::DurabilitySyncFailed)?;
+    sync_fd(&staging)?;
+    let identity = staging_identity(
         parent,
         staging_name,
-        staging,
+        &staging,
         parent_identity,
         effective_uid,
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn cleanup_failed_staging<T>(
-    parent: &OwnedFd,
-    staging_name: &CStr,
-    error: MaterializationError,
-) -> Result<T, MaterializationError> {
-    remove_empty_staging(parent, staging_name)?;
-    Err(error)
-}
-
-#[cfg(target_os = "linux")]
-fn remove_empty_staging(parent: &OwnedFd, staging_name: &CStr) -> Result<(), MaterializationError> {
-    fs::unlinkat(parent, staging_name, AtFlags::REMOVEDIR).map_err(map_cleanup_error)?;
-    sync_fd(parent)
+    )?;
+    pending.armed = false;
+    Ok((staging_name.clone(), staging, identity))
 }
 
 #[cfg(target_os = "linux")]
@@ -509,7 +496,7 @@ fn remove_staging_tree(
                     remove_directory_contents(&staging)
                         .and_then(|()| {
                             fs::unlinkat(parent, staging_name, AtFlags::REMOVEDIR)
-                                .map_err(map_cleanup_error)
+                                .map_err(map_open_error)
                         })
                         .and_then(|()| sync_fd(parent))
                 } else {
@@ -523,11 +510,11 @@ fn remove_staging_tree(
 #[cfg(target_os = "linux")]
 fn remove_directory_contents(directory: &OwnedFd) -> Result<(), MaterializationError> {
     Dir::read_from(directory)
-        .map_err(map_cleanup_error)
+        .map_err(map_open_error)
         .and_then(|mut entries| {
             entries.try_for_each(|entry| {
                 entry
-                    .map_err(map_cleanup_error)
+                    .map_err(map_open_error)
                     .and_then(|entry| remove_directory_entry(directory, entry.file_name()))
             })
         })
@@ -539,12 +526,12 @@ fn remove_directory_entry(directory: &OwnedFd, name: &CStr) -> Result<(), Materi
         return Ok(());
     }
     fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(map_cleanup_error)
+        .map_err(map_open_error)
         .and_then(|metadata| match FileType::from_raw_mode(metadata.st_mode) {
             FileType::Directory => open_directory(directory, name).and_then(|child| {
                 remove_directory_contents(&child)
                     .and_then(|()| {
-                        fs::unlinkat(directory, name, AtFlags::REMOVEDIR).map_err(map_cleanup_error)
+                        fs::unlinkat(directory, name, AtFlags::REMOVEDIR).map_err(map_open_error)
                     })
                     .and_then(|()| sync_fd(directory))
             }),
@@ -559,11 +546,11 @@ fn remove_directory_entry(directory: &OwnedFd, name: &CStr) -> Result<(), Materi
             )
             .and_then(|file| {
                 fs::fstat(&file)
-                    .map_err(map_cleanup_error)
+                    .map_err(map_open_error)
                     .and_then(|file_metadata| {
                         if FileType::from_raw_mode(file_metadata.st_mode) == FileType::RegularFile {
                             fs::unlinkat(directory, name, AtFlags::empty())
-                                .map_err(map_cleanup_error)
+                                .map_err(map_open_error)
                                 .and_then(|()| sync_fd(directory))
                         } else {
                             Err(MaterializationError::UntrustedOutputDirectory)
@@ -577,7 +564,7 @@ fn remove_directory_entry(directory: &OwnedFd, name: &CStr) -> Result<(), Materi
 
 #[cfg(target_os = "linux")]
 fn sync_fd<Fd: std::os::fd::AsFd>(fd: Fd) -> Result<(), MaterializationError> {
-    fs::fsync(fd).map_err(map_sync_error)
+    fs::fsync(fd).map_err(|_| MaterializationError::DurabilitySyncFailed)
 }
 
 #[cfg(target_os = "linux")]
@@ -591,36 +578,21 @@ const fn map_publish_error(error: Errno) -> MaterializationError {
 }
 
 #[cfg(target_os = "linux")]
-const fn map_sync_error(error: Errno) -> MaterializationError {
-    map_atomic_error(AtomicOperation::Sync, error)
-}
-
-#[cfg(target_os = "linux")]
-const fn map_cleanup_error(error: Errno) -> MaterializationError {
-    map_atomic_error(AtomicOperation::Cleanup, error)
-}
-
-#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 enum AtomicOperation {
     Open,
     Publish,
-    Sync,
-    Cleanup,
 }
 
 #[cfg(target_os = "linux")]
 const fn map_atomic_error(operation: AtomicOperation, error: Errno) -> MaterializationError {
     match (operation, error) {
         (AtomicOperation::Publish, Errno::EXIST) => MaterializationError::DestinationExists,
-        (AtomicOperation::Open | AtomicOperation::Cleanup, Errno::LOOP) => {
-            MaterializationError::SymlinkDetected
-        }
+        (AtomicOperation::Open, Errno::LOOP) => MaterializationError::SymlinkDetected,
         (_, Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV) => {
             MaterializationError::AtomicPublicationUnsupported
         }
-        (AtomicOperation::Sync, _) => MaterializationError::DurabilitySyncFailed,
-        (AtomicOperation::Open | AtomicOperation::Publish | AtomicOperation::Cleanup, _) => {
+        (AtomicOperation::Open | AtomicOperation::Publish, _) => {
             MaterializationError::UntrustedOutputDirectory
         }
     }

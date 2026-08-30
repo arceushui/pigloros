@@ -16,6 +16,8 @@ use pos_conformance::{
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -587,7 +589,9 @@ fn prepare_atomic_publication(
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == expected)
     {
-        AtomicPublication::prepare(destination, &expected)
+        CString::new(expected)
+            .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
+            .and_then(|destination_name| AtomicPublication::prepare(destination, destination_name))
     } else {
         Err(MaterializationError::SourceInventoryAddressMismatch)
     }
