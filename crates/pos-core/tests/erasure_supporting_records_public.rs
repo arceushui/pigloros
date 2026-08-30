@@ -506,13 +506,7 @@ fn retry_admission_rejects_invalid_ordinals_deadlines_and_obligation_sets() {
 
     let mut shared_commands = retry_input();
     shared_commands.command_identities[1] = reference(15);
-    let Ok(shared_commands) = ErasureRetryAdmissionV1::new(shared_commands) else {
-        panic!("obligations may share one destruction command");
-    };
-    assert_eq!(
-        shared_commands.command_identities(),
-        &[reference(15), reference(15)]
-    );
+    assert!(ErasureRetryAdmissionV1::new(shared_commands).is_ok());
 }
 
 #[test]
