@@ -16,8 +16,6 @@ use pos_conformance::{
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
-#[cfg(target_os = "linux")]
-use std::ffi::CString;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
