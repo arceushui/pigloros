@@ -715,11 +715,8 @@ mod coverage_entrypoints {
         expect_err(&oversized_coordinate.to_canonical_cbor());
 
         let result_value = decode_value(ok(result.to_canonical_cbor()));
-        let negative_count = replace_field(
-            result_value.clone(),
-            15,
-            ciborium::Value::Integer((-1_i64).into()),
-        );
+        let negative_count =
+            replace_field(result_value, 15, ciborium::Value::Integer((-1_i64).into()));
         expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
             &negative_count,
         )));
