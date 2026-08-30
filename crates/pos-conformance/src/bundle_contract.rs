@@ -2660,7 +2660,10 @@ fn raw_fixture_inventory(
         RawFixtureFamily::Downgrade,
         RawFixtureFamily::IndependentEvaluation,
     ]);
-    let required_modes = [RawFixtureMode::Local, RawFixtureMode::AirGapped];
+    let required_modes = [
+        RawFixtureMode(RawArchiveMode::Local.code()),
+        RawFixtureMode(RawArchiveMode::AirGapped.code()),
+    ];
     for provider in required {
         for execution in executions {
             for mode in required_modes {
