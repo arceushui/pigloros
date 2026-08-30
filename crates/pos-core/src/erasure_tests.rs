@@ -335,21 +335,6 @@ pub(super) fn request_input(selectors: Vec<ErasureReferenceV1>) -> ErasureReques
     }
 }
 
-pub(super) fn test_port_with_commit_error() -> TestCoordinatorPort {
-    let mut port = test_port(true, Vec::new());
-    port.commit_error = Some(ErasureErrorV1::ReceiptCommitFailed);
-    port
-}
-
-pub(super) fn test_port_with_commit_error_on_call(
-    call: usize,
-    targets: Vec<ErasureRequiredTargetV1>,
-) -> TestCoordinatorPort {
-    let mut port = test_port(true, targets);
-    port.commit_error_on_call = Some(call);
-    port
-}
-
 pub(super) fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(request_input(vec![reference(8), reference(7)]))
 }

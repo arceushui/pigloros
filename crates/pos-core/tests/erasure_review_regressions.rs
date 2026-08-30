@@ -577,10 +577,10 @@ fn access_freeze_transition() -> ErasureStateTransitionV1 {
 fn state_after_acknowledgements(
     acknowledgements: [ErasureAcknowledgementV1; 2],
 ) -> Result<ErasureStateV1, ErasureErrorV1> {
-    let request = request()?;
-    let request_reference = request.reference();
+    let submitted_request = request()?;
+    let request_reference = submitted_request.reference();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(public_port(false), reference(91));
-    coordinator.submit(request, reference(92))?;
+    coordinator.submit(submitted_request, reference(92))?;
     coordinator.authorize(request_reference, reference(93))?;
     coordinator.freeze_inventory(request_reference, access_freeze_transition())?;
     let command = destruction_command_reference(request_reference, target());
