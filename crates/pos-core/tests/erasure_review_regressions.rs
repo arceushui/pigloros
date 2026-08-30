@@ -235,7 +235,7 @@ fn active_supporting_records(
         )
     });
     ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
-        scope_commitment: Some(scope.clone()),
+        scope_commitment: Some(scope),
         obligations: obligations.clone(),
         obligation_set: Some(obligation_set),
         retry_admissions: vec![admission],

@@ -1,7 +1,7 @@
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
-    destruction_command_reference, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    destruction_command_reference, ErasureAcknowledgementProvenanceV1, ErasureArtifactClassV1,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureCoordinatorPortV1,
     ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
