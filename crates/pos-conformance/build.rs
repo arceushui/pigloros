@@ -58,6 +58,9 @@ struct FixturePaths {
     schema_path: String,
     contract: CatalogFixtureContract,
     strict_oracle: CatalogStrictOracle,
+    failure_outcome: CatalogVerificationOutcome,
+    replay_claim: CatalogReplayClaim,
+    redaction_state: CatalogRedactionState,
     schema: FixtureAsset,
     input: FixtureAsset,
     expected: FixtureAsset,
@@ -271,6 +274,63 @@ struct FixtureFamilyDeclaration {
     name: CatalogFixtureFamily,
     operation: String,
     oracle: FixtureFamilyOracle,
+    failure_outcome: CatalogVerificationOutcome,
+    replay_claim: CatalogReplayClaim,
+    redaction_state: CatalogRedactionState,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogVerificationOutcome {
+    InvalidManifest,
+    IncompatibleProfile,
+    ResourceLimitExceeded,
+}
+
+impl CatalogVerificationOutcome {
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::InvalidManifest => "VerificationOutcomeV1::InvalidManifest",
+            Self::IncompatibleProfile => "VerificationOutcomeV1::IncompatibleProfile",
+            Self::ResourceLimitExceeded => "VerificationOutcomeV1::ResourceLimitExceeded",
+        }
+    }
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogReplayClaim {
+    Exact,
+    ExactAuthoritativeWithRedactedViews,
+    IncompatibleProfile,
+}
+
+impl CatalogReplayClaim {
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::Exact => "ReplayClaimV1::Exact",
+            Self::ExactAuthoritativeWithRedactedViews => {
+                "ReplayClaimV1::ExactAuthoritativeWithRedactedViews"
+            }
+            Self::IncompatibleProfile => "ReplayClaimV1::IncompatibleProfile",
+        }
+    }
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogRedactionState {
+    None,
+    RedactedViews,
+}
+
+impl CatalogRedactionState {
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::None => "RedactionStateV1::None",
+            Self::RedactedViews => "RedactionStateV1::RedactedViews",
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -950,6 +1010,9 @@ fn profile_fixtures(
                 schema_path,
                 contract: fixture_contract(provider_value, family)?,
                 strict_oracle: strict_oracle(family_declaration, provider)?,
+                failure_outcome: family_declaration.failure_outcome,
+                replay_claim: family_declaration.replay_claim,
+                redaction_state: family_declaration.redaction_state,
                 schema,
                 input,
                 expected,
@@ -1256,6 +1319,21 @@ fn emit_fixture(
         fixture.oracle.bytes
     )?;
     emit_strict_oracle(generated, &fixture.strict_oracle)?;
+    writeln!(
+        generated,
+        "                        failure_outcome: {},",
+        fixture.failure_outcome.rust_variant()
+    )?;
+    writeln!(
+        generated,
+        "                        replay_claim: {},",
+        fixture.replay_claim.rust_variant()
+    )?;
+    writeln!(
+        generated,
+        "                        redaction_state: {},",
+        fixture.redaction_state.rust_variant()
+    )?;
     writeln!(generated, "                    }}\n}}")
 }
 

@@ -7,7 +7,10 @@
       "operation": "required",
       "oracle": {
         "kind": "canonical-output"
-      }
+      },
+      "failure_outcome": "invalid-manifest",
+      "replay_claim": "exact",
+      "redaction_state": "none"
     },
     {
       "name": "denied",
@@ -15,7 +18,10 @@
       "oracle": {
         "kind": "namespaced-failure",
         "code_id": "capability-denied"
-      }
+      },
+      "failure_outcome": "invalid-manifest",
+      "replay_claim": "exact",
+      "redaction_state": "none"
     },
     {
       "name": "malformed",
@@ -23,7 +29,10 @@
       "oracle": {
         "kind": "namespaced-failure",
         "code_id": "malformed-payload"
-      }
+      },
+      "failure_outcome": "invalid-manifest",
+      "replay_claim": "exact",
+      "redaction_state": "none"
     },
     {
       "name": "resource-exhaustion",
@@ -31,14 +40,20 @@
       "oracle": {
         "kind": "namespaced-failure",
         "code_id": "resource-limit"
-      }
+      },
+      "failure_outcome": "resource-limit-exceeded",
+      "replay_claim": "exact",
+      "redaction_state": "none"
     },
     {
       "name": "deletion-redaction",
       "operation": "required",
       "oracle": {
         "kind": "canonical-output"
-      }
+      },
+      "failure_outcome": "invalid-manifest",
+      "replay_claim": "exact-authoritative-with-redacted-views",
+      "redaction_state": "redacted-views"
     },
     {
       "name": "downgrade",
@@ -46,14 +61,20 @@
       "oracle": {
         "kind": "namespaced-failure",
         "code_id": "incompatible-contract"
-      }
+      },
+      "failure_outcome": "incompatible-profile",
+      "replay_claim": "incompatible-profile",
+      "redaction_state": "none"
     },
     {
       "name": "independent-evaluation",
       "operation": "optional",
       "oracle": {
         "kind": "canonical-output"
-      }
+      },
+      "failure_outcome": "invalid-manifest",
+      "replay_claim": "exact",
+      "redaction_state": "none"
     }
   ]
 }

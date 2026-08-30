@@ -88,32 +88,6 @@ enum MaterializationError {
 
 include!(concat!(env!("OUT_DIR"), "/materialization_assets.rs"));
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CatalogExecutionProfile {
-    DeterministicLocalV1,
-    DeterministicAirGappedV1,
-}
-
-impl CatalogExecutionProfile {
-    const ALL: [Self; 2] = [Self::DeterministicLocalV1, Self::DeterministicAirGappedV1];
-
-    const fn name(self) -> &'static str {
-        match self {
-            Self::DeterministicLocalV1 => "deterministic-local-v1",
-            Self::DeterministicAirGappedV1 => "deterministic-air-gapped-v1",
-        }
-    }
-
-    fn digest(self) -> Result<[u8; 32], Box<dyn Error>> {
-        execution_profile_bytes(self).map(|bytes| *blake3::hash(&bytes).as_bytes())
-    }
-}
-
-const EXECUTION_MODES: [pos_conformance::ExecutionModeV1; 2] = [
-    pos_conformance::ExecutionModeV1::Local,
-    pos_conformance::ExecutionModeV1::AirGapped,
-];
-
 // This seed is repository test-fixture authority only.  It is never a
 // deployment trust root and is used solely to make Draft evidence reproducible.
 const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
@@ -134,11 +108,9 @@ fn cbor_bytes(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
         .map(|()| bytes)
 }
 
-fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, Box<dyn Error>> {
-    let declaration = DRAFT_EXECUTION_PROFILES
-        .iter()
-        .find(|candidate| candidate.profile_id == profile.name())
-        .ok_or("Draft authority omits an execution profile")?;
+fn execution_profile_bytes(
+    declaration: &DraftExecutionProfileSource,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let reproducibility_classes = declaration
         .reproducibility_classes
         .iter()
@@ -173,6 +145,12 @@ fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, 
         signed_fields.push(Value::Bytes(digest.to_vec()));
         cbor_bytes(&Value::Array(signed_fields))
     })
+}
+
+fn execution_profile_digest(
+    declaration: &DraftExecutionProfileSource,
+) -> Result<[u8; 32], Box<dyn Error>> {
+    execution_profile_bytes(declaration).map(|bytes| *blake3::hash(&bytes).as_bytes())
 }
 
 fn trust_policy_snapshot_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
@@ -260,6 +238,13 @@ impl CatalogBundleMode {
             Self::AirGapped => BundleModeV1::AirGapped,
         }
     }
+
+    const fn execution_mode(self) -> pos_conformance::ExecutionModeV1 {
+        match self {
+            Self::Local => pos_conformance::ExecutionModeV1::Local,
+            Self::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -300,6 +285,9 @@ struct CatalogFixture {
     expected: &'static [u8],
     oracle: &'static [u8],
     strict_oracle: CatalogStrictOracle,
+    failure_outcome: VerificationOutcomeV1,
+    replay_claim: ReplayClaimV1,
+    redaction_state: RedactionStateV1,
 }
 
 struct FixtureExpectation {
@@ -715,8 +703,8 @@ fn materialize_profile(
             .to_canonical_cbor()
             .map_err(Into::into)
             .and_then(|profile_bytes| {
-                let [local, air_gapped] = bundle_modes
-                    .map(|mode| signed_bundle(context, layer, &profile, mode.bundle_mode()));
+                let [local, air_gapped] =
+                    bundle_modes.map(|mode| signed_bundle(context, layer, &profile, mode));
                 local.and_then(|local| {
                     air_gapped.and_then(|air_gapped| {
                         let pair = ConformanceBundlePairV1 { local, air_gapped };
@@ -739,7 +727,7 @@ fn signed_bundle(
     context: &MaterializationContext<'_>,
     layer: &LayerCatalogEntry,
     profile: &ConformanceProfileV1,
-    mode: BundleModeV1,
+    mode: CatalogBundleMode,
 ) -> Result<ConformanceBundleV1, Box<dyn Error>> {
     bundle_inputs_from_profile(
         layer,
@@ -749,7 +737,7 @@ fn signed_bundle(
         context.providers,
     )
     .and_then(|(members, expected_results)| {
-        ConformanceBundleV1::materialize(profile, mode, members, expected_results)
+        ConformanceBundleV1::materialize(profile, mode.bundle_mode(), members, expected_results)
             .and_then(|bundle| bundle.sign(context.signing_key))
             .map_err(Into::into)
     })
@@ -910,9 +898,9 @@ fn fixtures_for_layer(
     context: &FixtureContext,
     provider_key: &FixtureProviderKeyV1,
 ) -> Result<Vec<FixtureDescriptorV1>, Box<dyn Error>> {
-    CatalogExecutionProfile::ALL
-        .into_iter()
-        .map(CatalogExecutionProfile::digest)
+    DRAFT_EXECUTION_PROFILES
+        .iter()
+        .map(execution_profile_digest)
         .collect::<Result<Vec<_>, _>>()
         .and_then(|execution_profiles| {
             layer
@@ -920,8 +908,9 @@ fn fixtures_for_layer(
                 .iter()
                 .flat_map(|fixture| {
                     execution_profiles.iter().copied().flat_map(move |digest| {
-                        EXECUTION_MODES
+                        CatalogBundleMode::ALL
                             .into_iter()
+                            .map(CatalogBundleMode::execution_mode)
                             .map(move |mode| (fixture, digest, mode))
                     })
                 })
@@ -963,9 +952,9 @@ fn profile_from_catalog(
         abi_minor: layer.fixture_provider.abi_minor,
     };
     fixtures_for_layer(layer, &context, &provider_key).and_then(|fixtures| {
-        CatalogExecutionProfile::ALL
-            .into_iter()
-            .map(CatalogExecutionProfile::digest)
+        DRAFT_EXECUTION_PROFILES
+            .iter()
+            .map(execution_profile_digest)
             .collect::<Result<Vec<_>, _>>()
             .and_then(|mut execution_profile_digests| {
                 execution_profile_digests.sort_unstable();
@@ -1115,7 +1104,6 @@ fn fixture_expectation(
     fixture: &CatalogFixture,
     auxiliary: &ArtifactDescriptorV1,
 ) -> FixtureExpectation {
-    let semantics = fixture_family_semantics(fixture.family);
     let (strict_oracle, verification_outcome, verification_error) = match &fixture.strict_oracle {
         CatalogStrictOracle::CanonicalOutput => (
             StrictOracleV1 {
@@ -1144,7 +1132,7 @@ fn fixture_expectation(
                     failure: Some(failure.clone()),
                     divergence: None,
                 },
-                semantics.failure_outcome,
+                fixture.failure_outcome,
                 Some(failure),
             )
         }
@@ -1153,43 +1141,8 @@ fn fixture_expectation(
         strict_oracle,
         verification_outcome,
         verification_error,
-        replay_claim: semantics.replay_claim,
-        redaction_state: semantics.redaction_state,
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FixtureFamilySemantics {
-    failure_outcome: VerificationOutcomeV1,
-    replay_claim: ReplayClaimV1,
-    redaction_state: RedactionStateV1,
-}
-
-const fn fixture_family_semantics(family: FixtureFamilyV1) -> FixtureFamilySemantics {
-    match family {
-        FixtureFamilyV1::DeletionRedaction => FixtureFamilySemantics {
-            failure_outcome: VerificationOutcomeV1::InvalidManifest,
-            replay_claim: ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-            redaction_state: RedactionStateV1::RedactedViews,
-        },
-        FixtureFamilyV1::Downgrade => FixtureFamilySemantics {
-            failure_outcome: VerificationOutcomeV1::IncompatibleProfile,
-            replay_claim: ReplayClaimV1::IncompatibleProfile,
-            redaction_state: RedactionStateV1::None,
-        },
-        FixtureFamilyV1::ResourceExhaustion => FixtureFamilySemantics {
-            failure_outcome: VerificationOutcomeV1::ResourceLimitExceeded,
-            replay_claim: ReplayClaimV1::Exact,
-            redaction_state: RedactionStateV1::None,
-        },
-        FixtureFamilyV1::Positive
-        | FixtureFamilyV1::Denied
-        | FixtureFamilyV1::Malformed
-        | FixtureFamilyV1::IndependentEvaluation => FixtureFamilySemantics {
-            failure_outcome: VerificationOutcomeV1::InvalidManifest,
-            replay_claim: ReplayClaimV1::Exact,
-            redaction_state: RedactionStateV1::None,
-        },
+        replay_claim: fixture.replay_claim,
+        redaction_state: fixture.redaction_state,
     }
 }
 
@@ -1265,11 +1218,11 @@ fn evaluator_protocol(profile_record_digest: [u8; 32]) -> EvaluatorProtocolV1 {
 fn bundle_inputs_from_profile(
     layer: &LayerCatalogEntry,
     profile: &ConformanceProfileV1,
-    mode: BundleModeV1,
+    mode: CatalogBundleMode,
     inventory_bytes: &[u8],
     providers: &ProviderCatalog,
 ) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
-    let execution_mode = execution_mode(mode);
+    let execution_mode = mode.execution_mode();
     let mut members = Vec::new();
     let mut expected_results = Vec::new();
     for source in &layer.fixtures {
@@ -1299,7 +1252,7 @@ fn bundle_inputs_from_profile(
                 case_id: fixture.case_id.clone(),
                 claim_layer: fixture.claim_layer,
                 execution_profile_digest: fixture.execution_profile_digest,
-                mode,
+                mode: mode.bundle_mode(),
                 member_path: path.clone(),
                 digest: member.digest,
             });
@@ -1316,7 +1269,7 @@ fn append_supporting_members(
     inventory_bytes: &[u8],
     providers: &ProviderCatalog,
     profile: &ConformanceProfileV1,
-    mode: BundleModeV1,
+    mode: CatalogBundleMode,
 ) -> Result<(), Box<dyn Error>> {
     members.extend(MATERIALIZATION_SUPPORT_ARTIFACTS.iter().map(|artifact| {
         BundleMemberV1::supporting(artifact.path, artifact.bytes.to_vec(), artifact.role)
@@ -1352,16 +1305,16 @@ fn append_supporting_members(
 fn append_draft_authority_members(
     members: &mut Vec<BundleMemberV1>,
     profile: &ConformanceProfileV1,
-    mode: BundleModeV1,
+    mode: CatalogBundleMode,
 ) -> Result<(), Box<dyn Error>> {
-    CatalogExecutionProfile::ALL
-        .into_iter()
+    DRAFT_EXECUTION_PROFILES
+        .iter()
         .map(|execution_profile| {
             execution_profile_bytes(execution_profile).map(|bytes| {
                 BundleMemberV1::supporting(
                     format!(
                         "authority/execution-profiles/{}.epf1",
-                        execution_profile.name()
+                        execution_profile.profile_id
                     ),
                     bytes,
                     BundleMemberRoleV1::ExecutionProfile,
@@ -1385,9 +1338,9 @@ fn append_draft_authority_members(
 fn append_draft_release_admissions(
     members: &mut Vec<BundleMemberV1>,
     profile: &ConformanceProfileV1,
-    mode: BundleModeV1,
+    mode: CatalogBundleMode,
 ) -> Result<(), Box<dyn Error>> {
-    let execution_mode = execution_mode(mode);
+    let execution_mode = mode.execution_mode();
     profile
         .fixtures
         .iter()
@@ -1424,13 +1377,6 @@ fn append_draft_release_admissions(
                 })
             })
         })
-}
-
-const fn execution_mode(mode: BundleModeV1) -> pos_conformance::ExecutionModeV1 {
-    match mode {
-        BundleModeV1::Local => pos_conformance::ExecutionModeV1::Local,
-        BundleModeV1::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
-    }
 }
 
 fn verify_public_archive(

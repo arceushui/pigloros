@@ -7620,39 +7620,62 @@ pub mod tests {
 
         assert_eq!(verify_evidence(&host_fixture()), Ok(()));
 
-        let cases: [fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
-            |audit, _| audit.subject.clear(),
-            |audit, _| audit.closure_payload_digest = [0; 32],
-            |audit, _| audit.requested_after_seq = audit.effective_after_seq,
-            |audit, _| {
-                audit.closure_event_seq = 2;
-            },
-            |audit, _| audit.halted_at_tick_boundary = false,
-            |_, events| {
-                let duplicate = events[2].clone();
-                events.push(duplicate);
-            },
-            |_, events| {
-                events[2].event_type = "other".to_owned();
-                events.push(AuthoritativeEventV1 {
-                    seq: 4,
-                    tick: 3,
-                    entity: "host".to_owned(),
-                    event_type: "experiment.lifecycle.consent-closed.v1".to_owned(),
-                    payload_digest: [7; 32],
-                    causation_seq: None,
-                });
-            },
-            |_, events| events[2].seq = 4,
-            |_, events| events[2].payload_digest = [8; 32],
+        type HostClosureMutation = fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>);
+        let cases: [(HostClosureMutation, EvidenceError); 9] = [
+            (
+                |audit, _| audit.subject.clear(),
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.closure_payload_digest = [0; 32],
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.requested_after_seq = audit.effective_after_seq,
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.closure_event_seq = 2,
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.halted_at_tick_boundary = false,
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |_, events| {
+                    let duplicate = events[2].clone();
+                    events.push(duplicate);
+                },
+                EvidenceError::NonContiguousEventSequence,
+            ),
+            (
+                |_, events| {
+                    events[2].event_type = "other".to_owned();
+                    events.push(AuthoritativeEventV1 {
+                        seq: 4,
+                        tick: 3,
+                        entity: "host".to_owned(),
+                        event_type: "experiment.lifecycle.consent-closed.v1".to_owned(),
+                        payload_digest: [7; 32],
+                        causation_seq: None,
+                    });
+                },
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |_, events| events[2].seq = 4,
+                EvidenceError::NonContiguousEventSequence,
+            ),
+            (
+                |_, events| events[2].payload_digest = [8; 32],
+                EvidenceError::InvalidConsentAudit,
+            ),
         ];
-        for mutate in cases {
+        for (mutate, expected) in cases {
             let mut invalid = host_fixture();
             mutate(&mut invalid.host_closure, &mut invalid.authoritative_events);
-            assert_eq!(
-                verify_evidence(&invalid),
-                Err(EvidenceError::InvalidConsentAudit)
-            );
+            assert_eq!(verify_evidence(&invalid), Err(expected));
         }
     }
 

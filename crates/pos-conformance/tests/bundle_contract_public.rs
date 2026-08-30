@@ -1,5 +1,7 @@
 //! Public archive-contract regression tests for the current CPF1/FPR1/FPP1 surface.
 
+pub mod support;
+
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
@@ -16,11 +18,14 @@ use pos_conformance::{
     VerificationOutcomeV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
     FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
-use sha2::{Digest as Sha2Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
+use support::{
+    ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField, ManifestField,
+    MemberField, ProfileField, ProviderBindingField, TemporaryOutput,
+};
 
 static MATERIALIZER_PROCESS_LOCK: Mutex<()> = Mutex::new(());
 
@@ -845,9 +850,7 @@ fn authority_members_reject_closed_contract_mutations() -> TestResult {
 }
 
 fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)?;
-    Ok(bytes)
+    support::encode_value(value)
 }
 
 fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {
@@ -953,24 +956,11 @@ fn release_admission_bytes(
 }
 
 fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> {
-    let bytes = encode_value(&Value::Array(fields.to_vec()))?;
-    let mut preimage = Vec::with_capacity(domain.len() + 9 + bytes.len());
-    preimage.extend_from_slice(domain);
-    preimage.push(0);
-    preimage.extend_from_slice(&u64::try_from(bytes.len())?.to_be_bytes());
-    preimage.extend_from_slice(&bytes);
-    Ok(*blake3::hash(&preimage).as_bytes())
+    support::contract_digest(domain, fields)
 }
 
 fn resign_archive(value: &mut Value) -> TestResult {
-    let Value::Array(archive) = value else {
-        return Err("archive is not an array".into());
-    };
-    let manifest_bytes = encode_value(&archive[0])?;
-    let key = SigningKey::from_bytes(&[7; 32]);
-    archive[2] = Value::Bytes(key.verifying_key().to_bytes().to_vec());
-    archive[3] = Value::Bytes(key.sign(&manifest_bytes).to_bytes().to_vec());
-    Ok(())
+    support::resign_archive(value)
 }
 
 fn array_field<'a>(
@@ -978,10 +968,7 @@ fn array_field<'a>(
     index: usize,
     name: &str,
 ) -> TestResult<&'a mut Vec<Value>> {
-    match fields.get_mut(index) {
-        Some(Value::Array(values)) => Ok(values),
-        _ => Err(format!("{name} is not an array").into()),
-    }
+    support::array_field(fields, index, name)
 }
 
 fn fixture_with_family(fields: &mut [Value], family: u64) -> TestResult<&mut Vec<Value>> {
@@ -998,11 +985,7 @@ fn fixture_with_family(fields: &mut [Value], family: u64) -> TestResult<&mut Vec
 }
 
 fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &str) -> TestResult {
-    let slot = fields
-        .get_mut(index)
-        .ok_or_else(|| format!("{name} is absent"))?;
-    *slot = value;
-    Ok(())
+    support::replace_value(fields, index, value, name)
 }
 
 fn mutate_profile_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
@@ -1031,19 +1014,19 @@ fn mutate_profile_archive_staged(
     let Value::Array(archive_fields) = &mut archive else {
         return Err("archive is not an array".into());
     };
-    let Value::Array(members) = &mut archive_fields[1] else {
+    let Value::Array(members) = &mut archive_fields[ArchiveField::Members.index()] else {
         return Err("archive members are not an array".into());
     };
     let profile_member = members
         .iter_mut()
         .find(|member| {
-            matches!(member, Value::Array(fields) if fields.first() == Some(&Value::Text("profile/CPF1.cbor".to_owned())))
+            matches!(member, Value::Array(fields) if fields.first() == Some(&Value::Text(support::PROFILE_MEMBER_PATH.to_owned())))
         })
         .ok_or("profile member is absent")?;
     let Value::Array(profile_member_fields) = profile_member else {
         return Err("profile member is not an array".into());
     };
-    let Value::Bytes(profile_bytes) = &profile_member_fields[1] else {
+    let Value::Bytes(profile_bytes) = &profile_member_fields[MemberField::Bytes.index()] else {
         return Err("profile member is not bytes".into());
     };
     let mut profile: Value = ciborium::from_reader(profile_bytes.as_slice())?;
@@ -1051,50 +1034,60 @@ fn mutate_profile_archive_staged(
         return Err("profile is not an array".into());
     };
     mutate(profile_fields)?;
-    if let Some(Value::Array(fixtures)) = profile_fields.get_mut(9) {
+    if let Some(Value::Array(fixtures)) = profile_fields.get_mut(ProfileField::Fixtures.index()) {
         for fixture in fixtures {
             let Value::Array(fields) = fixture else {
                 continue;
             };
-            if fields.len() == 24 {
-                fields[23] = Value::Bytes(
-                    contract_digest(b"PiglorOS.Conformance.Fixture.v1", &fields[..23])?.to_vec(),
+            if fields.len() == FixtureField::Digest.index() + 1 {
+                fields[FixtureField::Digest.index()] = Value::Bytes(
+                    contract_digest(
+                        b"PiglorOS.Conformance.Fixture.v1",
+                        &fields[..FixtureField::Digest.index()],
+                    )?
+                    .to_vec(),
                 );
             }
         }
     }
     mutate_after_fixture_digest(profile_fields)?;
-    if profile_fields.len() == 18 {
-        profile_fields[17] = Value::Bytes(
-            contract_digest(b"PiglorOS.ConformanceProfile.v1", &profile_fields[..17])?.to_vec(),
+    if profile_fields.len() == ProfileField::Digest.index() + 1 {
+        profile_fields[ProfileField::Digest.index()] = Value::Bytes(
+            contract_digest(
+                b"PiglorOS.ConformanceProfile.v1",
+                &profile_fields[..ProfileField::Digest.index()],
+            )?
+            .to_vec(),
         );
     }
     mutate_after_profile_digest(profile_fields)?;
-    let profile_digest = match &profile_fields[17] {
+    let profile_digest = match &profile_fields[ProfileField::Digest.index()] {
         Value::Bytes(bytes) => bytes.clone(),
         _ => return Err("profile digest is not bytes".into()),
     };
     let new_profile_bytes = encode_value(&profile)?;
-    profile_member_fields[1] = Value::Bytes(new_profile_bytes.clone());
+    profile_member_fields[MemberField::Bytes.index()] = Value::Bytes(new_profile_bytes.clone());
 
-    let Value::Array(manifest) = &mut archive_fields[0] else {
+    let Value::Array(manifest) = &mut archive_fields[ArchiveField::Manifest.index()] else {
         return Err("manifest is not an array".into());
     };
-    manifest[3] = Value::Bytes(profile_digest);
-    let Value::Array(descriptors) = &mut manifest[4] else {
+    manifest[ManifestField::ProfileDigest.index()] = Value::Bytes(profile_digest);
+    let Value::Array(descriptors) = &mut manifest[ManifestField::MemberDescriptors.index()] else {
         return Err("manifest descriptors are not an array".into());
     };
     let descriptor = descriptors
         .iter_mut()
         .find(|descriptor| {
-            matches!(descriptor, Value::Array(fields) if fields.first() == Some(&Value::Text("profile/CPF1.cbor".to_owned())))
+            matches!(descriptor, Value::Array(fields) if fields.first() == Some(&Value::Text(support::PROFILE_MEMBER_PATH.to_owned())))
         })
         .ok_or("profile descriptor is absent")?;
     let Value::Array(descriptor_fields) = descriptor else {
         return Err("profile descriptor is not an array".into());
     };
-    descriptor_fields[1] = Value::Integer(u64::try_from(new_profile_bytes.len())?.into());
-    descriptor_fields[2] = Value::Bytes(blake3::hash(&new_profile_bytes).as_bytes().to_vec());
+    descriptor_fields[DescriptorField::Length.index()] =
+        Value::Integer(u64::try_from(new_profile_bytes.len())?.into());
+    descriptor_fields[DescriptorField::Digest.index()] =
+        Value::Bytes(blake3::hash(&new_profile_bytes).as_bytes().to_vec());
     resign_archive(&mut archive)?;
     encode_value(&archive)
 }
@@ -1124,60 +1117,24 @@ fn archive_member_fields<'a>(
     archive: &'a mut [Value],
     path: &str,
 ) -> TestResult<&'a mut Vec<Value>> {
-    let members = array_field(archive, 1, "archive members")?;
-    let member = members
-        .iter_mut()
-        .find(|member| matches!(member, Value::Array(fields) if matches!(fields.first(), Some(Value::Text(value)) if value == path)))
-        .ok_or_else(|| format!("archive member {path} is absent"))?;
-    match member {
-        Value::Array(fields) => Ok(fields),
-        _ => Err(format!("archive member {path} is not an array").into()),
-    }
+    support::archive_member_fields(archive, path)
 }
 
 fn archive_descriptor_fields<'a>(
     archive: &'a mut [Value],
     path: &str,
 ) -> TestResult<&'a mut Vec<Value>> {
-    let manifest = array_field(archive, 0, "manifest")?;
-    let descriptors = array_field(manifest, 4, "member descriptors")?;
-    let descriptor = descriptors
-        .iter_mut()
-        .find(|descriptor| matches!(descriptor, Value::Array(fields) if matches!(fields.first(), Some(Value::Text(value)) if value == path)))
-        .ok_or_else(|| format!("archive descriptor {path} is absent"))?;
-    match descriptor {
-        Value::Array(fields) => Ok(fields),
-        _ => Err(format!("archive descriptor {path} is not an array").into()),
-    }
+    support::archive_descriptor_fields(archive, path)
 }
 
 fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[u8]) -> TestResult {
-    {
-        let member = archive_member_fields(archive, path)?;
-        replace_value(
-            member,
-            1,
-            Value::Bytes(bytes.to_owned()),
-            "archive member bytes",
-        )?;
-    }
-    let descriptor = archive_descriptor_fields(archive, path)?;
-    replace_value(
-        descriptor,
-        1,
-        Value::Integer(u64::try_from(bytes.len())?.into()),
-        "archive member length",
-    )?;
-    replace_value(
-        descriptor,
-        2,
-        Value::Bytes(blake3::hash(bytes).as_bytes().to_vec()),
-        "archive member digest",
-    )
+    support::replace_archive_member_bytes(archive, path, bytes)
 }
 
 fn refresh_profile_registry_binding(archive: &mut [Value], registry_bytes: &[u8]) -> TestResult {
-    let profile_bytes = match archive_member_fields(archive, "profile/CPF1.cbor")?.get(1) {
+    let profile_bytes = match archive_member_fields(archive, support::PROFILE_MEMBER_PATH)?
+        .get(MemberField::Bytes.index())
+    {
         Some(Value::Bytes(bytes)) => bytes.clone(),
         _ => return Err("profile member is not bytes".into()),
     };
@@ -1185,43 +1142,56 @@ fn refresh_profile_registry_binding(archive: &mut [Value], registry_bytes: &[u8]
     let Value::Array(profile_fields) = &mut profile else {
         return Err("profile is not an array".into());
     };
-    let binding = array_field(profile_fields, 8, "provider binding")?;
-    let descriptor = array_field(binding, 0, "provider registry descriptor")?;
+    let binding = array_field(
+        profile_fields,
+        ProfileField::ProviderRegistryBinding.index(),
+        "provider binding",
+    )?;
+    let descriptor = array_field(
+        binding,
+        ProviderBindingField::RegistryDescriptor.index(),
+        "provider registry descriptor",
+    )?;
     replace_value(
         descriptor,
-        2,
+        ArtifactDescriptorField::Length.index(),
         Value::Integer(u64::try_from(registry_bytes.len())?.into()),
         "provider registry length",
     )?;
     replace_value(
         descriptor,
-        3,
+        ArtifactDescriptorField::Digest.index(),
         Value::Bytes(blake3::hash(registry_bytes).as_bytes().to_vec()),
         "provider registry digest",
     )?;
-    let profile_digest = contract_digest(b"PiglorOS.ConformanceProfile.v1", &profile_fields[..17])?;
+    let profile_digest = contract_digest(
+        b"PiglorOS.ConformanceProfile.v1",
+        &profile_fields[..ProfileField::Digest.index()],
+    )?;
     replace_value(
         profile_fields,
-        17,
+        ProfileField::Digest.index(),
         Value::Bytes(profile_digest.to_vec()),
         "profile digest",
     )?;
-    let profile_digest = match profile_fields.get(17) {
+    let profile_digest = match profile_fields.get(ProfileField::Digest.index()) {
         Some(Value::Bytes(digest)) => digest.clone(),
         _ => return Err("profile digest is not bytes".into()),
     };
     let profile_bytes = encode_value(&profile)?;
-    replace_archive_member_bytes(archive, "profile/CPF1.cbor", &profile_bytes)?;
+    replace_archive_member_bytes(archive, support::PROFILE_MEMBER_PATH, &profile_bytes)?;
     replace_value(
-        array_field(archive, 0, "manifest")?,
-        3,
+        array_field(archive, ArchiveField::Manifest.index(), "manifest")?,
+        ManifestField::ProfileDigest.index(),
         Value::Bytes(profile_digest),
         "manifest profile digest",
     )
 }
 
 fn refresh_profile_matrix_binding(archive: &mut [Value], matrix_bytes: &[u8]) -> TestResult {
-    let profile_bytes = match archive_member_fields(archive, "profile/CPF1.cbor")?.get(1) {
+    let profile_bytes = match archive_member_fields(archive, support::PROFILE_MEMBER_PATH)?
+        .get(MemberField::Bytes.index())
+    {
         Some(Value::Bytes(bytes)) => bytes.clone(),
         _ => return Err("profile member is not bytes".into()),
     };
@@ -1231,26 +1201,200 @@ fn refresh_profile_matrix_binding(archive: &mut [Value], matrix_bytes: &[u8]) ->
     };
     replace_value(
         profile_fields,
-        4,
+        ProfileField::ExecutionMatrixDigest.index(),
         Value::Bytes(blake3::hash(matrix_bytes).as_bytes().to_vec()),
         "execution matrix digest",
     )?;
-    let profile_digest = contract_digest(b"PiglorOS.ConformanceProfile.v1", &profile_fields[..17])?;
+    let profile_digest = contract_digest(
+        b"PiglorOS.ConformanceProfile.v1",
+        &profile_fields[..ProfileField::Digest.index()],
+    )?;
     replace_value(
         profile_fields,
-        17,
+        ProfileField::Digest.index(),
         Value::Bytes(profile_digest.to_vec()),
         "profile digest",
     )?;
     let profile_bytes = encode_value(&profile)?;
-    replace_archive_member_bytes(archive, "profile/CPF1.cbor", &profile_bytes)?;
+    replace_archive_member_bytes(archive, support::PROFILE_MEMBER_PATH, &profile_bytes)?;
     replace_value(
-        array_field(archive, 0, "manifest")?,
-        3,
+        array_field(archive, ArchiveField::Manifest.index(), "manifest")?,
+        ManifestField::ProfileDigest.index(),
         Value::Bytes(profile_digest.to_vec()),
         "manifest profile digest",
     )
 }
+
+struct MutationCase {
+    label: &'static str,
+    selector: usize,
+}
+
+const PROVIDER_REGISTRY_MUTATIONS: [MutationCase; 18] = [
+    MutationCase {
+        label: "invalid registry magic",
+        selector: 0,
+    },
+    MutationCase {
+        label: "invalid registry version",
+        selector: 1,
+    },
+    MutationCase {
+        label: "empty registry providers",
+        selector: 2,
+    },
+    MutationCase {
+        label: "invalid registry digest",
+        selector: 3,
+    },
+    MutationCase {
+        label: "invalid provider entry shape",
+        selector: 4,
+    },
+    MutationCase {
+        label: "invalid provider claim layer",
+        selector: 5,
+    },
+    MutationCase {
+        label: "invalid provider subject adapter",
+        selector: 6,
+    },
+    MutationCase {
+        label: "missing provider package path",
+        selector: 7,
+    },
+    MutationCase {
+        label: "invalid provider identifier",
+        selector: 8,
+    },
+    MutationCase {
+        label: "noncanonical provider version",
+        selector: 9,
+    },
+    MutationCase {
+        label: "invalid provider ABI major",
+        selector: 10,
+    },
+    MutationCase {
+        label: "invalid provider ABI minor",
+        selector: 11,
+    },
+    MutationCase {
+        label: "absolute provider package path",
+        selector: 12,
+    },
+    MutationCase {
+        label: "invalid provider package media type",
+        selector: 13,
+    },
+    MutationCase {
+        label: "invalid provider package length",
+        selector: 14,
+    },
+    MutationCase {
+        label: "invalid provider package digest",
+        selector: 15,
+    },
+    MutationCase {
+        label: "duplicate provider entry",
+        selector: 16,
+    },
+    MutationCase {
+        label: "invalid provider package role",
+        selector: 17,
+    },
+];
+
+const PROVIDER_PACKAGE_MUTATIONS: [MutationCase; 22] = [
+    MutationCase {
+        label: "invalid package magic",
+        selector: 0,
+    },
+    MutationCase {
+        label: "invalid package version",
+        selector: 1,
+    },
+    MutationCase {
+        label: "empty package provider key",
+        selector: 2,
+    },
+    MutationCase {
+        label: "empty package schemas",
+        selector: 3,
+    },
+    MutationCase {
+        label: "invalid package schema family",
+        selector: 4,
+    },
+    MutationCase {
+        label: "invalid package schema descriptor",
+        selector: 5,
+    },
+    MutationCase {
+        label: "invalid package licence digest",
+        selector: 6,
+    },
+    MutationCase {
+        label: "invalid package digest",
+        selector: 7,
+    },
+    MutationCase {
+        label: "invalid package provider identifier",
+        selector: 8,
+    },
+    MutationCase {
+        label: "noncanonical package provider version",
+        selector: 9,
+    },
+    MutationCase {
+        label: "invalid package provider ABI major",
+        selector: 10,
+    },
+    MutationCase {
+        label: "invalid package provider ABI minor",
+        selector: 11,
+    },
+    MutationCase {
+        label: "invalid package claim layer",
+        selector: 12,
+    },
+    MutationCase {
+        label: "invalid package subject adapter",
+        selector: 13,
+    },
+    MutationCase {
+        label: "missing package family schema",
+        selector: 14,
+    },
+    MutationCase {
+        label: "invalid package schema shape",
+        selector: 15,
+    },
+    MutationCase {
+        label: "absolute package schema path",
+        selector: 16,
+    },
+    MutationCase {
+        label: "invalid package schema media type",
+        selector: 17,
+    },
+    MutationCase {
+        label: "invalid package schema length",
+        selector: 18,
+    },
+    MutationCase {
+        label: "invalid package schema digest",
+        selector: 19,
+    },
+    MutationCase {
+        label: "missing package notices",
+        selector: 20,
+    },
+    MutationCase {
+        label: "colliding package support path",
+        selector: 21,
+    },
+];
 
 fn mutate_provider_registry_fields(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
     match mutation {
@@ -1675,41 +1819,15 @@ fn mutate_provider_package_archive_with(
 }
 
 fn temporary_root(label: &str) -> TestResult<PathBuf> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_nanos();
-    Ok(std::env::temp_dir().join(format!("pigloros-{label}-{}-{nonce}", std::process::id())))
+    support::temporary_root(label)
 }
 
 fn source_inventory_address() -> String {
-    let digest: [u8; 32] =
-        Sha256::digest(include_bytes!("../../../fixtures/conformance/SHA256SUMS")).into();
-    pos_conformance::hex_digest(&digest)
-}
-
-struct TemporaryOutput(PathBuf);
-
-impl Drop for TemporaryOutput {
-    fn drop(&mut self) {
-        drop(fs::remove_dir_all(&self.0));
-    }
+    support::source_inventory_address()
 }
 
 fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(directory) = pending.pop() {
-        for entry in fs::read_dir(directory)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                pending.push(path);
-            } else {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
+    support::release_files(root)
 }
 
 fn assert_complete_execution_mode_closure(archive: &[u8]) -> TestResult {
@@ -4242,21 +4360,18 @@ fn independent_verifier_rejects_network_for_air_gapped_fixture() -> TestResult {
 
 #[test]
 fn independent_verifier_rejects_each_current_provider_registry_mutation() -> TestResult {
-    for mutation in 0..18 {
-        let archive = mutate_provider_registry_archive(mutation)?;
-        assert_archive_rejected_by_both(
-            &archive,
-            &format!("provider registry mutation {mutation}"),
-        );
+    for case in PROVIDER_REGISTRY_MUTATIONS {
+        let archive = mutate_provider_registry_archive(case.selector)?;
+        assert_archive_rejected_by_both(&archive, case.label);
     }
     Ok(())
 }
 
 #[test]
 fn independent_verifier_rejects_each_current_provider_package_mutation() -> TestResult {
-    for mutation in 0..22 {
-        let archive = mutate_provider_package_archive(mutation)?;
-        assert_archive_rejected_by_both(&archive, &format!("provider package mutation {mutation}"));
+    for case in PROVIDER_PACKAGE_MUTATIONS {
+        let archive = mutate_provider_package_archive(case.selector)?;
+        assert_archive_rejected_by_both(&archive, case.label);
     }
     Ok(())
 }

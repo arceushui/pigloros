@@ -42,6 +42,13 @@ jq -e '
      else
        (has("code_id") | not)
      end) and
+    (.failure_outcome == "invalid-manifest" or
+     .failure_outcome == "incompatible-profile" or
+     .failure_outcome == "resource-limit-exceeded") and
+    (.replay_claim == "exact" or
+     .replay_claim == "exact-authoritative-with-redacted-views" or
+     .replay_claim == "incompatible-profile") and
+    (.redaction_state == "none" or .redaction_state == "redacted-views") and
     (has("input_with_operation") | not) and
     (has("input_without_operation") | not)
   )
