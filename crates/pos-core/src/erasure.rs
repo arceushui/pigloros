@@ -5983,10 +5983,12 @@ mod erasure_coverage_tests {
             Err(ErasureErrorV1::PolicyConflict)
         );
 
+        let mut weakened_current = fixtures.frozen;
+        weakened_current.state.replay_claim = ErasureReplayClaimV1::StructuralOnly;
         let mut stronger_claim = fixtures.dispatched;
         stronger_claim.state.replay_claim = ErasureReplayClaimV1::Exact;
         assert_eq!(
-            fixtures.frozen.validate_replacement_fields(&stronger_claim),
+            weakened_current.validate_replacement_fields(&stronger_claim),
             Err(ErasureErrorV1::PolicyConflict)
         );
         Ok(())
