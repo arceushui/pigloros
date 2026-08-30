@@ -5447,6 +5447,50 @@ mod coverage_entrypoints {
     }
 
     #[test]
+    fn memory_erasure_cas_load_and_idempotency_boundaries_are_instrumented() {
+        let record = erasure_record();
+        let request = record.request().reference();
+
+        let mut missing = MemoryStore::new();
+        assert_eq!(
+            missing.compare_and_swap_scope_extension(
+                request,
+                erasure_reference(90),
+                record.clone()
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            missing.compare_and_swap_administrative_resolution(request, None, record.clone()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+
+        let mut corrupt = MemoryStore::new();
+        corrupt.erasure_records.insert(request, vec![0_u8]);
+        assert!(corrupt
+            .compare_and_swap_scope_extension(request, erasure_reference(90), record.clone())
+            .is_err());
+        assert!(corrupt
+            .compare_and_swap_administrative_resolution(request, None, record.clone())
+            .is_err());
+
+        let mut idempotent = MemoryStore::new();
+        ok(idempotent.commit_record(record.clone()));
+        assert_eq!(
+            idempotent.compare_and_swap_scope_extension(
+                request,
+                erasure_reference(90),
+                record.clone(),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            idempotent.compare_and_swap_administrative_resolution(request, None, record),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn memory_admin_operations_reject_geographic_timelines() {
         let mut store = MemoryStore::new();
         let timeline = ok(store.create_timeline("coverage-geographic-admin"));

@@ -1375,6 +1375,166 @@ fn every_portable_decoder_rejects_a_wrong_type_in_every_field() -> Result<(), Er
 }
 
 #[test]
+fn freeze_record_decoders_reject_a_wrong_type_in_every_field() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request,
+        authorization_provenance: reference(2),
+    })?;
+    assert_each_field_rejects(
+        &rejection.to_canonical_cbor()?,
+        ErasureAuthorizationRejectionV1::from_canonical_cbor,
+    )?;
+
+    let scope = scope_commitment(request)?;
+    assert_each_field_rejects(
+        &scope.to_canonical_cbor()?,
+        ErasureScopeCommitmentV1::from_canonical_cbor,
+    )?;
+    let obligation = obligation(request)?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: obligation_set.reference(),
+        freeze_position: 10,
+        host_evidence: reference(6),
+    })?;
+    assert_each_field_rejects(
+        &freeze.to_canonical_cbor()?,
+        ErasureFreezeProvenanceV1::from_canonical_cbor,
+    )?;
+
+    let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request,
+        error: ErasureErrorV1::ScopeInvalid,
+        authorization_provenance: reference(2),
+        evidence: reference(6),
+    })?;
+    assert_each_field_rejects(
+        &failure.to_canonical_cbor()?,
+        ErasureFreezeFailureV1::from_canonical_cbor,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn obligation_record_decoders_reject_a_wrong_type_in_every_field() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let obligation = obligation(request)?;
+    assert_each_field_rejects(
+        &obligation.to_canonical_cbor()?,
+        ErasureObligationV1::from_canonical_cbor,
+    )?;
+    let set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    assert_each_field_rejects(
+        &set.to_canonical_cbor()?,
+        ErasureObligationSetV1::from_canonical_cbor,
+    )?;
+
+    let scope = scope_commitment(request)?;
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        fork: reference(6),
+        lineage_rule: reference(7),
+        predecessor_extension: None,
+        admission_provenance: reference(8),
+    })?;
+    assert_each_field_rejects(
+        &extension.to_canonical_cbor()?,
+        ErasureScopeExtensionV1::from_canonical_cbor,
+    )?;
+    let ledger = ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        scope_commitment: scope.reference(),
+        extensions: vec![extension.reference()],
+        head: Some(extension.reference()),
+    })?;
+    assert_each_field_rejects(
+        &ledger.to_canonical_cbor()?,
+        ErasureScopeExtensionLedgerV1::from_canonical_cbor,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn supporting_decoder_rehydrates_each_optional_freeze_record() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request,
+        authorization_provenance: reference(2),
+    })?;
+    let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request,
+        error: ErasureErrorV1::ScopeInvalid,
+        authorization_provenance: reference(2),
+        evidence: reference(6),
+    })?;
+    for input in [
+        ErasureSupportingRecordsInputV1 {
+            authorization_rejection: Some(rejection),
+            ..ErasureSupportingRecordsInputV1::default()
+        },
+        ErasureSupportingRecordsInputV1 {
+            freeze_failure: Some(failure),
+            ..ErasureSupportingRecordsInputV1::default()
+        },
+    ] {
+        let records = ErasureSupportingRecordsV1::new(input)?;
+        assert_eq!(
+            roundtrip(
+                &records,
+                ErasureSupportingRecordsV1::to_canonical_cbor,
+                ErasureSupportingRecordsV1::from_canonical_cbor,
+            )?,
+            records
+        );
+    }
+
+    let scope = scope_commitment(request)?;
+    let obligation = obligation(request)?;
+    let set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: set.reference(),
+        freeze_position: 10,
+        host_evidence: reference(6),
+    })?;
+    let records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope),
+        freeze_provenance: Some(freeze),
+        obligations: vec![obligation],
+        obligation_set: Some(set),
+        ..ErasureSupportingRecordsInputV1::default()
+    })?;
+    assert_eq!(
+        roundtrip(
+            &records,
+            ErasureSupportingRecordsV1::to_canonical_cbor,
+            ErasureSupportingRecordsV1::from_canonical_cbor,
+        )?,
+        records
+    );
+    Ok(())
+}
+
+#[test]
 fn portable_reference_decoders_reject_duplicate_entries() -> Result<(), ErasureErrorV1> {
     let input = complete_supporting_input(reference(1))?;
     let retry = input.retry_admissions[0].to_canonical_cbor()?;
