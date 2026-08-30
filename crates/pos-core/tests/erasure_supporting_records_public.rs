@@ -219,24 +219,10 @@ fn portable_scope_and_obligation_records_expose_canonical_public_seams(
 }
 
 #[test]
-fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<(), ErasureErrorV1> {
+fn supporting_records_reject_conflicting_rejection_and_freeze_evidence(
+) -> Result<(), ErasureErrorV1> {
     let request = reference(1);
     let scope = scope_commitment(request)?;
-    let other_obligation = obligation(reference(9))?;
-    let obligation = obligation(request)?;
-    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
-        request,
-        obligations: vec![obligation.reference()],
-        policy: reference(4),
-        trust: reference(5),
-    })?;
-    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
-        request,
-        scope_commitment: scope.reference(),
-        obligation_set: obligation_set.reference(),
-        freeze_position: 10,
-        host_evidence: reference(6),
-    })?;
     let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
         request,
         authorization_provenance: reference(7),
@@ -275,8 +261,29 @@ fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<()
         ErasureSupportingRecordsV1::new(failure_with_scope),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
+
+#[test]
+fn supporting_records_require_complete_freeze_commitments() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let scope = scope_commitment(request)?;
+    let obligation = obligation(request)?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: obligation_set.reference(),
+        freeze_position: 10,
+        host_evidence: reference(6),
+    })?;
     let obligations_without_scope = ErasureSupportingRecordsInputV1 {
-        obligations: vec![obligation.clone()],
+        obligations: vec![obligation],
         obligation_set: Some(obligation_set.clone()),
         ..ErasureSupportingRecordsInputV1::default()
     };
@@ -287,7 +294,7 @@ fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<()
     let freeze_without_scope = ErasureSupportingRecordsInputV1 {
         freeze_provenance: Some(freeze),
         obligation_set: Some(obligation_set.clone()),
-        obligations: vec![obligation.clone()],
+        obligations: vec![obligation],
         ..ErasureSupportingRecordsInputV1::default()
     };
     assert_eq!(
@@ -313,7 +320,7 @@ fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<()
     let mismatched_freeze = ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope.clone()),
         freeze_provenance: Some(mismatched_freeze),
-        obligations: vec![obligation.clone()],
+        obligations: vec![obligation],
         obligation_set: Some(obligation_set.clone()),
         ..ErasureSupportingRecordsInputV1::default()
     };
@@ -321,6 +328,21 @@ fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<()
         ErasureSupportingRecordsV1::new(mismatched_freeze),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
+
+#[test]
+fn supporting_records_bind_obligation_objects_and_lineage_ledgers() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let scope = scope_commitment(request)?;
+    let obligation = obligation(request)?;
+    let other_obligation = obligation(reference(9))?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
     let missing_obligation_objects = ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope.clone()),
         obligation_set: Some(obligation_set.clone()),
@@ -348,7 +370,7 @@ fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<()
         })?;
     let ledger_without_lineage = ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope),
-        obligations: vec![obligation.clone()],
+        obligations: vec![obligation],
         obligation_set: Some(ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
             request,
             obligations: vec![obligation.reference()],
