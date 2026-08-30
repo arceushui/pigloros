@@ -963,6 +963,32 @@ mod tests {
             "remove empty sibling",
         );
 
+        ok(
+            fs::mknodat(
+                &publication.staging,
+                c"socket",
+                FileType::Socket,
+                Mode::RWXU,
+                fs::makedev(0, 0),
+            ),
+            "create staged socket",
+        );
+        assert_error(
+            remove_directory_entry(&publication.staging, c"socket"),
+            "untrusted output directory",
+        );
+        ok(
+            fs::unlinkat(&publication.staging, c"socket", AtFlags::empty()),
+            "remove staged socket",
+        );
+    }
+
+    #[test]
+    fn private_staging_configuration_rejects_untrusted_entries() {
+        let root = TestDirectory::create("staging-configuration");
+        let destination = root.0.join("published");
+        let publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
+
         let regular_name = c"regular-entry".to_owned();
         let regular_path = root.0.join(regular_name.to_string_lossy().as_ref());
         ok(
@@ -1029,25 +1055,6 @@ mod tests {
                 effective_uid(),
             ),
             "untrusted output directory",
-        );
-
-        ok(
-            fs::mknodat(
-                &publication.staging,
-                c"socket",
-                FileType::Socket,
-                Mode::RWXU,
-                fs::makedev(0, 0),
-            ),
-            "create staged socket",
-        );
-        assert_error(
-            remove_directory_entry(&publication.staging, c"socket"),
-            "untrusted output directory",
-        );
-        ok(
-            fs::unlinkat(&publication.staging, c"socket", AtFlags::empty()),
-            "remove staged socket",
         );
     }
 }
