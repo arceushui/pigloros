@@ -1583,8 +1583,8 @@ impl ErasureSupportingRecordsV1 {
         if self.retry_admissions.len() > self.attempt_outcomes.len().saturating_add(1) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        self.validate_attempt_chain()?;
         self.validate_acknowledgements()?;
+        self.validate_attempt_chain()?;
         self.validate_resolution_chain()
     }
 
@@ -1983,12 +1983,15 @@ fn normalize_retry_admission(
         .zip(input.command_identities.iter().copied())
         .collect::<Vec<_>>();
     pairs.sort_unstable_by_key(|(obligation, _)| *obligation);
-    if has_duplicate(
+    let duplicate_obligation = has_duplicate(
         &pairs
             .iter()
             .map(|(obligation, _)| *obligation)
             .collect::<Vec<_>>(),
-    ) {
+    );
+    let mut commands = input.command_identities.clone();
+    commands.sort_unstable();
+    if duplicate_obligation || has_duplicate(&commands) {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     input.unresolved_obligations = pairs.iter().map(|(obligation, _)| *obligation).collect();
