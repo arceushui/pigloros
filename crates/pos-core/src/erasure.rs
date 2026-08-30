@@ -5522,7 +5522,7 @@ mod erasure_coverage_tests {
         upgraded_parts.dispatch_provenance = Some(ErasureReferenceV1::from_digest([10; 32]));
         assert_eq!(
             ErasureCoordinatorRecordV1::from_parts(upgraded_parts, coordinator()),
-            Err(ErasureErrorV1::PolicyConflict)
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
 
         let mut changed_authorization_parts = tests::record_parts(&fixtures.frozen);
