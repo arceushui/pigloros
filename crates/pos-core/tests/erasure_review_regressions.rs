@@ -36,6 +36,17 @@ const fn target() -> ErasureRequiredTargetV1 {
     }
 }
 
+const fn second_target() -> ErasureRequiredTargetV1 {
+    ErasureRequiredTargetV1 {
+        artifact_class: ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: reference(14),
+        key_role: ErasureKeyRoleV1::DataEncryption,
+        key_digest: reference(15),
+        replica_set: reference(16),
+        replica_id: reference(17),
+    }
+}
+
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(ErasureRequestInputV1 {
         request: reference(1),
@@ -52,9 +63,16 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
 }
 
 const fn inventory(owner: ErasureReferenceV1) -> ErasureInventoryResultV1 {
+    inventory_for_target(target(), owner)
+}
+
+const fn inventory_for_target(
+    target: ErasureRequiredTargetV1,
+    owner: ErasureReferenceV1,
+) -> ErasureInventoryResultV1 {
     ErasureInventoryResultV1 {
         category: ErasureInventoryCategoryV1::Artifact,
-        target: target(),
+        target,
         transition: ErasureArtifactTransitionV1 {
             from: ErasureReplayClaimV1::Exact,
             to: ErasureReplayClaimV1::StructuralOnly,
@@ -71,7 +89,15 @@ fn acknowledgement(
     owner: ErasureReferenceV1,
     evidence: ErasureReferenceV1,
 ) -> ErasureAcknowledgementV1 {
-    let inventory = inventory(owner);
+    acknowledgement_for_target(target(), owner, evidence)
+}
+
+fn acknowledgement_for_target(
+    target: ErasureRequiredTargetV1,
+    owner: ErasureReferenceV1,
+    evidence: ErasureReferenceV1,
+) -> ErasureAcknowledgementV1 {
+    let inventory = inventory_for_target(target, owner);
     ErasureAcknowledgementV1 {
         obligation: inventory.obligation_reference(),
         target: inventory.target,
@@ -419,6 +445,7 @@ fn receipt_accepts_an_inventory_owner_independent_of_the_target_replica(
 struct PublicPort {
     records: Vec<ErasureCoordinatorRecordV1>,
     states: Vec<ErasureStateV1>,
+    targets: Vec<ErasureRequiredTargetV1>,
     fail_commits: bool,
 }
 
@@ -487,10 +514,18 @@ impl ErasurePersistencePortV1 for PublicPort {
     }
 }
 
-const fn public_port(fail_commits: bool) -> PublicPort {
+fn public_port(fail_commits: bool) -> PublicPort {
+    public_port_with_targets(fail_commits, vec![target()])
+}
+
+fn public_port_with_targets(
+    fail_commits: bool,
+    targets: Vec<ErasureRequiredTargetV1>,
+) -> PublicPort {
     PublicPort {
         records: Vec::new(),
         states: Vec::new(),
+        targets,
         fail_commits,
     }
 }
@@ -513,7 +548,7 @@ impl ErasureCoordinatorPortV1 for PublicPort {
         &self,
         _request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
-        Ok(vec![target()])
+        Ok(self.targets.clone())
     }
     fn affected_scope(
         &self,
@@ -579,11 +614,17 @@ fn state_after_acknowledgements(
 ) -> Result<ErasureStateV1, ErasureErrorV1> {
     let submitted_request = request()?;
     let request_reference = submitted_request.reference();
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(public_port(false), reference(91));
+    let targets = acknowledgements
+        .iter()
+        .map(|acknowledgement| acknowledgement.target)
+        .collect();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        public_port_with_targets(false, targets),
+        reference(91),
+    );
     coordinator.submit(submitted_request, reference(92))?;
     coordinator.authorize(request_reference, reference(93))?;
     coordinator.freeze_inventory(request_reference, access_freeze_transition())?;
-    let command = destruction_command_reference(request_reference, target());
     let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
         request: request_reference,
         attempt_ordinal: 0,
@@ -592,7 +633,12 @@ fn state_after_acknowledgements(
             .iter()
             .map(|acknowledgement| acknowledgement.obligation)
             .collect(),
-        command_identities: vec![command; acknowledgements.len()],
+        command_identities: acknowledgements
+            .iter()
+            .map(|acknowledgement| {
+                destruction_command_reference(request_reference, acknowledgement.target)
+            })
+            .collect(),
         policy: reference(6),
         trust: reference(94),
         admitted_position: 9,
@@ -635,7 +681,7 @@ fn public_coordinator_rejects_conflicting_retries_and_propagates_commit_failure(
 fn coordinator_acknowledgement_arrival_order_does_not_change_ers1_identity(
 ) -> Result<(), ErasureErrorV1> {
     let first = acknowledgement(reference(95), reference(96));
-    let second = acknowledgement(reference(97), reference(98));
+    let second = acknowledgement_for_target(second_target(), reference(97), reference(98));
     let forward = state_after_acknowledgements(&[first, second])?;
     let reverse = state_after_acknowledgements(&[second, first])?;
     assert_eq!(forward, reverse);
