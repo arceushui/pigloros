@@ -20,6 +20,7 @@ use crate::{
 
 pub const CONFORMANCE_BUNDLE_MAGIC_V1: &str = "CFB1";
 pub const MAX_CONFORMANCE_BUNDLE_BYTES_V1: u64 = 1024 * 1024 * 1024;
+const MAX_CONFORMANCE_BUNDLE_LEN_V1: usize = 1024 * 1024 * 1024;
 const MAX_CONFORMANCE_MEMBER_BYTES_V1: u64 = 64 * 1024 * 1024;
 const MAX_CONFORMANCE_TEXT_BYTES_V1: u64 = 512;
 const MAX_CONFORMANCE_ITEMS_V1: u64 = 65_536;
@@ -305,7 +306,7 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error for malformed, noncanonical, oversized, or invalid bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, BundleContractErrorV1> {
-        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
+        if bytes.len() > MAX_CONFORMANCE_BUNDLE_LEN_V1 {
             return Err(BundleContractErrorV1::MemberOutOfBounds);
         }
         decode(bytes).and_then(|value| {
@@ -905,53 +906,61 @@ fn validate_member_closure(
             })
             .map(|member| member.path.clone()),
     );
-    declare_provider_members(members, &mut declared)?;
-    if members.iter().all(|member| declared.contains(&member.path)) {
-        Ok(())
-    } else {
-        Err(BundleContractErrorV1::UndeclaredMember)
-    }
+    declare_provider_members(members, &mut declared).and_then(|()| {
+        if members.iter().all(|member| declared.contains(&member.path)) {
+            Ok(())
+        } else {
+            Err(BundleContractErrorV1::UndeclaredMember)
+        }
+    })
 }
 
 fn declare_provider_members(
     members: &[BundleMemberV1],
     declared: &mut BTreeSet<String>,
 ) -> Result<(), BundleContractErrorV1> {
-    let registry_member = member_by_role_and_path(
+    member_by_role_and_path(
         members,
         BundleMemberRoleV1::FixtureProviderRegistry,
         FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
-    )?;
-    let registry = FixtureProviderRegistryV1::from_canonical_cbor(&registry_member.bytes)
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    for entry in registry.providers {
-        declared.insert(entry.provider_package_descriptor.member_path.clone());
-        let package_member = descriptor_member(
-            members,
-            &entry.provider_package_descriptor,
-            BundleMemberRoleV1::FixtureProviderPackage,
-        )?;
-        let package = FixtureProviderPackageV1::from_canonical_cbor(&package_member.bytes)
-            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-        declared.extend(
-            package
-                .family_schemas
-                .iter()
-                .map(|schema| schema.schema_descriptor.member_path.clone()),
-        );
-        declared.extend(
-            [
-                &package.licence_descriptor,
-                &package.notices_descriptor,
-                &package.sbom_descriptor,
-                &package.source_provenance_descriptor,
-                &package.limitations_descriptor,
-            ]
-            .into_iter()
-            .map(|descriptor| descriptor.member_path.clone()),
-        );
-    }
-    Ok(())
+    )
+    .and_then(|registry_member| {
+        FixtureProviderRegistryV1::from_canonical_cbor(&registry_member.bytes)
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+    })
+    .and_then(|registry| {
+        registry.providers.into_iter().try_for_each(|entry| {
+            declared.insert(entry.provider_package_descriptor.member_path.clone());
+            descriptor_member(
+                members,
+                &entry.provider_package_descriptor,
+                BundleMemberRoleV1::FixtureProviderPackage,
+            )
+            .and_then(|package_member| {
+                FixtureProviderPackageV1::from_canonical_cbor(&package_member.bytes)
+                    .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+            })
+            .map(|package| {
+                declared.extend(
+                    package
+                        .family_schemas
+                        .iter()
+                        .map(|schema| schema.schema_descriptor.member_path.clone()),
+                );
+                declared.extend(
+                    [
+                        &package.licence_descriptor,
+                        &package.notices_descriptor,
+                        &package.sbom_descriptor,
+                        &package.source_provenance_descriptor,
+                        &package.limitations_descriptor,
+                    ]
+                    .into_iter()
+                    .map(|descriptor| descriptor.member_path.clone()),
+                );
+            })
+        })
+    })
 }
 
 fn validate_member_descriptors(
@@ -1423,7 +1432,7 @@ pub fn verify_archive_independently(archive_bytes: &[u8]) -> Result<(), BundleCo
 fn verify_archive_summary_independently(
     archive_bytes: &[u8],
 ) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
-    if u64::try_from(archive_bytes.len()).unwrap_or(u64::MAX) > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
+    if archive_bytes.len() > MAX_CONFORMANCE_BUNDLE_LEN_V1 {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
     decode(archive_bytes).and_then(|value| {
@@ -4324,16 +4333,20 @@ impl ConformanceBundlePairV1 {
     pub fn validate(&self) -> Result<(), BundleContractErrorV1> {
         self.local.validate().and_then(|()| {
             self.air_gapped.validate().and_then(|()| {
-                if self.local.manifest.mode == BundleModeV1::Local
-                    && self.air_gapped.manifest.mode == BundleModeV1::AirGapped
-                    && self.local.manifest.profile_digest == self.air_gapped.manifest.profile_digest
-                    && authoritative_expected_results(&self.local)?
-                        == authoritative_expected_results(&self.air_gapped)?
-                {
-                    Ok(())
-                } else {
-                    Err(BundleContractErrorV1::ModeParityMismatch)
-                }
+                authoritative_expected_results(&self.local).and_then(|local_expected| {
+                    authoritative_expected_results(&self.air_gapped).and_then(|air_expected| {
+                        if self.local.manifest.mode == BundleModeV1::Local
+                            && self.air_gapped.manifest.mode == BundleModeV1::AirGapped
+                            && self.local.manifest.profile_digest
+                                == self.air_gapped.manifest.profile_digest
+                            && local_expected == air_expected
+                        {
+                            Ok(())
+                        } else {
+                            Err(BundleContractErrorV1::ModeParityMismatch)
+                        }
+                    })
+                })
             })
         })
     }
