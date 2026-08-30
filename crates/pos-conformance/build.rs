@@ -176,6 +176,23 @@ fn validate_fixture_provider(
     claim_layer: &str,
     subject_adapter: &str,
 ) -> Result<(), io::Error> {
+    let schemas = json_field(provider, "schemas")?.as_object();
+    let operations = json_field(provider, "fixture_operations")?.as_object();
+    let contracts = json_field(provider, "fixture_contracts")?.as_object();
+    let contracts_match_families =
+        schemas
+            .zip(operations)
+            .zip(contracts)
+            .is_some_and(|((schemas, operations), contracts)| {
+                let schema_families = schemas.keys().collect::<BTreeSet<_>>();
+                let operation_families = operations.keys().collect::<BTreeSet<_>>();
+                let contract_families = contracts.keys().collect::<BTreeSet<_>>();
+                schemas.len() == FIXTURES_PER_PROFILE
+                    && operations.len() == FIXTURES_PER_PROFILE
+                    && contracts.len() == FIXTURES_PER_PROFILE
+                    && schema_families == operation_families
+                    && schema_families == contract_families
+            });
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
@@ -183,12 +200,7 @@ fn validate_fixture_provider(
         && !json_text(provider, "package_path")?.is_empty()
         && json_text(provider, "claim_layer")? == claim_layer
         && json_text(provider, "subject_adapter")? == subject_adapter
-        && json_field(provider, "schemas")?
-            .as_object()
-            .is_some_and(|schemas| schemas.len() == FIXTURES_PER_PROFILE)
-        && json_field(provider, "fixture_operations")?
-            .as_object()
-            .is_some_and(|operations| operations.len() == FIXTURES_PER_PROFILE);
+        && contracts_match_families;
     if valid {
         Ok(())
     } else {

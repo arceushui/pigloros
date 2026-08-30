@@ -15,6 +15,7 @@ use pos_conformance::{
 };
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::Write;
@@ -239,10 +240,47 @@ struct FixtureProviderRecord {
     abi_major: u16,
     abi_minor: u16,
     package_path: String,
+    fixture_contracts: BTreeMap<CatalogFixtureFamily, CatalogFixtureContract>,
+}
+
+#[derive(Clone, Deserialize)]
+struct CatalogFixtureContract {
+    deterministic_budget: CatalogDeterministicBudget,
+    watchdog_ms: u64,
+    network_allowed: bool,
+    minimum_capability_ids: Vec<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct CatalogDeterministicBudget {
+    memory_bytes: u64,
+    cpu_fuel: u64,
+    host_calls: u64,
+    event_count: u64,
+    output_bytes: u64,
+    storage_bytes: u64,
+    execution_steps: u64,
+    simulation_time_ns: u64,
+}
+
+impl CatalogDeterministicBudget {
+    fn resolved(&self) -> DeterministicBudgetV1 {
+        DeterministicBudgetV1 {
+            memory_bytes: self.memory_bytes,
+            cpu_fuel: self.cpu_fuel,
+            host_calls: self.host_calls,
+            event_count: self.event_count,
+            output_bytes: self.output_bytes,
+            storage_bytes: self.storage_bytes,
+            execution_steps: self.execution_steps,
+            simulation_time_ns: self.simulation_time_ns,
+        }
+    }
 }
 
 struct CatalogFixture {
     record: ProfileFixtureRecord,
+    contract: CatalogFixtureContract,
     schema: &'static [u8],
     input: &'static [u8],
     expected: &'static [u8],
@@ -272,6 +310,11 @@ struct LayerCatalogEntry {
 struct LayerCatalog {
     entries: Vec<LayerCatalogEntry>,
     bundle_modes: [CatalogBundleMode; 2],
+}
+
+struct CatalogEntryInput {
+    record: ProfileCatalogRecord,
+    fixture_provider: FixtureProviderRecord,
 }
 
 #[derive(Clone)]
@@ -508,35 +551,78 @@ fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
 }
 
 fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Error>> {
-    let record: ProfileCatalogRecord = serde_json::from_slice(source.profile_record)?;
-    let fixture_provider: FixtureProviderRecord = serde_json::from_slice(source.provider_record)?;
-    let claim_layer = ClaimLayerV1::from_wire_code(record.wire_code)
-        .ok_or("typed layer catalog wire code is invalid")?;
-    let fixtures = source
+    catalog_entry_input(source)
+        .and_then(|input| {
+            catalog_identity(&input.record)
+                .map(|(claim_layer, subject_adapter)| (input, claim_layer, subject_adapter))
+        })
+        .and_then(|(input, claim_layer, subject_adapter)| {
+            catalog_fixtures(source, &input.record, &input.fixture_provider).map(|fixtures| {
+                LayerCatalogEntry {
+                    claim_layer,
+                    name: claim_layer.catalog_name(),
+                    profile_id: input.record.profile_id,
+                    subject_adapter,
+                    fixture_provider: input.fixture_provider,
+                    profile_record: source.profile_record,
+                    fixtures,
+                    execution_profiles: input.record.execution_profiles,
+                }
+            })
+        })
+        .map_err(Into::into)
+}
+
+fn catalog_entry_input(source: &LayerSource) -> Result<CatalogEntryInput, serde_json::Error> {
+    serde_json::from_slice(source.profile_record).and_then(|record| {
+        serde_json::from_slice(source.provider_record).map(|fixture_provider| CatalogEntryInput {
+            record,
+            fixture_provider,
+        })
+    })
+}
+
+fn catalog_identity(
+    record: &ProfileCatalogRecord,
+) -> Result<(ClaimLayerV1, SubjectAdapterKindV1), serde_json::Error> {
+    ClaimLayerV1::from_wire_code(record.wire_code)
+        .ok_or_else(|| catalog_error("typed layer catalog wire code is invalid"))
+        .and_then(|claim_layer| {
+            SubjectAdapterKindV1::from_catalog_name(&record.subject_adapter)
+                .ok_or_else(|| catalog_error("typed layer catalog subject adapter is invalid"))
+                .map(|subject_adapter| (claim_layer, subject_adapter))
+        })
+}
+
+fn catalog_fixtures(
+    source: &LayerSource,
+    record: &ProfileCatalogRecord,
+    fixture_provider: &FixtureProviderRecord,
+) -> Result<Vec<CatalogFixture>, serde_json::Error> {
+    source
         .fixtures
         .iter()
         .zip(record.fixtures.iter())
-        .map(|(fixture_source, fixture_record)| catalog_fixture(fixture_record, fixture_source))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(LayerCatalogEntry {
-        claim_layer,
-        name: claim_layer.catalog_name(),
-        profile_id: record.profile_id,
-        subject_adapter: SubjectAdapterKindV1::from_catalog_name(&record.subject_adapter)
-            .ok_or("typed layer catalog subject adapter is invalid")?,
-        fixture_provider,
-        profile_record: source.profile_record,
-        fixtures,
-        execution_profiles: record.execution_profiles,
-    })
+        .map(|(fixture_source, fixture_record)| {
+            fixture_provider
+                .fixture_contracts
+                .get(&fixture_record.family)
+                .ok_or_else(|| catalog_error("provider catalog is missing a fixture contract"))
+                .and_then(|contract| catalog_fixture(fixture_record, fixture_source, contract))
+        })
+        .collect()
+}
+
+fn catalog_error(message: &'static str) -> serde_json::Error {
+    serde_json::Error::io(std::io::Error::other(message))
 }
 
 fn catalog_fixture(
     record: &ProfileFixtureRecord,
     source: &FixtureSource,
-) -> Result<CatalogFixture, Box<dyn Error>> {
-    let oracle: FixtureOracleRecord = serde_json::from_slice(source.oracle)?;
-    Ok(CatalogFixture {
+    contract: &CatalogFixtureContract,
+) -> Result<CatalogFixture, serde_json::Error> {
+    serde_json::from_slice(source.oracle).map(|oracle: FixtureOracleRecord| CatalogFixture {
         record: ProfileFixtureRecord {
             case_id: record.case_id.clone(),
             claim_layer: record.claim_layer.clone(),
@@ -546,6 +632,7 @@ fn catalog_fixture(
             expected: record.expected.clone(),
             oracle: record.oracle.clone(),
         },
+        contract: contract.clone(),
         schema: source.schema,
         input: source.input,
         expected: source.expected,
@@ -1057,9 +1144,14 @@ fn fixture_descriptor_from_record(
         expected_verification_error: expectation.verification_error,
         replay_claim: expectation.replay_claim,
         redaction_state: expectation.redaction_state,
-        deterministic_budget: fixture_budget(),
-        operational_safety: fixture_operational_safety(),
-        capability_policy: fixture_capability_policy(fixture.record.family),
+        deterministic_budget: fixture.contract.deterministic_budget.resolved(),
+        operational_safety: OperationalSafetyV1 {
+            watchdog_ms: fixture.contract.watchdog_ms,
+        },
+        capability_policy: CapabilityPolicyV1 {
+            network_allowed: fixture.contract.network_allowed,
+            capability_ids: fixture.contract.minimum_capability_ids.clone(),
+        },
         provenance: fixture_provenance(context),
         trust_policy_snapshot_digest: downgrade.then(|| {
             labeled_digest(
@@ -1156,38 +1248,6 @@ fn fixture_expectation(
         verification_error,
         replay_claim,
         redaction_state,
-    }
-}
-
-const fn fixture_budget() -> DeterministicBudgetV1 {
-    DeterministicBudgetV1 {
-        memory_bytes: 64 * 1024 * 1024,
-        cpu_fuel: 10_000_000,
-        host_calls: 10_000,
-        event_count: 100_000,
-        output_bytes: 16 * 1024 * 1024,
-        storage_bytes: 64 * 1024 * 1024,
-        execution_steps: 10_000_000,
-        simulation_time_ns: 60_000_000_000,
-    }
-}
-
-const fn fixture_operational_safety() -> OperationalSafetyV1 {
-    OperationalSafetyV1 {
-        watchdog_ms: 120_000,
-    }
-}
-
-fn fixture_capability_policy(family: CatalogFixtureFamily) -> CapabilityPolicyV1 {
-    let capability = match family {
-        CatalogFixtureFamily::Denied => None,
-        CatalogFixtureFamily::DeletionRedaction => Some("redact-synthetic-subject"),
-        CatalogFixtureFamily::Downgrade => Some("verify-release-admission"),
-        _ => Some("read-public-bundle"),
-    };
-    CapabilityPolicyV1 {
-        network_allowed: false,
-        capability_ids: capability.into_iter().map(str::to_owned).collect(),
     }
 }
 

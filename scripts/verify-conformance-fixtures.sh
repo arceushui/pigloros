@@ -207,7 +207,20 @@ for layer in "${profile_layers[@]}"; do
      (.subject_adapter | type == "string" and length > 0) and
      (.fixture_operations | keys | sort) == ($family_names | sort) and
      all(.fixture_operations[]; . == null or (type == "string" and length > 0)) and
-     (.schemas | length == $family_count)' "${provider_manifest}" >/dev/null || {
+     (.schemas | length == $family_count) and
+     (.fixture_contracts | keys | sort) == ($family_names | sort) and
+     all(.fixture_contracts[];
+       (.deterministic_budget | keys | sort) == ([
+         "memory_bytes", "cpu_fuel", "host_calls", "event_count",
+         "output_bytes", "storage_bytes", "execution_steps", "simulation_time_ns"
+       ] | sort) and
+       all(.deterministic_budget[]; type == "number" and . >= 0 and floor == .) and
+       (.watchdog_ms | type == "number" and . > 0 and floor == .) and
+       (.network_allowed | type == "boolean") and
+       (.minimum_capability_ids | type == "array") and
+       all(.minimum_capability_ids[]; type == "string" and length > 0) and
+       (.minimum_capability_ids == (.minimum_capability_ids | unique | sort))
+     )' "${provider_manifest}" >/dev/null || {
     echo "invalid provider manifest for ${layer}" >&2
     exit 1
   }
