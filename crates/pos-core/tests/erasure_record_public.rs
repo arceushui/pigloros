@@ -60,7 +60,7 @@ fn malformed_record_bytes() -> Vec<Vec<u8>> {
         (3, Value::Null),
         (4, Value::Null),
         (5, Value::Null),
-        (6, Value::Null),
+        (6, Value::Array(Vec::new())),
         (7, Value::Array(Vec::new())),
         (7, Value::Array(vec![Value::Null; 19])),
         (8, Value::Text("invalid".to_owned())),
