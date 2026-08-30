@@ -488,17 +488,11 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
 }
 
 fn embedded_catalog_result<T, E>(result: Result<T, E>) -> T {
-    match result {
-        Ok(value) => value,
-        Err(_) => std::process::abort(),
-    }
+    result.map_or_else(|_| std::process::abort(), |value| value)
 }
 
 fn embedded_catalog_option<T>(value: Option<T>) -> T {
-    match value {
-        Some(value) => value,
-        None => std::process::abort(),
-    }
+    value.map_or_else(std::process::abort, |value| value)
 }
 
 fn package_support_artifacts() -> [PublicArtifact; 7] {
@@ -833,7 +827,7 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
                 outputs
             })
         })
-        .and_then(|mut outputs| {
+        .map(|mut outputs| {
             let archives = outputs
                 .iter()
                 .filter(|output| output.archive_release_filename.is_some())
@@ -843,7 +837,7 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
             let published_file_count = outputs.len().saturating_add(2);
             outputs.push(materialization_metadata(&catalog, published_file_count));
             outputs.push(output_checksum_inventory(&outputs));
-            Ok(outputs)
+            outputs
         })
 }
 

@@ -9,7 +9,6 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -57,7 +56,7 @@ fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn materialize_current_archive() -> TestResult<Vec<u8>> {
+fn current_archive() -> TestResult<Vec<u8>> {
     let root = temporary_root()?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
@@ -83,16 +82,6 @@ fn materialize_current_archive() -> TestResult<Vec<u8>> {
         })
         .ok_or("materializer did not publish a CFB1 archive")?;
     Ok(fs::read(archive)?)
-}
-
-fn current_archive() -> Vec<u8> {
-    static ARCHIVE: OnceLock<Vec<u8>> = OnceLock::new();
-    ARCHIVE
-        .get_or_init(|| {
-            materialize_current_archive()
-                .unwrap_or_else(|error| panic!("public archive materialization failed: {error}"))
-        })
-        .clone()
 }
 
 fn encode(value: &Value) -> TestResult<Vec<u8>> {
@@ -196,10 +185,10 @@ fn descriptor_fields<'a>(archive: &'a mut [Value], path: &str) -> TestResult<&'a
     array_mut(descriptor, "archive descriptor")
 }
 
-fn replace_member_bytes(archive: &mut [Value], path: &str, bytes: Vec<u8>) -> TestResult {
+fn replace_member_bytes(archive: &mut [Value], path: &str, bytes: &[u8]) -> TestResult {
     {
         let member = member_fields(archive, path)?;
-        member[1] = Value::Bytes(bytes.clone());
+        member[1] = Value::Bytes(bytes.to_owned());
     }
     let descriptor = descriptor_fields(archive, path)?;
     descriptor[1] = Value::Integer(u64::try_from(bytes.len())?.into());
@@ -239,7 +228,7 @@ fn mutate_member(
     let mut value: Value = ciborium::from_reader(member_bytes.as_slice())?;
     mutate(array_mut(&mut value, "authority member")?)?;
     let updated = encode(&value)?;
-    replace_member_bytes(array_mut(&mut archive, "archive")?, path, updated)?;
+    replace_member_bytes(array_mut(&mut archive, "archive")?, path, &updated)?;
     resign_archive(&mut archive)?;
     encode(&archive)
 }
@@ -277,10 +266,11 @@ fn mutate_profile(
             _ => return Err("profile digest is not bytes".into()),
         }
     };
+    let updated_profile = encode(&profile)?;
     replace_member_bytes(
         array_mut(&mut archive, "archive")?,
         PROFILE_PATH,
-        encode(&profile)?,
+        &updated_profile,
     )?;
     array_field(array_mut(&mut archive, "archive")?, 0, "manifest")?[3] =
         Value::Bytes(profile_digest);
@@ -321,7 +311,7 @@ fn update_typed_member(
 
 #[test]
 fn public_typed_bundle_rejects_missing_or_malformed_authority() -> TestResult {
-    let archive = current_archive();
+    let archive = current_archive()?;
     let valid = ConformanceBundleV1::from_canonical_cbor(&archive)?;
     let archive_value: Value = ciborium::from_reader(archive.as_slice())?;
 
@@ -370,7 +360,7 @@ fn public_typed_bundle_rejects_missing_or_malformed_authority() -> TestResult {
 
 #[test]
 fn public_cfb1_decoders_reject_invalid_member_roles() -> TestResult {
-    let archive = current_archive();
+    let archive = current_archive()?;
     let invalid_manifest_role = mutate_archive(&archive, |fields| {
         let descriptor = array_field(array_field(fields, 0, "manifest")?, 4, "member descriptors")?
             .first_mut()
@@ -396,7 +386,7 @@ fn public_cfb1_decoders_reject_invalid_member_roles() -> TestResult {
 
 #[test]
 fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
-    let archive = current_archive();
+    let archive = current_archive()?;
     let archive_value: Value = ciborium::from_reader(archive.as_slice())?;
     let release_admission_path = member_path_by_role(&archive_value, 16)?;
 
@@ -418,6 +408,10 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
         fields[0] = Value::Integer(0_u64.into());
         Ok(())
     })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&malformed_release_admission),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
     assert_independent_rejects(
         &malformed_release_admission,
         "a malformed release admission",
@@ -434,6 +428,10 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
         );
         Ok(())
     })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&invalid_release_admission),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
     assert_independent_rejects(&invalid_release_admission, "a re-signed invalid admission")?;
 
     Ok(())
@@ -441,7 +439,7 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
 
 #[test]
 fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
-    let archive = current_archive();
+    let archive = current_archive()?;
     let undeclared_member = mutate_archive(&archive, |fields| {
         array_field(fields, 1, "archive members")?.push(Value::Array(vec![
             Value::Text("zzzz/undeclared.bin".to_owned()),
@@ -482,6 +480,10 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
         array_field(profile, 12, "independence requirements")?[3] = Value::Bytes(vec![9; 32]);
         Ok(())
     })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&mismatched_snapshot),
+        Err(BundleContractErrorV1::MemberDigestMismatch)
+    );
     assert_independent_rejects(&mismatched_snapshot, "a mismatched trust-policy snapshot")?;
 
     let unknown_provider = mutate_profile(&archive, |profile| {
@@ -494,6 +496,10 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
         ]);
         Ok(())
     })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&unknown_provider),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
     assert_independent_rejects(&unknown_provider, "an undeclared fixture provider")?;
 
     let unordered_artifacts = mutate_profile(&archive, |profile| {
