@@ -792,10 +792,16 @@ fn divergence_report() -> DivergenceReportV1 {
             size: Some(14),
         },
         prior_matching_checkpoint_digest: Some([15; 32]),
-        follow_on_counts: vec![FollowOnMismatchV1 {
-            kind: DivergenceMismatchKindV1::Artifact,
-            count: 1,
-        }],
+        follow_on_counts: vec![
+            FollowOnMismatchV1 {
+                kind: DivergenceMismatchKindV1::Artifact,
+                count: 1,
+            },
+            FollowOnMismatchV1 {
+                kind: DivergenceMismatchKindV1::SchemaOrUpcaster,
+                count: 2,
+            },
+        ],
         report_digest: [0; 32],
     };
     report.report_digest = ok(report.digest());

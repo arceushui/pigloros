@@ -43,6 +43,7 @@ enum StagingMutation {
     ReplaceIdentity,
     RelaxPermissions,
     RelaxRetainedPermissions,
+    CorruptFiles,
     InjectSymlink,
     InjectFifo,
     BlockFutureDirectory,
@@ -91,6 +92,46 @@ fn await_staging_directory(parent: &Path, child: &mut std::process::Child) -> Te
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn staged_regular_files(directory: &Path) -> TestResult<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            files.extend(staged_regular_files(&entry.path())?);
+        } else if file_type.is_file() {
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn await_staged_regular_files(
+    staging: &Path,
+    child: &mut std::process::Child,
+) -> TestResult<Vec<PathBuf>> {
+    for _ in 0..200_000 {
+        if let Some(status) = child.try_wait()? {
+            return Err(format!(
+                "materializer exited before staged files were observable: {status}"
+            )
+            .into());
+        }
+        let files = staged_regular_files(staging)?;
+        if files.len() >= 2 {
+            return Ok(files);
+        }
+        std::thread::yield_now();
+    }
+    child.kill()?;
+    child.wait()?;
+    Err("materializer staged fewer than two regular files".into())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn await_stopped_process(child: &mut std::process::Child) -> TestResult {
     let status_path = format!("/proc/{}/status", child.id());
     for _ in 0..200_000 {
@@ -131,6 +172,11 @@ fn mutate_live_staging(
         .stderr(Stdio::piped())
         .spawn()?;
     let staging = await_staging_directory(&root, &mut child)?;
+    let staged_files = if matches!(mutation, StagingMutation::CorruptFiles) {
+        await_staged_regular_files(&staging, &mut child)?
+    } else {
+        Vec::new()
+    };
     signal_process(&child, "STOP")?;
     await_stopped_process(&mut child)?;
 
@@ -151,6 +197,9 @@ fn mutate_live_staging(
                 .and_then(|()| fs::create_dir(&staging))
                 .and_then(|()| fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)))
         }
+        StagingMutation::CorruptFiles => staged_files
+            .iter()
+            .try_for_each(|path| fs::write(path, b"corrupted staged bytes")),
         StagingMutation::InjectSymlink => symlink("/dev/null", staging.join("injected-link"))
             .and_then(|()| fs::create_dir(&destination)),
         StagingMutation::InjectFifo => {
@@ -2777,6 +2826,9 @@ fn public_materializer_rejects_live_staging_replacement_and_contamination() -> T
         let stderr = mutate_live_staging(materializer.as_os_str(), key, mutation)?;
         assert!(stderr.contains("UntrustedOutputDirectory"));
     }
+
+    let stderr = mutate_live_staging(materializer.as_os_str(), key, StagingMutation::CorruptFiles)?;
+    assert!(stderr.contains("ArchiveDigestMismatch"));
 
     let stderr = mutate_live_staging(
         materializer.as_os_str(),

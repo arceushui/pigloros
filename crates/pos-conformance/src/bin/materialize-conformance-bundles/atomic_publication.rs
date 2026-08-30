@@ -41,23 +41,6 @@ struct RelativeFilePath {
 struct VerifiedPublication(AtomicPublication);
 
 #[cfg(target_os = "linux")]
-struct PendingStaging<'a> {
-    parent: &'a OwnedFd,
-    name: &'a CStr,
-    armed: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for PendingStaging<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            let _unlink_result = fs::unlinkat(self.parent, self.name, AtFlags::REMOVEDIR);
-            let _sync_result = fs::fsync(self.parent);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
 impl AtomicPublication {
     fn prepare(
         destination: &Path,
@@ -272,11 +255,21 @@ fn configure_private_staging(
     parent_identity: DirectoryIdentity,
     effective_uid: u32,
 ) -> Result<(CString, OwnedFd, DirectoryIdentity), MaterializationError> {
-    let mut pending = PendingStaging {
-        parent,
-        name: staging_name,
-        armed: true,
-    };
+    configure_staging_descriptor(parent, staging_name, parent_identity, effective_uid)
+        .map(|(staging, identity)| (staging_name.clone(), staging, identity))
+        .or_else(|error| {
+            let _cleanup_result = unlink_empty_directory(parent, staging_name);
+            Err(error)
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn configure_staging_descriptor(
+    parent: &OwnedFd,
+    staging_name: &CStr,
+    parent_identity: DirectoryIdentity,
+    effective_uid: u32,
+) -> Result<(OwnedFd, DirectoryIdentity), MaterializationError> {
     let staging = open_directory(parent, staging_name)?;
     fs::fchmod(&staging, Mode::from_raw_mode(0o700))
         .map_err(|_| MaterializationError::DurabilitySyncFailed)?;
@@ -288,8 +281,7 @@ fn configure_private_staging(
         parent_identity,
         effective_uid,
     )?;
-    pending.armed = false;
-    Ok((staging_name.clone(), staging, identity))
+    Ok((staging, identity))
 }
 
 #[cfg(target_os = "linux")]
@@ -494,17 +486,20 @@ fn remove_staging_tree(
             .and_then(|actual_identity| {
                 if actual_identity == staging_identity_expected {
                     remove_directory_contents(&staging)
-                        .and_then(|()| {
-                            fs::unlinkat(parent, staging_name, AtFlags::REMOVEDIR)
-                                .map_err(map_open_error)
-                        })
-                        .and_then(|()| sync_fd(parent))
+                        .and_then(|()| unlink_empty_directory(parent, staging_name))
                 } else {
                     Err(MaterializationError::UntrustedOutputDirectory)
                 }
             })
         })
     })
+}
+
+#[cfg(target_os = "linux")]
+fn unlink_empty_directory(parent: &OwnedFd, name: &CStr) -> Result<(), MaterializationError> {
+    fs::unlinkat(parent, name, AtFlags::REMOVEDIR)
+        .map_err(map_open_error)
+        .and_then(|()| sync_fd(parent))
 }
 
 #[cfg(target_os = "linux")]
