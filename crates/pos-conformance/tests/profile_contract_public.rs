@@ -4,13 +4,15 @@ use ciborium::value::Value;
 use pos_conformance::{
     AllowedDivergenceV1, ArtifactDescriptorV1, CapabilityPolicyV1, CaseOutcomeStatusV1,
     CaseOutcomeV1, ClaimLayerV1, ConformanceContractError, ConformanceProfileV1,
-    ConformanceReportV1, DeterministicBudgetV1, DivergenceMismatchKindV1, ErasureDispositionV1,
-    EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
-    ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1,
-    FixtureProviderKeyV1, FixtureProviderRegistryBindingV1, ImplementationIdentityV1,
+    ConformanceReportV1, DeterministicBudgetV1, DigestSizeV1, DivergenceLocationKindV1,
+    DivergenceMismatchKindV1, DivergenceReportV1, ErasureDispositionV1, EvaluatorHardCapsV1,
+    EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1, ExecutionModeV1,
+    FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderKeyV1,
+    FixtureProviderRegistryBindingV1, FollowOnMismatchV1, ImplementationIdentityV1,
     IndependenceEvidenceV1, IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1,
-    RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
+    RedactionStateV1, ReplayClaimV1, ReproducibilityClassV1, StrictOracleKindV1, StrictOracleV1,
+    SubjectAdapterKindV1, VerificationOutcomeV1, VerificationResultV1,
+    DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -1476,6 +1478,124 @@ fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
 
     let exact_case_cap = report_with_cases(65_536)?;
     assert_eq!(exact_case_cap.validate(), Ok(()));
+    Ok(())
+}
+
+#[test]
+fn public_closed_canonical_records_reject_trailing_cbor_items(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = report_with_cases(1)?;
+    assert_eq!(report.validate(), Ok(()));
+    assert_eq!(
+        report_with_cases(0)?.to_canonical_cbor(),
+        Err(pos_conformance::EvidenceError::InvalidConformanceReport)
+    );
+    let report_bytes = report.to_canonical_cbor()?;
+    assert_eq!(
+        ConformanceReportV1::from_canonical_cbor(&report_bytes)?,
+        report
+    );
+    let mut report_bytes = report_bytes;
+    report_bytes.push(0);
+    assert_eq!(
+        ConformanceReportV1::from_canonical_cbor(&report_bytes),
+        Err(pos_conformance::EvidenceError::InvalidConformanceReport)
+    );
+
+    let mut result = VerificationResultV1 {
+        request_digest: [1; 32],
+        manifest_digest: [2; 32],
+        execution_profile_digest: [3; 32],
+        trust_policy_snapshot_digest: [4; 32],
+        artifact_closure_digest: [5; 32],
+        fixture_digest: Some([6; 32]),
+        evaluator_digest: [7; 32],
+        reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
+        verification_outcome: VerificationOutcomeV1::VerifiedExact,
+        replay_claim: ReplayClaimV1::Exact,
+        authoritative_result_digest: Some([8; 32]),
+        divergence_report_digest: None,
+        first_error: None,
+        checked_artifact_count: 9,
+        provenance_digest: [10; 32],
+        result_digest: [0; 32],
+    };
+    result.result_digest = result.digest()?;
+    let result_bytes = result.to_canonical_cbor()?;
+    assert_eq!(
+        VerificationResultV1::from_canonical_cbor(&result_bytes)?,
+        result
+    );
+    let mut invalid_result = result.clone();
+    invalid_result.authoritative_result_digest = None;
+    invalid_result.result_digest = invalid_result.digest()?;
+    let invalid_result_rejection = invalid_result
+        .to_canonical_cbor()
+        .expect_err("VRR1 must reject an incomplete verified result");
+    assert!(invalid_result_rejection
+        .to_string()
+        .starts_with("serialization error:"));
+    let mut result_bytes = result_bytes;
+    result_bytes.push(0);
+    let result_rejection = VerificationResultV1::from_canonical_cbor(&result_bytes)
+        .expect_err("VRR1 must reject a trailing CBOR item");
+    assert!(result_rejection
+        .to_string()
+        .starts_with("serialization error:"));
+
+    let mut divergence = DivergenceReportV1 {
+        request_digest: [1; 32],
+        manifest_digest: [2; 32],
+        execution_profile_digest: [3; 32],
+        fixture_digest: Some([4; 32]),
+        evaluator_digest: [5; 32],
+        reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
+        replay_claim: ReplayClaimV1::Exact,
+        location_kind: DivergenceLocationKindV1::TimelineSeq,
+        timeline_or_worldcut_id: [6; 16],
+        timeline_seq_or_cut_ordinal: 7,
+        tick: 8,
+        scheduler_position: Some(9),
+        driver_or_plugin_id: Some("world".to_owned()),
+        output_ordinal: Some(10),
+        mismatch_kind: DivergenceMismatchKindV1::CanonicalBytes,
+        expected: DigestSizeV1 {
+            digest: Some([11; 32]),
+            size: Some(12),
+        },
+        actual: DigestSizeV1 {
+            digest: Some([13; 32]),
+            size: Some(14),
+        },
+        prior_matching_checkpoint_digest: Some([15; 32]),
+        follow_on_counts: vec![FollowOnMismatchV1 {
+            kind: DivergenceMismatchKindV1::Artifact,
+            count: 1,
+        }],
+        report_digest: [0; 32],
+    };
+    divergence.report_digest = divergence.digest()?;
+    let divergence_bytes = divergence.to_canonical_cbor()?;
+    assert_eq!(
+        DivergenceReportV1::from_canonical_cbor(&divergence_bytes)?,
+        divergence
+    );
+    let mut invalid_divergence = divergence.clone();
+    invalid_divergence.output_ordinal = Some(u32::MAX);
+    invalid_divergence.report_digest = invalid_divergence.digest()?;
+    let invalid_divergence_rejection = invalid_divergence
+        .to_canonical_cbor()
+        .expect_err("DVR1 must reject an out-of-bounds output ordinal");
+    assert!(invalid_divergence_rejection
+        .to_string()
+        .starts_with("serialization error:"));
+    let mut divergence_bytes = divergence_bytes;
+    divergence_bytes.push(0);
+    let divergence_rejection = DivergenceReportV1::from_canonical_cbor(&divergence_bytes)
+        .expect_err("DVR1 must reject a trailing CBOR item");
+    assert!(divergence_rejection
+        .to_string()
+        .starts_with("serialization error:"));
     Ok(())
 }
 
