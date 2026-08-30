@@ -264,7 +264,7 @@ struct CatalogDeterministicBudget {
 }
 
 impl CatalogDeterministicBudget {
-    fn resolved(&self) -> DeterministicBudgetV1 {
+    const fn resolved(&self) -> DeterministicBudgetV1 {
         DeterministicBudgetV1 {
             memory_bytes: self.memory_bytes,
             cpu_fuel: self.cpu_fuel,
