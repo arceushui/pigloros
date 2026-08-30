@@ -4585,7 +4585,7 @@ pub mod strict_codec {
                     return;
                 };
                 consume(encode_verification_result(&result));
-                std::hint::black_box(verification_result_digest(&result));
+                consume(verification_result_digest(&result));
                 let verification_value = encode_verification_result_value(&result, true);
                 reject_each_field(&verification_value, |value| {
                     array(value, "verification_result", 18)
@@ -4970,7 +4970,7 @@ pub mod strict_codec {
 
         #[cfg_attr(coverage_nightly, coverage(off))]
         pub fn exercise_for_coverage(evidence: &MoatProofEvidenceV1) {
-            let _ = strict_codec_coverage_cases!(evidence);
+            strict_codec_coverage_cases!(evidence);
         }
     }
 
