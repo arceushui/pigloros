@@ -610,7 +610,7 @@ enum AtomicOperation {
 }
 
 #[cfg(target_os = "linux")]
-fn map_atomic_error(operation: AtomicOperation, error: Errno) -> MaterializationError {
+const fn map_atomic_error(operation: AtomicOperation, error: Errno) -> MaterializationError {
     match (operation, error) {
         (AtomicOperation::Publish, Errno::EXIST) => MaterializationError::DestinationExists,
         (AtomicOperation::Open | AtomicOperation::Cleanup, Errno::LOOP) => {
