@@ -134,6 +134,14 @@ pub mod fixtures {
                 uint(32),
                 uint(128),
                 uint(1_048_576),
+                uint(1_073_741_824),
+                uint(1_000_000_000),
+                uint(1_000_000),
+                uint(1_000_000),
+                uint(67_108_864),
+                uint(1_073_741_824),
+                uint(1_000_000_000),
+                uint(86_400_000_000_000),
             ]),
         ])
     }
@@ -1271,7 +1279,9 @@ fn public_current_cpf1_catalog_round_trips_lifecycle_adapter_mode_and_family_var
         ExecutionModeV1::Fork,
     ] {
         let mut profile = profile_for_digest();
-        profile.fixtures[0].modes = vec![mode];
+        for fixture in &mut profile.fixtures {
+            fixture.modes = vec![mode];
+        }
         refresh(&mut profile);
         assert_profile_round_trip(profile)?;
     }
@@ -1485,7 +1495,10 @@ fn public_profile_requires_all_seven_families_for_each_provider() {
         )
     });
     extra.profile_digest = extra.digest();
-    assert_eq!(extra.validate(), Ok(()));
+    assert_eq!(
+        extra.validate(),
+        Err(ConformanceContractError::NonCanonicalOrder)
+    );
 }
 
 #[test]
@@ -1653,7 +1666,19 @@ fn public_profile_caps_accept_exact_profile_and_member_path_limits(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut exact_profiles = profile_for_digest();
     exact_profiles.execution_profile_digests = (1_u8..=64).map(|seed| [seed; 32]).collect();
-    exact_profiles.profile_digest = exact_profiles.digest();
+    let base_fixtures = exact_profiles.fixtures.clone();
+    exact_profiles.fixtures = base_fixtures
+        .into_iter()
+        .flat_map(|fixture| {
+            (1_u8..=64).map(move |seed| {
+                let mut coordinate = fixture.clone();
+                coordinate.execution_profile_digest = [seed; 32];
+                coordinate.fixture_digest = coordinate.digest();
+                coordinate
+            })
+        })
+        .collect();
+    refresh(&mut exact_profiles);
     assert_eq!(exact_profiles.validate(), Ok(()));
 
     let mut too_many_profiles = exact_profiles;
