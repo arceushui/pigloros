@@ -946,7 +946,7 @@ fn supporting_attempt_chain_rejects_gaps_and_identity_mismatches() -> Result<(),
         })?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(wrong_ordinal),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let mut wrong_outcome = input.clone();
