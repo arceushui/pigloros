@@ -1258,6 +1258,23 @@ fn supporting_lifecycle_rejects_evidence_at_the_wrong_boundary() -> Result<(), E
 
     let rejected = empty_target_rejection_fixture()?;
     let rejected_record = latest_record(&rejected.state, rejected.request)?;
+    let rejected_scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: rejected.request,
+        affected_scope: vec![reference(3)],
+        target_closure: target_closure_digest(&[]),
+        extension_head: None,
+    })?;
+    let mut rejected_with_scope = record_parts(&rejected_record);
+    rejected_with_scope.supporting_records =
+        ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            scope_commitment: Some(rejected_scope),
+            ..ErasureSupportingRecordsInputV1::default()
+        })?;
+    assert_eq!(
+        ErasureCoordinatorRecordV1::from_parts(rejected_with_scope, COORDINATOR),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
     let mut authorized_with_failure = record_parts(&authorized_record);
     authorized_with_failure.supporting_records = rejected_record.supporting_records().clone();
     assert_eq!(
