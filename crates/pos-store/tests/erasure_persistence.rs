@@ -5,15 +5,16 @@
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
     CanonicalBytes, EntityId, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinatorPortV1,
-    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
-    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureFreezeAdmissionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
-    ErasureKeyRoleV1, ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1, EventDraft, EventStore, Kind,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
+    ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
+    ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureFreezeAdmissionV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
+    ErasureSupportingRecordsV1, EventDraft, EventStore, Kind,
 };
 use pos_store::memory::MemoryStore;
 use std::cell::RefCell;
@@ -27,12 +28,6 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
 }
 
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    request_with_provenance(reference(7))
-}
-
-fn request_with_provenance(
-    provenance: ErasureReferenceV1,
-) -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(ErasureRequestInputV1 {
         request: reference(1),
         subject: reference(2),
@@ -43,7 +38,7 @@ fn request_with_provenance(
         policy: reference(6),
         request_position: 10,
         horizon_position: 20,
-        provenance,
+        provenance: reference(7),
     })
 }
 
@@ -87,16 +82,24 @@ fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecord
 }
 
 fn record_with_supporting_provenance() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
-    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-        rejected_request: reference(20),
-        rejected_terminal_state: reference(21),
-        correction_reason: reference(22),
-        authorization_provenance: reference(23),
-    })?;
-    let request = request_with_provenance(correction.reference())?;
+    let request = request()?;
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: request.reference(),
+            affected_digests: vec![reference(20)],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: reference(21),
+            policy: reference(6),
+            trust: reference(22),
+            principal: reference(23),
+            authorization_provenance: reference(24),
+            reason: reference(25),
+            issue_position: 11,
+            predecessor_resolution: None,
+        })?;
     let state = ErasureStateV1::submitted(request.reference(), reference(8), reference(9))?;
     let supporting_records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
-        correction_provenance: Some(correction),
+        administrative_resolutions: vec![resolution],
         ..ErasureSupportingRecordsInputV1::default()
     })?;
     ErasureCoordinatorRecordV1::from_parts(
@@ -495,15 +498,14 @@ fn memory_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
     assert_eq!(record.receipt(), Some(&receipt));
     assert_eq!(record.acknowledgements().len(), 2);
     assert_eq!(receipt.acknowledgements().len(), 2);
-    let mut expected_targets = vec![target(10), target(20)];
-    expected_targets.sort_unstable();
+    let mut expected_acknowledgements = vec![
+        acknowledgement(target(10), 60),
+        acknowledgement(target(20), 61),
+    ];
+    expected_acknowledgements.sort_unstable();
     assert_eq!(
-        receipt
-            .acknowledgements()
-            .iter()
-            .map(|acknowledgement| acknowledgement.target)
-            .collect::<Vec<_>>(),
-        expected_targets
+        receipt.acknowledgements(),
+        expected_acknowledgements.as_slice()
     );
     Ok(())
 }
@@ -652,15 +654,14 @@ fn sqlite_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(record.state().lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(record.receipt(), Some(&receipt));
-    let mut expected_targets = vec![target(10), target(20)];
-    expected_targets.sort_unstable();
+    let mut expected_acknowledgements = vec![
+        acknowledgement(target(10), 60),
+        acknowledgement(target(20), 61),
+    ];
+    expected_acknowledgements.sort_unstable();
     assert_eq!(
-        receipt
-            .acknowledgements()
-            .iter()
-            .map(|acknowledgement| acknowledgement.target)
-            .collect::<Vec<_>>(),
-        expected_targets
+        receipt.acknowledgements(),
+        expected_acknowledgements.as_slice()
     );
     Ok(())
 }
