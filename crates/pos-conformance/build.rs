@@ -882,39 +882,18 @@ fn relative_asset(
     Ok(FixtureAsset { relative, bytes })
 }
 
-fn profile_paths(
+fn profile_fixtures(
     snapshots: &SourceSnapshots,
-    profile: String,
-) -> Result<ProfilePaths, Box<dyn Error>> {
-    let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
-    let profile_value: Value = serde_json::from_slice(&profile_record)?;
-    let profile_id = json_text(&profile_value, "profile_id")?;
-    let claim_layer = json_text(&profile_value, "claim_layer")?;
-    let catalog_claim_layer = CatalogClaimLayer::from_catalog_name(&claim_layer)?;
-    let subject_adapter = json_text(&profile_value, "subject_adapter")?;
-    let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
-    let fixture_root = json_text(&profile_value, "fixture_root")?;
-    let provider_manifest = relative_asset(snapshots, &profile_value, "fixture_provider_manifest")?;
-    let provider_value: Value = serde_json::from_slice(&provider_manifest.bytes)?;
-    validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
-    let fixture_provider = fixture_provider(&provider_value)?;
-    let provider_schemas = json_field(&provider_value, "schemas")?
-        .as_object()
-        .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
-    let wire_code = json_field(&profile_value, "wire_code")?
-        .as_u64()
-        .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
-    let profile_fixtures = json_field(&profile_value, "fixtures")?
+    profile_value: &Value,
+    provider_value: &Value,
+    provider_schemas: &serde_json::Map<String, Value>,
+    claim_layer: &str,
+    subject_adapter: &str,
+) -> Result<Vec<FixturePaths>, io::Error> {
+    let fixtures = json_field(profile_value, "fixtures")?
         .as_array()
         .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?;
-    if profile_fixtures.len() != FIXTURES_PER_PROFILE {
-        return Err(invalid_data(format!(
-            "profile manifest {profile} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
-            profile_fixtures.len()
-        ))
-        .into());
-    }
-    let fixtures = profile_fixtures
+    fixtures
         .iter()
         .zip(CatalogFixtureFamily::ALL)
         .map(|(fixture, expected_family)| {
@@ -950,18 +929,18 @@ fn profile_paths(
             let oracle = relative_asset(snapshots, fixture, "oracle")?;
             let strict_oracle = validate_fixture_records(
                 fixture,
-                &provider_value,
+                provider_value,
                 &input.bytes,
                 &expected.bytes,
                 &oracle.bytes,
-                &claim_layer,
-                &subject_adapter,
+                claim_layer,
+                subject_adapter,
             )?;
             Ok(FixturePaths {
                 case_id,
                 family,
                 schema_path,
-                contract: fixture_contract(&provider_value, family)?,
+                contract: fixture_contract(provider_value, family)?,
                 strict_oracle,
                 schema,
                 input,
@@ -969,7 +948,49 @@ fn profile_paths(
                 oracle,
             })
         })
-        .collect::<Result<Vec<_>, io::Error>>()?;
+        .collect()
+}
+
+fn profile_paths(
+    snapshots: &SourceSnapshots,
+    profile: String,
+) -> Result<ProfilePaths, Box<dyn Error>> {
+    let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
+    let profile_value: Value = serde_json::from_slice(&profile_record)?;
+    let profile_id = json_text(&profile_value, "profile_id")?;
+    let claim_layer = json_text(&profile_value, "claim_layer")?;
+    let catalog_claim_layer = CatalogClaimLayer::from_catalog_name(&claim_layer)?;
+    let subject_adapter = json_text(&profile_value, "subject_adapter")?;
+    let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
+    let fixture_root = json_text(&profile_value, "fixture_root")?;
+    let provider_manifest = relative_asset(snapshots, &profile_value, "fixture_provider_manifest")?;
+    let provider_value: Value = serde_json::from_slice(&provider_manifest.bytes)?;
+    validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
+    let fixture_provider = fixture_provider(&provider_value)?;
+    let provider_schemas = json_field(&provider_value, "schemas")?
+        .as_object()
+        .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
+    let wire_code = json_field(&profile_value, "wire_code")?
+        .as_u64()
+        .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
+    let fixture_records = json_field(&profile_value, "fixtures")?
+        .as_array()
+        .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?;
+    if fixture_records.len() != FIXTURES_PER_PROFILE {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
+            fixture_records.len()
+        ))
+        .into());
+    }
+    let fixtures = profile_fixtures(
+        snapshots,
+        &profile_value,
+        &provider_value,
+        provider_schemas,
+        &claim_layer,
+        &subject_adapter,
+    )?;
     let bundle_modes = json_field(&profile_value, "bundle_modes")?;
     let execution_profiles = json_field(&profile_value, "execution_profiles")?;
     if fixture_root != claim_layer
@@ -1066,203 +1087,224 @@ fn discover_profiles(
     Ok(profiles)
 }
 
+fn emit_fixture_contract(
+    generated: &mut String,
+    fixture: &FixturePaths,
+) -> Result<(), std::fmt::Error> {
+    writeln!(
+        generated,
+        "                        contract: CatalogFixtureContract {{"
+    )?;
+    writeln!(
+        generated,
+        "                            deterministic_budget: DeterministicBudgetV1 {{"
+    )?;
+    let budget = &fixture.contract.deterministic_budget;
+    writeln!(
+        generated,
+        "                                memory_bytes: {},",
+        budget.memory_bytes
+    )?;
+    writeln!(
+        generated,
+        "                                cpu_fuel: {},",
+        budget.cpu_fuel
+    )?;
+    writeln!(
+        generated,
+        "                                host_calls: {},",
+        budget.host_calls
+    )?;
+    writeln!(
+        generated,
+        "                                event_count: {},",
+        budget.event_count
+    )?;
+    writeln!(
+        generated,
+        "                                output_bytes: {},",
+        budget.output_bytes
+    )?;
+    writeln!(
+        generated,
+        "                                storage_bytes: {},",
+        budget.storage_bytes
+    )?;
+    writeln!(
+        generated,
+        "                                execution_steps: {},",
+        budget.execution_steps
+    )?;
+    writeln!(
+        generated,
+        "                                simulation_time_ns: {},",
+        budget.simulation_time_ns
+    )?;
+    writeln!(generated, "                            }},")?;
+    writeln!(
+        generated,
+        "                            watchdog_ms: {},",
+        fixture.contract.watchdog_ms
+    )?;
+    writeln!(
+        generated,
+        "                            network_allowed: {},",
+        fixture.contract.network_allowed
+    )?;
+    write!(
+        generated,
+        "                            minimum_capability_ids: &["
+    )?;
+    for capability in &fixture.contract.minimum_capability_ids {
+        write!(generated, "{capability:?}, ")?;
+    }
+    writeln!(generated, "],")?;
+    writeln!(generated, "                        }},")
+}
+
+fn emit_strict_oracle(
+    generated: &mut String,
+    oracle: &CatalogStrictOracle,
+) -> Result<(), std::fmt::Error> {
+    match oracle {
+        CatalogStrictOracle::CanonicalOutput => writeln!(
+            generated,
+            "                        strict_oracle: CatalogStrictOracle::CanonicalOutput,"
+        ),
+        CatalogStrictOracle::NamespacedFailure {
+            owner_id,
+            contract_version,
+            code_id,
+        } => {
+            writeln!(
+                generated,
+                "                        strict_oracle: CatalogStrictOracle::NamespacedFailure {{"
+            )?;
+            writeln!(
+                generated,
+                "                            owner_id: {owner_id:?},"
+            )?;
+            writeln!(
+                generated,
+                "                            contract_version: {contract_version:?},"
+            )?;
+            writeln!(
+                generated,
+                "                            code_id: {code_id:?},"
+            )?;
+            writeln!(generated, "                        }},")
+        }
+    }
+}
+
+fn emit_fixture(generated: &mut String, fixture: &FixturePaths) -> Result<(), std::fmt::Error> {
+    writeln!(generated, "                    CatalogFixture {{")?;
+    writeln!(
+        generated,
+        "                        case_id: {:?},",
+        fixture.case_id
+    )?;
+    writeln!(
+        generated,
+        "                        family: {},",
+        fixture.family.rust_variant()
+    )?;
+    writeln!(
+        generated,
+        "                        schema_path: {:?},",
+        fixture.schema_path
+    )?;
+    emit_fixture_contract(generated, fixture)?;
+    writeln!(
+        generated,
+        "                        schema: &{:?},",
+        fixture.schema.bytes
+    )?;
+    writeln!(
+        generated,
+        "                        input: &{:?},",
+        fixture.input.bytes
+    )?;
+    writeln!(
+        generated,
+        "                        expected: &{:?},",
+        fixture.expected.bytes
+    )?;
+    writeln!(
+        generated,
+        "                        oracle: &{:?},",
+        fixture.oracle.bytes
+    )?;
+    emit_strict_oracle(generated, &fixture.strict_oracle)?;
+    writeln!(generated, "                    }},")
+}
+
+fn emit_profile(generated: &mut String, profile: &ProfilePaths) -> Result<(), std::fmt::Error> {
+    writeln!(generated, "            LayerCatalogEntry {{")?;
+    writeln!(
+        generated,
+        "                claim_layer: {},",
+        profile.claim_layer.rust_variant()
+    )?;
+    writeln!(
+        generated,
+        "                profile_id: {:?},",
+        profile.profile_id
+    )?;
+    writeln!(
+        generated,
+        "                subject_adapter: {},",
+        profile.subject_adapter.rust_variant()
+    )?;
+    writeln!(
+        generated,
+        "                fixture_provider: FixtureProvider {{"
+    )?;
+    writeln!(
+        generated,
+        "                    provider_id: {:?},",
+        profile.fixture_provider.provider_id
+    )?;
+    writeln!(
+        generated,
+        "                    contract_version: {:?},",
+        profile.fixture_provider.contract_version
+    )?;
+    writeln!(
+        generated,
+        "                    abi_major: {},",
+        profile.fixture_provider.abi_major
+    )?;
+    writeln!(
+        generated,
+        "                    abi_minor: {},",
+        profile.fixture_provider.abi_minor
+    )?;
+    writeln!(
+        generated,
+        "                    package_path: {:?},",
+        profile.fixture_provider.package_path
+    )?;
+    writeln!(generated, "                }},")?;
+    writeln!(
+        generated,
+        "                profile_record: &{:?},",
+        profile.profile_record
+    )?;
+    writeln!(generated, "                fixtures: vec![")?;
+    for fixture in &profile.fixtures {
+        emit_fixture(generated, fixture)?;
+    }
+    writeln!(generated, "                ],")?;
+    writeln!(generated, "            }},")
+}
+
 fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
     let mut generated = String::from(
         "fn layer_catalog() -> LayerCatalog {\n    LayerCatalog {\n        entries: vec![\n",
     );
     for profile in profiles {
-        writeln!(generated, "            LayerCatalogEntry {{")?;
-        writeln!(
-            generated,
-            "                claim_layer: {},",
-            profile.claim_layer.rust_variant()
-        )?;
-        writeln!(
-            generated,
-            "                profile_id: {:?},",
-            profile.profile_id
-        )?;
-        writeln!(
-            generated,
-            "                subject_adapter: {},",
-            profile.subject_adapter.rust_variant()
-        )?;
-        writeln!(
-            generated,
-            "                fixture_provider: FixtureProvider {{"
-        )?;
-        writeln!(
-            generated,
-            "                    provider_id: {:?},",
-            profile.fixture_provider.provider_id
-        )?;
-        writeln!(
-            generated,
-            "                    contract_version: {:?},",
-            profile.fixture_provider.contract_version
-        )?;
-        writeln!(
-            generated,
-            "                    abi_major: {},",
-            profile.fixture_provider.abi_major
-        )?;
-        writeln!(
-            generated,
-            "                    abi_minor: {},",
-            profile.fixture_provider.abi_minor
-        )?;
-        writeln!(
-            generated,
-            "                    package_path: {:?},",
-            profile.fixture_provider.package_path
-        )?;
-        writeln!(generated, "                }},")?;
-        writeln!(
-            generated,
-            "                profile_record: &{:?},",
-            profile.profile_record
-        )?;
-        writeln!(generated, "                fixtures: vec![")?;
-        for fixture in &profile.fixtures {
-            writeln!(generated, "                    CatalogFixture {{")?;
-            writeln!(
-                generated,
-                "                        case_id: {:?},",
-                fixture.case_id
-            )?;
-            writeln!(
-                generated,
-                "                        family: {},",
-                fixture.family.rust_variant()
-            )?;
-            writeln!(
-                generated,
-                "                        schema_path: {:?},",
-                fixture.schema_path
-            )?;
-            writeln!(
-                generated,
-                "                        contract: CatalogFixtureContract {{"
-            )?;
-            writeln!(
-                generated,
-                "                            deterministic_budget: DeterministicBudgetV1 {{"
-            )?;
-            writeln!(
-                generated,
-                "                                memory_bytes: {},",
-                fixture.contract.deterministic_budget.memory_bytes
-            )?;
-            writeln!(
-                generated,
-                "                                cpu_fuel: {},",
-                fixture.contract.deterministic_budget.cpu_fuel
-            )?;
-            writeln!(
-                generated,
-                "                                host_calls: {},",
-                fixture.contract.deterministic_budget.host_calls
-            )?;
-            writeln!(
-                generated,
-                "                                event_count: {},",
-                fixture.contract.deterministic_budget.event_count
-            )?;
-            writeln!(
-                generated,
-                "                                output_bytes: {},",
-                fixture.contract.deterministic_budget.output_bytes
-            )?;
-            writeln!(
-                generated,
-                "                                storage_bytes: {},",
-                fixture.contract.deterministic_budget.storage_bytes
-            )?;
-            writeln!(
-                generated,
-                "                                execution_steps: {},",
-                fixture.contract.deterministic_budget.execution_steps
-            )?;
-            writeln!(
-                generated,
-                "                                simulation_time_ns: {},",
-                fixture.contract.deterministic_budget.simulation_time_ns
-            )?;
-            writeln!(generated, "                            }},")?;
-            writeln!(
-                generated,
-                "                            watchdog_ms: {},",
-                fixture.contract.watchdog_ms
-            )?;
-            writeln!(
-                generated,
-                "                            network_allowed: {},",
-                fixture.contract.network_allowed
-            )?;
-            write!(
-                generated,
-                "                            minimum_capability_ids: &["
-            )?;
-            for capability in &fixture.contract.minimum_capability_ids {
-                write!(generated, "{capability:?}, ")?;
-            }
-            writeln!(generated, "],")?;
-            writeln!(generated, "                        }},")?;
-            writeln!(
-                generated,
-                "                        schema: &{:?},",
-                fixture.schema.bytes
-            )?;
-            writeln!(
-                generated,
-                "                        input: &{:?},",
-                fixture.input.bytes
-            )?;
-            writeln!(
-                generated,
-                "                        expected: &{:?},",
-                fixture.expected.bytes
-            )?;
-            writeln!(
-                generated,
-                "                        oracle: &{:?},",
-                fixture.oracle.bytes
-            )?;
-            match &fixture.strict_oracle {
-                CatalogStrictOracle::CanonicalOutput => {
-                    writeln!(
-                        generated,
-                        "                        strict_oracle: CatalogStrictOracle::CanonicalOutput,"
-                    )?;
-                }
-                CatalogStrictOracle::NamespacedFailure {
-                    owner_id,
-                    contract_version,
-                    code_id,
-                } => {
-                    writeln!(
-                        generated,
-                        "                        strict_oracle: CatalogStrictOracle::NamespacedFailure {{"
-                    )?;
-                    writeln!(
-                        generated,
-                        "                            owner_id: {owner_id:?},"
-                    )?;
-                    writeln!(
-                        generated,
-                        "                            contract_version: {contract_version:?},"
-                    )?;
-                    writeln!(
-                        generated,
-                        "                            code_id: {code_id:?},"
-                    )?;
-                    writeln!(generated, "                        }},")?;
-                }
-            }
-            writeln!(generated, "                    }},")?;
-        }
-        writeln!(generated, "                ],")?;
-        writeln!(generated, "            }},")?;
+        emit_profile(&mut generated, profile)?;
     }
     generated.push_str("        ],\n    }\n}\n");
     Ok(generated)
@@ -1272,7 +1314,7 @@ fn draft_authority_public_key(snapshots: &SourceSnapshots) -> Result<[u8; 32], i
     let relative = "support/draft-execution-authority.json";
     let bytes = snapshots.bytes(relative, "Draft authority declaration")?;
     let declaration: DraftAuthorityDeclaration =
-        serde_json::from_slice(&bytes).map_err(|error| {
+        serde_json::from_slice(bytes).map_err(|error| {
             invalid_data(format!(
                 "Draft authority declaration is invalid at {relative}: {error}"
             ))
