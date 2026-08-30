@@ -39,15 +39,6 @@ const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_COMPRESSION_EXPANSION: u32 = 100;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
-const FIXTURE_FAMILIES: [FixtureFamilyV1; 7] = [
-    FixtureFamilyV1::Positive,
-    FixtureFamilyV1::Denied,
-    FixtureFamilyV1::Malformed,
-    FixtureFamilyV1::ResourceExhaustion,
-    FixtureFamilyV1::DeletionRedaction,
-    FixtureFamilyV1::Downgrade,
-    FixtureFamilyV1::IndependentEvaluation,
-];
 /// Closed safe errors exposed by the CPF1 and evaluator-request interfaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ConformanceContractError {
@@ -785,7 +776,7 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
 fn validate_fixture_inventory(
     profile: &ConformanceProfileV1,
 ) -> Result<(), ConformanceContractError> {
-    let required_families = FIXTURE_FAMILIES.into_iter().collect::<BTreeSet<_>>();
+    let required_families = FixtureFamilyV1::ALL.into_iter().collect::<BTreeSet<_>>();
     let mut inventory = BTreeMap::<
         (&FixtureProviderKeyV1, [u8; 32], ExecutionModeV1),
         BTreeSet<FixtureFamilyV1>,

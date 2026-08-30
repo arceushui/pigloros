@@ -4258,31 +4258,27 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
             _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
         };
         let end = index.saturating_add(width);
-        let encoded = match bytes.get(*index..end) {
-            Some(encoded) => encoded,
-            None => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
-        };
-        *index = end;
-        let mut value = [0_u8; 8];
-        value[8 - width..].copy_from_slice(encoded);
-        Ok(u64::from_be_bytes(value))
+        bytes
+            .get(*index..end)
+            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)
+            .map(|encoded| {
+                *index = end;
+                let mut value = [0_u8; 8];
+                value[8 - width..].copy_from_slice(encoded);
+                u64::from_be_bytes(value)
+            })
     }
 
     fn item(bytes: &[u8], index: &mut usize, depth: u8) -> Result<(), BundleContractErrorV1> {
         if depth > MAX_CONFORMANCE_NESTING_V1 {
             return Err(BundleContractErrorV1::MemberOutOfBounds);
         }
-        let initial = match bytes.get(*index) {
-            Some(initial) => *initial,
-            None => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        let Some(initial) = bytes.get(*index).copied() else {
+            return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
         };
         *index += 1;
         let major = initial >> 5;
-        let length = match read_length(bytes, index, initial & 0x1f) {
-            Ok(length) => length,
-            Err(error) => return Err(error),
-        };
-        match major {
+        read_length(bytes, index, initial & 0x1f).and_then(|length| match major {
             0 | 1 => Ok(()),
             7 if matches!(initial & 0x1f, 20..=22) => Ok(()),
             2 | 3 => {
@@ -4295,34 +4291,28 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
                 let end = index.saturating_add(count);
                 bytes
                     .get(*index..end)
-                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
-                *index = end;
-                Ok(())
+                    .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)
+                    .map(|_| *index = end)
             }
             4 => {
                 if length > MAX_CONFORMANCE_ITEMS_V1 {
-                    return Err(BundleContractErrorV1::MemberOutOfBounds);
+                    Err(BundleContractErrorV1::MemberOutOfBounds)
+                } else {
+                    (0..length).try_for_each(|_| item(bytes, index, depth.saturating_add(1)))
                 }
-                for _ in 0..length {
-                    if let Err(error) = item(bytes, index, depth.saturating_add(1)) {
-                        return Err(error);
-                    }
-                }
-                Ok(())
             }
             _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
-        }
+        })
     }
 
     let mut index = 0;
-    if let Err(error) = item(bytes, &mut index, 0) {
-        return Err(error);
-    }
-    if index == bytes.len() {
-        Ok(())
-    } else {
-        Err(BundleContractErrorV1::ArchiveEncodingInvalid)
-    }
+    item(bytes, &mut index, 0).and_then(|()| {
+        if index == bytes.len() {
+            Ok(())
+        } else {
+            Err(BundleContractErrorV1::ArchiveEncodingInvalid)
+        }
+    })
 }
 fn array(value: &Value, width: usize) -> Result<&[Value], BundleContractErrorV1> {
     match value {
@@ -4509,9 +4499,11 @@ impl ConformanceBundlePairV1 {
     }
 }
 
+type ExpectedResultIdentity = (String, crate::ClaimLayerV1, [u8; 32]);
+
 fn authoritative_expected_results(
     bundle: &ConformanceBundleV1,
-) -> Result<BTreeMap<(String, crate::ClaimLayerV1), Vec<u8>>, BundleContractErrorV1> {
+) -> Result<BTreeMap<ExpectedResultIdentity, Vec<u8>>, BundleContractErrorV1> {
     bundle
         .manifest
         .expected_results
@@ -4524,7 +4516,11 @@ fn authoritative_expected_results(
             )
             .map(|member| {
                 (
-                    (expected.case_id.clone(), expected.claim_layer),
+                    (
+                        expected.case_id.clone(),
+                        expected.claim_layer,
+                        expected.execution_profile_digest,
+                    ),
                     member.bytes.clone(),
                 )
             })

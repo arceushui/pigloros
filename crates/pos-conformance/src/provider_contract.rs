@@ -153,6 +153,16 @@ pub enum FixtureFamilyV1 {
 }
 
 impl FixtureFamilyV1 {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Positive,
+        Self::Denied,
+        Self::Malformed,
+        Self::ResourceExhaustion,
+        Self::DeletionRedaction,
+        Self::Downgrade,
+        Self::IndependentEvaluation,
+    ];
+
     pub(crate) const fn wire_code(self) -> u64 {
         match self {
             Self::Positive => 0,
@@ -178,16 +188,6 @@ impl FixtureFamilyV1 {
         }
     }
 }
-
-const FIXTURE_FAMILIES: [FixtureFamilyV1; 7] = [
-    FixtureFamilyV1::Positive,
-    FixtureFamilyV1::Denied,
-    FixtureFamilyV1::Malformed,
-    FixtureFamilyV1::ResourceExhaustion,
-    FixtureFamilyV1::DeletionRedaction,
-    FixtureFamilyV1::Downgrade,
-    FixtureFamilyV1::IndependentEvaluation,
-];
 
 /// The schema descriptor for one fixed fixture family.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -485,7 +485,7 @@ fn validate_family_schemas(
     let ordered = schemas.len() == 7
         && schemas
             .iter()
-            .zip(FIXTURE_FAMILIES)
+            .zip(FixtureFamilyV1::ALL)
             .all(|(schema, family)| schema.family == family);
     if !ordered {
         return Err(ProviderContractErrorV1::FamilyInventoryInvalid);

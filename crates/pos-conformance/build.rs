@@ -720,13 +720,8 @@ fn validate_fixture_records(
         _ => false,
     };
     let input_digest = blake3::hash(input_bytes).to_hex().to_string();
-    let malformed_contract_matches = family != CatalogFixtureFamily::Malformed
-        || malformed_stimulus_is_rejected(
-            schema_bytes,
-            input
-                .get("stimulus")
-                .ok_or_else(|| invalid_data("malformed fixture input omits stimulus"))?,
-        )?;
+    let schema_accepts_input = json_schema_accepts(schema_bytes, &input)?;
+    let schema_result_matches = schema_accepts_input == (family != CatalogFixtureFamily::Malformed);
     let expected_shape_matches = if family == CatalogFixtureFamily::IndependentEvaluation {
         input.get("expected").is_none()
             && input
@@ -757,7 +752,7 @@ fn validate_fixture_records(
         && oracle.claim_layer == claim_layer
         && oracle.family == family
         && oracle_shape_matches
-        && malformed_contract_matches;
+        && schema_result_matches;
     if operation_matches && identity_matches {
         Ok(oracle.oracle)
     } else {
@@ -767,42 +762,198 @@ fn validate_fixture_records(
     }
 }
 
-fn malformed_stimulus_is_rejected(
-    schema_bytes: &[u8],
-    stimulus: &Value,
-) -> Result<bool, io::Error> {
+fn json_schema_accepts(schema_bytes: &[u8], instance: &Value) -> Result<bool, io::Error> {
     let schema: Value = serde_json::from_slice(schema_bytes)
-        .map_err(|error| invalid_data(format!("malformed fixture schema is invalid: {error}")))?;
-    let stimulus_schema = schema
-        .pointer("/properties/stimulus")
-        .ok_or_else(|| invalid_data("malformed fixture schema omits stimulus"))?;
-    match stimulus_schema.get("type").and_then(Value::as_str) {
-        Some("string") if stimulus_schema.get("minLength").and_then(Value::as_u64) == Some(1) => {
-            Ok(stimulus.as_str().is_none_or(str::is_empty))
-        }
-        Some("object")
-            if stimulus_schema
-                .pointer("/properties/operation/const")
-                .and_then(Value::as_str)
-                == Some("reduce")
-                && stimulus_schema
-                    .pointer("/properties/payload/type")
-                    .and_then(Value::as_str)
-                    == Some("string")
-                && stimulus_schema
-                    .pointer("/properties/payload/minLength")
-                    .and_then(Value::as_u64)
-                    == Some(1) =>
-        {
-            Ok(stimulus
-                .get("payload")
-                .and_then(Value::as_str)
-                .is_none_or(str::is_empty))
-        }
-        _ => Err(invalid_data(
-            "malformed fixture schema is outside the supported public contract",
-        )),
+        .map_err(|error| invalid_data(format!("fixture schema is invalid: {error}")))?;
+    validate_supported_schema(&schema).and_then(|()| value_matches_schema(instance, &schema))
+}
+
+fn validate_supported_schema(schema: &Value) -> Result<(), io::Error> {
+    let object = schema
+        .as_object()
+        .ok_or_else(|| invalid_data("fixture schema node must be an object"))?;
+    let supported = [
+        "$schema",
+        "additionalProperties",
+        "const",
+        "maximum",
+        "minLength",
+        "minimum",
+        "pattern",
+        "properties",
+        "required",
+        "type",
+    ];
+    if object.keys().any(|key| !supported.contains(&key.as_str())) {
+        return Err(invalid_data("fixture schema uses an unsupported keyword"));
     }
+    let metadata_valid = object
+        .get("$schema")
+        .is_none_or(|value| value.as_str() == Some("https://json-schema.org/draft/2020-12/schema"))
+        && object
+            .get("additionalProperties")
+            .is_none_or(Value::is_boolean)
+        && object
+            .get("minLength")
+            .is_none_or(|value| value.as_u64().is_some())
+        && object
+            .get("minimum")
+            .is_none_or(|value| value.as_i64().is_some())
+        && object
+            .get("maximum")
+            .is_none_or(|value| value.as_i64().is_some())
+        && object
+            .get("pattern")
+            .is_none_or(|value| value.as_str() == Some("^[0-9a-f]{64}$"))
+        && object.get("required").is_none_or(|value| {
+            value
+                .as_array()
+                .is_some_and(|names| names.iter().all(Value::is_string))
+        });
+    if !metadata_valid {
+        return Err(invalid_data("fixture schema keyword value is unsupported"));
+    }
+    schema_type_matches(&Value::Null, object.get("type"))?;
+    object.get("properties").map_or(Ok(()), |properties| {
+        properties
+            .as_object()
+            .ok_or_else(|| invalid_data("fixture schema properties must be an object"))?
+            .values()
+            .try_for_each(validate_supported_schema)
+    })
+}
+
+fn value_matches_schema(instance: &Value, schema: &Value) -> Result<bool, io::Error> {
+    let object = schema
+        .as_object()
+        .ok_or_else(|| invalid_data("fixture schema node must be an object"))?;
+    if !schema_type_matches(instance, object.get("type"))?
+        || object
+            .get("const")
+            .is_some_and(|constant| constant != instance)
+        || !schema_scalar_constraints_match(instance, object)?
+    {
+        return Ok(false);
+    }
+    schema_object_constraints_match(instance, object)
+}
+
+fn schema_type_matches(instance: &Value, declared: Option<&Value>) -> Result<bool, io::Error> {
+    declared.map_or(Ok(true), |value| {
+        value
+            .as_str()
+            .ok_or_else(|| invalid_data("fixture schema type must be a string"))
+            .and_then(|kind| match kind {
+                "array" => Ok(instance.is_array()),
+                "integer" => Ok(instance.as_i64().is_some() || instance.as_u64().is_some()),
+                "object" => Ok(instance.is_object()),
+                "string" => Ok(instance.is_string()),
+                _ => Err(invalid_data("fixture schema type is unsupported")),
+            })
+    })
+}
+
+fn schema_scalar_constraints_match(
+    instance: &Value,
+    schema: &serde_json::Map<String, Value>,
+) -> Result<bool, io::Error> {
+    let minimum_length = schema.get("minLength").map_or(Ok(None), |value| {
+        value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| invalid_data("fixture schema minLength must be unsigned"))
+    })?;
+    let length_matches = minimum_length.is_none_or(|minimum| {
+        instance.as_str().is_some_and(|value| {
+            u64::try_from(value.chars().count()).is_ok_and(|length| length >= minimum)
+        })
+    });
+    let pattern_matches = schema.get("pattern").map_or(Ok(true), |pattern| {
+        pattern
+            .as_str()
+            .ok_or_else(|| invalid_data("fixture schema pattern must be a string"))
+            .and_then(|pattern| {
+                if pattern == "^[0-9a-f]{64}$" {
+                    Ok(instance.as_str().is_some_and(|value| {
+                        value.len() == 64
+                            && value
+                                .bytes()
+                                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                    }))
+                } else {
+                    Err(invalid_data("fixture schema pattern is unsupported"))
+                }
+            })
+    })?;
+    let minimum_matches = integer_bound_matches(instance, schema.get("minimum"), false)?;
+    let maximum_matches = integer_bound_matches(instance, schema.get("maximum"), true)?;
+    Ok(length_matches && pattern_matches && minimum_matches && maximum_matches)
+}
+
+fn integer_bound_matches(
+    instance: &Value,
+    bound: Option<&Value>,
+    maximum: bool,
+) -> Result<bool, io::Error> {
+    bound.map_or(Ok(true), |bound| {
+        let bound = bound
+            .as_i64()
+            .ok_or_else(|| invalid_data("fixture schema bound must be an integer"))?;
+        let value = instance
+            .as_i64()
+            .ok_or_else(|| invalid_data("fixture integer does not fit the supported range"))?;
+        Ok(if maximum {
+            value <= bound
+        } else {
+            value >= bound
+        })
+    })
+}
+
+fn schema_object_constraints_match(
+    instance: &Value,
+    schema: &serde_json::Map<String, Value>,
+) -> Result<bool, io::Error> {
+    let Some(instance) = instance.as_object() else {
+        return Ok(true);
+    };
+    let properties = schema.get("properties").map_or(Ok(None), |value| {
+        value
+            .as_object()
+            .map(Some)
+            .ok_or_else(|| invalid_data("fixture schema properties must be an object"))
+    })?;
+    let required = schema.get("required").map_or(Ok(Vec::new()), |value| {
+        value
+            .as_array()
+            .ok_or_else(|| invalid_data("fixture schema required must be an array"))?
+            .iter()
+            .map(|name| {
+                name.as_str()
+                    .ok_or_else(|| invalid_data("fixture schema required entry must be a string"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    if required.iter().any(|name| !instance.contains_key(*name)) {
+        return Ok(false);
+    }
+    if schema.get("additionalProperties") == Some(&Value::Bool(false))
+        && instance
+            .keys()
+            .any(|name| properties.is_none_or(|known| !known.contains_key(name)))
+    {
+        return Ok(false);
+    }
+    properties.map_or(Ok(true), |properties| {
+        properties
+            .iter()
+            .try_fold(true, |matches, (name, child_schema)| {
+                instance.get(name).map_or(Ok(matches), |child| {
+                    value_matches_schema(child, child_schema)
+                        .map(|child_matches| matches && child_matches)
+                })
+            })
+    })
 }
 
 fn fixture_contract(

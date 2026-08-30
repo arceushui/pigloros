@@ -1688,6 +1688,33 @@ fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn assert_complete_execution_mode_closure(archive: &[u8]) -> TestResult {
+    let bundle = ConformanceBundleV1::from_canonical_cbor(archive)?;
+    let profile_member = bundle
+        .members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or("materialized archive omits its CPF1 profile")?;
+    let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)?;
+    assert_eq!(profile.fixtures.len(), 28);
+    for execution_profile in &profile.execution_profile_digests {
+        for mode in [ExecutionModeV1::Local, ExecutionModeV1::AirGapped] {
+            assert_eq!(
+                profile
+                    .fixtures
+                    .iter()
+                    .filter(|fixture| {
+                        fixture.execution_profile_digest == *execution_profile
+                            && fixture.modes.as_slice() == [mode]
+                    })
+                    .count(),
+                7
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn current_signed_bundle_round_trips_through_typed_and_independent_verifiers() -> TestResult {
     for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
@@ -1816,6 +1843,7 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
     );
     for (archive_path, bytes) in archives.iter().zip(&archive_bytes) {
         verify_archive_independently(bytes)?;
+        assert_complete_execution_mode_closure(bytes)?;
         let filename = archive_path
             .file_name()
             .and_then(|name| name.to_str())

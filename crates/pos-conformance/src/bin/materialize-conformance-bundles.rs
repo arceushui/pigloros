@@ -125,14 +125,12 @@ impl CatalogExecutionProfile {
     fn digest(self) -> Result<[u8; 32], Box<dyn Error>> {
         execution_profile_bytes(self).map(|bytes| *blake3::hash(&bytes).as_bytes())
     }
-
-    const fn execution_mode(self) -> pos_conformance::ExecutionModeV1 {
-        match self {
-            Self::DeterministicLocalV1 => pos_conformance::ExecutionModeV1::Local,
-            Self::DeterministicAirGappedV1 => pos_conformance::ExecutionModeV1::AirGapped,
-        }
-    }
 }
+
+const EXECUTION_MODES: [pos_conformance::ExecutionModeV1; 2] = [
+    pos_conformance::ExecutionModeV1::Local,
+    pos_conformance::ExecutionModeV1::AirGapped,
+];
 
 // This seed is repository test-fixture authority only.  It is never a
 // deployment trust root and is used solely to make Draft evidence reproducible.
@@ -1000,33 +998,33 @@ fn fixtures_for_layer(
     context: &FixtureContext,
     provider_key: &FixtureProviderKeyV1,
 ) -> Result<Vec<FixtureDescriptorV1>, Box<dyn Error>> {
-    layer
-        .fixtures
-        .iter()
-        .try_fold(
-            Vec::with_capacity(layer.fixtures.len() * CatalogExecutionProfile::ALL.len()),
-            |mut fixtures, fixture| {
-                CatalogExecutionProfile::ALL
-                    .into_iter()
-                    .map(|execution_profile| {
-                        execution_profile.digest().and_then(|digest| {
-                            fixture_descriptor_from_record(
-                                layer,
-                                fixture,
-                                context,
-                                provider_key,
-                                digest,
-                                execution_profile.execution_mode(),
-                            )
-                        })
+    CatalogExecutionProfile::ALL
+        .into_iter()
+        .map(CatalogExecutionProfile::digest)
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|execution_profiles| {
+            layer
+                .fixtures
+                .iter()
+                .flat_map(|fixture| {
+                    execution_profiles.iter().copied().flat_map(move |digest| {
+                        EXECUTION_MODES
+                            .into_iter()
+                            .map(move |mode| (fixture, digest, mode))
                     })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|descriptors| {
-                        fixtures.extend(descriptors);
-                        fixtures
-                    })
-            },
-        )
+                })
+                .map(|(fixture, digest, mode)| {
+                    fixture_descriptor_from_record(
+                        layer,
+                        fixture,
+                        context,
+                        provider_key,
+                        digest,
+                        mode,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
         .map(|mut fixtures| {
             fixtures.sort_by_key(|fixture| {
                 (

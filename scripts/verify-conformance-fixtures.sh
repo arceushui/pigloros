@@ -350,20 +350,65 @@ for layer in "${profile_layers[@]}"; do
       echo "invalid input fixture record for ${layer}: ${input_path}" >&2
       exit 1
     }
-    if [[ "${family}" == "malformed" ]]; then
-      jq -e --slurpfile schema "${fixture_root}/${schema_path}" '
-        ($schema[0].properties.stimulus) as $stimulus_schema |
-        if $stimulus_schema.type == "string" then
-          (.stimulus | type) != "string"
-        elif $stimulus_schema.type == "object" then
-          .stimulus.operation == $stimulus_schema.properties.operation.const and
-          (.stimulus.payload | type) != "string"
-        else false end
-      ' "${fixture_root}/${input_path}" >/dev/null || {
-        echo "malformed fixture is valid against its pinned schema: ${input_path}" >&2
-        exit 1
-      }
-    fi
+    jq -e --arg family "${family}" --slurpfile schema "${fixture_root}/${schema_path}" '
+      def supported_schema($value):
+        ($value | type) == "object" and
+        (($value | keys) - ["$schema", "additionalProperties", "const", "maximum",
+          "minLength", "minimum", "pattern", "properties", "required", "type"] | length) == 0 and
+        (($value | has("$schema") | not) or
+          $value["$schema"] == "https://json-schema.org/draft/2020-12/schema") and
+        (($value | has("type") | not) or
+          (["array", "integer", "object", "string"] | index($value.type)) != null) and
+        (($value | has("additionalProperties") | not) or
+          ($value.additionalProperties | type) == "boolean") and
+        (($value | has("minLength") | not) or
+          (($value.minLength | type) == "number" and
+           ($value.minLength | floor) == $value.minLength and $value.minLength >= 0)) and
+        (($value | has("minimum") | not) or
+          (($value.minimum | type) == "number" and ($value.minimum | floor) == $value.minimum)) and
+        (($value | has("maximum") | not) or
+          (($value.maximum | type) == "number" and ($value.maximum | floor) == $value.maximum)) and
+        (($value | has("pattern") | not) or $value.pattern == "^[0-9a-f]{64}$") and
+        (($value | has("required") | not) or
+          (($value.required | type) == "array" and all($value.required[]; type == "string"))) and
+        (($value.properties // {}) | type) == "object" and
+        all(($value.properties // {})[]; supported_schema(.));
+      def type_matches($value):
+        (($value.type? // null) as $type |
+          $type == null or
+          ($type == "array" and (type == "array")) or
+          ($type == "integer" and (type == "number") and (floor == .)) or
+          ($type == "object" and (type == "object")) or
+          ($type == "string" and (type == "string")));
+      def conforms($value):
+        . as $instance |
+        type_matches($value) and
+        (($value | has("const") | not) or $instance == $value.const) and
+        (($value | has("minLength") | not) or
+          (($instance | type) == "string" and ($instance | length) >= $value.minLength)) and
+        (($value | has("pattern") | not) or
+          ($value.pattern == "^[0-9a-f]{64}$" and
+           ($instance | type) == "string" and ($instance | test($value.pattern)))) and
+        (($value | has("minimum") | not) or
+          (($instance | type) == "number" and $instance >= $value.minimum)) and
+        (($value | has("maximum") | not) or
+          (($instance | type) == "number" and $instance <= $value.maximum)) and
+        (if ($instance | type) == "object" then
+          (($value.required // []) | all(.[]; . as $name | $instance | has($name))) and
+          (($value | has("additionalProperties") | not) or
+            $value.additionalProperties != false or
+            (($instance | keys) - (($value.properties // {}) | keys) | length) == 0) and
+          (($value.properties // {}) | to_entries |
+            all(.[]; . as $property |
+              ($instance | has($property.key) | not) or
+              ($instance[$property.key] | conforms($property.value))))
+        else true end);
+      supported_schema($schema[0]) and
+      (conforms($schema[0]) == ($family != "malformed"))
+    ' "${fixture_root}/${input_path}" >/dev/null || {
+      echo "fixture input does not have the required pinned-schema result: ${input_path}" >&2
+      exit 1
+    }
     input_blake3_digest="$(b3sum "${fixture_root}/${input_path}" | awk '{print $1}')"
     jq -e \
       --arg case_id "${case_id}" \
