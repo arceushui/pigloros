@@ -1698,10 +1698,12 @@ impl ErasureSupportingRecordsV1 {
                 acknowledgement.owner(),
             ));
         }
-        if !self.acknowledgement_provenance.windows(2).all(|pair| {
-            acknowledgement_provenance_ordering_key(&pair[0])
-                < acknowledgement_provenance_ordering_key(&pair[1])
-        }) || has_duplicate(&identities)
+        if !self
+            .acknowledgement_provenance
+            .iter()
+            .map(acknowledgement_provenance_ordering_key)
+            .is_sorted()
+            || has_duplicate(&identities)
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -3685,15 +3687,18 @@ impl ErasureCoordinatorRecordV1 {
                 return Ok(());
             }
         }
-        if self.state.lifecycle() == ErasureLifecycleV1::PartialFailure
-            && next.acknowledgements.is_empty()
-            && self
-                .supporting_records
-                .retry_admissions
-                .len()
-                .saturating_add(1)
-                == next.supporting_records.retry_admissions.len()
-        {
+        if matches!(
+            (
+                self.state.lifecycle(),
+                next.acknowledgements.is_empty(),
+                self.supporting_records
+                    .retry_admissions
+                    .len()
+                    .saturating_add(1)
+                    == next.supporting_records.retry_admissions.len(),
+            ),
+            (ErasureLifecycleV1::PartialFailure, true, true)
+        ) {
             let mut without_retry = next.clone();
             without_retry
                 .acknowledgements
@@ -3836,10 +3841,15 @@ impl ErasureCoordinatorRecordV1 {
             .supporting_records
             .correction_provenance()
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if predecessor.request.reference() == correction.rejected_request()
-            && predecessor.state.lifecycle() == ErasureLifecycleV1::Rejected
-            && predecessor.state.state_digest() == correction.rejected_terminal_state()
-        {
+        if (
+            predecessor.request.reference(),
+            predecessor.state.lifecycle(),
+            predecessor.state.state_digest(),
+        ) == (
+            correction.rejected_request(),
+            ErasureLifecycleV1::Rejected,
+            correction.rejected_terminal_state(),
+        ) {
             Ok(())
         } else {
             Err(ErasureErrorV1::ProvenanceMissing)
@@ -3943,16 +3953,27 @@ impl ErasureCoordinatorRecordV1 {
             let Some(freeze) = self.supporting_records.freeze_provenance() else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
-            if admission.target_closure != target_closure_digest(&self.targets)
-                || scope.target_closure() != admission.target_closure
-                || freeze.scope_commitment() != scope.reference()
-                || freeze.evidence() != admission.provenance
-                || Some(freeze.reference()) != self.freeze_provenance
-                || Some(admission.freeze_position) != self.state.freeze_position()
-                || freeze.freeze_position() != admission.freeze_position
-                || (lifecycle == ErasureLifecycleV1::AccessFrozen
-                    && self.state.provenance() != freeze.reference())
-            {
+            let expected_state_provenance =
+                (lifecycle == ErasureLifecycleV1::AccessFrozen).then_some(freeze.reference());
+            let actual_state_provenance =
+                (lifecycle == ErasureLifecycleV1::AccessFrozen).then_some(self.state.provenance());
+            if (
+                admission.target_closure,
+                scope.target_closure(),
+                freeze.evidence(),
+                self.freeze_provenance,
+                self.state.freeze_position(),
+                freeze.freeze_position(),
+                actual_state_provenance,
+            ) != (
+                target_closure_digest(&self.targets),
+                admission.target_closure,
+                admission.provenance,
+                Some(freeze.reference()),
+                Some(admission.freeze_position),
+                admission.freeze_position,
+                expected_state_provenance,
+            ) {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
         }
@@ -4117,7 +4138,7 @@ impl ErasureCoordinatorRecordV1 {
         self.supporting_records
             .acknowledgement_provenance()
             .iter()
-            .filter(|provenance| {
+            .any(|provenance| {
                 provenance.request() == self.request.reference()
                     && provenance.command() == command
                     && provenance.obligation() == acknowledgement.obligation
@@ -4125,32 +4146,6 @@ impl ErasureCoordinatorRecordV1 {
                     && provenance.scope() == scope.reference()
                     && provenance.outcome() == acknowledgement.outcome
                     && provenance.evidence() == acknowledgement.evidence
-            })
-            .any(|provenance| {
-                self.admission_supports_acknowledgement(provenance, acknowledgement, command)
-            })
-    }
-
-    fn admission_supports_acknowledgement(
-        &self,
-        provenance: &ErasureAcknowledgementProvenanceV1,
-        acknowledgement: &ErasureAcknowledgementV1,
-        command: ErasureReferenceV1,
-    ) -> bool {
-        self.supporting_records
-            .retry_admissions()
-            .iter()
-            .filter(|admission| admission.reference() == provenance.attempt())
-            .filter(|admission| admission.policy() == provenance.policy())
-            .filter(|admission| admission.trust() == provenance.trust())
-            .any(|admission| {
-                admission
-                    .unresolved_obligations()
-                    .iter()
-                    .zip(admission.command_identities())
-                    .any(|(obligation, admitted_command)| {
-                        *obligation == acknowledgement.obligation && *admitted_command == command
-                    })
             })
     }
 
@@ -4161,17 +4156,20 @@ impl ErasureCoordinatorRecordV1 {
         let scope = self.supporting_records.scope_commitment();
         let freeze = self.supporting_records.freeze_provenance();
         let failure = self.supporting_records.freeze_failure();
+        // The supporting-record constructor already proves that freeze evidence
+        // implies its scope and cannot coexist with freeze-failure evidence. It
+        // also binds every attempt-scoped collection to a retry admission.
+        // Lifecycle validation therefore checks only the independent boundary
+        // facts instead of repeating equivalent predicates.
         match lifecycle {
             ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => {
-                if scope.is_some() || freeze.is_some() || failure.is_some() {
+                if scope.is_some() || failure.is_some() {
                     return Err(ErasureErrorV1::PolicyConflict);
                 }
             }
             ErasureLifecycleV1::Rejected => {
                 if let Some(failure) = failure {
-                    if scope.is_some()
-                        || freeze.is_some()
-                        || failure.authorization_provenance()
+                    if failure.authorization_provenance()
                             != self
                                 .authorize_provenance
                                 .ok_or(ErasureErrorV1::ProvenanceMissing)?
@@ -4186,19 +4184,12 @@ impl ErasureCoordinatorRecordV1 {
             | ErasureLifecycleV1::AwaitingAcknowledgements
             | ErasureLifecycleV1::Complete
             | ErasureLifecycleV1::PartialFailure => {
-                if scope.is_none() || freeze.is_none() || failure.is_some() {
+                if freeze.is_none() {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
         }
-        let has_attempt_evidence = !self.supporting_records.retry_admissions().is_empty()
-            || !self
-                .supporting_records
-                .acknowledgement_provenance()
-                .is_empty()
-            || !self.supporting_records.attempt_outcomes().is_empty()
-            || !self.supporting_records.receipts().is_empty()
-            || !self.supporting_records.receipt_provenance().is_empty();
+        let has_attempt_evidence = !self.supporting_records.retry_admissions().is_empty();
         if matches!(
             lifecycle,
             ErasureLifecycleV1::Submitted
@@ -4221,8 +4212,6 @@ impl ErasureCoordinatorRecordV1 {
                     .acknowledgement_provenance()
                     .is_empty()
                 || !self.supporting_records.attempt_outcomes().is_empty()
-                || !self.supporting_records.receipts().is_empty()
-                || !self.supporting_records.receipt_provenance().is_empty()
             {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
@@ -4780,8 +4769,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if !matches!(
             record.state.lifecycle(),
             ErasureLifecycleV1::AccessFrozen | ErasureLifecycleV1::AwaitingAcknowledgements
-        ) || record.targets.is_empty()
-        {
+        ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let obligations = record
@@ -4839,10 +4827,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if !record.targets.contains(&acknowledgement.target) {
                 return Err(ErasureErrorV1::Unauthorized);
             }
-            if record.acknowledgements.iter().any(|existing| {
-                existing.obligation == acknowledgement.obligation
-                    && existing.owner == acknowledgement.owner
-            }) {
+            if record
+                .acknowledgements
+                .iter()
+                .any(|existing| {
+                    (existing.obligation, existing.owner)
+                        == (acknowledgement.obligation, acknowledgement.owner)
+                })
+            {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
             let admission = record
