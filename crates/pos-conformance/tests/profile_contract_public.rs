@@ -327,7 +327,7 @@ fn knowledge_non_interference_profile() -> ConformanceProfileV1 {
         provider_key: provider_key.clone(),
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         execution_profile_digest: [1; 32],
-        modes: vec![ExecutionModeV1::Local],
+        modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
         schema: ArtifactDescriptorV1 {
             member_path: "providers/artifact-integrity/schemas/positive.schema.json".to_owned(),
             media_type: "application/schema+json".to_owned(),
@@ -605,7 +605,6 @@ fn with_second_execution_coordinate(mut profile: ConformanceProfileV1) -> Confor
         .cloned()
         .map(|mut fixture| {
             fixture.execution_profile_digest = execution_profile_digest;
-            fixture.modes = vec![ExecutionModeV1::AirGapped];
             fixture.fixture_digest = fixture.digest();
             fixture
         })
@@ -1311,15 +1310,17 @@ fn public_current_cpf1_catalog_round_trips_lifecycle_adapter_mode_and_family_var
         assert_profile_round_trip(profile)?;
     }
 
-    for mode in [
-        ExecutionModeV1::Local,
-        ExecutionModeV1::AirGapped,
-        ExecutionModeV1::Replay,
-        ExecutionModeV1::Fork,
+    for optional_mode in [
+        None,
+        Some(ExecutionModeV1::Replay),
+        Some(ExecutionModeV1::Fork),
     ] {
         let mut profile = profile_for_digest();
         for fixture in &mut profile.fixtures {
-            fixture.modes = vec![mode];
+            fixture.modes = vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped];
+            if let Some(mode) = optional_mode {
+                fixture.modes.push(mode);
+            }
         }
         refresh(&mut profile);
         assert_profile_round_trip(profile)?;
