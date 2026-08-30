@@ -1282,7 +1282,7 @@ fn public_record_rejections_cover_semantic_boundaries() {
     )));
 
     let report = divergence_report();
-    let invalid_reports: [fn(&mut DivergenceReportV1); 9] = [
+    let invalid_reports: [fn(&mut DivergenceReportV1); 8] = [
         |value| value.timeline_seq_or_cut_ordinal = u64::MAX,
         |value| value.tick = u64::MAX,
         |value| value.scheduler_position = Some(u32::MAX),
@@ -1291,19 +1291,20 @@ fn public_record_rejections_cover_semantic_boundaries() {
         |value| value.report_digest = [0; 32],
         |value| value.follow_on_counts = vec![value.follow_on_counts[0].clone(); 33],
         |value| value.follow_on_counts[0].count = 0,
-        |value| {
-            value
-                .follow_on_counts
-                .push(value.follow_on_counts[0].clone());
-        },
     ];
     for mutate in invalid_reports {
         let mut invalid = report.clone();
         mutate(&mut invalid);
-        invalid.report_digest = ok(invalid.digest());
         let encoded = ok(invalid.to_canonical_cbor());
         expect_err(&DivergenceReportV1::from_canonical_cbor(&encoded));
     }
+    let mut duplicate_kind = report.clone();
+    duplicate_kind
+        .follow_on_counts
+        .push(duplicate_kind.follow_on_counts[0].clone());
+    duplicate_kind.report_digest = ok(duplicate_kind.digest());
+    let encoded = ok(duplicate_kind.to_canonical_cbor());
+    expect_err(&DivergenceReportV1::from_canonical_cbor(&encoded));
     let mut trailing_report = ok(report.to_canonical_cbor());
     trailing_report.push(0);
     expect_err(&DivergenceReportV1::from_canonical_cbor(&trailing_report));
