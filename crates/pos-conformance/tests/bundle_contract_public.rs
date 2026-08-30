@@ -1382,7 +1382,7 @@ fn privileged_materializer_test_drops_identity_and_rejects_foreign_parent() -> T
         "foreign-owned publication parent must be denied"
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("untrusted output directory"),
+        String::from_utf8_lossy(&output.stderr).contains("UntrustedOutputDirectory"),
         "public CLI must expose the typed untrusted-parent denial"
     );
     assert!(
@@ -2808,7 +2808,7 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
     assert_archive_rejected_by_both(&missing_family, "missing required fixture family");
 
     let complete_second_coordinate = mutate_profile_archive(|profile| {
-        array_field(profile, 7, "profile executions")?.push(Value::Bytes(vec![2; 32]));
+        array_field(profile, 7, "profile executions")?.insert(0, Value::Bytes(vec![2; 32]));
         let originals = array_field(profile, 9, "fixtures")?.clone();
         let mut expanded = Vec::with_capacity(originals.len() * 2);
         for original in originals {
@@ -2818,8 +2818,8 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
             };
             fields[6] = Value::Bytes(vec![2; 32]);
             fields[7] = Value::Array(vec![Value::Integer(1_u64.into())]);
-            expanded.push(original);
             expanded.push(additional);
+            expanded.push(original);
         }
         *array_field(profile, 9, "fixtures")? = expanded;
         Ok(())
@@ -2828,7 +2828,7 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
     ConformanceBundleV1::from_canonical_cbor(&complete_second_coordinate)?;
 
     let incomplete_second_coordinate = mutate_profile_archive(|profile| {
-        array_field(profile, 7, "profile executions")?.push(Value::Bytes(vec![2; 32]));
+        array_field(profile, 7, "profile executions")?.insert(0, Value::Bytes(vec![2; 32]));
         let originals = array_field(profile, 9, "fixtures")?.clone();
         let mut expanded = Vec::with_capacity(originals.len() * 2 - 1);
         for (index, original) in originals.into_iter().enumerate() {
@@ -2838,10 +2838,10 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
             };
             fields[6] = Value::Bytes(vec![2; 32]);
             fields[7] = Value::Array(vec![Value::Integer(1_u64.into())]);
-            expanded.push(original);
             if index != 6 {
                 expanded.push(additional);
             }
+            expanded.push(original);
         }
         *array_field(profile, 9, "fixtures")? = expanded;
         Ok(())
@@ -3111,16 +3111,22 @@ fn both_verifiers_reject_stale_profile_identity_for_each_selected_ceiling() -> T
 #[test]
 fn both_verifiers_accept_all_current_fixture_execution_modes() -> TestResult {
     let archive = mutate_profile_archive(|profile| {
-        replace_value(
-            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
-            7,
-            Value::Array(
-                (0_u64..=3)
-                    .map(|mode| Value::Integer(mode.into()))
-                    .collect(),
-            ),
-            "fixture execution modes",
-        )
+        for fixture in array_field(profile, 9, "fixtures")? {
+            let Value::Array(fields) = fixture else {
+                return Err("fixture must be an array".into());
+            };
+            replace_value(
+                fields,
+                7,
+                Value::Array(
+                    (0_u64..=3)
+                        .map(|mode| Value::Integer(mode.into()))
+                        .collect(),
+                ),
+                "fixture execution modes",
+            )?;
+        }
+        Ok(())
     })?;
     verify_archive_independently(&archive)?;
     ConformanceBundleV1::from_canonical_cbor(&archive)?;
