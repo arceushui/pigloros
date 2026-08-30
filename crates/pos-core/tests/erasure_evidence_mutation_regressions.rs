@@ -180,6 +180,11 @@ fn scope_commitment_binds_scope_extension_encoding_and_content_address(
     ))?;
     assert_eq!(extended.extension_head(), Some(reference(6)));
     assert_ne!(extended.reference(), record.reference());
+    roundtrip(
+        &extended,
+        ErasureScopeCommitmentV1::to_canonical_cbor,
+        ErasureScopeCommitmentV1::from_canonical_cbor,
+    )?;
 
     let empty_scope =
         ErasureScopeCommitmentV1::new(scope_input(reference(1), Vec::new(), reference(4), None));
@@ -232,6 +237,11 @@ fn freeze_provenance_binds_optional_extension_encoding_and_content_address(
     ))?;
     assert_eq!(extended.extension_head(), Some(reference(5)));
     assert_ne!(extended.reference(), record.reference());
+    roundtrip(
+        &extended,
+        ErasureFreezeProvenanceV1::to_canonical_cbor,
+        ErasureFreezeProvenanceV1::from_canonical_cbor,
+    )?;
     Ok(())
 }
 
@@ -556,6 +566,25 @@ fn supporting_records_roundtrip_every_populated_collection() -> Result<(), Erasu
         ErasureSupportingRecordsV1::to_canonical_cbor,
         ErasureSupportingRecordsV1::from_canonical_cbor,
     )?;
+    Ok(())
+}
+
+#[test]
+fn supporting_record_decoder_rejects_each_malformed_nested_collection() -> Result<(), ErasureErrorV1>
+{
+    let bytes = ErasureSupportingRecordsV1::default().to_canonical_cbor()?;
+    for index in 0..4 {
+        let changed = replace_cbor_field(&bytes, index, Value::Array(Vec::new()))?;
+        assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&changed).is_err());
+    }
+    for index in 4..10 {
+        let wrong_collection = replace_cbor_field(&bytes, index, Value::Null)?;
+        assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&wrong_collection).is_err());
+
+        let malformed_entry =
+            replace_cbor_field(&bytes, index, Value::Array(vec![Value::Array(Vec::new())]))?;
+        assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&malformed_entry).is_err());
+    }
     Ok(())
 }
 

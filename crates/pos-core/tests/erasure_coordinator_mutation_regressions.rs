@@ -230,12 +230,17 @@ const fn deadline_receipt_input(issue_position: u64) -> ErasureReceiptInputV1 {
 
 struct PortState {
     records: Vec<ErasureCoordinatorRecordV1>,
+    record_history: Vec<ErasureCoordinatorRecordV1>,
     states: Vec<ErasureStateV1>,
     targets: Vec<ErasureRequiredTargetV1>,
     required_targets_error: Option<ErasureErrorV1>,
     affected_scope_error: Option<ErasureErrorV1>,
     freeze_error: Option<ErasureErrorV1>,
     mismatched_freeze_closure: bool,
+    attempt_error: Option<ErasureErrorV1>,
+    dispatch_error: Option<ErasureErrorV1>,
+    acknowledgement_error: Option<ErasureErrorV1>,
+    receipt_error: Option<ErasureErrorV1>,
 }
 
 struct SharedPort {
@@ -282,6 +287,7 @@ impl ErasurePersistencePortV1 for SharedPort {
         let mut state = self.state.borrow_mut();
         let mut staged_records = state.records.clone();
         let mut staged_states = state.states.clone();
+        let mut staged_history = state.record_history.clone();
         for record in records {
             if let Some(existing) = staged_records
                 .iter()
@@ -302,9 +308,11 @@ impl ErasurePersistencePortV1 for SharedPort {
                 staged_records.push(record.clone());
             }
             staged_states.push(record.state().clone());
+            staged_history.push(record.clone());
         }
         state.records = staged_records;
         state.states = staged_states;
+        state.record_history = staged_history;
         Ok(())
     }
 }
@@ -369,11 +377,11 @@ impl ErasureCoordinatorPortV1 for SharedPort {
         _request: ErasureReferenceV1,
         _commands: &[pos_core::ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        self.state.borrow().dispatch_error.map_or(Ok(()), Err)
     }
 
     fn admit_attempt(&self, _admission: &ErasureRetryAdmissionV1) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        self.state.borrow().attempt_error.map_or(Ok(()), Err)
     }
 
     fn admit_acknowledgement(
@@ -381,11 +389,14 @@ impl ErasureCoordinatorPortV1 for SharedPort {
         _request: ErasureReferenceV1,
         _acknowledgement: &ErasureAcknowledgementV1,
     ) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        self.state
+            .borrow()
+            .acknowledgement_error
+            .map_or(Ok(()), Err)
     }
 
     fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        self.state.borrow().receipt_error.map_or(Ok(()), Err)
     }
 }
 
@@ -398,12 +409,17 @@ struct Fixture {
 fn submitted_fixture(targets: Vec<ErasureRequiredTargetV1>) -> Result<Fixture, ErasureErrorV1> {
     let state = Rc::new(RefCell::new(PortState {
         records: Vec::new(),
+        record_history: Vec::new(),
         states: Vec::new(),
         targets,
         required_targets_error: None,
         affected_scope_error: None,
         freeze_error: None,
         mismatched_freeze_closure: false,
+        attempt_error: None,
+        dispatch_error: None,
+        acknowledgement_error: None,
+        receipt_error: None,
     }));
     let mut machine = Machine::new(
         SharedPort {
@@ -502,6 +518,20 @@ fn latest_record(
         .records
         .iter()
         .find(|record| record.request().reference() == request)
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+fn historical_record(
+    state: &SharedState,
+    lifecycle: ErasureLifecycleV1,
+    predicate: impl Fn(&ErasureCoordinatorRecordV1) -> bool,
+) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    state
+        .borrow()
+        .record_history
+        .iter()
+        .find(|record| record.state().lifecycle() == lifecycle && predicate(record))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
@@ -737,6 +767,172 @@ fn replacement_validation_rejects_identity_and_evidence_regressions() -> Result<
         frozen_record.validate_replacement(&authorized_record),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
+
+#[test]
+fn replacement_validation_accepts_each_same_state_persistence_extension(
+) -> Result<(), ErasureErrorV1> {
+    let frozen = frozen_fixture(vec![target(10)])?;
+    let authorized = historical_record(&frozen.state, ErasureLifecycleV1::Authorized, |record| {
+        record.reserved_targets().is_empty()
+    })?;
+    let reserved = historical_record(&frozen.state, ErasureLifecycleV1::Authorized, |record| {
+        !record.reserved_targets().is_empty()
+    })?;
+    assert_eq!(authorized.validate_replacement(&reserved), Ok(()));
+
+    let awaiting = awaiting_fixture(vec![target(10)])?;
+    let frozen_without_intent = historical_record(
+        &awaiting.state,
+        ErasureLifecycleV1::AccessFrozen,
+        |record| record.dispatch_provenance().is_none(),
+    )?;
+    let frozen_with_intent = historical_record(
+        &awaiting.state,
+        ErasureLifecycleV1::AccessFrozen,
+        |record| record.dispatch_provenance().is_some(),
+    )?;
+    assert_eq!(
+        frozen_without_intent.validate_replacement(&frozen_with_intent),
+        Ok(())
+    );
+
+    let mut complete = awaiting_fixture(vec![target(10)])?;
+    let before_acknowledgement = latest_record(&complete.state, complete.request)?;
+    let acknowledgement = acknowledgement_for(
+        target(10),
+        target(10).replica_id,
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+        reference(95),
+    );
+    complete
+        .machine
+        .acknowledge(complete.request, acknowledgement)?;
+    let after_acknowledgement = latest_record(&complete.state, complete.request)?;
+    assert_eq!(
+        before_acknowledgement.validate_replacement(&after_acknowledgement),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn coordinator_propagates_attempt_dispatch_acknowledgement_and_receipt_failures(
+) -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+
+    let mut attempt = frozen_fixture(vec![target])?;
+    attempt.state.borrow_mut().attempt_error = Some(ErasureErrorV1::Unauthorized);
+    let admission = retry_admission(attempt.request, target, 0, None, u64::MAX)?;
+    assert_eq!(
+        attempt
+            .machine
+            .dispatch_attempt(attempt.request, &admission),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut dispatch = frozen_fixture(vec![target])?;
+    dispatch.state.borrow_mut().dispatch_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        dispatch
+            .machine
+            .dispatch_destruction(dispatch.request, reference(94)),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let acknowledgement = acknowledgement_for(
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+        reference(95),
+    );
+    let mut acknowledge = awaiting_fixture(vec![target])?;
+    acknowledge.state.borrow_mut().acknowledgement_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        acknowledge
+            .machine
+            .acknowledge(acknowledge.request, acknowledgement),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+
+    let mut finalize = awaiting_fixture(vec![target])?;
+    finalize
+        .machine
+        .acknowledge(finalize.request, acknowledgement)?;
+    finalize.state.borrow_mut().receipt_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        finalize.machine.finalize(
+            finalize.request,
+            receipt_input(
+                finalize.request,
+                target,
+                acknowledgement,
+                ErasureLifecycleV1::Complete,
+                11,
+            ),
+        ),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+#[test]
+fn dispatch_rejects_a_command_outside_the_frozen_closure() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let mut fixture = frozen_fixture(vec![target])?;
+    let invalid = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: fixture.request,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![
+            inventory_for(target, target.replica_id).obligation_reference()
+        ],
+        command_identities: vec![reference(99)],
+        policy: reference(6),
+        trust: reference(94),
+        admitted_position: 9,
+        deadline_position: u64::MAX,
+        authorization_provenance: reference(94),
+    })?;
+    assert_eq!(
+        fixture.machine.dispatch_attempt(fixture.request, &invalid),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn active_retry_can_commit_a_new_partial_failure_receipt() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let mut fixture = partial_failure_fixture()?;
+    let record = latest_record(&fixture.state, fixture.request)?;
+    let source_receipt = record
+        .receipt()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .receipt_digest();
+    let retry = retry_admission(fixture.request, target, 1, Some(source_receipt), 20)?;
+    fixture.machine.dispatch_attempt(fixture.request, &retry)?;
+    let retry_acknowledgement = acknowledgement_for(
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Negative,
+        reference(97),
+    );
+    fixture
+        .machine
+        .acknowledge(fixture.request, retry_acknowledgement)?;
+    let receipt = fixture.machine.finalize(
+        fixture.request,
+        receipt_input(
+            fixture.request,
+            target,
+            retry_acknowledgement,
+            ErasureLifecycleV1::PartialFailure,
+            13,
+        ),
+    )?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
     Ok(())
 }
 
