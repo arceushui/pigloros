@@ -4421,6 +4421,41 @@ mod erasure_coverage_tests {
         Ok(())
     }
 
+    #[test]
+    fn public_state_chain_verification_rejects_a_missing_predecessor() -> Result<(), ErasureErrorV1>
+    {
+        struct EmptyResolver;
+
+        impl ErasureStateResolverV1 for EmptyResolver {
+            fn resolve_state(
+                &self,
+                _digest: ErasureReferenceV1,
+            ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+                Ok(None)
+            }
+        }
+
+        let submitted = ErasureStateV1::submitted(
+            ErasureReferenceV1::from_digest([1; 32]),
+            ErasureReferenceV1::from_digest([2; 32]),
+            ErasureReferenceV1::from_digest([3; 32]),
+        )?;
+        let authorized = submitted.transition(ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::Authorized,
+            freeze_position: None,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: ErasureReferenceV1::from_digest([4; 32]),
+        })?;
+        assert_eq!(
+            authorized.verify_predecessor_chain(&EmptyResolver),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
     fn transition(
         lifecycle: ErasureLifecycleV1,
         freeze_position: Option<u64>,

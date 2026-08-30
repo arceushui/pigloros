@@ -41,31 +41,6 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
-#[test]
-fn public_state_chain_verification_rejects_a_missing_predecessor() -> Result<(), ErasureErrorV1> {
-    let submitted =
-        pos_core::ErasureStateV1::submitted(reference(1), reference(30), reference(31))?;
-    let authorized = submitted.transition(ErasureStateTransitionV1 {
-        lifecycle: ErasureLifecycleV1::Authorized,
-        freeze_position: None,
-        pending_owners: Vec::new(),
-        failed_owners: Vec::new(),
-        acknowledged_targets: Vec::new(),
-        replay_claim: ErasureReplayClaimV1::Exact,
-        provenance: reference(32),
-    })?;
-    let resolver = PublicPort {
-        records: Vec::new(),
-        states: Vec::new(),
-        target: target(),
-    };
-    assert_eq!(
-        authorized.verify_predecessor_chain(&resolver),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    Ok(())
-}
-
 const fn transition(lifecycle: ErasureLifecycleV1) -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle,
