@@ -1183,6 +1183,21 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
         verify_release_tree_independently(&archive_refs[..13]),
         Err(BundleContractErrorV1::ProfileInvalid)
     );
+    let mut duplicate_mode = archive_refs.clone();
+    duplicate_mode[1] = duplicate_mode[0];
+    assert_eq!(
+        verify_release_tree_independently(&duplicate_mode),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+
+    let foreign_registry_archive =
+        signed_current_bundle(BundleModeV1::Local)?.to_canonical_cbor()?;
+    let mut mismatched_registry = archive_refs.clone();
+    mismatched_registry[0] = &foreign_registry_archive;
+    assert_eq!(
+        verify_release_tree_independently(&mismatched_registry),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
     for (archive_path, bytes) in archives.iter().zip(&archive_bytes) {
         verify_archive_independently(bytes)?;
         let filename = archive_path

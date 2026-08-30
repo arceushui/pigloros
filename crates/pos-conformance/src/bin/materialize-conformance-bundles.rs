@@ -639,8 +639,7 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
     let inventory_bytes =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
     let catalog = layer_catalog()?;
-    let providers = provider_catalog(&catalog)
-        .map_err(|error| contextual_error("provider catalog", error))?;
+    let providers = provider_catalog(&catalog)?;
     let context = MaterializationContext {
         signing_key,
         inventory_bytes,
@@ -724,7 +723,7 @@ fn materialize_profile(
     let prefix = format!("{}/draft", layer.name);
     profile
         .to_canonical_cbor()
-        .map_err(|error| contextual_error("CPF1 profile encoding", error))
+        .map_err(Into::into)
         .and_then(|profile_bytes| {
             let [local, air_gapped] = bundle_modes
                 .map(|mode| signed_bundle(context, layer, &profile, mode.bundle_mode()));
@@ -759,12 +758,8 @@ fn signed_bundle(
         context.providers,
     )?;
     ConformanceBundleV1::materialize(profile, mode, members, expected_results)
-        .map_err(|error| contextual_error("CFB1 bundle materialization", error))
-        .and_then(|bundle| {
-            bundle
-                .sign(context.signing_key)
-                .map_err(|error| contextual_error("CFB1 bundle signing", error))
-        })
+        .and_then(|bundle| bundle.sign(context.signing_key))
+        .map_err(Into::into)
 }
 
 fn materialized_profile_outputs(
@@ -1019,10 +1014,8 @@ fn fixture_descriptor_from_record(
         context.claim_layer,
         &execution_profile_digest,
     );
-    let oracle_output_path = oracle_output_member_path(
-        &fixture.record.case_id,
-        &execution_profile_digest,
-    );
+    let oracle_output_path =
+        oracle_output_member_path(&fixture.record.case_id, &execution_profile_digest);
     let fixture_record = serde_json::json!({
         "case_id": &fixture.record.case_id,
         "claim_layer": &fixture.record.claim_layer,
@@ -1035,11 +1028,8 @@ fn fixture_descriptor_from_record(
     let fixture_record_digest =
         labeled_digest("PiglorOS.CPF1FixtureRecord.v1", fixture_record.as_bytes());
     let auxiliary = artifact_descriptor(&expected_path, "application/json", fixture.expected);
-    let oracle_output = artifact_descriptor(
-        &oracle_output_path,
-        "application/json",
-        fixture.expected,
-    );
+    let oracle_output =
+        artifact_descriptor(&oracle_output_path, "application/json", fixture.expected);
     let expectation = fixture_expectation(fixture, &oracle_output);
     let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
     let mut descriptor = FixtureDescriptorV1 {
@@ -1106,47 +1096,46 @@ fn fixture_expectation(
     fixture: &CatalogFixture,
     auxiliary: &ArtifactDescriptorV1,
 ) -> FixtureExpectation {
-    let (strict_oracle, verification_outcome, verification_error) =
-        match &fixture.strict_oracle {
-            CatalogStrictOracle::CanonicalOutput => (
+    let (strict_oracle, verification_outcome, verification_error) = match &fixture.strict_oracle {
+        CatalogStrictOracle::CanonicalOutput => (
+            StrictOracleV1 {
+                kind: StrictOracleKindV1::Output,
+                output: Some(auxiliary.clone()),
+                failure: None,
+                divergence: None,
+            },
+            VerificationOutcomeV1::VerifiedExact,
+            None,
+        ),
+        CatalogStrictOracle::NamespacedFailure {
+            owner_id,
+            contract_version,
+            code_id,
+        } => {
+            let failure = NamespacedFailureV1 {
+                owner_id: owner_id.clone(),
+                contract_version: contract_version.clone(),
+                code_id: code_id.clone(),
+            };
+            let outcome = match fixture.record.family {
+                CatalogFixtureFamily::ResourceExhaustion => {
+                    VerificationOutcomeV1::ResourceLimitExceeded
+                }
+                CatalogFixtureFamily::Downgrade => VerificationOutcomeV1::IncompatibleProfile,
+                _ => VerificationOutcomeV1::InvalidManifest,
+            };
+            (
                 StrictOracleV1 {
-                    kind: StrictOracleKindV1::Output,
-                    output: Some(auxiliary.clone()),
-                    failure: None,
+                    kind: StrictOracleKindV1::Failure,
+                    output: None,
+                    failure: Some(failure.clone()),
                     divergence: None,
                 },
-                VerificationOutcomeV1::VerifiedExact,
-                None,
-            ),
-            CatalogStrictOracle::NamespacedFailure {
-                owner_id,
-                contract_version,
-                code_id,
-            } => {
-                let failure = NamespacedFailureV1 {
-                    owner_id: owner_id.clone(),
-                    contract_version: contract_version.clone(),
-                    code_id: code_id.clone(),
-                };
-                let outcome = match fixture.record.family {
-                    CatalogFixtureFamily::ResourceExhaustion => {
-                        VerificationOutcomeV1::ResourceLimitExceeded
-                    }
-                    CatalogFixtureFamily::Downgrade => VerificationOutcomeV1::IncompatibleProfile,
-                    _ => VerificationOutcomeV1::InvalidManifest,
-                };
-                (
-                    StrictOracleV1 {
-                        kind: StrictOracleKindV1::Failure,
-                        output: None,
-                        failure: Some(failure.clone()),
-                        divergence: None,
-                    },
-                    outcome,
-                    Some(failure),
-                )
-            }
-        };
+                outcome,
+                Some(failure),
+            )
+        }
+    };
     let (replay_claim, redaction_state) = match fixture.record.family {
         CatalogFixtureFamily::DeletionRedaction => (
             ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
@@ -1328,9 +1317,7 @@ fn bundle_inputs_from_profile(
         if let Some(output) = fixture.strict_oracle.output.as_ref() {
             let output_path =
                 oracle_output_member_path(&fixture.case_id, &fixture.execution_profile_digest);
-            if output
-                != &artifact_descriptor(&output_path, "application/json", source.expected)
-            {
+            if output != &artifact_descriptor(&output_path, "application/json", source.expected) {
                 return Err(
                     "profile strict-oracle descriptor disagrees with public catalog asset".into(),
                 );
@@ -1421,15 +1408,10 @@ fn verify_public_archive(
     release_filename: &str,
 ) -> Result<(), Box<dyn Error>> {
     ConformanceBundleV1::from_canonical_cbor(archive_bytes)
-        .map_err(|error| contextual_error("typed CFB1 verification", error))
+        .map_err(Into::into)
         .and_then(|_| {
-            verify_archive_release_filename(archive_bytes, release_filename)
-                .map_err(|error| contextual_error("independent CFB1 verification", error))
+            verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
         })
-}
-
-fn contextual_error(context: &str, error: impl std::fmt::Display) -> Box<dyn Error> {
-    format!("{context}: {error}").into()
 }
 
 #[cfg(target_os = "linux")]

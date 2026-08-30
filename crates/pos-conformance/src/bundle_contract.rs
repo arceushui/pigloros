@@ -870,18 +870,22 @@ fn decode_role(value: &Value) -> Result<BundleMemberRoleV1, BundleContractErrorV
 ///
 /// Returns a closed bundle error for malformed bytes or any failed archive-contract invariant.
 pub fn verify_archive_independently(archive_bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+    verify_archive_summary_independently(archive_bytes).map(|_| ())
+}
+
+fn verify_archive_summary_independently(
+    archive_bytes: &[u8],
+) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
     if u64::try_from(archive_bytes.len()).unwrap_or(u64::MAX) > MAX_CONFORMANCE_BUNDLE_BYTES_V1 {
         return Err(BundleContractErrorV1::MemberOutOfBounds);
     }
-    decode(archive_bytes).and_then(|value| {
-        array(&value, 4).and_then(|fields| {
-            array(&fields[0], 6).and_then(|manifest| {
-                raw_manifest_header(manifest)
-                    .and_then(|()| raw_archive_body(fields, manifest))
-                    .and_then(|()| raw_archive_signature(fields))
-            })
-        })
-    })
+    let value = decode(archive_bytes)?;
+    let fields = array(&value, 4)?;
+    let manifest = array(&fields[0], 6)?;
+    let mode = raw_manifest_header(manifest)?;
+    let summary = raw_archive_body(fields, manifest, mode)?;
+    raw_archive_signature(fields)?;
+    Ok(summary)
 }
 
 /// Independently validate the complete seven-profile, dual-mode release tree.
@@ -898,14 +902,10 @@ pub fn verify_release_tree_independently(archives: &[&[u8]]) -> Result<(), Bundl
     let mut referenced_providers = BTreeSet::new();
 
     for archive in archives {
-        verify_archive_independently(archive)?;
-        let summary = raw_release_archive_summary(archive)?;
+        let summary = verify_archive_summary_independently(archive)?;
         if registry_bytes
             .as_ref()
             .is_some_and(|expected| expected != &summary.registry_bytes)
-            || registry_providers
-                .as_ref()
-                .is_some_and(|expected| expected != &summary.registry_providers)
         {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
@@ -942,44 +942,6 @@ struct RawReleaseArchiveSummary {
     required_providers: BTreeSet<RawProviderKey>,
 }
 
-fn raw_release_archive_summary(
-    archive_bytes: &[u8],
-) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
-    let archive = decode(archive_bytes)?;
-    let archive_fields = array(&archive, 4)?;
-    let manifest = array(&archive_fields[0], 6)?;
-    let members = array_values(&archive_fields[1])?;
-    let profile_member = raw_member(members, PROFILE_PATH, 2)?;
-    let profile = decode(bytes(&profile_member[1])?)?;
-    let profile_fields = array(&profile, 18)?;
-    let fixtures = array_values(&profile_fields[9])?;
-    let claim_layer = raw_profile_claim_layer(fixtures)?;
-    let binding = array(&profile_fields[8], 2)?;
-    let required_providers = array_values(&binding[1])?
-        .iter()
-        .map(raw_provider_order_key)
-        .collect::<Result<_, _>>()?;
-    let registry_member = raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12)?;
-    let registry_bytes = bytes(&registry_member[1])?.to_vec();
-    let registry = decode(&registry_bytes)?;
-    let registry_fields = array(&registry, 4)?;
-    let registry_providers = array_values(&registry_fields[2])?
-        .iter()
-        .map(|provider| {
-            let entry = array(provider, 7)?;
-            raw_provider_order_key(&Value::Array(entry[..4].to_vec()))
-        })
-        .collect::<Result<_, _>>()?;
-    Ok(RawReleaseArchiveSummary {
-        profile_digest: digest::<32>(&profile_fields[17])?,
-        claim_layer,
-        mode: uint(&manifest[2])?,
-        registry_bytes,
-        registry_providers,
-        required_providers,
-    })
-}
-
 fn raw_profile_claim_layer(fixtures: &[Value]) -> Result<u64, BundleContractErrorV1> {
     let first = fixtures
         .first()
@@ -996,42 +958,35 @@ fn raw_profile_claim_layer(fixtures: &[Value]) -> Result<u64, BundleContractErro
     }
 }
 
-fn raw_manifest_header(manifest: &[Value]) -> Result<(), BundleContractErrorV1> {
-    text(&manifest[0]).and_then(|magic| {
-        uint(&manifest[1]).and_then(|lifecycle| {
-            uint(&manifest[2]).and_then(|mode| {
-                if magic == CONFORMANCE_BUNDLE_MAGIC_V1 && lifecycle == 0 && mode <= 1 {
-                    Ok(())
-                } else {
-                    Err(BundleContractErrorV1::LifecycleInvalid)
-                }
-            })
-        })
-    })
+fn raw_manifest_header(manifest: &[Value]) -> Result<u64, BundleContractErrorV1> {
+    let magic = text(&manifest[0])?;
+    let lifecycle = uint(&manifest[1])?;
+    let mode = uint(&manifest[2])?;
+    if magic == CONFORMANCE_BUNDLE_MAGIC_V1 && lifecycle == 0 && mode <= 1 {
+        Ok(mode)
+    } else {
+        Err(BundleContractErrorV1::LifecycleInvalid)
+    }
 }
 
-fn raw_archive_body(fields: &[Value], manifest: &[Value]) -> Result<(), BundleContractErrorV1> {
-    array_values(&fields[1]).and_then(|members| {
-        array_values(&manifest[4]).and_then(|descriptors| {
-            raw_member_paths_ordered(members).and_then(|members_ordered| {
-                raw_descriptor_paths_ordered(descriptors).and_then(|descriptors_ordered| {
-                    if members.len() != descriptors.len()
-                        || !members_ordered
-                        || !descriptors_ordered
-                    {
-                        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-                    }
-                    members
-                        .iter()
-                        .zip(descriptors)
-                        .try_for_each(|(member, descriptor)| {
-                            raw_member_descriptor_pair(member, descriptor)
-                        })
-                        .and_then(|()| raw_archive_profile(manifest, members))
-                })
-            })
-        })
-    })
+fn raw_archive_body(
+    fields: &[Value],
+    manifest: &[Value],
+    mode: u64,
+) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
+    let members = array_values(&fields[1])?;
+    let descriptors = array_values(&manifest[4])?;
+    if members.len() != descriptors.len()
+        || !raw_member_paths_ordered(members)?
+        || !raw_descriptor_paths_ordered(descriptors)?
+    {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    }
+    members
+        .iter()
+        .zip(descriptors)
+        .try_for_each(|(member, descriptor)| raw_member_descriptor_pair(member, descriptor))?;
+    raw_archive_profile(manifest, members, mode)
 }
 
 fn raw_member_descriptor_pair(
@@ -1074,50 +1029,46 @@ fn raw_member_descriptor_pair(
     }
 }
 
-fn raw_archive_profile(manifest: &[Value], members: &[Value]) -> Result<(), BundleContractErrorV1> {
-    raw_member(members, PROFILE_PATH, 2).and_then(|profile_member| {
-        bytes(&profile_member[1]).and_then(|profile_bytes| {
-            decode(profile_bytes).and_then(|profile| {
-                array(&profile, 18).and_then(|profile_fields| {
-                    raw_cpf1_value(profile_fields).and_then(|()| {
-                        if profile_fields[4] != manifest[1] {
-                            return Err(BundleContractErrorV1::LifecycleInvalid);
-                        }
-                        raw_profile_digest(manifest, profile_fields).and_then(|()| {
-                            uint(&manifest[2]).and_then(|mode| {
-                                raw_registry_and_packages(profile_fields, members, mode).and_then(
-                                    |()| {
-                                        raw_expected_results(
-                                            &manifest[5],
-                                            profile_fields,
-                                            members,
-                                            mode,
-                                        )
-                                    },
-                                )
-                            })
-                        })
-                    })
-                })
-            })
-        })
+fn raw_archive_profile(
+    manifest: &[Value],
+    members: &[Value],
+    mode: u64,
+) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
+    let profile_member = raw_member(members, PROFILE_PATH, 2)?;
+    let profile_bytes = bytes(&profile_member[1])?;
+    let profile = decode(profile_bytes)?;
+    let profile_fields = array(&profile, 18)?;
+    let claim_layer = raw_cpf1_value(profile_fields)?;
+    if profile_fields[4] != manifest[1] {
+        return Err(BundleContractErrorV1::LifecycleInvalid);
+    }
+    let profile_digest = raw_profile_digest(manifest, profile_fields)?;
+    let registry = raw_registry_and_packages(profile_fields, members, mode)?;
+    raw_expected_results(&manifest[5], profile_fields, members, mode)?;
+    Ok(RawReleaseArchiveSummary {
+        profile_digest,
+        claim_layer,
+        mode,
+        registry_bytes: registry.bytes,
+        registry_providers: registry.providers,
+        required_providers: registry.required_providers,
     })
 }
 
-fn raw_profile_digest(manifest: &[Value], profile: &[Value]) -> Result<(), BundleContractErrorV1> {
-    digest::<32>(&profile[17]).and_then(|profile_digest| {
-        length_bound(&Value::Array(profile[..17].to_vec())).and_then(|bound| {
-            digest::<32>(&manifest[3]).and_then(|manifest_digest| {
-                if profile_digest == digest_domain(b"PiglorOS.ConformanceProfile.v1\0", &bound)
-                    && profile_digest == manifest_digest
-                {
-                    Ok(())
-                } else {
-                    Err(BundleContractErrorV1::ProfileInvalid)
-                }
-            })
-        })
-    })
+fn raw_profile_digest(
+    manifest: &[Value],
+    profile: &[Value],
+) -> Result<[u8; 32], BundleContractErrorV1> {
+    let profile_digest = digest::<32>(&profile[17])?;
+    let bound = length_bound(&Value::Array(profile[..17].to_vec()))?;
+    let manifest_digest = digest::<32>(&manifest[3])?;
+    if profile_digest == digest_domain(b"PiglorOS.ConformanceProfile.v1\0", &bound)
+        && profile_digest == manifest_digest
+    {
+        Ok(profile_digest)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
 }
 
 fn raw_archive_signature(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
@@ -1135,16 +1086,17 @@ fn raw_archive_signature(fields: &[Value]) -> Result<(), BundleContractErrorV1> 
         })
     })
 }
-fn raw_cpf1_value(profile_fields: &[Value]) -> Result<(), BundleContractErrorV1> {
-    raw_cpf1_header(profile_fields)
-        .and_then(|()| raw_execution_digests(&profile_fields[7]))
-        .and_then(|()| raw_provider_binding(&profile_fields[8]))
-        .and_then(|()| raw_fixtures(&profile_fields[9]))
-        .and_then(|()| raw_allowed_divergences(&profile_fields[10]))
-        .and_then(|()| raw_profile_fixture_relationships(profile_fields))
-        .and_then(|()| raw_protocol(&profile_fields[11]))
-        .and_then(|()| raw_independence(&profile_fields[12]))
-        .and_then(|()| raw_nullable_digest(&profile_fields[16]))
+fn raw_cpf1_value(profile_fields: &[Value]) -> Result<u64, BundleContractErrorV1> {
+    raw_cpf1_header(profile_fields)?;
+    raw_execution_digests(&profile_fields[7])?;
+    raw_provider_binding(&profile_fields[8])?;
+    raw_fixtures(&profile_fields[9])?;
+    raw_allowed_divergences(&profile_fields[10])?;
+    let claim_layer = raw_profile_fixture_relationships(profile_fields)?;
+    raw_protocol(&profile_fields[11])?;
+    raw_independence(&profile_fields[12])?;
+    raw_nullable_digest(&profile_fields[16])?;
+    Ok(claim_layer)
 }
 
 fn raw_allowed_divergences(value: &Value) -> Result<(), BundleContractErrorV1> {
@@ -1163,7 +1115,7 @@ fn raw_allowed_divergences(value: &Value) -> Result<(), BundleContractErrorV1> {
     })
 }
 
-fn raw_profile_fixture_relationships(profile: &[Value]) -> Result<(), BundleContractErrorV1> {
+fn raw_profile_fixture_relationships(profile: &[Value]) -> Result<u64, BundleContractErrorV1> {
     let binding = array(&profile[8], 2)?;
     let required = array_values(&binding[1])?;
     let executions = array_values(&profile[7])?;
@@ -1194,7 +1146,8 @@ fn raw_profile_fixture_relationships(profile: &[Value]) -> Result<(), BundleCont
         raw_fixture_oracle_relationships(fields, allowed)
             .and_then(|()| raw_fixture_claim_relationship(fields))
             .and_then(|()| raw_fixture_downgrade_relationship(fields))
-    })
+    })?;
+    raw_profile_claim_layer(fixtures)
 }
 
 fn raw_fixture_oracle_relationships(
@@ -1597,66 +1550,63 @@ fn raw_member<'a>(
         .ok_or(BundleContractErrorV1::MemberMissing)
 }
 
+struct RawRegistrySummary {
+    bytes: Vec<u8>,
+    providers: BTreeSet<RawProviderKey>,
+    required_providers: BTreeSet<RawProviderKey>,
+}
+
 fn raw_registry_and_packages(
     profile: &[Value],
     members: &[Value],
     mode: u64,
-) -> Result<(), BundleContractErrorV1> {
-    array(&profile[8], 2).and_then(|binding| {
-        array(&binding[0], 4).and_then(|descriptor| {
-            text(&descriptor[0]).and_then(|registry_path| {
-                if registry_path != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
-                    return Err(BundleContractErrorV1::ProfileInvalid);
-                }
-                raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12).and_then(
-                    |registry_member| {
-                        raw_descriptor_matches_member(descriptor, registry_member).and_then(|()| {
-                            bytes(&registry_member[1]).and_then(|registry_bytes| {
-                                decode(registry_bytes).and_then(|registry| {
-                                    array(&registry, 4).and_then(|fields| {
-                                        raw_registry_fields(fields, binding, profile, members, mode)
-                                    })
-                                })
-                            })
-                        })
-                    },
-                )
-            })
-        })
-    })
+) -> Result<RawRegistrySummary, BundleContractErrorV1> {
+    let binding = array(&profile[8], 2)?;
+    let descriptor = array(&binding[0], 4)?;
+    if text(&descriptor[0])? != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let registry_member = raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12)?;
+    raw_descriptor_matches_member(descriptor, registry_member)?;
+    let registry_bytes = bytes(&registry_member[1])?;
+    let registry = decode(registry_bytes)?;
+    let fields = array(&registry, 4)?;
+    raw_registry_fields(fields, registry_bytes, binding, profile, members, mode)
 }
 
 fn raw_registry_fields(
     fields: &[Value],
+    registry_bytes: &[u8],
     binding: &[Value],
     profile: &[Value],
     members: &[Value],
     mode: u64,
-) -> Result<(), BundleContractErrorV1> {
-    text(&fields[0]).and_then(|magic| {
-        uint(&fields[1]).and_then(|version| {
-            if magic != "FPR1" || version != 1 {
-                return Err(BundleContractErrorV1::ProfileInvalid);
-            }
-            array_values(&fields[2]).and_then(|providers| {
-                raw_provider_entries_ordered(providers).and_then(|ordered| {
-                    if providers.is_empty() || !ordered {
-                        return Err(BundleContractErrorV1::ProfileInvalid);
-                    }
-                    raw_registry_digest(fields)
-                        .and_then(|()| raw_required_providers(&binding[1], providers))
-                        .and_then(|()| raw_declared_packages(members, providers))
-                        .and_then(|()| {
-                            providers
-                                .iter()
-                                .try_for_each(|provider| raw_provider_package(provider, members))
-                        })
-                        .and_then(|()| {
-                            raw_fixture_provider_bindings(profile, providers, members, mode)
-                        })
-                })
-            })
+) -> Result<RawRegistrySummary, BundleContractErrorV1> {
+    if text(&fields[0])? != "FPR1" || uint(&fields[1])? != 1 {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let providers = array_values(&fields[2])?;
+    if providers.is_empty() || !raw_provider_entries_ordered(providers)? {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    raw_registry_digest(fields)?;
+    let required_providers = raw_required_providers(&binding[1], providers)?;
+    raw_declared_packages(members, providers)?;
+    providers
+        .iter()
+        .try_for_each(|provider| raw_provider_package(provider, members))?;
+    raw_fixture_provider_bindings(profile, providers, members, mode)?;
+    let provider_keys = providers
+        .iter()
+        .map(|provider| {
+            let entry = array(provider, 7)?;
+            raw_provider_order_key(&Value::Array(entry[..4].to_vec()))
         })
+        .collect::<Result<_, _>>()?;
+    Ok(RawRegistrySummary {
+        bytes: registry_bytes.to_vec(),
+        providers: provider_keys,
+        required_providers,
     })
 }
 
@@ -1754,20 +1704,25 @@ fn raw_registry_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
     })
 }
 
-fn raw_required_providers(value: &Value, providers: &[Value]) -> Result<(), BundleContractErrorV1> {
+fn raw_required_providers(
+    value: &Value,
+    providers: &[Value],
+) -> Result<BTreeSet<RawProviderKey>, BundleContractErrorV1> {
     array_values(value).and_then(|required| {
-        required.iter().try_for_each(|key| {
-            array(key, 4).and_then(|key_fields| {
-                if providers
-                    .iter()
-                    .any(|provider| array(provider, 7).is_ok_and(|entry| entry[..4] == *key_fields))
-                {
-                    Ok(())
-                } else {
-                    Err(BundleContractErrorV1::ProfileInvalid)
-                }
+        required
+            .iter()
+            .map(|key| {
+                array(key, 4).and_then(|key_fields| {
+                    if providers.iter().any(|provider| {
+                        array(provider, 7).is_ok_and(|entry| entry[..4] == *key_fields)
+                    }) {
+                        raw_provider_order_key(key)
+                    } else {
+                        Err(BundleContractErrorV1::ProfileInvalid)
+                    }
+                })
             })
-        })
+            .collect()
     })
 }
 
