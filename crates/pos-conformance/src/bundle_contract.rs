@@ -1267,7 +1267,7 @@ fn raw_archive_profile(
     let profile_bytes = bytes(&profile_member[1])?;
     let profile = decode(profile_bytes)?;
     let profile_fields = array(&profile, 18)?;
-    let claim_layer = raw_cpf1_value(profile_fields)?;
+    let raw_profile = raw_cpf1_value(profile_fields)?;
     if profile_fields[4] != manifest[1] {
         return Err(BundleContractErrorV1::LifecycleInvalid);
     }
@@ -1275,10 +1275,10 @@ fn raw_archive_profile(
     raw_profile_support_members(profile_fields, members)?;
     let registry = raw_registry_and_packages(profile_fields, members, mode)?;
     let expected_results = raw_expected_results(&manifest[5], profile_fields, members, mode)?;
-    raw_member_closure(profile_fields, &manifest[5], members)?;
+    raw_member_closure(&raw_profile.declared_paths, &manifest[5], members)?;
     Ok(RawReleaseArchiveSummary {
         profile_digest,
-        claim_layer,
+        claim_layer: raw_profile.claim_layer,
         mode,
         registry_bytes: registry.bytes,
         registry_providers: registry.providers,
@@ -1337,7 +1337,7 @@ fn raw_fixture_provenance_members(
 }
 
 fn raw_member_closure(
-    profile: &[Value],
+    profile_paths: &BTreeSet<String>,
     expected: &Value,
     members: &[Value],
 ) -> Result<(), BundleContractErrorV1> {
@@ -1355,20 +1355,7 @@ fn raw_member_closure(
     .into_iter()
     .map(str::to_owned)
     .collect::<BTreeSet<_>>();
-    let binding = array(&profile[8], 2)?;
-    declared.insert(raw_descriptor_path(&binding[0])?.to_owned());
-    for fixture in array_values(&profile[9])? {
-        let fields = array(fixture, 24)?;
-        declared.insert(raw_descriptor_path(&fields[8])?.to_owned());
-        declared.insert(raw_descriptor_path(&fields[9])?.to_owned());
-        for auxiliary in array_values(&fields[10])? {
-            declared.insert(raw_descriptor_path(auxiliary)?.to_owned());
-        }
-        let oracle = array(&fields[11], 4)?;
-        if uint(&oracle[0])? == 0 {
-            declared.insert(raw_descriptor_path(&oracle[1])?.to_owned());
-        }
-    }
+    declared.extend(profile_paths.iter().cloned());
     for record in array_values(expected)? {
         declared.insert(text(&array(record, 6)?[4])?.to_owned());
     }
@@ -1443,17 +1430,26 @@ fn raw_archive_signature(fields: &[Value]) -> Result<(), BundleContractErrorV1> 
         })
     })
 }
-fn raw_cpf1_value(profile_fields: &[Value]) -> Result<u64, BundleContractErrorV1> {
+struct RawCpf1Summary {
+    claim_layer: u64,
+    declared_paths: BTreeSet<String>,
+}
+
+fn raw_cpf1_value(profile_fields: &[Value]) -> Result<RawCpf1Summary, BundleContractErrorV1> {
     raw_cpf1_header(profile_fields)?;
     raw_execution_digests(&profile_fields[7])?;
-    raw_provider_binding(&profile_fields[8])?;
+    let registry_path = raw_provider_binding(&profile_fields[8])?;
     let deterministic_caps = raw_protocol(&profile_fields[11])?;
-    raw_fixtures(&profile_fields[9], &deterministic_caps)?;
+    let mut declared_paths = raw_fixtures(&profile_fields[9], &deterministic_caps)?;
+    declared_paths.insert(registry_path);
     raw_allowed_divergences(&profile_fields[10])?;
     let claim_layer = raw_profile_fixture_relationships(profile_fields)?;
     raw_independence(&profile_fields[12])?;
     raw_nullable_digest(&profile_fields[16])?;
-    Ok(claim_layer)
+    Ok(RawCpf1Summary {
+        claim_layer,
+        declared_paths,
+    })
 }
 
 fn raw_allowed_divergences(value: &Value) -> Result<(), BundleContractErrorV1> {
@@ -1655,22 +1651,28 @@ fn raw_execution_digests(value: &Value) -> Result<(), BundleContractErrorV1> {
     })
 }
 
-fn raw_provider_binding(value: &Value) -> Result<(), BundleContractErrorV1> {
+fn raw_provider_binding(value: &Value) -> Result<String, BundleContractErrorV1> {
     array(value, 2).and_then(|binding| {
-        raw_artifact(&binding[0]).and_then(|()| {
+        raw_artifact(&binding[0]).and_then(|registry| {
             array_values(&binding[1]).and_then(|provider_keys| {
                 raw_provider_keys_ordered(provider_keys).and_then(|ordered| {
                     if provider_keys.is_empty() || !ordered {
                         return Err(BundleContractErrorV1::ProfileInvalid);
                     }
-                    provider_keys.iter().try_for_each(raw_provider_key)
+                    provider_keys
+                        .iter()
+                        .try_for_each(raw_provider_key)
+                        .map(|()| registry.path.to_owned())
                 })
             })
         })
     })
 }
 
-fn raw_fixtures(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), BundleContractErrorV1> {
+fn raw_fixtures(
+    value: &Value,
+    deterministic_caps: &[u64; 8],
+) -> Result<BTreeSet<String>, BundleContractErrorV1> {
     array_values(value).and_then(|fixtures| {
         raw_fixture_ordered(fixtures).and_then(|ordered| {
             if fixtures.is_empty() || fixtures.len() > 65_536 || !ordered {
@@ -1678,12 +1680,18 @@ fn raw_fixtures(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), Bund
             }
             fixtures
                 .iter()
-                .try_for_each(|fixture| raw_fixture(fixture, deterministic_caps))
+                .try_fold(BTreeSet::new(), |mut paths, fixture| {
+                    paths.extend(raw_fixture(fixture, deterministic_caps)?);
+                    Ok(paths)
+                })
         })
     })
 }
 
-fn raw_fixture(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), BundleContractErrorV1> {
+fn raw_fixture(
+    value: &Value,
+    deterministic_caps: &[u64; 8],
+) -> Result<BTreeSet<String>, BundleContractErrorV1> {
     array(value, 24).and_then(|fields| {
         raw_capabilities(&fields[18]).and_then(|network_allowed| {
             text(&fields[0]).and_then(|case_id| {
@@ -1696,9 +1704,6 @@ fn raw_fixture(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), Bundl
                                 || adapter > 2
                                 || !matches!(&fields[1], Value::Bool(_))
                                 || digest::<32>(&fields[6]).is_err()
-                                || raw_artifact(&fields[8]).is_err()
-                                || raw_artifact(&fields[9]).is_err()
-                                || raw_oracle(&fields[11]).is_err()
                                 || raw_budget(&fields[16], deterministic_caps).is_err()
                                 || raw_watchdog(&fields[17]).is_err()
                             {
@@ -1716,7 +1721,7 @@ fn raw_fixture(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), Bundl
 fn raw_fixture_members(
     fields: &[Value],
     network_allowed: bool,
-) -> Result<(), BundleContractErrorV1> {
+) -> Result<BTreeSet<String>, BundleContractErrorV1> {
     raw_provider_key(&fields[4])
         .and_then(|()| array_values(&fields[7]))
         .and_then(|modes| {
@@ -1728,12 +1733,12 @@ fn raw_fixture_members(
             })
         })
         .and_then(|()| raw_fixture_artifacts(fields))
-        .and_then(|()| {
+        .and_then(|declared_paths| {
             uint(&fields[12]).and_then(|verification| {
                 uint(&fields[14]).and_then(|replay| {
                     uint(&fields[15]).and_then(|redaction| {
                         if verification <= 5 && replay <= 4 && redaction <= 3 {
-                            Ok(())
+                            Ok(declared_paths)
                         } else {
                             Err(BundleContractErrorV1::ProfileInvalid)
                         }
@@ -1741,17 +1746,17 @@ fn raw_fixture_members(
                 })
             })
         })
-        .and_then(|()| raw_nullable_failure(&fields[13]))
-        .and_then(|()| raw_provenance(&fields[21]))
-        .and_then(|()| raw_nullable_digest(&fields[19]))
-        .and_then(|()| raw_nullable_digest(&fields[20]))
-        .and_then(|()| raw_transition(&fields[22]))
-        .and_then(|()| {
+        .and_then(|paths| raw_nullable_failure(&fields[13]).map(|()| paths))
+        .and_then(|paths| raw_provenance(&fields[21]).map(|()| paths))
+        .and_then(|paths| raw_nullable_digest(&fields[19]).map(|()| paths))
+        .and_then(|paths| raw_nullable_digest(&fields[20]).map(|()| paths))
+        .and_then(|paths| raw_transition(&fields[22]).map(|()| paths))
+        .and_then(|paths| {
             length_bound(&Value::Array(fields[..23].to_vec())).and_then(|bound| {
                 digest::<32>(&fields[23]).and_then(|recorded| {
                     let computed = digest_domain(b"PiglorOS.Conformance.Fixture.v1\0", &bound);
                     if computed == recorded {
-                        Ok(())
+                        Ok(paths)
                     } else {
                         Err(BundleContractErrorV1::ProfileInvalid)
                     }
@@ -1760,25 +1765,25 @@ fn raw_fixture_members(
         })
 }
 
-fn raw_fixture_artifacts(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+fn raw_fixture_artifacts(fields: &[Value]) -> Result<BTreeSet<String>, BundleContractErrorV1> {
     array_values(&fields[10]).and_then(|auxiliary| {
         if auxiliary.len() > 64 || !raw_descriptor_paths_ordered(auxiliary)? {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
-        auxiliary.iter().try_for_each(raw_artifact)?;
         let mut paths = [&fields[8], &fields[9]]
             .into_iter()
             .chain(auxiliary)
-            .map(|artifact| array(artifact, 4).and_then(|descriptor| text(&descriptor[0])))
+            .map(raw_artifact)
             .collect::<Result<Vec<_>, _>>()?;
-        let [oracle_kind, oracle_output, ..] = array(&fields[11], 4)? else {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        };
-        if uint(oracle_kind)? == 0 {
-            paths.push(text(&array(oracle_output, 4)?[0])?);
+        if let RawOracle::Output(output) = raw_oracle(&fields[11])? {
+            paths.push(output);
         }
-        if paths.iter().collect::<BTreeSet<_>>().len() == paths.len() {
-            Ok(())
+        let declared = paths
+            .iter()
+            .map(|artifact| artifact.path.to_owned())
+            .collect::<BTreeSet<_>>();
+        if declared.len() == paths.len() {
+            Ok(declared)
         } else {
             Err(BundleContractErrorV1::ProfileInvalid)
         }
@@ -1893,48 +1898,21 @@ fn raw_protocol(value: &Value) -> Result<[u64; 8], BundleContractErrorV1> {
                             1_000_000_000,
                             86_400_000_000_000,
                         ];
+                        let values = caps.iter().map(uint).collect::<Result<Vec<_>, _>>()?;
                         let valid =
-                            caps.iter()
+                            values
+                                .iter()
                                 .zip(maxima)
                                 .enumerate()
-                                .all(|(index, (value, maximum))| {
-                                    uint(value)
-                                        .is_ok_and(|cap| cap <= maximum && (index == 9 || cap > 0))
+                                .all(|(index, (cap, maximum))| {
+                                    *cap <= maximum && (index == 9 || *cap > 0)
                                 });
                         if !valid {
                             return Err(BundleContractErrorV1::ProfileInvalid);
                         }
-                        let (
-                            Ok(memory),
-                            Ok(cpu),
-                            Ok(host_calls),
-                            Ok(events),
-                            Ok(output),
-                            Ok(storage),
-                            Ok(steps),
-                            Ok(simulation_time),
-                        ) = (
-                            uint(&caps[10]),
-                            uint(&caps[11]),
-                            uint(&caps[12]),
-                            uint(&caps[13]),
-                            uint(&caps[14]),
-                            uint(&caps[15]),
-                            uint(&caps[16]),
-                            uint(&caps[17]),
-                        )
-                        else {
-                            return Err(BundleContractErrorV1::ProfileInvalid);
-                        };
                         Ok([
-                            memory,
-                            cpu,
-                            host_calls,
-                            events,
-                            output,
-                            storage,
-                            steps,
-                            simulation_time,
+                            values[10], values[11], values[12], values[13], values[14], values[15],
+                            values[16], values[17],
                         ])
                     })
                 })
@@ -2101,7 +2079,7 @@ fn raw_fixture_schema_binding(
 }
 
 fn raw_bound_artifact_any(value: &Value, members: &[Value]) -> Result<(), BundleContractErrorV1> {
-    raw_artifact(value).and_then(|()| {
+    raw_artifact(value).and_then(|_| {
         let descriptor = array(value, 4)?;
         let path = text(&descriptor[0])?;
         let member = members
@@ -2184,7 +2162,7 @@ fn raw_provider_package(provider: &Value, members: &[Value]) -> Result<(), Bundl
                     if claim_layer > 6 || adapter > 2 {
                         return Err(BundleContractErrorV1::ProfileInvalid);
                     }
-                    raw_artifact(&entry[6]).and_then(|()| {
+                    raw_artifact(&entry[6]).and_then(|_| {
                         array(&entry[6], 4).and_then(|descriptor| {
                             text(&descriptor[0]).and_then(|path| {
                                 raw_member(members, path, 13).and_then(|package_member| {
@@ -2289,7 +2267,7 @@ fn raw_bound_artifact(
     members: &[Value],
     role: u64,
 ) -> Result<(), BundleContractErrorV1> {
-    raw_artifact(value).and_then(|()| {
+    raw_artifact(value).and_then(|_| {
         array(value, 4).and_then(|descriptor| {
             text(&descriptor[0]).and_then(|path| {
                 raw_member(members, path, role)
@@ -2616,7 +2594,7 @@ fn raw_provider_key(value: &Value) -> Result<(), BundleContractErrorV1> {
     }
 }
 
-fn raw_artifact(value: &Value) -> Result<(), BundleContractErrorV1> {
+fn raw_artifact(value: &Value) -> Result<RawArtifact<'_>, BundleContractErrorV1> {
     let Ok(fields) = array(value, 4) else {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     };
@@ -2633,7 +2611,7 @@ fn raw_artifact(value: &Value) -> Result<(), BundleContractErrorV1> {
         && (1..=64 * 1024 * 1024).contains(&byte_length)
         && digest != [0; 32]
     {
-        Ok(())
+        Ok(RawArtifact { path: member_path })
     } else {
         Err(BundleContractErrorV1::ProfileInvalid)
     }
@@ -2721,16 +2699,36 @@ fn raw_semver_identifiers(value: &str, no_leading_zero: bool) -> bool {
         })
 }
 
-type RawValueValidator = fn(&Value) -> Result<(), BundleContractErrorV1>;
+struct RawArtifact<'a> {
+    path: &'a str,
+}
 
-fn raw_oracle(value: &Value) -> Result<(), BundleContractErrorV1> {
+enum RawOracle<'a> {
+    Output(RawArtifact<'a>),
+    Failure,
+    Divergence,
+}
+
+#[derive(Clone, Copy)]
+enum RawOracleKind {
+    Output,
+    Failure,
+    Divergence,
+}
+
+fn raw_oracle(value: &Value) -> Result<RawOracle<'_>, BundleContractErrorV1> {
     array(value, 4).and_then(|fields| {
         uint(&fields[0]).and_then(|kind| {
-            let (active, validate): (usize, RawValueValidator) = match kind {
-                0 => (1, raw_artifact),
-                1 => (2, raw_nullable_failure),
-                2 => (3, raw_divergence),
+            let kind = match kind {
+                0 => RawOracleKind::Output,
+                1 => RawOracleKind::Failure,
+                2 => RawOracleKind::Divergence,
                 _ => return Err(BundleContractErrorV1::ProfileInvalid),
+            };
+            let active = match kind {
+                RawOracleKind::Output => 1,
+                RawOracleKind::Failure => 2,
+                RawOracleKind::Divergence => 3,
             };
             if fields
                 .iter()
@@ -2740,7 +2738,15 @@ fn raw_oracle(value: &Value) -> Result<(), BundleContractErrorV1> {
             {
                 return Err(BundleContractErrorV1::ProfileInvalid);
             }
-            validate(&fields[active])
+            match kind {
+                RawOracleKind::Output => raw_artifact(&fields[active]).map(RawOracle::Output),
+                RawOracleKind::Failure => {
+                    raw_nullable_failure(&fields[active]).map(|()| RawOracle::Failure)
+                }
+                RawOracleKind::Divergence => {
+                    raw_divergence(&fields[active]).map(|()| RawOracle::Divergence)
+                }
+            }
         })
     })
 }
