@@ -326,6 +326,26 @@ fn current_profile(
     Ok(profile)
 }
 
+fn current_provenance_members() -> [BundleMemberV1; 3] {
+    [
+        BundleMemberV1::supporting(
+            "support/source-provenance.json",
+            SOURCE_PROVENANCE_BYTES.to_vec(),
+            BundleMemberRoleV1::Provenance,
+        ),
+        BundleMemberV1::supporting(
+            "support/build-provenance.json",
+            BUILD_PROVENANCE_BYTES.to_vec(),
+            BundleMemberRoleV1::Provenance,
+        ),
+        BundleMemberV1::supporting(
+            "support/publication-review.json",
+            PUBLICATION_REVIEW_BYTES.to_vec(),
+            BundleMemberRoleV1::Provenance,
+        ),
+    ]
+}
+
 fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> {
     let ProviderContractInputs {
         family_schemas,
@@ -398,21 +418,6 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
             BundleMemberRoleV1::Sbom,
         ),
         BundleMemberV1::supporting(
-            "support/source-provenance.json",
-            SOURCE_PROVENANCE_BYTES.to_vec(),
-            BundleMemberRoleV1::Provenance,
-        ),
-        BundleMemberV1::supporting(
-            "support/build-provenance.json",
-            BUILD_PROVENANCE_BYTES.to_vec(),
-            BundleMemberRoleV1::Provenance,
-        ),
-        BundleMemberV1::supporting(
-            "support/publication-review.json",
-            PUBLICATION_REVIEW_BYTES.to_vec(),
-            BundleMemberRoleV1::Provenance,
-        ),
-        BundleMemberV1::supporting(
             "support/limitations.md",
             LIMITATIONS_BYTES.to_vec(),
             BundleMemberRoleV1::Limitations,
@@ -427,6 +432,7 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         BundleMemberV1::fixture_provider_package(package_path, package_bytes),
         BundleMemberV1::fixture_provider_registry(registry_bytes),
     ]);
+    members.extend(current_provenance_members());
     Ok(CurrentBundleInputs {
         profile,
         members,

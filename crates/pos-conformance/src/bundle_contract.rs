@@ -874,6 +874,7 @@ fn validate_fixture_members(
                     fixture
                         .auxiliary
                         .iter()
+                        .chain(fixture.strict_oracle.output.iter())
                         .find(|artifact| {
                             (
                                 artifact.member_path.as_str(),
@@ -2403,17 +2404,23 @@ fn raw_expected_fixture_bound(profile: &[Value], expected: &[Value], member_size
             text(&fields[0]).ok() == text(&expected[0]).ok()
                 && uint(&fields[2]).ok() == uint(&expected[1]).ok()
                 && digest::<32>(&fields[6]).ok() == digest::<32>(&expected[2]).ok()
-                && array_values(&fields[10]).is_ok_and(|artifacts| {
-                    artifacts.iter().any(|artifact| {
-                        array(artifact, 4).is_ok_and(|descriptor| {
-                            text(&descriptor[0]).ok() == text(&expected[4]).ok()
-                                && digest::<32>(&descriptor[3]).ok()
-                                    == digest::<32>(&expected[5]).ok()
-                                && uint(&descriptor[2]).ok() == Some(size)
-                        })
-                    })
-                })
+                && (array_values(&fields[10]).is_ok_and(|artifacts| {
+                    artifacts
+                        .iter()
+                        .any(|artifact| raw_expected_descriptor_bound(artifact, expected, size))
+                }) || array(&fields[11], 4).is_ok_and(|oracle| {
+                    uint(&oracle[0]).is_ok_and(|kind| kind == 0)
+                        && raw_expected_descriptor_bound(&oracle[1], expected, size)
+                }))
         })
+    })
+}
+
+fn raw_expected_descriptor_bound(artifact: &Value, expected: &[Value], size: u64) -> bool {
+    array(artifact, 4).is_ok_and(|descriptor| {
+        text(&descriptor[0]).ok() == text(&expected[4]).ok()
+            && digest::<32>(&descriptor[3]).ok() == digest::<32>(&expected[5]).ok()
+            && uint(&descriptor[2]).ok() == Some(size)
     })
 }
 

@@ -1037,6 +1037,11 @@ fn fixture_descriptor_from_record(
     let oracle_output =
         artifact_descriptor(&oracle_output_path, "application/json", fixture.oracle);
     let expectation = fixture_expectation(fixture, &oracle_output);
+    let auxiliary = if expectation.strict_oracle.output.is_some() {
+        vec![evidence]
+    } else {
+        vec![evidence, oracle_output]
+    };
     let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
     let mut descriptor = FixtureDescriptorV1 {
         case_id: fixture.record.case_id.clone(),
@@ -1053,7 +1058,7 @@ fn fixture_descriptor_from_record(
             fixture.schema,
         ),
         payload: artifact_descriptor(&payload_path, "application/json", fixture.input),
-        auxiliary: vec![evidence, oracle_output],
+        auxiliary,
         strict_oracle: expectation.strict_oracle,
         expected_verification_outcome: expectation.verification_outcome,
         expected_verification_error: expectation.verification_error,
@@ -1309,11 +1314,14 @@ fn bundle_inputs_from_profile(
         );
         let evidence_path =
             evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
-        let expected_auxiliary = [
-            artifact_descriptor(&evidence_path, "application/json", source.expected),
-            artifact_descriptor(&path, "application/json", source.oracle),
-        ];
-        if fixture.auxiliary.as_slice() != expected_auxiliary {
+        let evidence = artifact_descriptor(&evidence_path, "application/json", source.expected);
+        let oracle = artifact_descriptor(&path, "application/json", source.oracle);
+        let expected_auxiliary = if fixture.strict_oracle.output.is_some() {
+            vec![evidence]
+        } else {
+            vec![evidence, oracle.clone()]
+        };
+        if fixture.auxiliary != expected_auxiliary {
             return Err(
                 "profile evidence and oracle descriptors disagree with public catalog assets"
                     .into(),
@@ -1334,7 +1342,7 @@ fn bundle_inputs_from_profile(
         });
         members.push(member);
         if let Some(output) = fixture.strict_oracle.output.as_ref() {
-            if output != &artifact_descriptor(&path, "application/json", source.oracle) {
+            if output != &oracle {
                 return Err(
                     "profile strict-oracle descriptor disagrees with public catalog asset".into(),
                 );
