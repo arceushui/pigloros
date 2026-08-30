@@ -3313,17 +3313,14 @@ fn lifecycle_public_edges_and_terminality_are_closed() {
     assert!(ErasureLifecycleV1::PartialFailure.is_attempt_terminal());
     assert!(ErasureLifecycleV1::Rejected.is_terminal());
     assert!(!ErasureLifecycleV1::Authorized.is_terminal());
+    assert!(ErasureLifecycleV1::Submitted.permits(ErasureLifecycleV1::Rejected));
+    assert!(!ErasureLifecycleV1::Complete.permits(ErasureLifecycleV1::Authorized));
+    assert!(ErasureLifecycleV1::PartialFailure.permits(ErasureLifecycleV1::PartialFailure));
+    assert!(ErasureLifecycleV1::PartialFailure.permits(ErasureLifecycleV1::Complete));
 }
 #[test]
 fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
     let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
-    assert!(submitted
-        .lifecycle()
-        .permits(ErasureLifecycleV1::Authorized));
-    assert!(submitted.lifecycle().permits(ErasureLifecycleV1::Rejected));
-    assert!(!ErasureLifecycleV1::Complete.permits(ErasureLifecycleV1::Authorized));
-    assert!(ErasureLifecycleV1::PartialFailure.permits(ErasureLifecycleV1::PartialFailure));
-    assert!(ErasureLifecycleV1::PartialFailure.permits(ErasureLifecycleV1::Complete));
     assert_eq!(
         submitted.transition(change(
             ErasureLifecycleV1::Submitted,
