@@ -3787,6 +3787,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                             freeze_provenance: None,
                             freeze_admission: None,
                             dispatch_provenance: None,
+                            supporting_records: Default::default(),
                         };
                         self.commit(record).map(|()| state)
                     })
