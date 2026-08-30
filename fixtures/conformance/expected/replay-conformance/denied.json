@@ -3,12 +3,7 @@
   "case_id": "replay-conformance-denied",
   "family": "denied",
   "input_blake3_digest": "1eb932e94cbac82d535e120a19753bf9a4a452cbea4cab41157d636ec93f3ebc",
-  "result": "rejected",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.replay-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "capability-denied"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

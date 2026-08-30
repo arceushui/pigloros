@@ -3,12 +3,7 @@
   "case_id": "plugin-conformance-denied",
   "family": "denied",
   "input_blake3_digest": "ccbb3b02a31477d3d5d766e599587ef0b37a201f26186c82c8450c5720463755",
-  "result": "rejected",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.plugin-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "capability-denied"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

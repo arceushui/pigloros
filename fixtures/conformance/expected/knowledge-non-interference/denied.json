@@ -3,12 +3,7 @@
   "case_id": "knowledge-non-interference-denied",
   "family": "denied",
   "input_blake3_digest": "d85585090c3d50e4bf76315334758d9fd8344c585050e7b58958cd2a993fedf7",
-  "result": "rejected",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.knowledge-non-interference",
-    "contract_version": "1.0.0",
-    "code_id": "capability-denied"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

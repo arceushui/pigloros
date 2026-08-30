@@ -3,12 +3,7 @@
   "case_id": "empirical-evaluation-denied",
   "family": "denied",
   "input_blake3_digest": "cfd249c91da3231629fad53e42d53a258120c78432166f6dc1d37e836de71826",
-  "result": "rejected",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.empirical-evaluation",
-    "contract_version": "1.0.0",
-    "code_id": "capability-denied"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

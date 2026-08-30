@@ -12,7 +12,8 @@
       "family": "positive",
       "schema": "providers/empirical-evaluation/schemas/positive.schema.json",
       "input": "inputs/empirical-evaluation/positive.json",
-      "expected": "expected/empirical-evaluation/positive.json"
+      "expected": "expected/empirical-evaluation/positive.json",
+      "oracle": "oracles/empirical-evaluation/positive.json"
     },
     {
       "claim_layer": "empirical-evaluation",
@@ -20,7 +21,8 @@
       "family": "denied",
       "schema": "providers/empirical-evaluation/schemas/denied.schema.json",
       "input": "inputs/empirical-evaluation/denied.json",
-      "expected": "expected/empirical-evaluation/denied.json"
+      "expected": "expected/empirical-evaluation/denied.json",
+      "oracle": "oracles/empirical-evaluation/denied.json"
     },
     {
       "claim_layer": "empirical-evaluation",
@@ -28,7 +30,8 @@
       "family": "malformed",
       "schema": "providers/empirical-evaluation/schemas/malformed.schema.json",
       "input": "inputs/empirical-evaluation/malformed.json",
-      "expected": "expected/empirical-evaluation/malformed.json"
+      "expected": "expected/empirical-evaluation/malformed.json",
+      "oracle": "oracles/empirical-evaluation/malformed.json"
     },
     {
       "claim_layer": "empirical-evaluation",
@@ -36,7 +39,8 @@
       "family": "resource-exhaustion",
       "schema": "providers/empirical-evaluation/schemas/resource-exhaustion.schema.json",
       "input": "inputs/empirical-evaluation/resource-exhaustion.json",
-      "expected": "expected/empirical-evaluation/resource-exhaustion.json"
+      "expected": "expected/empirical-evaluation/resource-exhaustion.json",
+      "oracle": "oracles/empirical-evaluation/resource-exhaustion.json"
     },
     {
       "claim_layer": "empirical-evaluation",
@@ -44,7 +48,8 @@
       "family": "deletion-redaction",
       "schema": "providers/empirical-evaluation/schemas/deletion-redaction.schema.json",
       "input": "inputs/empirical-evaluation/deletion-redaction.json",
-      "expected": "expected/empirical-evaluation/deletion-redaction.json"
+      "expected": "expected/empirical-evaluation/deletion-redaction.json",
+      "oracle": "oracles/empirical-evaluation/deletion-redaction.json"
     },
     {
       "claim_layer": "empirical-evaluation",
@@ -52,7 +57,8 @@
       "family": "downgrade",
       "schema": "providers/empirical-evaluation/schemas/downgrade.schema.json",
       "input": "inputs/empirical-evaluation/downgrade.json",
-      "expected": "expected/empirical-evaluation/downgrade.json"
+      "expected": "expected/empirical-evaluation/downgrade.json",
+      "oracle": "oracles/empirical-evaluation/downgrade.json"
     },
     {
       "claim_layer": "empirical-evaluation",
@@ -60,7 +66,8 @@
       "family": "independent-evaluation",
       "schema": "providers/empirical-evaluation/schemas/independent-evaluation.schema.json",
       "input": "inputs/empirical-evaluation/independent-evaluation.json",
-      "expected": "expected/empirical-evaluation/independent-evaluation.json"
+      "expected": "expected/empirical-evaluation/independent-evaluation.json",
+      "oracle": "oracles/empirical-evaluation/independent-evaluation.json"
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",

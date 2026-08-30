@@ -3,9 +3,7 @@
   "case_id": "metric-conformance-independent-evaluation",
   "family": "independent-evaluation",
   "input_blake3_digest": "a9af3dd280d9f44494fa1c614ebdd2af7acd7ce6aeec39093228cb8bb7052fad",
-  "result": "corroborated",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

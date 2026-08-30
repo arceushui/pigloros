@@ -3,12 +3,7 @@
   "case_id": "replay-conformance-downgrade",
   "family": "downgrade",
   "input_blake3_digest": "c3202fa4681f1d3ba236923445576040be135e6e0deb14e31f150add826419e4",
-  "result": "not-authorized",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.replay-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "incompatible-contract"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

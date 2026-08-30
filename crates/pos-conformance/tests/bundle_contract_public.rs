@@ -44,7 +44,9 @@ const CURRENT_SCHEMA_BYTES: [&[u8]; 7] = [
 const LICENCE_BYTES: &[u8] = b"MIT\n";
 const NOTICE_BYTES: &[u8] = b"public notice\n";
 const SBOM_BYTES: &[u8] = br#"{"bomFormat":"CycloneDX"}"#;
-const PROVENANCE_BYTES: &[u8] = br#"{"source":"public"}"#;
+const SOURCE_PROVENANCE_BYTES: &[u8] = br#"{"source":"public"}"#;
+const BUILD_PROVENANCE_BYTES: &[u8] = br#"{"builder":"public"}"#;
+const PUBLICATION_REVIEW_BYTES: &[u8] = br#"{"review_status":"pending"}"#;
 const LIMITATIONS_BYTES: &[u8] = b"# Limitations\n";
 const NORMATIVE_BYTES: &[u8] = b"normative contract";
 const MATRIX_BYTES: &[u8] = b"execution matrix";
@@ -122,9 +124,9 @@ fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
         notices_descriptor: artifact("support/NOTICE", "text/plain", NOTICE_BYTES)?,
         sbom_descriptor: artifact("support/sbom.json", "application/json", SBOM_BYTES)?,
         source_provenance_descriptor: artifact(
-            "support/provenance.json",
+            "support/source-provenance.json",
             "application/json",
-            PROVENANCE_BYTES,
+            SOURCE_PROVENANCE_BYTES,
         )?,
         limitations_descriptor: artifact(
             "support/limitations.md",
@@ -234,9 +236,9 @@ fn current_fixtures(
                     licence_id: "MIT".to_owned(),
                     notices_digest: *blake3::hash(NOTICE_BYTES).as_bytes(),
                     sbom_digest: *blake3::hash(SBOM_BYTES).as_bytes(),
-                    source_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
-                    build_digest: digest(41),
-                    publication_review_digest: digest(42),
+                    source_digest: *blake3::hash(SOURCE_PROVENANCE_BYTES).as_bytes(),
+                    build_digest: *blake3::hash(BUILD_PROVENANCE_BYTES).as_bytes(),
+                    publication_review_digest: *blake3::hash(PUBLICATION_REVIEW_BYTES).as_bytes(),
                     limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
                 },
                 transition: None,
@@ -316,7 +318,7 @@ fn current_profile(
         },
         fixture_contract_policy_digest: *blake3::hash(PROFILE_SCHEMA_BYTES).as_bytes(),
         limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
-        provenance_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
+        provenance_digest: *blake3::hash(PUBLICATION_REVIEW_BYTES).as_bytes(),
         previous_profile_digest: None,
         profile_digest: [0; 32],
     };
@@ -396,8 +398,18 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
             BundleMemberRoleV1::Sbom,
         ),
         BundleMemberV1::supporting(
-            "support/provenance.json",
-            PROVENANCE_BYTES.to_vec(),
+            "support/source-provenance.json",
+            SOURCE_PROVENANCE_BYTES.to_vec(),
+            BundleMemberRoleV1::Provenance,
+        ),
+        BundleMemberV1::supporting(
+            "support/build-provenance.json",
+            BUILD_PROVENANCE_BYTES.to_vec(),
+            BundleMemberRoleV1::Provenance,
+        ),
+        BundleMemberV1::supporting(
+            "support/publication-review.json",
+            PUBLICATION_REVIEW_BYTES.to_vec(),
             BundleMemberRoleV1::Provenance,
         ),
         BundleMemberV1::supporting(
@@ -1832,7 +1844,9 @@ fn materialize_rejects_each_missing_provider_support_member() -> TestResult {
         "support/LICENSE",
         "support/NOTICE",
         "support/sbom.json",
-        "support/provenance.json",
+        "support/source-provenance.json",
+        "support/build-provenance.json",
+        "support/publication-review.json",
         "support/limitations.md",
     ];
     for path in paths {
@@ -1885,7 +1899,9 @@ fn independent_verifier_rejects_provider_packages_with_missing_support_members()
         "support/LICENSE",
         "support/NOTICE",
         "support/sbom.json",
-        "support/provenance.json",
+        "support/source-provenance.json",
+        "support/build-provenance.json",
+        "support/publication-review.json",
         "support/limitations.md",
     ] {
         let archive =
@@ -2054,7 +2070,7 @@ fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
         41..=48 => mutate_profile_fixture_tail_fields(profile, mutation),
         49..=73 => mutate_profile_text_contracts(profile, mutation),
         74..=90 => mutate_profile_nested_contracts(profile, mutation),
-        91..=101 => mutate_profile_order_and_shape_contracts(profile, mutation),
+        91..=102 => mutate_profile_order_and_shape_contracts(profile, mutation),
         _ => Err(format!("unsupported profile mutation {mutation}").into()),
     }
 }
@@ -2145,6 +2161,16 @@ fn mutate_profile_order_and_shape_contracts(profile: &mut [Value], mutation: usi
             3,
             Value::Text("é.0.0".to_owned()),
             "non-ASCII semantic version",
+        ),
+        102 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                21,
+                "fixture provenance",
+            )?,
+            3,
+            Value::Bytes(vec![99; 32]),
+            "fixture source provenance digest",
         ),
         _ => Err(format!("unsupported order or shape mutation {mutation}").into()),
     }
@@ -2623,7 +2649,7 @@ fn assert_archive_rejected_by_both(archive: &[u8], label: &str) {
 
 #[test]
 fn independent_verifier_rejects_each_current_profile_contract_mutation() -> TestResult {
-    for mutation in 0..102 {
+    for mutation in 0..103 {
         let archive = mutate_profile_archive(|profile| mutate_profile_fields(profile, mutation))?;
         if mutation == 4 {
             assert_eq!(

@@ -3,9 +3,7 @@
   "case_id": "knowledge-non-interference-positive",
   "family": "positive",
   "input_blake3_digest": "cdd20c6c9bacddf815f6b051eb289e3eaa9c730b76f1facfc925c1458c21a9cd",
-  "result": "accepted",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

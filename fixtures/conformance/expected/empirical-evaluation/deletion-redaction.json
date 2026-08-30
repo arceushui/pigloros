@@ -3,9 +3,7 @@
   "case_id": "empirical-evaluation-deletion-redaction",
   "family": "deletion-redaction",
   "input_blake3_digest": "c358cc9547e40928bcab86427d482074a0b7b912746ee98dace018b17da896fb",
-  "result": "destroyed",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

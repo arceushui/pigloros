@@ -3,12 +3,7 @@
   "case_id": "metric-conformance-denied",
   "family": "denied",
   "input_blake3_digest": "c70cadb53b7859ad5fe6721abf5077882d1b27f6ccaf1d715b7eea3480791a51",
-  "result": "rejected",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.metric-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "capability-denied"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

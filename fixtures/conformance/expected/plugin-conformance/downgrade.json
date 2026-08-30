@@ -3,12 +3,7 @@
   "case_id": "plugin-conformance-downgrade",
   "family": "downgrade",
   "input_blake3_digest": "dbac48062f780ec52c0bb4d044151a2598d1bfa3389b120b18a29b55a751fdf7",
-  "result": "not-authorized",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.plugin-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "incompatible-contract"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

@@ -3,9 +3,7 @@
   "case_id": "artifact-integrity-independent-evaluation",
   "family": "independent-evaluation",
   "input_blake3_digest": "b581c319f565b924e927ec0583944993fc78921e287076526ea81f71ba4889c3",
-  "result": "corroborated",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

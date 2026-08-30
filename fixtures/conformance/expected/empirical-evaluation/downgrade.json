@@ -3,12 +3,7 @@
   "case_id": "empirical-evaluation-downgrade",
   "family": "downgrade",
   "input_blake3_digest": "f003fdfd3f68a5ec27092073277bfd9898309c1daee88ab8e655747cc0772175",
-  "result": "not-authorized",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.empirical-evaluation",
-    "contract_version": "1.0.0",
-    "code_id": "incompatible-contract"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

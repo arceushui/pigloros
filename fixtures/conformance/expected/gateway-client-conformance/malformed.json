@@ -3,12 +3,7 @@
   "case_id": "gateway-client-conformance-malformed",
   "family": "malformed",
   "input_blake3_digest": "39fe5e480566923828b8c459bd70147ce27809e09505fb439501024d4425ed12",
-  "result": "namespaced-failure",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.gateway-client-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "malformed-payload"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

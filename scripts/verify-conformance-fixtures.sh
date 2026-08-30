@@ -12,7 +12,7 @@ command -v jq >/dev/null || {
   exit 1
 }
 
-if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/providers" || ! -d "${fixture_root}/support" ]]; then
+if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/oracles" || ! -d "${fixture_root}/providers" || ! -d "${fixture_root}/support" ]]; then
   echo "missing conformance fixture directories under ${fixture_root}" >&2
   exit 1
 fi
@@ -102,9 +102,10 @@ matrix_blake3_digest="$(b3sum "${matrix_path}" | awk '{print $1}')"
 
 mapfile -t inputs < <(find "${fixture_root}/inputs" -type f -print | sort)
 mapfile -t expected < <(find "${fixture_root}/expected" -type f -print | sort)
+mapfile -t oracles < <(find "${fixture_root}/oracles" -type f -print | sort)
 
-if (( ${#inputs[@]} != 49 || ${#expected[@]} != 49 )); then
-  echo "expected exactly 49 layer-specific input and expected-result records" >&2
+if (( ${#inputs[@]} != 49 || ${#expected[@]} != 49 || ${#oracles[@]} != 49 )); then
+  echo "expected exactly 49 layer-specific input, evidence-status, and oracle records" >&2
   exit 1
 fi
 
@@ -182,13 +183,19 @@ for layer in "${profile_layers[@]}"; do
      (.contract_version | type == "string" and length > 0) and
      (.abi_major | type == "number") and (.abi_minor | type == "number") and
      (.package_path | type == "string" and length > 0) and
+     (.fixture_operations | keys | sort) == ([
+       "positive", "denied", "malformed", "resource-exhaustion",
+       "deletion-redaction", "downgrade", "independent-evaluation"
+     ] | sort) and
+     all(.fixture_operations[]; . == null or (type == "string" and length > 0)) and
      (.schemas | length == 7)' "${provider_manifest}" >/dev/null || {
     echo "invalid provider manifest for ${layer}" >&2
     exit 1
   }
   provider_id="$(jq -r '.provider_id' "${provider_manifest}")"
-  while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path; do
-    for path in "${schema_path}" "${input_path}" "${expected_path}"; do
+  while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path oracle_path; do
+    fixture_operation="$(jq -r --arg family "${family}" '.fixture_operations[$family] // ""' "${provider_manifest}")"
+    for path in "${schema_path}" "${input_path}" "${expected_path}" "${oracle_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
         echo "unsafe profile fixture path for ${layer}: ${path}" >&2
         exit 1
@@ -198,8 +205,15 @@ for layer in "${profile_layers[@]}"; do
         exit 1
       }
     done
-    jq -e --arg family "${family}" \
-      '.properties.family.const == $family and .additionalProperties == false' \
+    jq -e --arg family "${family}" --arg fixture_operation "${fixture_operation}" \
+      '.properties.family.const == $family and .additionalProperties == false and
+       (if $fixture_operation == "" then
+          (.properties.stimulus.type == "string" or (.properties | has("stimulus") | not))
+        else
+          ((.properties.stimulus.properties.operation.type == "string") or
+           (.properties.stimulus.properties.operation.const | type == "string")) and
+          ((.properties.stimulus.properties.operation.const // $fixture_operation) == $fixture_operation)
+        end)' \
       "${fixture_root}/${schema_path}" >/dev/null || {
       echo "invalid fixture-family schema for ${layer}: ${schema_path}" >&2
       exit 1
@@ -210,24 +224,15 @@ for layer in "${profile_layers[@]}"; do
       --arg family "${family}" \
       --arg provider_contract "${provider_id}@1.0.0" \
       --arg subject_adapter "${subject_adapter}" \
+      --arg fixture_operation "${fixture_operation}" \
       '.case_id == $case_id and .claim_layer == $fixture_layer and
        .family == $family and
        .provider_contract == $provider_contract and .subject_adapter == $subject_adapter and
-       (if $family == "positive" then .expected.result == "accepted" and
-          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "describe" else .stimulus.operation == "execute-positive-case" end)
-        elif $family == "denied" then .stimulus.required_capability == "mutate-subject" and .expected.failure_code == "capability-denied" and
-          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "drive" else .stimulus.operation == "mutate-subject" end)
-        elif $family == "malformed" then .expected.failure_code == "malformed-payload" and
-          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "reduce" else (.stimulus | type) == "string" end)
-        elif $family == "resource-exhaustion" then .limit.maximum == 10000000 and .limit.requested == 10000001 and .expected.failure_code == "resource-limit" and
-          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "drive" else .stimulus.operation == "consume-execution-steps" end)
-        elif $family == "deletion-redaction" then .expected.post_state.prohibited_data_present == false and
-          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "migrate-state" else .stimulus.operation == "redact-synthetic-subject" end)
-        elif $family == "downgrade" then .stimulus.allow_fallback == false and .expected.failure_code == "incompatible-contract" and
-          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "migrate-state" else .stimulus.operation == "verify-release-admission" end)
-        elif $family == "independent-evaluation" then .algorithm == "BLAKE3-256" and (.expected_digest | test("^[0-9a-f]{64}$")) and
-          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "describe" else has("stimulus") | not end)
-        else false end)' \
+       (if $fixture_operation == "" then
+          ((.stimulus? | type) != "object" or (.stimulus | has("operation") | not))
+        else
+          .stimulus.operation == $fixture_operation
+        end)' \
       "${fixture_root}/${input_path}" >/dev/null || {
       echo "invalid input fixture record for ${layer}: ${input_path}" >&2
       exit 1
@@ -238,32 +243,31 @@ for layer in "${profile_layers[@]}"; do
       --arg fixture_layer "${fixture_layer}" \
       --arg family "${family}" \
       --arg input_blake3_digest "${input_blake3_digest}" \
-      --arg provider_id "${provider_id}" \
       '.case_id == $case_id and .claim_layer == $fixture_layer and
        .family == $family and
        .input_blake3_digest == $input_blake3_digest and
-       ((.result | type) == "string") and (.result != "") and
        .status == "pending" and
-       (if ($family == "positive" or $family == "deletion-redaction" or $family == "independent-evaluation") then
-          .draft_expected_result == {kind: "canonical-output"}
-        else
-          .draft_expected_result.owner_id == $provider_id and
-          .draft_expected_result.contract_version == "1.0.0" and
-          .draft_expected_result.kind == "namespaced-failure" and
-          .draft_expected_result.code_id ==
-            (if $family == "denied" then "capability-denied"
-             elif $family == "malformed" then "malformed-payload"
-             elif $family == "resource-exhaustion" then "resource-limit"
-             elif $family == "downgrade" then "incompatible-contract"
-             else "" end)
-        end) and
-       (has("verification") | not) and
-       (has("source") | not)' \
+       .execution_result == null and .executed_at == null and
+       (has("result") | not) and (has("draft_expected_result") | not) and
+       (keys | sort) == (["case_id", "claim_layer", "executed_at", "execution_result", "family", "input_blake3_digest", "status"] | sort)' \
       "${fixture_root}/${expected_path}" >/dev/null || {
-      echo "invalid pending expected fixture record for ${layer}: ${expected_path}" >&2
+      echo "invalid pending evidence-status record for ${layer}: ${expected_path}" >&2
       exit 1
     }
-  done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected] | @tsv' "${profile}")
+    jq -e --arg provider_id "${provider_id}" \
+      'if .oracle.kind == "canonical-output" then
+         has("output") and (.output != null)
+       elif .oracle.kind == "namespaced-failure" then
+         (.oracle.owner_id == $provider_id) and
+         (.oracle.contract_version == "1.0.0") and
+         (.oracle.code_id | type == "string" and length > 0) and
+         (has("output") | not)
+       else false end' \
+      "${fixture_root}/${oracle_path}" >/dev/null || {
+      echo "invalid provider-owned oracle record for ${layer}: ${oracle_path}" >&2
+      exit 1
+    }
+  done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, .oracle] | @tsv' "${profile}")
 done
 for wire_code in {0..6}; do
   [[ -n "${profile_wire_codes[${wire_code}]:-}" ]] || {
@@ -282,19 +286,28 @@ mapfile -t declared_expected < <(
     jq -r '.fixtures[].expected' "${profile}"
   done | sort -u
 )
-if (( ${#declared_inputs[@]} != 49 || ${#declared_expected[@]} != 49 )); then
-  echo "expected every layer-specific fixture pair to be declared exactly once" >&2
+mapfile -t declared_oracles < <(
+  for profile in "${profile_root}"/*/profile.json; do
+    jq -r '.fixtures[].oracle' "${profile}"
+  done | sort -u
+)
+if (( ${#declared_inputs[@]} != 49 || ${#declared_expected[@]} != 49 || ${#declared_oracles[@]} != 49 )); then
+  echo "expected every layer-specific fixture triple to be declared exactly once" >&2
   exit 1
 fi
 
 mapfile -t actual_input_paths < <(find "${fixture_root}/inputs" -type f -printf 'inputs/%P\n' | sort)
 mapfile -t actual_expected_paths < <(find "${fixture_root}/expected" -type f -printf 'expected/%P\n' | sort)
+mapfile -t actual_oracle_paths < <(find "${fixture_root}/oracles" -type f -printf 'oracles/%P\n' | sort)
 if ! diff -u \
   <(printf '%s\n' "${actual_input_paths[@]}") \
   <(printf '%s\n' "${declared_inputs[@]}") >/dev/null ||
   ! diff -u \
   <(printf '%s\n' "${actual_expected_paths[@]}") \
-  <(printf '%s\n' "${declared_expected[@]}") >/dev/null; then
+  <(printf '%s\n' "${declared_expected[@]}") >/dev/null ||
+  ! diff -u \
+  <(printf '%s\n' "${actual_oracle_paths[@]}") \
+  <(printf '%s\n' "${declared_oracles[@]}") >/dev/null; then
   echo "profile manifests do not declare the complete fixture inventory" >&2
   exit 1
 fi
@@ -316,14 +329,14 @@ jq -e \
   .adr_059_execution_matrix.blake3_digest == $matrix_blake3 and
   .adr_059_execution_matrix.status == $matrix_lifecycle and
   .adr_059_execution_matrix.executed_case_count == 0
-' "${fixture_root}/support/provenance.json" >/dev/null || {
+' "${fixture_root}/support/publication-review.json" >/dev/null || {
   echo "Draft authority handoff metadata is invalid" >&2
   exit 1
 }
 
 jq -e --arg authority_sha256 "${authority_inventory_sha256}" \
   '.authority_inventory.sha256_digest == $authority_sha256' \
-  "${fixture_root}/support/provenance.json" >/dev/null || {
+  "${fixture_root}/support/publication-review.json" >/dev/null || {
   echo "profile-bound authority inventory digest is incorrect" >&2
   exit 1
 }
@@ -336,7 +349,7 @@ mapfile -t blake3_paths < <(
 )
 mapfile -t expected_blake3_paths < <(
   cd "${fixture_root}" &&
-    find expected-authority expected inputs matrix profiles providers support \
+    find expected-authority expected inputs matrix oracles profiles providers support \
       -type f -printf '%p\n' | sort
 )
 if ! diff -u \
@@ -349,8 +362,9 @@ fi
 for input in "${inputs[@]}"; do
   relative_path="${input#"${fixture_root}/inputs/"}"
   expected_path="${fixture_root}/expected/${relative_path}"
-  [[ -f "${expected_path}" ]] || {
-    echo "missing expected-result pair for ${input}" >&2
+  oracle_path="${fixture_root}/oracles/${relative_path}"
+  [[ -f "${expected_path}" && -f "${oracle_path}" ]] || {
+    echo "missing evidence-status or oracle pair for ${input}" >&2
     exit 1
   }
 done
@@ -358,6 +372,7 @@ done
 publishable_roots=(
   "${fixture_root}/inputs"
   "${fixture_root}/expected"
+  "${fixture_root}/oracles"
   "${fixture_root}/profiles"
   "${fixture_root}/matrix"
   "${fixture_root}/expected-authority"
@@ -457,22 +472,24 @@ fi
 expected_support=(
   "${fixture_root}/support/LICENSE"
   "${fixture_root}/support/NOTICE"
+  "${fixture_root}/support/build-provenance.json"
   "${fixture_root}/support/limitations.md"
   "${fixture_root}/support/normative-requirements.md"
-  "${fixture_root}/support/provenance.json"
+  "${fixture_root}/support/publication-review.json"
   "${fixture_root}/support/sbom.json"
   "${fixture_root}/support/schema-cpf1-v1.cddl"
+  "${fixture_root}/support/source-provenance.json"
 )
 if [[ "${support[*]}" != "${expected_support[*]}" ]]; then
   echo "public support artifact inventory does not match the current CPF1 contract" >&2
   exit 1
 fi
 
-for path in "${inputs[@]}" "${expected[@]}" "${profiles[@]}" "${provider_files[@]}" "${support[@]}"; do
+for path in "${inputs[@]}" "${expected[@]}" "${oracles[@]}" "${profiles[@]}" "${provider_files[@]}" "${support[@]}"; do
   [[ -s "${path}" ]] || {
     echo "empty conformance fixture: ${path}" >&2
     exit 1
   }
 done
 
-echo "verified ${#profiles[@]} public profiles, ${#inputs[@]} public inputs, ${#expected[@]} expected-result records, ${#provider_manifests[@]} provider manifests, ${#provider_schemas[@]} provider schemas, and ${#support[@]} support artifacts"
+echo "verified ${#profiles[@]} public profiles, ${#inputs[@]} public inputs, ${#expected[@]} evidence-status records, ${#oracles[@]} oracle records, ${#provider_manifests[@]} provider manifests, ${#provider_schemas[@]} provider schemas, and ${#support[@]} support artifacts"

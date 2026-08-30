@@ -30,7 +30,9 @@ const REQUIRED_FIXTURE_FAMILIES: usize = 7;
 struct FixtureContext {
     claim_layer: ClaimLayerV1,
     profile_record_digest: [u8; 32],
-    provenance_digest: [u8; 32],
+    source_provenance_digest: [u8; 32],
+    build_provenance_digest: [u8; 32],
+    publication_review_digest: [u8; 32],
     notice_digest: [u8; 32],
     sbom_digest: [u8; 32],
     limitations_digest: [u8; 32],
@@ -84,6 +86,7 @@ struct FixtureSource {
     schema: &'static [u8],
     input: &'static [u8],
     expected: &'static [u8],
+    oracle: &'static [u8],
 }
 
 struct LayerSource {
@@ -211,6 +214,7 @@ struct ProfileFixtureRecord {
     schema: String,
     input: String,
     expected: String,
+    oracle: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -225,8 +229,8 @@ enum CatalogStrictOracle {
 }
 
 #[derive(Deserialize)]
-struct FixtureExpectedRecord {
-    draft_expected_result: CatalogStrictOracle,
+struct FixtureOracleRecord {
+    oracle: CatalogStrictOracle,
 }
 
 #[derive(Clone, Deserialize)]
@@ -243,6 +247,7 @@ struct CatalogFixture {
     schema: &'static [u8],
     input: &'static [u8],
     expected: &'static [u8],
+    oracle: &'static [u8],
     strict_oracle: CatalogStrictOracle,
 }
 
@@ -311,7 +316,7 @@ struct ProviderPackage {
 struct ProviderCatalog {
     registry: PublicArtifact,
     packages: Vec<ProviderPackage>,
-    package_support: [PublicArtifact; 5],
+    package_support: [PublicArtifact; 7],
 }
 
 impl ProviderCatalog {
@@ -342,7 +347,7 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
     }
 }
 
-fn package_support_artifacts() -> [PublicArtifact; 5] {
+fn package_support_artifacts() -> [PublicArtifact; 7] {
     [
         public_artifact(
             "support/LICENSE",
@@ -360,9 +365,19 @@ fn package_support_artifacts() -> [PublicArtifact; 5] {
             include_bytes!("../../../../fixtures/conformance/support/sbom.json"),
         ),
         public_artifact(
-            "support/provenance.json",
+            "support/source-provenance.json",
             "application/json",
-            include_bytes!("../../../../fixtures/conformance/support/provenance.json"),
+            include_bytes!("../../../../fixtures/conformance/support/source-provenance.json"),
+        ),
+        public_artifact(
+            "support/build-provenance.json",
+            "application/json",
+            include_bytes!("../../../../fixtures/conformance/support/build-provenance.json"),
+        ),
+        public_artifact(
+            "support/publication-review.json",
+            "application/json",
+            include_bytes!("../../../../fixtures/conformance/support/publication-review.json"),
         ),
         public_artifact(
             "support/limitations.md",
@@ -417,7 +432,7 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
 
 fn provider_package(
     layer: &LayerCatalogEntry,
-    package_support: &[PublicArtifact; 5],
+    package_support: &[PublicArtifact; 7],
 ) -> Result<ProviderPackage, Box<dyn Error>> {
     let provider_key = FixtureProviderKeyV1 {
         provider_id: layer.fixture_provider.provider_id.clone(),
@@ -426,7 +441,7 @@ fn provider_package(
         abi_minor: layer.fixture_provider.abi_minor,
     };
     let schemas = provider_schema_artifacts(layer)?;
-    let [licence, notices, sbom, source_provenance, limitations] = package_support;
+    let [licence, notices, sbom, source_provenance, _, _, limitations] = package_support;
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
         claim_layer: layer.claim_layer,
@@ -527,7 +542,7 @@ fn catalog_fixture(
     record: &ProfileFixtureRecord,
     source: &FixtureSource,
 ) -> Result<CatalogFixture, Box<dyn Error>> {
-    let expected: FixtureExpectedRecord = serde_json::from_slice(source.expected)?;
+    let oracle: FixtureOracleRecord = serde_json::from_slice(source.oracle)?;
     Ok(CatalogFixture {
         record: ProfileFixtureRecord {
             case_id: record.case_id.clone(),
@@ -536,11 +551,13 @@ fn catalog_fixture(
             schema: record.schema.clone(),
             input: record.input.clone(),
             expected: record.expected.clone(),
+            oracle: record.oracle.clone(),
         },
         schema: source.schema,
         input: source.input,
         expected: source.expected,
-        strict_oracle: expected.draft_expected_result,
+        oracle: source.oracle,
+        strict_oracle: oracle.oracle,
     })
 }
 
@@ -876,16 +893,22 @@ fn fixture_context(profile_record_bytes: &[u8], claim_layer: ClaimLayerV1) -> Fi
         include_bytes!("../../../../fixtures/conformance/support/normative-requirements.md");
     let notice = include_bytes!("../../../../fixtures/conformance/support/NOTICE");
     let sbom = include_bytes!("../../../../fixtures/conformance/support/sbom.json");
-    let provenance = include_bytes!("../../../../fixtures/conformance/support/provenance.json");
+    let source_provenance =
+        include_bytes!("../../../../fixtures/conformance/support/source-provenance.json");
+    let build_provenance =
+        include_bytes!("../../../../fixtures/conformance/support/build-provenance.json");
+    let publication_review =
+        include_bytes!("../../../../fixtures/conformance/support/publication-review.json");
     let limitations = include_bytes!("../../../../fixtures/conformance/support/limitations.md");
-    let provenance_digest = *blake3::hash(provenance).as_bytes();
     let notice_digest = *blake3::hash(notice).as_bytes();
     let sbom_digest = *blake3::hash(sbom).as_bytes();
     let limitations_digest = *blake3::hash(limitations).as_bytes();
     FixtureContext {
         claim_layer,
         profile_record_digest,
-        provenance_digest,
+        source_provenance_digest: *blake3::hash(source_provenance).as_bytes(),
+        build_provenance_digest: *blake3::hash(build_provenance).as_bytes(),
+        publication_review_digest: *blake3::hash(publication_review).as_bytes(),
         notice_digest,
         sbom_digest,
         limitations_digest,
@@ -973,7 +996,7 @@ fn profile_from_catalog(
         ))
         .as_bytes(),
         limitations_digest: context.limitations_digest,
-        provenance_digest: context.provenance_digest,
+        provenance_digest: context.publication_review_digest,
         previous_profile_digest: None,
         profile_digest: [0; 32],
     };
@@ -991,13 +1014,13 @@ fn fixture_descriptor_from_record(
 ) -> FixtureDescriptorV1 {
     let payload_path =
         fixture_payload_member_path(&fixture.record.case_id, &execution_profile_digest);
-    let expected_path = expected_result_member_path(
+    let evidence_path =
+        evidence_status_member_path(&fixture.record.case_id, &execution_profile_digest);
+    let oracle_output_path = expected_result_member_path(
         &fixture.record.case_id,
         context.claim_layer,
         &execution_profile_digest,
     );
-    let oracle_output_path =
-        oracle_output_member_path(&fixture.record.case_id, &execution_profile_digest);
     let fixture_record = serde_json::json!({
         "case_id": &fixture.record.case_id,
         "claim_layer": &fixture.record.claim_layer,
@@ -1005,13 +1028,14 @@ fn fixture_descriptor_from_record(
         "family": fixture.record.family.name(),
         "schema": &fixture.record.schema,
         "input": &fixture.record.input,
+        "oracle": &fixture.record.oracle,
     })
     .to_string();
     let fixture_record_digest =
         labeled_digest("PiglorOS.CPF1FixtureRecord.v1", fixture_record.as_bytes());
-    let auxiliary = artifact_descriptor(&expected_path, "application/json", fixture.expected);
+    let evidence = artifact_descriptor(&evidence_path, "application/json", fixture.expected);
     let oracle_output =
-        artifact_descriptor(&oracle_output_path, "application/json", fixture.expected);
+        artifact_descriptor(&oracle_output_path, "application/json", fixture.oracle);
     let expectation = fixture_expectation(fixture, &oracle_output);
     let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
     let mut descriptor = FixtureDescriptorV1 {
@@ -1029,7 +1053,7 @@ fn fixture_descriptor_from_record(
             fixture.schema,
         ),
         payload: artifact_descriptor(&payload_path, "application/json", fixture.input),
-        auxiliary: vec![auxiliary],
+        auxiliary: vec![evidence, oracle_output],
         strict_oracle: expectation.strict_oracle,
         expected_verification_outcome: expectation.verification_outcome,
         expected_verification_error: expectation.verification_error,
@@ -1174,9 +1198,9 @@ fn fixture_provenance(context: &FixtureContext) -> FixtureProvenanceV1 {
         licence_id: "MIT".to_owned(),
         notices_digest: context.notice_digest,
         sbom_digest: context.sbom_digest,
-        source_digest: context.provenance_digest,
-        build_digest: context.provenance_digest,
-        publication_review_digest: context.provenance_digest,
+        source_digest: context.source_provenance_digest,
+        build_digest: context.build_provenance_digest,
+        publication_review_digest: context.publication_review_digest,
         limitations_digest: context.limitations_digest,
     }
 }
@@ -1196,9 +1220,9 @@ fn fixture_payload_member_path(case_id: &str, execution_profile_digest: &[u8; 32
     )
 }
 
-fn oracle_output_member_path(case_id: &str, execution_profile_digest: &[u8; 32]) -> String {
+fn evidence_status_member_path(case_id: &str, execution_profile_digest: &[u8; 32]) -> String {
     format!(
-        "oracles/{case_id}/{}.json",
+        "evidence/{case_id}/{}.json",
         pos_conformance::hex_digest(execution_profile_digest)
     )
 }
@@ -1283,39 +1307,38 @@ fn bundle_inputs_from_profile(
             fixture.claim_layer,
             &fixture.execution_profile_digest,
         );
-        if fixture.auxiliary.as_slice()
-            != [artifact_descriptor(
-                &path,
-                "application/json",
-                source.expected,
-            )]
-        {
+        let evidence_path =
+            evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
+        let expected_auxiliary = [
+            artifact_descriptor(&evidence_path, "application/json", source.expected),
+            artifact_descriptor(&path, "application/json", source.oracle),
+        ];
+        if fixture.auxiliary.as_slice() != expected_auxiliary {
             return Err(
-                "profile expected-result descriptor disagrees with public catalog asset".into(),
+                "profile evidence and oracle descriptors disagree with public catalog assets"
+                    .into(),
             );
         }
-        let member = BundleMemberV1::expected_result(path.clone(), source.expected.to_vec());
+        members.push(BundleMemberV1::expected_result(
+            evidence_path,
+            source.expected.to_vec(),
+        ));
+        let member = BundleMemberV1::expected_result(path.clone(), source.oracle.to_vec());
         expected_results.push(BundleExpectedResultV1 {
             case_id: fixture.case_id.clone(),
             claim_layer: fixture.claim_layer,
             execution_profile_digest: fixture.execution_profile_digest,
             mode,
-            member_path: path,
+            member_path: path.clone(),
             digest: member.digest,
         });
         members.push(member);
         if let Some(output) = fixture.strict_oracle.output.as_ref() {
-            let output_path =
-                oracle_output_member_path(&fixture.case_id, &fixture.execution_profile_digest);
-            if output != &artifact_descriptor(&output_path, "application/json", source.expected) {
+            if output != &artifact_descriptor(&path, "application/json", source.oracle) {
                 return Err(
                     "profile strict-oracle descriptor disagrees with public catalog asset".into(),
                 );
             }
-            members.push(BundleMemberV1::expected_result(
-                output_path,
-                source.expected.to_vec(),
-            ));
         }
     }
     expected_results.sort();
@@ -1351,8 +1374,21 @@ fn append_supporting_members(
             BundleMemberRoleV1::Sbom,
         ),
         (
-            "support/provenance.json",
-            include_bytes!("../../../../fixtures/conformance/support/provenance.json").as_slice(),
+            "support/source-provenance.json",
+            include_bytes!("../../../../fixtures/conformance/support/source-provenance.json")
+                .as_slice(),
+            BundleMemberRoleV1::Provenance,
+        ),
+        (
+            "support/build-provenance.json",
+            include_bytes!("../../../../fixtures/conformance/support/build-provenance.json")
+                .as_slice(),
+            BundleMemberRoleV1::Provenance,
+        ),
+        (
+            "support/publication-review.json",
+            include_bytes!("../../../../fixtures/conformance/support/publication-review.json")
+                .as_slice(),
             BundleMemberRoleV1::Provenance,
         ),
         (

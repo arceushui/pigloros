@@ -3,9 +3,7 @@
   "case_id": "metric-conformance-positive",
   "family": "positive",
   "input_blake3_digest": "3456e0f62eed80c9926cc3e2729b96549fcbb447df582770147ab9655eb03eda",
-  "result": "accepted",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

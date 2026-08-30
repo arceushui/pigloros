@@ -19,6 +19,7 @@ struct FixturePaths {
     schema: FixtureAsset,
     input: FixtureAsset,
     expected: FixtureAsset,
+    oracle: FixtureAsset,
 }
 
 struct FixtureAsset {
@@ -184,7 +185,10 @@ fn validate_fixture_provider(
         && json_text(provider, "subject_adapter")? == subject_adapter
         && json_field(provider, "schemas")?
             .as_object()
-            .is_some_and(|schemas| schemas.len() == FIXTURES_PER_PROFILE);
+            .is_some_and(|schemas| schemas.len() == FIXTURES_PER_PROFILE)
+        && json_field(provider, "fixture_operations")?
+            .as_object()
+            .is_some_and(|operations| operations.len() == FIXTURES_PER_PROFILE);
     if valid {
         Ok(())
     } else {
@@ -253,6 +257,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
                 schema,
                 input: relative_asset(root, fixture, "input")?,
                 expected: relative_asset(root, fixture, "expected")?,
+                oracle: relative_asset(root, fixture, "oracle")?,
             })
         })
         .collect::<Result<Vec<_>, io::Error>>()?;
@@ -341,6 +346,11 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
                 "                expected: &{:?},",
                 fixture.expected.bytes
             )?;
+            writeln!(
+                generated,
+                "                oracle: &{:?},",
+                fixture.oracle.bytes
+            )?;
             writeln!(generated, "            }},")?;
         }
         writeln!(generated, "        ],")?;
@@ -363,6 +373,7 @@ fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
             paths.insert(root.source.join(&fixture.schema.relative));
             paths.insert(root.source.join(&fixture.input.relative));
             paths.insert(root.source.join(&fixture.expected.relative));
+            paths.insert(root.source.join(&fixture.oracle.relative));
         }
     }
     for path in paths {

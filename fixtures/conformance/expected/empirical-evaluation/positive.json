@@ -3,9 +3,7 @@
   "case_id": "empirical-evaluation-positive",
   "family": "positive",
   "input_blake3_digest": "333fc4b2b970cd943124442116647d3b185192608d0fd27f22a16ad0da44fb9c",
-  "result": "accepted",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

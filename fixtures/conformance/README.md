@@ -1,6 +1,7 @@
 # Public conformance fixture sources
 
-These files are the public, deterministic inputs and expected-result records
+These files are the public, deterministic inputs, provider-owned oracle records,
+and pending execution-evidence records
 for the seven CPF1 claim layers. Each directory under `profiles/` is a
 separate public profile manifest and binds exactly one claim layer to all seven
 required fixture families: positive, denied, malformed, resource exhaustion, deletion/redaction,
@@ -13,13 +14,13 @@ manifest is the single semantic source for its profile identity, paired
 claim-layer name and wire code, public subject adapter, fixture root, and
 fixture identities. The build derives Rust's byte-embedding table directly
 from those manifests; the materializer then parses and cross-checks identities
-from the profile, input, and expected-result records instead of maintaining a
+from the profile, provider, input, oracle, and evidence-status records instead of maintaining a
 second fixture or layer inventory in source code.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be
-materialized separately with the same expected-result records; the Air-Gapped
+materialized separately with the same oracle records; the Air-Gapped
 profile capability policy remains network-deny.
 
 The scenario names intentionally cover positive, denied, malformed, resource
@@ -27,24 +28,19 @@ exhaustion, deletion/redaction, downgrade, and independent-evaluation cases. A p
 manifest lists every family explicitly; no profile is represented by a single
 input/result pair.
 
-Each public input/result pair includes its claim-layer and case identity.
+Each public input/oracle/evidence triple includes its claim-layer and case identity.
 Materialization binds every family to deterministic-local-v1 or
 deterministic-air-gapped-v1, so every emitted descriptor has exactly one
-ExecutionProfile while the paired bundles retain identical expected bytes.
-Each expected record also carries the BLAKE3-256 digest of its exact input
-bytes; the independent generator and hosted verifier recompute this binding.
-The `result` value in a checked-in expected record is descriptive fixture
-metadata only; `status: "pending"` and the CPF1 unavailable outcome prevent it
-from being interpreted as executed conformance evidence.
-Each expected record also declares the exact Draft-unavailable namespaced
-failure (`pigloros.core` / `1.0.0` / `provenance-missing`) that the materializer encodes into the bundle, so the
-packaged result cannot silently diverge from the public record.
-Draft CPF1 bundles encode the exact checked-in expected-result record bytes;
-the record's `status: "pending"` and namespaced failure declaration keep those
-bytes explicitly unavailable rather than executed evidence.
+ExecutionProfile while the paired bundles retain identical oracle bytes.
+Provider-owned records under `oracles/` define canonical outputs or namespaced
+failures. Records under `expected/` bind the exact input digest but contain only
+`status: "pending"`, null execution result, and null execution timestamp. The
+materializer packages both artifacts separately, and only the oracle is bound
+as the manifest's expected result. Pending evidence metadata is never used as
+a canonical output or represented as an executed conformance claim.
 
 `SHA256SUMS` and `BLAKE3SUMS` are independent byte inventories for every
-remaining public profile, input, expected result, matrix, inventory, and support
+remaining public profile, input, oracle, evidence-status, matrix, inventory, and support
 artifact. The hosted verifier checks both inventories and rejects any file not
 covered by the manifests before bundle materialization.
 
@@ -66,8 +62,9 @@ also remain required for changes that run that workflow.
 
 Each directory below `providers/` contains the seven public schemas owned by
 that exact fixture provider. The `support/` directory contains the shared
-normative specification, CPF1 CDDL, licence, notice, SBOM, provenance, and
-limitations members that every immutable bundle manifest must declare.
+normative specification, CPF1 CDDL, licence, notice, SBOM, separate source/build
+provenance and publication-review records, and limitations members that every
+immutable bundle manifest must declare.
 
 The Draft `matrix/execution-matrix.json` records all twelve accepted
 non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork
@@ -86,7 +83,7 @@ retention authority. Candidate publication, trusted review, corrections, and
 retention are owned by the #198 governance workflow after #193 supplies the
 execution evidence.
 
-The Draft materializer binds every layer-specific input/result pair to its
+The Draft materializer binds every layer-specific input/oracle/evidence triple to its
 CPF1 profile, validates the authority handoff and matrix as open slots, checks
 the Local/Air-Gapped pair before writing either archive, and independently
 performs a structural cross-check of the resulting public archives. It does
@@ -97,7 +94,7 @@ repeated and clean-checkout construction, then asks the Rust materializer to
 publish the signed tree exactly once. It does not create temporary signed
 bundle trees outside the descriptor-relative ADR-067 publication transaction.
 
-CI also independently regenerates the 49 input/result records from the public
+CI also independently regenerates the 49 input/oracle/evidence triples from the public
 input identities and fixture-family contract, reconstructs the Draft authority
 inventory, and rebuilds both byte inventories before running the Rust
 materializer. This check does not import the materializer or execute a claim;

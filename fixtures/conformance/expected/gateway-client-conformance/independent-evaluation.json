@@ -3,9 +3,7 @@
   "case_id": "gateway-client-conformance-independent-evaluation",
   "family": "independent-evaluation",
   "input_blake3_digest": "42a6d35ed81e6f1a9dab3ee7f0c603ea1a6f70f2686806c59ca529ea38800ad8",
-  "result": "corroborated",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

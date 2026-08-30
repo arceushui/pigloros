@@ -12,7 +12,8 @@
       "family": "positive",
       "schema": "providers/gateway-client-conformance/schemas/positive.schema.json",
       "input": "inputs/gateway-client-conformance/positive.json",
-      "expected": "expected/gateway-client-conformance/positive.json"
+      "expected": "expected/gateway-client-conformance/positive.json",
+      "oracle": "oracles/gateway-client-conformance/positive.json"
     },
     {
       "claim_layer": "gateway-client-conformance",
@@ -20,7 +21,8 @@
       "family": "denied",
       "schema": "providers/gateway-client-conformance/schemas/denied.schema.json",
       "input": "inputs/gateway-client-conformance/denied.json",
-      "expected": "expected/gateway-client-conformance/denied.json"
+      "expected": "expected/gateway-client-conformance/denied.json",
+      "oracle": "oracles/gateway-client-conformance/denied.json"
     },
     {
       "claim_layer": "gateway-client-conformance",
@@ -28,7 +30,8 @@
       "family": "malformed",
       "schema": "providers/gateway-client-conformance/schemas/malformed.schema.json",
       "input": "inputs/gateway-client-conformance/malformed.json",
-      "expected": "expected/gateway-client-conformance/malformed.json"
+      "expected": "expected/gateway-client-conformance/malformed.json",
+      "oracle": "oracles/gateway-client-conformance/malformed.json"
     },
     {
       "claim_layer": "gateway-client-conformance",
@@ -36,7 +39,8 @@
       "family": "resource-exhaustion",
       "schema": "providers/gateway-client-conformance/schemas/resource-exhaustion.schema.json",
       "input": "inputs/gateway-client-conformance/resource-exhaustion.json",
-      "expected": "expected/gateway-client-conformance/resource-exhaustion.json"
+      "expected": "expected/gateway-client-conformance/resource-exhaustion.json",
+      "oracle": "oracles/gateway-client-conformance/resource-exhaustion.json"
     },
     {
       "claim_layer": "gateway-client-conformance",
@@ -44,7 +48,8 @@
       "family": "deletion-redaction",
       "schema": "providers/gateway-client-conformance/schemas/deletion-redaction.schema.json",
       "input": "inputs/gateway-client-conformance/deletion-redaction.json",
-      "expected": "expected/gateway-client-conformance/deletion-redaction.json"
+      "expected": "expected/gateway-client-conformance/deletion-redaction.json",
+      "oracle": "oracles/gateway-client-conformance/deletion-redaction.json"
     },
     {
       "claim_layer": "gateway-client-conformance",
@@ -52,7 +57,8 @@
       "family": "downgrade",
       "schema": "providers/gateway-client-conformance/schemas/downgrade.schema.json",
       "input": "inputs/gateway-client-conformance/downgrade.json",
-      "expected": "expected/gateway-client-conformance/downgrade.json"
+      "expected": "expected/gateway-client-conformance/downgrade.json",
+      "oracle": "oracles/gateway-client-conformance/downgrade.json"
     },
     {
       "claim_layer": "gateway-client-conformance",
@@ -60,7 +66,8 @@
       "family": "independent-evaluation",
       "schema": "providers/gateway-client-conformance/schemas/independent-evaluation.schema.json",
       "input": "inputs/gateway-client-conformance/independent-evaluation.json",
-      "expected": "expected/gateway-client-conformance/independent-evaluation.json"
+      "expected": "expected/gateway-client-conformance/independent-evaluation.json",
+      "oracle": "oracles/gateway-client-conformance/independent-evaluation.json"
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",

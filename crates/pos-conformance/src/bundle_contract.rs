@@ -30,7 +30,11 @@ const EXECUTION_MATRIX_PATH: &str = "authority/execution-matrix.json";
 const AUTHORITY_INVENTORY_PATH: &str = "authority/expected-authority-inventory.json";
 const PROFILE_SCHEMA_PATH: &str = "support/schema-cpf1-v1.cddl";
 const LIMITATIONS_PATH: &str = "support/limitations.md";
-const PROVENANCE_PATH: &str = "support/provenance.json";
+const SOURCE_PROVENANCE_PATH: &str = "support/source-provenance.json";
+const BUILD_PROVENANCE_PATH: &str = "support/build-provenance.json";
+const PUBLICATION_REVIEW_PATH: &str = "support/publication-review.json";
+const NOTICE_PATH: &str = "support/NOTICE";
+const SBOM_PATH: &str = "support/sbom.json";
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum BundleContractErrorV1 {
@@ -454,7 +458,7 @@ fn validate_profile_support_members(
             profile.limitations_digest,
         ),
         (
-            PROVENANCE_PATH,
+            PUBLICATION_REVIEW_PATH,
             BundleMemberRoleV1::Provenance,
             profile.provenance_digest,
         ),
@@ -475,6 +479,7 @@ fn validate_profile_support_members(
                 }
             })
         })
+        .and_then(|()| validate_fixture_provenance_members(profile, members))
         .and_then(|()| {
             member_by_role_and_path(
                 members,
@@ -483,6 +488,53 @@ fn validate_profile_support_members(
             )
             .map(|_| ())
         })
+}
+
+fn validate_fixture_provenance_members(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    profile.fixtures.iter().try_for_each(|fixture| {
+        let provenance = &fixture.provenance;
+        [
+            (
+                NOTICE_PATH,
+                BundleMemberRoleV1::Notice,
+                provenance.notices_digest,
+            ),
+            (SBOM_PATH, BundleMemberRoleV1::Sbom, provenance.sbom_digest),
+            (
+                SOURCE_PROVENANCE_PATH,
+                BundleMemberRoleV1::Provenance,
+                provenance.source_digest,
+            ),
+            (
+                BUILD_PROVENANCE_PATH,
+                BundleMemberRoleV1::Provenance,
+                provenance.build_digest,
+            ),
+            (
+                PUBLICATION_REVIEW_PATH,
+                BundleMemberRoleV1::Provenance,
+                provenance.publication_review_digest,
+            ),
+            (
+                LIMITATIONS_PATH,
+                BundleMemberRoleV1::Limitations,
+                provenance.limitations_digest,
+            ),
+        ]
+        .into_iter()
+        .try_for_each(|(path, role, digest)| {
+            member_by_role_and_path(members, role, path).and_then(|member| {
+                if member.digest == digest {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                }
+            })
+        })
+    })
 }
 
 fn validate_member_closure(
@@ -497,7 +549,9 @@ fn validate_member_closure(
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
         LIMITATIONS_PATH,
-        PROVENANCE_PATH,
+        SOURCE_PROVENANCE_PATH,
+        BUILD_PROVENANCE_PATH,
+        PUBLICATION_REVIEW_PATH,
     ]
     .into_iter()
     .map(str::to_owned)
@@ -1241,7 +1295,7 @@ fn raw_profile_support_members(
         (EXECUTION_MATRIX_PATH, 11, 6),
         (PROFILE_SCHEMA_PATH, 4, 13),
         (LIMITATIONS_PATH, 9, 14),
-        (PROVENANCE_PATH, 8, 15),
+        (PUBLICATION_REVIEW_PATH, 8, 15),
     ];
     for (path, role, profile_field) in bindings {
         let member = raw_member(members, path, role)?;
@@ -1250,7 +1304,35 @@ fn raw_profile_support_members(
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
     }
-    raw_member(members, AUTHORITY_INVENTORY_PATH, 10).map(|_| ())
+    raw_fixture_provenance_members(profile, members)
+        .and_then(|()| raw_member(members, AUTHORITY_INVENTORY_PATH, 10).map(|_| ()))
+}
+
+fn raw_fixture_provenance_members(
+    profile: &[Value],
+    members: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    for fixture in array_values(&profile[9])? {
+        let fields = array(fixture, 24)?;
+        let provenance = array(&fields[21], 7)?;
+        let bindings = [
+            (NOTICE_PATH, 6, 1),
+            (SBOM_PATH, 7, 2),
+            (SOURCE_PROVENANCE_PATH, 8, 3),
+            (BUILD_PROVENANCE_PATH, 8, 4),
+            (PUBLICATION_REVIEW_PATH, 8, 5),
+            (LIMITATIONS_PATH, 9, 6),
+        ];
+        for (path, role, provenance_field) in bindings {
+            let member = raw_member(members, path, role)?;
+            if *blake3::hash(bytes(&member[1])?).as_bytes()
+                != digest::<32>(&provenance[provenance_field])?
+            {
+                return Err(BundleContractErrorV1::MemberDigestMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn raw_member_closure(
@@ -1265,7 +1347,9 @@ fn raw_member_closure(
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
         LIMITATIONS_PATH,
-        PROVENANCE_PATH,
+        SOURCE_PROVENANCE_PATH,
+        BUILD_PROVENANCE_PATH,
+        PUBLICATION_REVIEW_PATH,
     ]
     .into_iter()
     .map(str::to_owned)

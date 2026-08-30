@@ -3,9 +3,7 @@
   "case_id": "artifact-integrity-positive",
   "family": "positive",
   "input_blake3_digest": "841400ba555c0836e409f971dda73f30fd0bbf1662d546458cd515afe1fb49bf",
-  "result": "accepted",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

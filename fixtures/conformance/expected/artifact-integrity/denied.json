@@ -3,12 +3,7 @@
   "case_id": "artifact-integrity-denied",
   "family": "denied",
   "input_blake3_digest": "ff9d7a29073c065ea30cbb688259c03aae6a38597d8c842ed484dc8730d1490f",
-  "result": "rejected",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.artifact-integrity",
-    "contract_version": "1.0.0",
-    "code_id": "capability-denied"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

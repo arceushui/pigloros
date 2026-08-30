@@ -3,12 +3,7 @@
   "case_id": "replay-conformance-malformed",
   "family": "malformed",
   "input_blake3_digest": "925dd063d9c250fe699926c64db0558e1a195e387d0c2986df2675e96ff59e1a",
-  "result": "namespaced-failure",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.replay-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "malformed-payload"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

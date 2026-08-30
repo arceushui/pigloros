@@ -12,7 +12,8 @@
       "family": "positive",
       "schema": "providers/artifact-integrity/schemas/positive.schema.json",
       "input": "inputs/artifact-integrity/positive.json",
-      "expected": "expected/artifact-integrity/positive.json"
+      "expected": "expected/artifact-integrity/positive.json",
+      "oracle": "oracles/artifact-integrity/positive.json"
     },
     {
       "claim_layer": "artifact-integrity",
@@ -20,7 +21,8 @@
       "family": "denied",
       "schema": "providers/artifact-integrity/schemas/denied.schema.json",
       "input": "inputs/artifact-integrity/denied.json",
-      "expected": "expected/artifact-integrity/denied.json"
+      "expected": "expected/artifact-integrity/denied.json",
+      "oracle": "oracles/artifact-integrity/denied.json"
     },
     {
       "claim_layer": "artifact-integrity",
@@ -28,7 +30,8 @@
       "family": "malformed",
       "schema": "providers/artifact-integrity/schemas/malformed.schema.json",
       "input": "inputs/artifact-integrity/malformed.json",
-      "expected": "expected/artifact-integrity/malformed.json"
+      "expected": "expected/artifact-integrity/malformed.json",
+      "oracle": "oracles/artifact-integrity/malformed.json"
     },
     {
       "claim_layer": "artifact-integrity",
@@ -36,7 +39,8 @@
       "family": "resource-exhaustion",
       "schema": "providers/artifact-integrity/schemas/resource-exhaustion.schema.json",
       "input": "inputs/artifact-integrity/resource-exhaustion.json",
-      "expected": "expected/artifact-integrity/resource-exhaustion.json"
+      "expected": "expected/artifact-integrity/resource-exhaustion.json",
+      "oracle": "oracles/artifact-integrity/resource-exhaustion.json"
     },
     {
       "claim_layer": "artifact-integrity",
@@ -44,7 +48,8 @@
       "family": "deletion-redaction",
       "schema": "providers/artifact-integrity/schemas/deletion-redaction.schema.json",
       "input": "inputs/artifact-integrity/deletion-redaction.json",
-      "expected": "expected/artifact-integrity/deletion-redaction.json"
+      "expected": "expected/artifact-integrity/deletion-redaction.json",
+      "oracle": "oracles/artifact-integrity/deletion-redaction.json"
     },
     {
       "claim_layer": "artifact-integrity",
@@ -52,7 +57,8 @@
       "family": "downgrade",
       "schema": "providers/artifact-integrity/schemas/downgrade.schema.json",
       "input": "inputs/artifact-integrity/downgrade.json",
-      "expected": "expected/artifact-integrity/downgrade.json"
+      "expected": "expected/artifact-integrity/downgrade.json",
+      "oracle": "oracles/artifact-integrity/downgrade.json"
     },
     {
       "claim_layer": "artifact-integrity",
@@ -60,7 +66,8 @@
       "family": "independent-evaluation",
       "schema": "providers/artifact-integrity/schemas/independent-evaluation.schema.json",
       "input": "inputs/artifact-integrity/independent-evaluation.json",
-      "expected": "expected/artifact-integrity/independent-evaluation.json"
+      "expected": "expected/artifact-integrity/independent-evaluation.json",
+      "oracle": "oracles/artifact-integrity/independent-evaluation.json"
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",

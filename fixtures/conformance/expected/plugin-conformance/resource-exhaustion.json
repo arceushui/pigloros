@@ -3,12 +3,7 @@
   "case_id": "plugin-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
   "input_blake3_digest": "78c921e303096178a1065ae8528713b5cb345a7e145932a32772a1b896b4284a",
-  "result": "resource-limit",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.plugin-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "resource-limit"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

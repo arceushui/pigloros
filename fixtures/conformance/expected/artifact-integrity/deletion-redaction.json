@@ -3,9 +3,7 @@
   "case_id": "artifact-integrity-deletion-redaction",
   "family": "deletion-redaction",
   "input_blake3_digest": "e1453b07e85626ff4e45eb64684dc3806c83daee21e747e7f321ffa0576e7f97",
-  "result": "destroyed",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

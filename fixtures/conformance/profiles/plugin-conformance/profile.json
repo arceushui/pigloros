@@ -12,7 +12,8 @@
       "family": "positive",
       "schema": "providers/plugin-conformance/schemas/positive.schema.json",
       "input": "inputs/plugin-conformance/positive.json",
-      "expected": "expected/plugin-conformance/positive.json"
+      "expected": "expected/plugin-conformance/positive.json",
+      "oracle": "oracles/plugin-conformance/positive.json"
     },
     {
       "claim_layer": "plugin-conformance",
@@ -20,7 +21,8 @@
       "family": "denied",
       "schema": "providers/plugin-conformance/schemas/denied.schema.json",
       "input": "inputs/plugin-conformance/denied.json",
-      "expected": "expected/plugin-conformance/denied.json"
+      "expected": "expected/plugin-conformance/denied.json",
+      "oracle": "oracles/plugin-conformance/denied.json"
     },
     {
       "claim_layer": "plugin-conformance",
@@ -28,7 +30,8 @@
       "family": "malformed",
       "schema": "providers/plugin-conformance/schemas/malformed.schema.json",
       "input": "inputs/plugin-conformance/malformed.json",
-      "expected": "expected/plugin-conformance/malformed.json"
+      "expected": "expected/plugin-conformance/malformed.json",
+      "oracle": "oracles/plugin-conformance/malformed.json"
     },
     {
       "claim_layer": "plugin-conformance",
@@ -36,7 +39,8 @@
       "family": "resource-exhaustion",
       "schema": "providers/plugin-conformance/schemas/resource-exhaustion.schema.json",
       "input": "inputs/plugin-conformance/resource-exhaustion.json",
-      "expected": "expected/plugin-conformance/resource-exhaustion.json"
+      "expected": "expected/plugin-conformance/resource-exhaustion.json",
+      "oracle": "oracles/plugin-conformance/resource-exhaustion.json"
     },
     {
       "claim_layer": "plugin-conformance",
@@ -44,7 +48,8 @@
       "family": "deletion-redaction",
       "schema": "providers/plugin-conformance/schemas/deletion-redaction.schema.json",
       "input": "inputs/plugin-conformance/deletion-redaction.json",
-      "expected": "expected/plugin-conformance/deletion-redaction.json"
+      "expected": "expected/plugin-conformance/deletion-redaction.json",
+      "oracle": "oracles/plugin-conformance/deletion-redaction.json"
     },
     {
       "claim_layer": "plugin-conformance",
@@ -52,7 +57,8 @@
       "family": "downgrade",
       "schema": "providers/plugin-conformance/schemas/downgrade.schema.json",
       "input": "inputs/plugin-conformance/downgrade.json",
-      "expected": "expected/plugin-conformance/downgrade.json"
+      "expected": "expected/plugin-conformance/downgrade.json",
+      "oracle": "oracles/plugin-conformance/downgrade.json"
     },
     {
       "claim_layer": "plugin-conformance",
@@ -60,7 +66,8 @@
       "family": "independent-evaluation",
       "schema": "providers/plugin-conformance/schemas/independent-evaluation.schema.json",
       "input": "inputs/plugin-conformance/independent-evaluation.json",
-      "expected": "expected/plugin-conformance/independent-evaluation.json"
+      "expected": "expected/plugin-conformance/independent-evaluation.json",
+      "oracle": "oracles/plugin-conformance/independent-evaluation.json"
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",

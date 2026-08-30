@@ -3,12 +3,7 @@
   "case_id": "metric-conformance-malformed",
   "family": "malformed",
   "input_blake3_digest": "52783c593e9d2b1aa185dedc41a0e02aa0ca5914368477dc91d70ad6417fd5cb",
-  "result": "namespaced-failure",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.metric-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "malformed-payload"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

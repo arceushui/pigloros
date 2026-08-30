@@ -3,12 +3,7 @@
   "case_id": "empirical-evaluation-resource-exhaustion",
   "family": "resource-exhaustion",
   "input_blake3_digest": "5208415362b9968df29c8bdbfd66d0039baf1d4847d458646c929a6ae0a02c5e",
-  "result": "resource-limit",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.empirical-evaluation",
-    "contract_version": "1.0.0",
-    "code_id": "resource-limit"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

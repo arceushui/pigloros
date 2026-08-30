@@ -3,12 +3,7 @@
   "case_id": "metric-conformance-downgrade",
   "family": "downgrade",
   "input_blake3_digest": "d902a13cc7c57254ab287acb11a2856fc042e51b4a82770312193f6529459780",
-  "result": "not-authorized",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.metric-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "incompatible-contract"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

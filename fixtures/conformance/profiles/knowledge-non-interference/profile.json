@@ -12,7 +12,8 @@
       "family": "positive",
       "schema": "providers/knowledge-non-interference/schemas/positive.schema.json",
       "input": "inputs/knowledge-non-interference/positive.json",
-      "expected": "expected/knowledge-non-interference/positive.json"
+      "expected": "expected/knowledge-non-interference/positive.json",
+      "oracle": "oracles/knowledge-non-interference/positive.json"
     },
     {
       "claim_layer": "knowledge-non-interference",
@@ -20,7 +21,8 @@
       "family": "denied",
       "schema": "providers/knowledge-non-interference/schemas/denied.schema.json",
       "input": "inputs/knowledge-non-interference/denied.json",
-      "expected": "expected/knowledge-non-interference/denied.json"
+      "expected": "expected/knowledge-non-interference/denied.json",
+      "oracle": "oracles/knowledge-non-interference/denied.json"
     },
     {
       "claim_layer": "knowledge-non-interference",
@@ -28,7 +30,8 @@
       "family": "malformed",
       "schema": "providers/knowledge-non-interference/schemas/malformed.schema.json",
       "input": "inputs/knowledge-non-interference/malformed.json",
-      "expected": "expected/knowledge-non-interference/malformed.json"
+      "expected": "expected/knowledge-non-interference/malformed.json",
+      "oracle": "oracles/knowledge-non-interference/malformed.json"
     },
     {
       "claim_layer": "knowledge-non-interference",
@@ -36,7 +39,8 @@
       "family": "resource-exhaustion",
       "schema": "providers/knowledge-non-interference/schemas/resource-exhaustion.schema.json",
       "input": "inputs/knowledge-non-interference/resource-exhaustion.json",
-      "expected": "expected/knowledge-non-interference/resource-exhaustion.json"
+      "expected": "expected/knowledge-non-interference/resource-exhaustion.json",
+      "oracle": "oracles/knowledge-non-interference/resource-exhaustion.json"
     },
     {
       "claim_layer": "knowledge-non-interference",
@@ -44,7 +48,8 @@
       "family": "deletion-redaction",
       "schema": "providers/knowledge-non-interference/schemas/deletion-redaction.schema.json",
       "input": "inputs/knowledge-non-interference/deletion-redaction.json",
-      "expected": "expected/knowledge-non-interference/deletion-redaction.json"
+      "expected": "expected/knowledge-non-interference/deletion-redaction.json",
+      "oracle": "oracles/knowledge-non-interference/deletion-redaction.json"
     },
     {
       "claim_layer": "knowledge-non-interference",
@@ -52,7 +57,8 @@
       "family": "downgrade",
       "schema": "providers/knowledge-non-interference/schemas/downgrade.schema.json",
       "input": "inputs/knowledge-non-interference/downgrade.json",
-      "expected": "expected/knowledge-non-interference/downgrade.json"
+      "expected": "expected/knowledge-non-interference/downgrade.json",
+      "oracle": "oracles/knowledge-non-interference/downgrade.json"
     },
     {
       "claim_layer": "knowledge-non-interference",
@@ -60,7 +66,8 @@
       "family": "independent-evaluation",
       "schema": "providers/knowledge-non-interference/schemas/independent-evaluation.schema.json",
       "input": "inputs/knowledge-non-interference/independent-evaluation.json",
-      "expected": "expected/knowledge-non-interference/independent-evaluation.json"
+      "expected": "expected/knowledge-non-interference/independent-evaluation.json",
+      "oracle": "oracles/knowledge-non-interference/independent-evaluation.json"
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",

@@ -18,7 +18,7 @@ command -v b3sum >/dev/null || {
   exit 1
 }
 
-[[ -d "${profile_root}" && -d "${fixture_root}/providers" && -d "${fixture_root}/inputs" && -d "${fixture_root}/expected" ]] || {
+[[ -d "${profile_root}" && -d "${fixture_root}/providers" && -d "${fixture_root}/inputs" && -d "${fixture_root}/expected" && -d "${fixture_root}/oracles" ]] || {
   echo "missing conformance fixture directories under ${fixture_root}" >&2
   exit 1
 }
@@ -28,13 +28,13 @@ trap 'rm -rf "${generated_root}"' EXIT
 
 generated_count=0
 declare -A seen_expected_paths=()
-while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path subject_adapter provider_id; do
+while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path oracle_path subject_adapter provider_id operation; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
   }
-  [[ "${input_path}" == inputs/* && "${expected_path}" == expected/* ]] || {
-    echo "fixture paths must remain under inputs/ and expected/: ${case_id}" >&2
+  [[ "${input_path}" == inputs/* && "${expected_path}" == expected/* && "${oracle_path}" == oracles/* ]] || {
+    echo "fixture paths must remain under inputs/, expected/, and oracles/: ${case_id}" >&2
     exit 1
   }
   expected_schema_prefix="providers/${claim_layer}/schemas/"
@@ -51,6 +51,11 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
     echo "fixture input/result paths are not paired: ${case_id}" >&2
     exit 1
   }
+  expected_oracle="oracles/${input_path#inputs/}"
+  [[ "${oracle_path}" == "${expected_oracle}" ]] || {
+    echo "fixture input/oracle paths are not paired: ${case_id}" >&2
+    exit 1
+  }
   [[ -n "${seen_expected_paths[${expected_path}]+seen}" ]] && {
     echo "fixture result path is declared more than once: ${expected_path}" >&2
     exit 1
@@ -59,8 +64,10 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
 
   input_file="${fixture_root}/${input_path}"
   expected_file="${fixture_root}/${expected_path}"
+  oracle_file="${fixture_root}/${oracle_path}"
   schema_file="${fixture_root}/${schema_path}"
-  [[ -s "${schema_file}" && -s "${input_file}" && -s "${expected_file}" ]] || {
+  [[ -s "${schema_file}" ]] &&
+    { [[ "${mode}" == "--write" ]] || [[ -s "${input_file}" && -s "${expected_file}" && -s "${oracle_file}" ]]; } || {
     echo "missing fixture pair: ${case_id}" >&2
     exit 1
   }
@@ -74,73 +81,58 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
   mkdir -p "$(dirname "${generated_file}")"
   generated_input="${generated_root}/${input_path}"
   mkdir -p "$(dirname "${generated_input}")"
+  generated_oracle="${generated_root}/${oracle_path}"
+  mkdir -p "$(dirname "${generated_oracle}")"
   case "${family}" in
     positive)
-      result=accepted
       oracle_kind=canonical-output
-      operation=execute-positive-case
-      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=describe
       jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
         '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,arguments:{seed:1}},expected:{result:"accepted",post_state:{committed:true}}}' > "${generated_input}"
       ;;
     denied)
-      result=rejected
       oracle_kind=namespaced-failure
       code_id=capability-denied
-      operation=mutate-subject
-      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=drive
       jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
         '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,required_capability:"mutate-subject",pre_state:{revision:1}},expected:{failure_code:"capability-denied",post_state:{revision:1}}}' > "${generated_input}"
       ;;
     malformed)
-      result=namespaced-failure
       oracle_kind=namespaced-failure
       code_id=malformed-payload
-      if [[ "${subject_adapter}" == "public-plugin-protocol" ]]; then
-        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
-          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"reduce",payload:"malformed-provider-payload"},expected:{failure_code:"malformed-payload"}}' > "${generated_input}"
-      else
+      if [[ -z "${operation}" ]]; then
         jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
           '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:"malformed-provider-payload",expected:{failure_code:"malformed-payload"}}' > "${generated_input}"
+      else
+        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
+          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,payload:"malformed-provider-payload"},expected:{failure_code:"malformed-payload"}}' > "${generated_input}"
       fi
       ;;
     resource-exhaustion)
-      result=resource-limit
       oracle_kind=namespaced-failure
       code_id=resource-limit
-      operation=consume-execution-steps
-      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=drive
       jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
         '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation},limit:{kind:"execution-steps",maximum:10000000,requested:10000001},expected:{failure_code:"resource-limit"}}' > "${generated_input}"
       ;;
     deletion-redaction)
-      result=destroyed
       oracle_kind=canonical-output
-      operation=redact-synthetic-subject
-      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=migrate-state
       jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
         '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,pre_state:{prohibited_data:"synthetic-secret",retained_metadata:{record_id:"synthetic-1"}},stimulus:{operation:$operation},expected:{post_state:{prohibited_data_present:false,retained_metadata:{record_id:"synthetic-1"}}}}' > "${generated_input}"
       ;;
     downgrade)
-      result=not-authorized
       oracle_kind=namespaced-failure
       code_id=incompatible-contract
-      operation=verify-release-admission
-      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=migrate-state
       jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_id "${provider_id}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
         '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,from_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:1},to_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:0},allow_fallback:false},expected:{failure_code:"incompatible-contract"}}' > "${generated_input}"
       ;;
     independent-evaluation)
-      result=corroborated
       oracle_kind=canonical-output
       independent_input="PiglorOS independent fixture ${claim_layer}"
       expected_digest="$(printf '%s' "${independent_input}" | b3sum | awk '{print $1}')"
-      if [[ "${subject_adapter}" == "public-plugin-protocol" ]]; then
-        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg input "${independent_input}" --arg expected_digest "${expected_digest}" \
-          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"describe"},algorithm:"BLAKE3-256",input:$input,expected_digest:$expected_digest}' > "${generated_input}"
-      else
+      if [[ -z "${operation}" ]]; then
         jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg input "${independent_input}" --arg expected_digest "${expected_digest}" \
           '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,algorithm:"BLAKE3-256",input:$input,expected_digest:$expected_digest}' > "${generated_input}"
+      else
+        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" --arg input "${independent_input}" --arg expected_digest "${expected_digest}" \
+          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation},algorithm:"BLAKE3-256",input:$input,expected_digest:$expected_digest}' > "${generated_input}"
       fi
       ;;
     *)
@@ -151,22 +143,24 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
 
   input_blake3_digest="$(b3sum "${generated_input}" | awk '{print $1}')"
   if [[ "${oracle_kind}" == "canonical-output" ]]; then
-    oracle="$(jq -cn '{kind:"canonical-output"}')"
+    jq -c '{oracle:{kind:"canonical-output"},output:(.expected // {algorithm,expected_digest})}' \
+      "${generated_input}" > "${generated_oracle}"
   else
-    oracle="$(jq -cn --arg owner_id "${provider_id}" --arg code_id "${code_id}" '{kind:"namespaced-failure",owner_id:$owner_id,contract_version:"1.0.0",code_id:$code_id}')"
+    jq -cn --arg owner_id "${provider_id}" --arg code_id "${code_id}" \
+      '{oracle:{kind:"namespaced-failure",owner_id:$owner_id,contract_version:"1.0.0",code_id:$code_id}}' \
+      > "${generated_oracle}"
   fi
   jq -n \
     --arg claim_layer "${claim_layer}" \
     --arg case_id "${case_id}" \
     --arg family "${family}" \
     --arg input_blake3_digest "${input_blake3_digest}" \
-    --arg result "${result}" \
-    --argjson oracle "${oracle}" \
-    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, result: $result, status: "pending", draft_expected_result: $oracle}' \
+    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, status: "pending", execution_result: null, executed_at: null}' \
     > "${generated_file}"
   if [[ "${mode}" == "--write" ]]; then
     install -m 0644 -- "${generated_input}" "${input_file}"
     install -m 0644 -- "${generated_file}" "${expected_file}"
+    install -m 0644 -- "${generated_oracle}" "${oracle_file}"
   else
     cmp -- "${generated_input}" "${input_file}" || {
       echo "input fixture is not independently reproducible: ${case_id}" >&2
@@ -176,6 +170,10 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
       echo "expected fixture record is not independently reproducible: ${case_id}" >&2
       exit 1
     }
+    cmp -- "${generated_oracle}" "${oracle_file}" || {
+      echo "oracle fixture is not independently reproducible: ${case_id}" >&2
+      exit 1
+    }
   fi
   generated_count=$((generated_count + 1))
 done < <(
@@ -183,8 +181,8 @@ done < <(
     provider_manifest="${fixture_root}/$(jq -r '.fixture_provider_manifest' "${profile}")"
     provider_id="$(jq -r '.provider_id' "${provider_manifest}")"
     subject_adapter="$(jq -r '.subject_adapter' "${profile}")"
-    jq -r --arg provider_id "${provider_id}" --arg subject_adapter "${subject_adapter}" \
-      '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, $subject_adapter, $provider_id] | @tsv' "${profile}"
+    jq -r --arg provider_id "${provider_id}" --arg subject_adapter "${subject_adapter}" --slurpfile provider "${provider_manifest}" \
+      '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, .oracle, $subject_adapter, $provider_id, ($provider[0].fixture_operations[.family] // "")] | @tsv' "${profile}"
   done < <(find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 | sort -z)
 )
 
@@ -234,13 +232,13 @@ generated_sha256="${generated_root}/SHA256SUMS"
 generated_blake3="${generated_root}/BLAKE3SUMS"
 (
   cd "${fixture_root}"
-  find expected-authority expected inputs matrix profiles providers support -type f -print0 |
+  find expected-authority expected inputs matrix oracles profiles providers support -type f -print0 |
     sort -z |
     xargs -0 b3sum
 ) > "${generated_blake3}"
 (
   cd "${fixture_root}"
-  { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix profiles providers support -type f -print0; } |
+  { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix oracles profiles providers support -type f -print0; } |
     sort -z |
     xargs -0 sha256sum
 ) > "${generated_sha256}"
@@ -248,7 +246,7 @@ if [[ "${mode}" == "--write" ]]; then
   install -m 0644 -- "${generated_blake3}" "${fixture_root}/BLAKE3SUMS"
   (
     cd "${fixture_root}"
-    { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix profiles providers support -type f -print0; } |
+    { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix oracles profiles providers support -type f -print0; } |
       sort -z |
       xargs -0 sha256sum
   ) > "${generated_sha256}"

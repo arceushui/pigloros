@@ -3,9 +3,7 @@
   "case_id": "replay-conformance-deletion-redaction",
   "family": "deletion-redaction",
   "input_blake3_digest": "cbdfa7286a40a85f784493929c430c7593210997c39de487b41c43a1c5ba248f",
-  "result": "destroyed",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

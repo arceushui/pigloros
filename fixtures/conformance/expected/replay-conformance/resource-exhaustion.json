@@ -3,12 +3,7 @@
   "case_id": "replay-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
   "input_blake3_digest": "3380557bf1ee0b5886b48782364d4fbe6761e2bf75db09b62ed3a684eadb35c4",
-  "result": "resource-limit",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.replay-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "resource-limit"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

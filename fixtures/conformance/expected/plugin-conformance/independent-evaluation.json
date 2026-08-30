@@ -3,9 +3,7 @@
   "case_id": "plugin-conformance-independent-evaluation",
   "family": "independent-evaluation",
   "input_blake3_digest": "a565850e908802b6042ee87a5c4ab5149cb1b338012eac0e42bbaa4e7752be1f",
-  "result": "corroborated",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

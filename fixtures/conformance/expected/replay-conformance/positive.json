@@ -3,9 +3,7 @@
   "case_id": "replay-conformance-positive",
   "family": "positive",
   "input_blake3_digest": "697454ab21be0ccf8f797acb88703801c79d5e6ea911543e2dbf75f17c1b0230",
-  "result": "accepted",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "canonical-output"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

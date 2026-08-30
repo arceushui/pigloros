@@ -3,12 +3,7 @@
   "case_id": "plugin-conformance-malformed",
   "family": "malformed",
   "input_blake3_digest": "be436c0dbaa81901c770f6e832d376f9dad216f4736d8ac8a08d4ddf17407037",
-  "result": "namespaced-failure",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.plugin-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "malformed-payload"
-  }
+  "execution_result": null,
+  "executed_at": null
 }

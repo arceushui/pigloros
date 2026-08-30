@@ -3,12 +3,7 @@
   "case_id": "gateway-client-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
   "input_blake3_digest": "be21e55709164d6772c741545ce3fc0d76fa6840f5f54bb1fc2a82fd87c8004a",
-  "result": "resource-limit",
   "status": "pending",
-  "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.fixture.gateway-client-conformance",
-    "contract_version": "1.0.0",
-    "code_id": "resource-limit"
-  }
+  "execution_result": null,
+  "executed_at": null
 }
