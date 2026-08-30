@@ -217,6 +217,11 @@ fn fixture_from_schema(
         &execution,
         "input.bin",
     );
+    let evidence_bytes = draft_evidence_bytes(&case_id, family_name)?;
+    let evidence_path = format!(
+        "evidence/{case_id}/{}.json",
+        pos_conformance::hex_digest(&execution)
+    );
     let mut fixture = FixtureDescriptorV1 {
         case_id,
         mandatory: true,
@@ -228,11 +233,10 @@ fn fixture_from_schema(
         modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
         schema: family_schema.schema_descriptor.clone(),
         payload: artifact(&payload_path, "application/octet-stream", PAYLOAD_BYTES)?,
-        auxiliary: vec![artifact(
-            &expected_path,
-            "application/json",
-            EXPECTED_BYTES,
-        )?],
+        auxiliary: vec![
+            artifact(&evidence_path, "application/json", &evidence_bytes)?,
+            artifact(&expected_path, "application/json", EXPECTED_BYTES)?,
+        ],
         strict_oracle: StrictOracleV1 {
             kind: StrictOracleKindV1::Failure,
             output: None,
@@ -274,6 +278,18 @@ fn fixture_from_schema(
     };
     fixture.fixture_digest = fixture.digest();
     Ok(fixture)
+}
+
+fn draft_evidence_bytes(case_id: &str, family: &str) -> TestResult<Vec<u8>> {
+    Ok(serde_json::to_vec(&serde_json::json!({
+        "case_id": case_id,
+        "claim_layer": "artifact-integrity",
+        "executed_at": null,
+        "execution_result": null,
+        "family": family,
+        "input_blake3_digest": pos_conformance::hex_digest(blake3::hash(PAYLOAD_BYTES).as_bytes()),
+        "status": "pending"
+    }))?)
 }
 
 fn bind_downgrade_authority(
@@ -429,7 +445,8 @@ fn expected_results(
         .map(|fixture| {
             let descriptor = fixture
                 .auxiliary
-                .first()
+                .iter()
+                .find(|descriptor| !descriptor.member_path.starts_with("evidence/"))
                 .ok_or("expected-result descriptor is absent")?;
             Ok(BundleExpectedResultV1 {
                 case_id: fixture.case_id.clone(),
@@ -475,22 +492,34 @@ fn append_release_admissions(
     Ok(())
 }
 
-fn current_fixture_members(profile: &ConformanceProfileV1) -> Vec<BundleMemberV1> {
+fn current_fixture_members(profile: &ConformanceProfileV1) -> TestResult<Vec<BundleMemberV1>> {
     profile
         .fixtures
         .iter()
-        .flat_map(|fixture| {
-            let payload = BundleMemberV1::fixture_input(
-                fixture.payload.member_path.clone(),
-                PAYLOAD_BYTES.to_vec(),
-            );
-            let expected = BundleMemberV1::expected_result(
-                fixture.auxiliary[0].member_path.clone(),
-                EXPECTED_BYTES.to_vec(),
-            );
-            [payload, expected]
-        })
-        .collect()
+        .map(current_fixture_member_set)
+        .collect::<TestResult<Vec<_>>>()
+        .map(|sets| sets.into_iter().flatten().collect())
+}
+
+fn current_fixture_member_set(fixture: &FixtureDescriptorV1) -> TestResult<[BundleMemberV1; 3]> {
+    let evidence = fixture
+        .auxiliary
+        .iter()
+        .find(|descriptor| descriptor.member_path.starts_with("evidence/"))
+        .ok_or("evidence descriptor is absent")?;
+    let expected = fixture
+        .auxiliary
+        .iter()
+        .find(|descriptor| !descriptor.member_path.starts_with("evidence/"))
+        .ok_or("expected-result descriptor is absent")?;
+    Ok([
+        BundleMemberV1::fixture_input(fixture.payload.member_path.clone(), PAYLOAD_BYTES.to_vec()),
+        BundleMemberV1::evidence_status(
+            evidence.member_path.clone(),
+            draft_evidence_bytes(&fixture.case_id, fixture_family_name(fixture.family))?,
+        ),
+        BundleMemberV1::expected_result(expected.member_path.clone(), EXPECTED_BYTES.to_vec()),
+    ])
 }
 
 fn current_static_support_members() -> Vec<BundleMemberV1> {
@@ -608,7 +637,7 @@ fn current_bundle_members(
             )
         })
         .collect::<Vec<_>>();
-    members.extend(current_fixture_members(profile));
+    members.extend(current_fixture_members(profile)?);
     members.extend(current_static_support_members());
     members.extend(current_authority_members(
         execution_profiles,
