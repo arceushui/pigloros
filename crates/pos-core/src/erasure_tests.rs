@@ -589,6 +589,33 @@ fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV1, ErasureE
     record
 }
 
+fn record_after_dispatch_intent(
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+    let mut port = test_port(true, vec![target]);
+    port.dispatch_error = Some(ErasureErrorV1::KeyDestructionFailed);
+    let persisted = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    assert_eq!(
+        coordinator.dispatch_destruction(reference(1), reference(9)),
+        Err(ErasureErrorV1::KeyDestructionFailed)
+    );
+    persisted
+        .load_record(reference(1))?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
 pub(super) fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let port = test_port(true, vec![ack.target]);
@@ -1625,13 +1652,24 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
     assert!(persisted.receipt().is_some());
     assert!(persisted.receipt_input().is_some());
     assert_eq!(persisted.authorize_provenance(), Some(reference(9)));
-    assert_eq!(persisted.freeze_provenance(), Some(reference(9)));
-    assert_eq!(persisted.dispatch_provenance(), Some(reference(9)));
+    let freeze = persisted
+        .supporting_records()
+        .freeze_provenance()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let admission = persisted
+        .supporting_records()
+        .retry_admissions()
+        .first()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(freeze.evidence(), reference(9));
+    assert_eq!(persisted.freeze_provenance(), Some(freeze.reference()));
+    assert_eq!(admission.trust(), reference(9));
+    assert_eq!(persisted.dispatch_provenance(), Some(admission.reference()));
     Ok(())
 }
 
 #[test]
-fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(), ErasureErrorV1> {
+fn coordinator_finalize_from_awaiting_state_rechecks_authority() -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let mut coordinator =
         ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
@@ -1647,16 +1685,10 @@ fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(),
         ),
     )?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
-    let dispatched = coordinator
+    let awaiting = coordinator
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let awaiting = dispatched.transition(change(
-        ErasureLifecycleV1::AwaitingAcknowledgements,
-        dispatched.freeze_position(),
-        Vec::new(),
-        Vec::new(),
-    ))?;
     let terminal = awaiting.transition(change(
         ErasureLifecycleV1::PartialFailure,
         awaiting.freeze_position(),
@@ -1682,7 +1714,7 @@ fn coordinator_finalize_from_dispatched_state_rechecks_authority() -> Result<(),
         coordinator
             .existing(reference(1))
             .map(ErasureStateV1::lifecycle),
-        Some(ErasureLifecycleV1::DestructionDispatched)
+        Some(ErasureLifecycleV1::AwaitingAcknowledgements)
     );
     Ok(())
 }
@@ -1708,8 +1740,13 @@ fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
     {
         let records = coordinator.port.records.borrow();
         let persisted = records.first().ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        assert_eq!(persisted.freeze_provenance(), Some(reference(42)));
-        assert_eq!(persisted.state().provenance(), reference(42));
+        let freeze = persisted
+            .supporting_records()
+            .freeze_provenance()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        assert_eq!(freeze.evidence(), reference(42));
+        assert_eq!(persisted.freeze_provenance(), Some(freeze.reference()));
+        assert_eq!(persisted.state().provenance(), freeze.reference());
         assert_eq!(persisted.state().freeze_position(), Some(42));
     }
     assert_eq!(
@@ -1857,7 +1894,13 @@ fn dispatch_intent_is_persisted_before_host_dispatch() -> Result<(), ErasureErro
         persisted.state().lifecycle(),
         ErasureLifecycleV1::AccessFrozen
     );
-    assert_eq!(persisted.dispatch_provenance(), Some(reference(9)));
+    let admission = persisted
+        .supporting_records()
+        .retry_admissions()
+        .last()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(admission.trust(), reference(9));
+    assert_eq!(persisted.dispatch_provenance(), Some(admission.reference()));
 
     let mut retry_port = restart_port;
     retry_port.dispatch_error = None;
@@ -1866,7 +1909,7 @@ fn dispatch_intent_is_persisted_before_host_dispatch() -> Result<(), ErasureErro
         restarted
             .dispatch_destruction(reference(1), reference(9))?
             .lifecycle(),
-        ErasureLifecycleV1::DestructionDispatched
+        ErasureLifecycleV1::AwaitingAcknowledgements
     );
     Ok(())
 }
@@ -1979,8 +2022,13 @@ fn freeze_retry_reuses_the_durable_target_reservation_after_restart() -> Result<
     let retry = restarted.freeze_inventory(reference(1), requested)?;
     assert_eq!(retry.lifecycle(), ErasureLifecycleV1::AccessFrozen);
     assert_eq!(retry.freeze_position(), Some(10));
-    assert_eq!(retry.provenance(), reference(9));
     let records = restarted.port.records.borrow();
+    let freeze = records[0]
+        .supporting_records()
+        .freeze_provenance()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(freeze.evidence(), reference(9));
+    assert_eq!(retry.provenance(), freeze.reference());
     assert_eq!(records[0].targets, vec![target]);
     assert_eq!(records[0].reserved_targets, Vec::new());
     Ok(())
@@ -2106,13 +2154,13 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
         coordinator
             .authorize(reference(1), reference(9))?
             .lifecycle(),
-        ErasureLifecycleV1::DestructionDispatched
+        ErasureLifecycleV1::AwaitingAcknowledgements
     );
     assert_eq!(
         coordinator
             .dispatch_destruction(reference(1), reference(9))?
             .lifecycle(),
-        ErasureLifecycleV1::DestructionDispatched
+        ErasureLifecycleV1::AwaitingAcknowledgements
     );
     assert_eq!(
         coordinator.dispatch_destruction(reference(1), reference(8)),
@@ -4116,26 +4164,31 @@ fn replacement_validation_accepts_idempotent_and_same_state_extensions(
     assert_eq!(authorized.validate_replacement(&reserved), Ok(()));
 
     let frozen = record_after_freeze(vec![target])?;
-    let mut intent_parts = record_parts(&frozen);
-    intent_parts.dispatch_provenance = Some(reference(10));
-    let intent = ErasureCoordinatorRecordV1::from_parts(intent_parts, reference(2))?;
+    let intent = record_after_dispatch_intent(target)?;
     assert_eq!(frozen.validate_replacement(&intent), Ok(()));
     Ok(())
 }
 
-fn dispatched_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
+fn awaiting_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let frozen = record_after_freeze(vec![target])?;
-    let dispatched_state = frozen.state().transition(change(
-        ErasureLifecycleV1::DestructionDispatched,
-        Some(10),
-        Vec::new(),
-        Vec::new(),
-    ))?;
-    let mut dispatched_parts = record_parts(&frozen);
-    dispatched_parts.state = dispatched_state;
-    dispatched_parts.dispatch_provenance = Some(reference(10));
-    ErasureCoordinatorRecordV1::from_parts(dispatched_parts, reference(2))
+    let port = test_port(true, vec![target]);
+    let persisted = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    persisted
+        .load_record(reference(1))?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
 #[test]
@@ -4158,7 +4211,7 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
     let authorized_with_reservation =
         ErasureCoordinatorRecordV1::from_parts(reserved_parts, reference(2))?;
     let frozen = record_after_freeze(vec![target])?;
-    let dispatched = dispatched_record()?;
+    let dispatched = awaiting_record()?;
     let mut backward_state = frozen.state().clone();
     backward_state.previous_state = Some(dispatched.state().state_digest());
     backward_state.state_digest = reference_zero();
@@ -4174,45 +4227,32 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
     );
 
     let wrong_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let wrong_frozen_state = authorized_with_reservation.state().transition(change(
-        ErasureLifecycleV1::AccessFrozen,
-        Some(10),
-        Vec::new(),
-        Vec::new(),
-    ))?;
-    let mut wrong_frozen_parts = record_parts(&authorized_with_reservation);
-    wrong_frozen_parts.state = wrong_frozen_state;
-    wrong_frozen_parts.targets = vec![wrong_target];
-    wrong_frozen_parts.freeze_provenance = Some(reference(9));
-    wrong_frozen_parts.freeze_admission = Some(ErasureFreezeAdmissionV1 {
-        freeze_position: 10,
-        provenance: reference(9),
-        target_closure: target_closure_digest(&[wrong_target]),
-    });
-    wrong_frozen_parts.reserved_targets.clear();
-    let wrong_frozen = ErasureCoordinatorRecordV1::from_parts(wrong_frozen_parts, reference(2))?;
+    let wrong_frozen = record_after_freeze(vec![wrong_target])?;
     assert_eq!(
         authorized_with_reservation.validate_replacement(&wrong_frozen),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let different_target_state = frozen.state().transition(change(
-        ErasureLifecycleV1::DestructionDispatched,
-        Some(10),
-        Vec::new(),
-        Vec::new(),
-    ))?;
-    let mut different_target_parts = record_parts(&frozen);
-    different_target_parts.state = different_target_state;
-    different_target_parts.targets = vec![wrong_target];
-    different_target_parts.freeze_admission = Some(ErasureFreezeAdmissionV1 {
-        freeze_position: 10,
-        provenance: reference(9),
-        target_closure: target_closure_digest(&[wrong_target]),
-    });
-    different_target_parts.dispatch_provenance = Some(reference(10));
-    let different_target =
-        ErasureCoordinatorRecordV1::from_parts(different_target_parts, reference(2))?;
+    let different_target = {
+        let port = test_port(true, vec![wrong_target]);
+        let persisted = port.clone();
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+        coordinator.submit(request()?, reference(3))?;
+        coordinator.authorize(reference(1), reference(9))?;
+        coordinator.freeze_inventory(
+            reference(1),
+            change(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )?;
+        coordinator.dispatch_destruction(reference(1), reference(9))?;
+        persisted
+            .load_record(reference(1))?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+    };
     assert_eq!(
         frozen.validate_replacement(&different_target),
         Err(ErasureErrorV1::PolicyConflict)
@@ -4222,30 +4262,8 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
 
 #[test]
 fn replacement_validation_rejects_removed_acknowledgements() -> Result<(), ErasureErrorV1> {
-    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let frozen = record_after_freeze(vec![target])?;
-    let dispatched_state = frozen.state().transition(change(
-        ErasureLifecycleV1::DestructionDispatched,
-        Some(10),
-        Vec::new(),
-        Vec::new(),
-    ))?;
-    let acknowledgement = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
-    let mut dispatched_parts = record_parts(&frozen);
-    dispatched_parts.state = dispatched_state;
-    dispatched_parts.dispatch_provenance = Some(reference(10));
-    let dispatched = ErasureCoordinatorRecordV1::from_parts(dispatched_parts, reference(2))?;
-    let mut acknowledged_parts = record_parts(&dispatched);
-    acknowledged_parts.acknowledgements = vec![acknowledgement];
-    let acknowledged = ErasureCoordinatorRecordV1::from_parts(acknowledged_parts, reference(2))?;
-    let awaiting_state = acknowledged.state().transition(change(
-        ErasureLifecycleV1::AwaitingAcknowledgements,
-        Some(10),
-        Vec::new(),
-        Vec::new(),
-    ))?;
+    let acknowledged = record_after_acknowledgement()?;
     let mut missing_ack_parts = record_parts(&acknowledged);
-    missing_ack_parts.state = awaiting_state;
     missing_ack_parts.acknowledgements.clear();
     let missing_ack = ErasureCoordinatorRecordV1::from_parts(missing_ack_parts, reference(2))?;
     assert_eq!(

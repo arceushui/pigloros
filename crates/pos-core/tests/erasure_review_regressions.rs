@@ -18,6 +18,7 @@ use pos_core::{
     ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
     ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
     ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ERASURE_PORTABLE_RECORD_MAX_BYTES,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -172,6 +173,25 @@ fn mutate_acknowledgement_provenance(
     Ok(changed)
 }
 
+fn replace_supporting_record_field(
+    bytes: &[u8],
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, ErasureErrorV1> {
+    let value: Value = ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let Value::Array(mut fields) = value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let field = fields
+        .get_mut(index)
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    *field = replacement;
+    let mut changed = Vec::new();
+    ciborium::into_writer(&Value::Array(fields), &mut changed)
+        .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    Ok(changed)
+}
+
 #[test]
 fn coordinator_decoder_rejects_reordered_or_duplicate_supporting_acknowledgements(
 ) -> Result<(), ErasureErrorV1> {
@@ -192,6 +212,39 @@ fn coordinator_decoder_rejects_reordered_or_duplicate_supporting_acknowledgement
         Ok(())
     })?;
     assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&duplicated).is_err());
+    Ok(())
+}
+
+#[test]
+fn supporting_records_roundtrip_canonically_and_reject_trailing_bytes() -> Result<(), ErasureErrorV1>
+{
+    let records = active_supporting_records(reference(1))?;
+    let bytes = records.to_canonical_cbor()?;
+    assert_eq!(
+        ErasureSupportingRecordsV1::from_canonical_cbor(&bytes)?,
+        records
+    );
+
+    let mut trailing = bytes;
+    trailing.push(0);
+    assert_eq!(
+        ErasureSupportingRecordsV1::from_canonical_cbor(&trailing),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_decoders_reject_malformed_and_oversized_evidence() -> Result<(), ErasureErrorV1> {
+    let bytes = active_supporting_records(reference(1))?.to_canonical_cbor()?;
+    let malformed = replace_supporting_record_field(&bytes, 1, Value::Bool(false))?;
+    assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&malformed).is_err());
+
+    let oversized = vec![0; ERASURE_PORTABLE_RECORD_MAX_BYTES + 1];
+    assert_eq!(
+        ErasureAcknowledgementProvenanceV1::from_canonical_cbor(&oversized),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     Ok(())
 }
 
@@ -366,6 +419,7 @@ fn receipt_accepts_an_inventory_owner_independent_of_the_target_replica(
 struct PublicPort {
     records: Vec<ErasureCoordinatorRecordV1>,
     states: Vec<ErasureStateV1>,
+    fail_commits: bool,
 }
 
 impl ErasureStateResolverV1 for PublicPort {
@@ -401,6 +455,9 @@ impl ErasurePersistencePortV1 for PublicPort {
         &mut self,
         records: &[ErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
+        if self.fail_commits {
+            return Err(ErasureErrorV1::ReceiptCommitFailed);
+        }
         let mut staged_records = self.records.clone();
         let mut staged_states = self.states.clone();
         for record in records {
@@ -427,6 +484,14 @@ impl ErasurePersistencePortV1 for PublicPort {
         self.records = staged_records;
         self.states = staged_states;
         Ok(())
+    }
+}
+
+fn public_port(fail_commits: bool) -> PublicPort {
+    PublicPort {
+        records: Vec::new(),
+        states: Vec::new(),
+        fail_commits,
     }
 }
 
@@ -514,13 +579,7 @@ fn state_after_acknowledgements(
 ) -> Result<ErasureStateV1, ErasureErrorV1> {
     let request = request()?;
     let request_reference = request.reference();
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
-        PublicPort {
-            records: Vec::new(),
-            states: Vec::new(),
-        },
-        reference(91),
-    );
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(public_port(false), reference(91));
     coordinator.submit(request, reference(92))?;
     coordinator.authorize(request_reference, reference(93))?;
     coordinator.freeze_inventory(request_reference, access_freeze_transition())?;
@@ -548,6 +607,28 @@ fn state_after_acknowledgements(
         .existing(request_reference)
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+#[test]
+fn public_coordinator_rejects_conflicting_retries_and_propagates_commit_failure(
+) -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let request_reference = request.reference();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(public_port(false), reference(91));
+    coordinator.submit(request, reference(92))?;
+    coordinator.authorize(request_reference, reference(93))?;
+    assert_eq!(
+        coordinator.authorize(request_reference, reference(99)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut commit_failure =
+        ErasureCoordinatorStateMachineV1::new(public_port(true), reference(91));
+    assert_eq!(
+        commit_failure.submit(request()?, reference(92)),
+        Err(ErasureErrorV1::ReceiptCommitFailed)
+    );
+    Ok(())
 }
 
 #[test]

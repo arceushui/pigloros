@@ -239,7 +239,7 @@ fn complete_supporting_input(
                 trust: reference(5),
             },
         )?],
-        receipts: vec![receipt.clone()],
+        receipts: vec![receipt],
         receipt_provenance: vec![receipt_provenance],
         administrative_resolutions: vec![administrative_resolution(request, None)?],
     })

@@ -3941,7 +3941,8 @@ impl ErasureCoordinatorRecordV1 {
                 || Some(freeze.reference()) != self.freeze_provenance
                 || Some(admission.freeze_position) != self.state.freeze_position()
                 || freeze.freeze_position() != admission.freeze_position
-                || self.state.provenance() != freeze.reference()
+                || (lifecycle == ErasureLifecycleV1::AccessFrozen
+                    && self.state.provenance() != freeze.reference())
             {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
@@ -4145,17 +4146,38 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        if lifecycle == ErasureLifecycleV1::AccessFrozen
-            && (self.supporting_records.retry_admissions().len() > 1
+        if lifecycle == ErasureLifecycleV1::AccessFrozen {
+            let admissions = self.supporting_records.retry_admissions();
+            let dispatch_intent_matches = match (self.dispatch_provenance, admissions) {
+                (None, []) => true,
+                (Some(provenance), [admission]) => provenance == admission.reference(),
+                _ => false,
+            };
+            if !dispatch_intent_matches
                 || !self
                     .supporting_records
                     .acknowledgement_provenance()
                     .is_empty()
                 || !self.supporting_records.attempt_outcomes().is_empty()
                 || !self.supporting_records.receipts().is_empty()
-                || !self.supporting_records.receipt_provenance().is_empty())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
+                || !self.supporting_records.receipt_provenance().is_empty()
+            {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+        }
+        if matches!(
+            lifecycle,
+            ErasureLifecycleV1::DestructionDispatched
+                | ErasureLifecycleV1::AwaitingAcknowledgements
+        ) {
+            let admission = self
+                .supporting_records
+                .retry_admissions()
+                .last()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            if self.state.provenance() != admission.reference() {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
         }
         if matches!(
             lifecycle,
@@ -4167,338 +4189,6 @@ impl ErasureCoordinatorRecordV1 {
             }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod erasure_targeted_coverage_tests {
-    use super::*;
-    use ciborium::value::Value;
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    const fn reference(value: u8) -> ErasureReferenceV1 {
-        ErasureReferenceV1::from_digest([value; 32])
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn target() -> ErasureRequiredTargetV1 {
-        ErasureRequiredTargetV1 {
-            artifact_class: ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest: reference(1),
-            key_role: ErasureKeyRoleV1::DataEncryption,
-            key_digest: reference(2),
-            replica_set: reference(3),
-            replica_id: reference(4),
-        }
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn authorized_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
-        let submitted = tests::record_after_submit()?;
-        let state = submitted.state().transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::Authorized,
-            freeze_position: None,
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: ErasureReplayClaimV1::StructuralOnly,
-            provenance: reference(9),
-        })?;
-        let mut parts = tests::record_parts(&submitted);
-        parts.state = state;
-        parts.authorize_provenance = Some(reference(9));
-        ErasureCoordinatorRecordV1::from_parts(parts, submitted.state().coordinator())
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn dispatched_record(
-        frozen: &ErasureCoordinatorRecordV1,
-    ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
-        let state = frozen.state().transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::DestructionDispatched,
-            freeze_position: Some(10),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: ErasureReplayClaimV1::StructuralOnly,
-            provenance: reference(10),
-        })?;
-        let mut parts = tests::record_parts(frozen);
-        parts.state = state;
-        parts.dispatch_provenance = Some(reference(10));
-        ErasureCoordinatorRecordV1::from_parts(parts, frozen.state().coordinator())
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn complete_record_bytes() -> Vec<u8> {
-        let bytes = tests::complete_record().and_then(|record| record.to_canonical_cbor());
-        assert!(bytes.is_ok());
-        bytes.unwrap_or_default()
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn malformed_record_bytes() -> Vec<Vec<u8>> {
-        let bytes = complete_record_bytes();
-        let Ok(Value::Array(fields)) = ciborium::from_reader(bytes.as_slice()) else {
-            return Vec::new();
-        };
-        let replacements = [
-            (2, Value::Null),
-            (3, Value::Null),
-            (4, Value::Null),
-            (5, Value::Null),
-            (6, Value::Null),
-            (7, Value::Array(Vec::new())),
-            (8, Value::Text(String::new())),
-            (9, Value::Text(String::new())),
-            (10, Value::Array(Vec::new())),
-            (11, Value::Text(String::new())),
-            (12, Value::Null),
-        ];
-        replacements
-            .into_iter()
-            .filter_map(|(index, replacement)| {
-                let mut fields = fields.clone();
-                fields[index] = replacement;
-                let mut bytes = Vec::new();
-                ciborium::into_writer(&Value::Array(fields), &mut bytes)
-                    .ok()
-                    .map(|()| bytes)
-            })
-            .collect()
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn awaiting_record(
-        frozen: &ErasureCoordinatorRecordV1,
-    ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
-        let dispatched = dispatched_record(frozen)?;
-        let state = dispatched.state().transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
-            freeze_position: Some(10),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim: ErasureReplayClaimV1::StructuralOnly,
-            provenance: reference(11),
-        })?;
-        let mut parts = tests::record_parts(frozen);
-        parts.state = state;
-        parts.dispatch_provenance = Some(reference(10));
-        ErasureCoordinatorRecordV1::from_parts(parts, frozen.state().coordinator())
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn same_state_reservation_rejects_unrelated_metadata() -> Result<(), ErasureErrorV1> {
-        let authorized = authorized_record()?;
-        let mut parts = tests::record_parts(&authorized);
-        parts.reserved_targets = vec![target()];
-        parts.authorize_provenance = Some(reference(10));
-        let replacement =
-            ErasureCoordinatorRecordV1::from_parts(parts, authorized.state().coordinator())?;
-        assert_eq!(
-            authorized.validate_replacement(&replacement),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-        Ok(())
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn same_state_dispatch_intent_rejects_unrelated_metadata() -> Result<(), ErasureErrorV1> {
-        let frozen = tests::record_after_freeze(vec![target()])?;
-        let mut parts = tests::record_parts(&frozen);
-        parts.dispatch_provenance = Some(reference(10));
-        parts.freeze_provenance = Some(reference(11));
-        parts
-            .freeze_admission
-            .as_mut()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?
-            .provenance = reference(11);
-        let replacement =
-            ErasureCoordinatorRecordV1::from_parts(parts, frozen.state().coordinator())?;
-        assert_eq!(
-            frozen.validate_replacement(&replacement),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-        Ok(())
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn same_state_acknowledgement_rejects_unrelated_metadata() -> Result<(), ErasureErrorV1> {
-        let target = target();
-        let frozen = tests::record_after_freeze(vec![target])?;
-        let awaiting = awaiting_record(&frozen)?;
-        let acknowledgement = ErasureAcknowledgementV1 {
-            obligation: inventory_obligation_reference(
-                ErasureInventoryCategoryV1::Artifact,
-                target,
-                target.replica_id,
-            ),
-            target,
-            owner: target.replica_id,
-            evidence: reference(12),
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-        };
-        let mut parts = tests::record_parts(&awaiting);
-        parts.acknowledgements = vec![acknowledgement];
-        parts.dispatch_provenance = Some(reference(12));
-        let replacement =
-            ErasureCoordinatorRecordV1::from_parts(parts, awaiting.state().coordinator())?;
-        assert_eq!(
-            awaiting.validate_replacement(&replacement),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-        Ok(())
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn advanced_replacement_rejects_a_backward_lifecycle() -> Result<(), ErasureErrorV1> {
-        let frozen = tests::record_after_freeze(vec![target()])?;
-        let dispatched = dispatched_record(&frozen)?;
-        let mut state = frozen.state().clone();
-        state.previous_state = Some(dispatched.state().state_digest());
-        state.state_digest = reference(0);
-        let state = state.with_digest()?;
-        let mut parts = tests::record_parts(&frozen);
-        parts.state = state;
-        let replacement =
-            ErasureCoordinatorRecordV1::from_parts(parts, frozen.state().coordinator())?;
-        assert_eq!(
-            dispatched.validate_replacement(&replacement),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-        assert_eq!(
-            dispatched.validate_advanced_replacement(&replacement),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn canonical_record_decoder_is_exercised_at_a_public_boundary() {
-        let bytes = complete_record_bytes();
-        assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).is_ok());
-
-        let mut noncanonical = bytes.clone();
-        noncanonical[7] = 0x18;
-        noncanonical.insert(8, 1);
-        assert_eq!(
-            ErasureCoordinatorRecordV1::from_canonical_cbor(&noncanonical),
-            Err(ErasureErrorV1::InvalidEncoding)
-        );
-
-        let mut trailing = bytes;
-        trailing.push(0);
-        assert_eq!(
-            ErasureCoordinatorRecordV1::from_canonical_cbor(&trailing),
-            Err(ErasureErrorV1::InvalidEncoding)
-        );
-    }
-
-    #[test]
-    fn canonical_record_decoder_rejects_malformed_fields_at_a_public_boundary() {
-        let malformed = malformed_record_bytes();
-        assert_eq!(malformed.len(), 11);
-        for bytes in malformed {
-            assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).is_err());
-        }
-    }
-
-    #[test]
-    fn limited_decoder_rejects_oversized_input_at_the_codec_boundary() {
-        assert_eq!(
-            decode_limited(&[0], 0, ERASURE_MAX_INVENTORY_RESULTS),
-            Err(ErasureErrorV1::ScopeInvalid)
-        );
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn required_record(
-        value: Result<ErasureCoordinatorRecordV1, ErasureErrorV1>,
-    ) -> ErasureCoordinatorRecordV1 {
-        value.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!(
-                "unexpected erasure coverage fixture error: {error:?}"
-            )))
-        })
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn required_request(value: Result<ErasureRequestV1, ErasureErrorV1>) -> ErasureRequestV1 {
-        value.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!(
-                "unexpected erasure coverage request error: {error:?}"
-            )))
-        })
-    }
-
-    #[test]
-    fn replacement_validation_rejects_an_invalid_persisted_record() {
-        let valid = required_record(tests::record_after_submit());
-        let mut invalid = valid.clone();
-        invalid.state.request = reference(99);
-
-        assert_eq!(
-            invalid.validate_replacement(&valid),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-    }
-
-    #[test]
-    fn batch_commit_and_dispatch_intent_failures_are_propagated() {
-        let valid = required_record(tests::record_after_submit());
-        let mut invalid = valid.clone();
-        invalid.state.request = reference(99);
-        let mut validation_failure =
-            ErasureCoordinatorStateMachineV1::new(tests::test_port(true, Vec::new()), reference(2));
-        assert_eq!(
-            validation_failure.commit_records(&[invalid]),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-
-        let mut persistence_failure = ErasureCoordinatorStateMachineV1::new(
-            tests::test_port_with_commit_error(),
-            reference(2),
-        );
-        assert_eq!(
-            persistence_failure.commit_records(&[valid]),
-            Err(ErasureErrorV1::ReceiptCommitFailed)
-        );
-
-        let target =
-            tests::acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-        let mut dispatch_failure = ErasureCoordinatorStateMachineV1::new(
-            tests::test_port_with_commit_error_on_call(5, vec![target]),
-            reference(2),
-        );
-        required_state(dispatch_failure.submit(required_request(tests::request()), reference(3)));
-        required_state(dispatch_failure.authorize(reference(1), reference(9)));
-        required_state(dispatch_failure.freeze_inventory(
-            reference(1),
-            tests::change(
-                ErasureLifecycleV1::AccessFrozen,
-                Some(10),
-                Vec::new(),
-                Vec::new(),
-            ),
-        ));
-        assert_eq!(
-            dispatch_failure.dispatch_destruction(reference(1), reference(9)),
-            Err(ErasureErrorV1::ReceiptCommitFailed)
-        );
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn required_state(value: Result<ErasureStateV1, ErasureErrorV1>) -> ErasureStateV1 {
-        value.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!(
-                "unexpected erasure coverage state error: {error:?}"
-            )))
-        })
     }
 }
 
