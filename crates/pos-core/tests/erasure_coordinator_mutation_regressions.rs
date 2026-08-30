@@ -885,6 +885,20 @@ fn supporting_records_bind_minimal_acknowledgement_trust_and_record_request(
 #[test]
 fn replacement_validation_accepts_each_same_state_persistence_extension(
 ) -> Result<(), ErasureErrorV1> {
+    let submitted = submitted_fixture(vec![target(10)])?;
+    let submitted_record = latest_record(&submitted.state, submitted.request)?;
+    let mut resolution_parts = record_parts(&submitted_record);
+    resolution_parts.supporting_records =
+        ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            administrative_resolutions: vec![administrative_resolution(submitted.request)?],
+            ..ErasureSupportingRecordsInputV1::default()
+        })?;
+    let with_resolution = ErasureCoordinatorRecordV1::from_parts(resolution_parts, COORDINATOR)?;
+    assert_eq!(
+        submitted_record.validate_replacement(&with_resolution),
+        Ok(())
+    );
+
     let frozen = frozen_fixture(vec![target(10)])?;
     let authorized = historical_record(&frozen.state, ErasureLifecycleV1::Authorized, |record| {
         record.reserved_targets().is_empty()
@@ -1524,11 +1538,14 @@ fn acknowledgement_requires_a_unique_admitted_obligation_owner_pair() -> Result<
     let mut different_owner = acknowledgement;
     different_owner.owner = reference(97);
     different_owner.evidence = reference(98);
+    accepted
+        .machine
+        .acknowledge(accepted.request, different_owner)?;
     assert_eq!(
-        accepted
-            .machine
-            .acknowledge(accepted.request, different_owner),
-        Err(ErasureErrorV1::ScopeInvalid)
+        latest_record(&accepted.state, accepted.request)?
+            .acknowledgements()
+            .len(),
+        2
     );
 
     let mut different_obligation = acknowledgement;

@@ -3625,7 +3625,14 @@ impl ErasureCoordinatorRecordV1 {
         without_supporting_records
             .supporting_records
             .clone_from(&self.supporting_records);
-        if without_supporting_records == *self {
+        if matches!(
+            (
+                without_supporting_records == *self,
+                self.supporting_records.retry_admissions.len()
+                    == next.supporting_records.retry_admissions.len(),
+            ),
+            (true, true)
+        ) {
             return Ok(());
         }
         if matches!(
