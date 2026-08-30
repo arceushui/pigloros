@@ -720,22 +720,19 @@ fn expected_source_paths(
     paths
 }
 
-fn source_snapshots(root: &CatalogRoot) -> Result<SourceSnapshots, io::Error> {
-    let sha256_bytes = read_fixture_relative(root, "SHA256SUMS", "SHA-256 source inventory")?;
-    let sha256_entries = checksum_manifest(&sha256_bytes, "SHA-256 source inventory")?;
-    if sha256_entries.contains_key("SHA256SUMS") {
-        return Err(invalid_data(
-            "SHA-256 source inventory must not declare itself",
-        ));
-    }
-    if sha256_entries.len() > MAX_SOURCE_FILE_COUNT {
+#[cfg(target_os = "linux")]
+fn inventoried_sources(
+    root: &CatalogRoot,
+    entries: &BTreeMap<String, [u8; 32]>,
+) -> Result<BTreeMap<String, Vec<u8>>, io::Error> {
+    if entries.len() > MAX_SOURCE_FILE_COUNT {
         return Err(invalid_data(format!(
             "SHA-256 source inventory exceeds the {MAX_SOURCE_FILE_COUNT}-file limit: {} files",
-            sha256_entries.len()
+            entries.len()
         )));
     }
     let mut declared_total_size = 0_u64;
-    for relative in sha256_entries.keys() {
+    for relative in entries.keys() {
         let opened = open_fixture_relative(root, relative, "SHA-256 inventoried source", false)?;
         let declared_size = fixture_file_size(&opened, relative, "SHA-256 inventoried source")?;
         declared_total_size = declared_total_size
@@ -749,7 +746,7 @@ fn source_snapshots(root: &CatalogRoot) -> Result<SourceSnapshots, io::Error> {
     }
     let mut retained_total_size = 0_u64;
     let mut sources = BTreeMap::new();
-    for relative in sha256_entries.keys() {
+    for relative in entries.keys() {
         let opened = open_fixture_relative(root, relative, "SHA-256 inventoried source", false)?;
         let declared_size = fixture_file_size(&opened, relative, "SHA-256 inventoried source")?;
         let next_total_size = retained_total_size
@@ -769,6 +766,32 @@ fn source_snapshots(root: &CatalogRoot) -> Result<SourceSnapshots, io::Error> {
         retained_total_size = next_total_size;
         sources.insert(relative.clone(), bytes);
     }
+    Ok(sources)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inventoried_sources(
+    root: &CatalogRoot,
+    entries: &BTreeMap<String, [u8; 32]>,
+) -> Result<BTreeMap<String, Vec<u8>>, io::Error> {
+    entries
+        .keys()
+        .map(|relative| {
+            read_fixture_relative(root, relative, "SHA-256 inventoried source")
+                .map(|bytes| (relative.clone(), bytes))
+        })
+        .collect()
+}
+
+fn source_snapshots(root: &CatalogRoot) -> Result<SourceSnapshots, io::Error> {
+    let sha256_bytes = read_fixture_relative(root, "SHA256SUMS", "SHA-256 source inventory")?;
+    let sha256_entries = checksum_manifest(&sha256_bytes, "SHA-256 source inventory")?;
+    if sha256_entries.contains_key("SHA256SUMS") {
+        return Err(invalid_data(
+            "SHA-256 source inventory must not declare itself",
+        ));
+    }
+    let sources = inventoried_sources(root, &sha256_entries)?;
     let blake3_bytes = sources
         .get("BLAKE3SUMS")
         .ok_or_else(|| invalid_data("SHA-256 source inventory omits BLAKE3SUMS"))?;
@@ -1118,31 +1141,105 @@ fn profile_fixtures(
         .collect()
 }
 
-fn profile_paths(
+struct ProfileFixtureContext<'a> {
+    snapshots: &'a SourceSnapshots,
+    family_contract: &'a BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
+    profile: &'a str,
+    claim_layer: &'a str,
+    subject_adapter: &'a str,
+    fixtures_by_case_id: &'a BTreeMap<String, &'a Value>,
+}
+
+fn profile_fixture_provider(
+    context: &ProfileFixtureContext<'_>,
+    declaration: &Value,
+    assigned_case_ids: &mut BTreeSet<String>,
+) -> Result<ProfileFixtureProvider, io::Error> {
+    let manifest = relative_asset(context.snapshots, declaration, "manifest")?;
+    let provider_value: Value = serde_json::from_slice(&manifest.bytes).map_err(|error| {
+        invalid_data(format!(
+            "fixture provider manifest {} is invalid: {error}",
+            manifest.relative
+        ))
+    })?;
+    validate_fixture_provider(
+        &provider_value,
+        context.claim_layer,
+        context.subject_adapter,
+    )?;
+    let provider = fixture_provider(&provider_value)?;
+    let provider_schemas = json_field(&provider_value, "schemas")?
+        .as_object()
+        .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
+    let fixture_case_ids = json_field(declaration, "fixture_case_ids")?
+        .as_array()
+        .ok_or_else(|| invalid_data("fixture provider fixture_case_ids must be an array"))?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                invalid_data("fixture provider fixture_case_ids must contain strings")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if fixture_case_ids.len() != FIXTURES_PER_PROFILE {
+        return Err(invalid_data(format!(
+            "profile manifest {} provider {} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
+            context.profile,
+            provider.provider_id,
+            fixture_case_ids.len()
+        )));
+    }
+    let fixtures = fixture_case_ids
+        .iter()
+        .map(|case_id| {
+            if !assigned_case_ids.insert(case_id.clone()) {
+                return Err(invalid_data(format!(
+                    "profile manifest {} assigns fixture {case_id} to multiple providers",
+                    context.profile
+                )));
+            }
+            context
+                .fixtures_by_case_id
+                .get(case_id)
+                .copied()
+                .ok_or_else(|| {
+                    invalid_data(format!(
+                        "profile manifest {} provider {} references undeclared fixture {case_id}",
+                        context.profile, provider.provider_id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    profile_fixtures(
+        context.snapshots,
+        &fixtures,
+        &provider_value,
+        &provider,
+        provider_schemas,
+        context.family_contract,
+        context.claim_layer,
+    )
+    .map(|fixtures| ProfileFixtureProvider {
+        provider,
+        manifest,
+        fixtures,
+    })
+}
+
+fn profile_fixture_providers(
     snapshots: &SourceSnapshots,
     family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
-    profile: String,
-) -> Result<ProfilePaths, Box<dyn Error>> {
-    let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
-    let profile_value: Value = serde_json::from_slice(&profile_record)?;
-    let profile_id = json_text(&profile_value, "profile_id")?;
-    let claim_layer = json_text(&profile_value, "claim_layer")?;
-    let catalog_claim_layer = CatalogClaimLayer::from_catalog_name(&claim_layer)?;
-    let subject_adapter = json_text(&profile_value, "subject_adapter")?;
-    let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
-    let fixture_root = json_text(&profile_value, "fixture_root")?;
-    let provider_declarations = json_field(&profile_value, "fixture_providers")?
-        .as_array()
-        .ok_or_else(|| invalid_data("profile catalog fixture_providers must be an array"))?;
+    profile: &str,
+    claim_layer: &str,
+    subject_adapter: &str,
+    provider_declarations: &[Value],
+    fixture_records: &[Value],
+) -> Result<Vec<ProfileFixtureProvider>, io::Error> {
     if provider_declarations.is_empty() {
-        return Err(invalid_data("profile catalog fixture_providers must not be empty").into());
+        return Err(invalid_data(
+            "profile catalog fixture_providers must not be empty",
+        ));
     }
-    let wire_code = json_field(&profile_value, "wire_code")?
-        .as_u64()
-        .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
-    let fixture_records = json_field(&profile_value, "fixtures")?
-        .as_array()
-        .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?;
     let fixtures_by_case_id = fixture_records
         .iter()
         .map(|fixture| json_text(fixture, "case_id").map(|case_id| (case_id, fixture)))
@@ -1150,79 +1247,25 @@ fn profile_paths(
     if fixtures_by_case_id.len() != fixture_records.len() {
         return Err(invalid_data(format!(
             "profile manifest {profile} contains duplicate fixture case IDs"
-        ))
-        .into());
+        )));
     }
     let mut assigned_case_ids = BTreeSet::new();
+    let context = ProfileFixtureContext {
+        snapshots,
+        family_contract,
+        profile,
+        claim_layer,
+        subject_adapter,
+        fixtures_by_case_id: &fixtures_by_case_id,
+    };
     let fixture_providers = provider_declarations
         .iter()
-        .map(|declaration| {
-            let manifest = relative_asset(snapshots, declaration, "manifest")?;
-            let provider_value: Value = serde_json::from_slice(&manifest.bytes).map_err(|error| {
-                invalid_data(format!(
-                    "fixture provider manifest {} is invalid: {error}",
-                    manifest.relative
-                ))
-            })?;
-            validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
-            let provider = fixture_provider(&provider_value)?;
-            let provider_schemas = json_field(&provider_value, "schemas")?
-                .as_object()
-                .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
-            let fixture_case_ids = json_field(declaration, "fixture_case_ids")?
-                .as_array()
-                .ok_or_else(|| invalid_data("fixture provider fixture_case_ids must be an array"))?
-                .iter()
-                .map(|value| {
-                    value.as_str().map(str::to_owned).ok_or_else(|| {
-                        invalid_data("fixture provider fixture_case_ids must contain strings")
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if fixture_case_ids.len() != FIXTURES_PER_PROFILE {
-                return Err(invalid_data(format!(
-                    "profile manifest {profile} provider {} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
-                    provider.provider_id,
-                    fixture_case_ids.len()
-                )));
-            }
-            let fixtures = fixture_case_ids
-                .iter()
-                .map(|case_id| {
-                    if !assigned_case_ids.insert(case_id.clone()) {
-                        return Err(invalid_data(format!(
-                            "profile manifest {profile} assigns fixture {case_id} to multiple providers"
-                        )));
-                    }
-                    fixtures_by_case_id.get(case_id).copied().ok_or_else(|| {
-                        invalid_data(format!(
-                            "profile manifest {profile} provider {} references undeclared fixture {case_id}",
-                            provider.provider_id
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            profile_fixtures(
-                snapshots,
-                &fixtures,
-                &provider_value,
-                &provider,
-                provider_schemas,
-                family_contract,
-                &claim_layer,
-            )
-            .map(|fixtures| ProfileFixtureProvider {
-                provider,
-                manifest,
-                fixtures,
-            })
-        })
-        .collect::<Result<Vec<_>, io::Error>>()?;
+        .map(|declaration| profile_fixture_provider(&context, declaration, &mut assigned_case_ids))
+        .collect::<Result<Vec<_>, _>>()?;
     if assigned_case_ids.len() != fixture_records.len() {
         return Err(invalid_data(format!(
             "profile manifest {profile} has fixtures that are not owned by a declared provider"
-        ))
-        .into());
+        )));
     }
     let mut provider_keys = fixture_providers
         .iter()
@@ -1241,15 +1284,47 @@ fn profile_paths(
     if provider_keys.len() != fixture_providers.len() {
         return Err(invalid_data(format!(
             "profile manifest {profile} contains duplicate fixture provider keys"
-        ))
-        .into());
+        )));
     }
     if provider_keys != declared_provider_keys {
         return Err(invalid_data(format!(
             "profile manifest {profile} fixture providers are not in canonical provider-key order"
-        ))
-        .into());
+        )));
     }
+    Ok(fixture_providers)
+}
+
+fn profile_paths(
+    snapshots: &SourceSnapshots,
+    family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
+    profile: String,
+) -> Result<ProfilePaths, Box<dyn Error>> {
+    let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
+    let profile_value: Value = serde_json::from_slice(&profile_record)?;
+    let profile_id = json_text(&profile_value, "profile_id")?;
+    let claim_layer = json_text(&profile_value, "claim_layer")?;
+    let catalog_claim_layer = CatalogClaimLayer::from_catalog_name(&claim_layer)?;
+    let subject_adapter = json_text(&profile_value, "subject_adapter")?;
+    let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
+    let fixture_root = json_text(&profile_value, "fixture_root")?;
+    let provider_declarations = json_field(&profile_value, "fixture_providers")?
+        .as_array()
+        .ok_or_else(|| invalid_data("profile catalog fixture_providers must be an array"))?;
+    let wire_code = json_field(&profile_value, "wire_code")?
+        .as_u64()
+        .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
+    let fixture_records = json_field(&profile_value, "fixtures")?
+        .as_array()
+        .ok_or_else(|| invalid_data("profile catalog fixtures must be an array"))?;
+    let fixture_providers = profile_fixture_providers(
+        snapshots,
+        family_contract,
+        &profile,
+        &claim_layer,
+        &subject_adapter,
+        provider_declarations,
+        fixture_records,
+    )?;
     let bundle_modes = json_field(&profile_value, "bundle_modes")?;
     let execution_profiles = json_field(&profile_value, "execution_profiles")?;
     if fixture_root != claim_layer {
