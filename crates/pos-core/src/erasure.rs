@@ -1218,19 +1218,38 @@ impl ErasureSupportingRecordsV1 {
                 .get(ordinal)
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?;
-            let outcome_matches = outcome.request() == admission.request()
-                && outcome.attempt() == admission.reference()
-                && outcome.source_receipt() == admission.source_receipt()
-                && outcome.lifecycle() == receipt.lifecycle()
-                && outcome.policy() == admission.policy()
-                && outcome.trust() == admission.trust();
-            let provenance_matches = provenance.request() == admission.request()
-                && provenance.attempt() == admission.reference()
-                && provenance.attempt_ordinal() == ordinal
-                && provenance.predecessor_receipt() == admission.source_receipt()
-                && provenance.terminal_state() == receipt.terminal_state()
-                && provenance.policy() == admission.policy()
-                && provenance.trust() == admission.trust();
+            let outcome_matches = (
+                outcome.request(),
+                outcome.attempt(),
+                outcome.source_receipt(),
+                outcome.lifecycle(),
+                outcome.policy(),
+                outcome.trust(),
+            ) == (
+                admission.request(),
+                admission.reference(),
+                admission.source_receipt(),
+                receipt.lifecycle(),
+                admission.policy(),
+                admission.trust(),
+            );
+            let provenance_matches = (
+                provenance.request(),
+                provenance.attempt(),
+                provenance.attempt_ordinal(),
+                provenance.predecessor_receipt(),
+                provenance.terminal_state(),
+                provenance.policy(),
+                provenance.trust(),
+            ) == (
+                admission.request(),
+                admission.reference(),
+                ordinal,
+                admission.source_receipt(),
+                receipt.terminal_state(),
+                admission.policy(),
+                admission.trust(),
+            );
             if !outcome_matches || !provenance_matches {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
