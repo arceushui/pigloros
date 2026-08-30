@@ -4169,10 +4169,6 @@ impl ErasurePersistencePortV1 for SqliteStore {
             .transpose()
     }
 
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        self.commit_records(std::slice::from_ref(&record))
-    }
-
     fn commit_records(
         &mut self,
         records: &[ErasureCoordinatorRecordV1],
@@ -4203,6 +4199,86 @@ impl ErasurePersistencePortV1 for SqliteStore {
                 finish_erasure_transaction(&self.conn, result)
             })
     }
+
+    fn compare_and_swap_scope_extension(
+        &mut self,
+        request: ErasureReferenceV1,
+        expected_ledger: ErasureReferenceV1,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        compare_and_swap_erasure_record_sql(
+            &self.conn,
+            request,
+            ErasureCasExpectation::ScopeExtension(expected_ledger),
+            &record,
+        )
+    }
+
+    fn compare_and_swap_administrative_resolution(
+        &mut self,
+        request: ErasureReferenceV1,
+        expected_head: Option<ErasureReferenceV1>,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        compare_and_swap_erasure_record_sql(
+            &self.conn,
+            request,
+            ErasureCasExpectation::AdministrativeResolution(expected_head),
+            &record,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ErasureCasExpectation {
+    ScopeExtension(ErasureReferenceV1),
+    AdministrativeResolution(Option<ErasureReferenceV1>),
+}
+
+fn compare_and_swap_erasure_record_sql(
+    conn: &Connection,
+    request: ErasureReferenceV1,
+    expectation: ErasureCasExpectation,
+    record: &ErasureCoordinatorRecordV1,
+) -> Result<(), ErasureErrorV1> {
+    let record_bytes = record.to_canonical_cbor()?;
+    let state_bytes = record.state().to_canonical_cbor()?;
+    conn.execute_batch(begin_immediate_sql())
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let result = load_sqlite_erasure_record(conn, request).and_then(|current| {
+        let current = current.ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if current.eq(record) {
+            return Ok(());
+        }
+        let expectation_matches = match expectation {
+            ErasureCasExpectation::ScopeExtension(expected) => {
+                current.scope_extension_ledger() == Some(expected)
+            }
+            ErasureCasExpectation::AdministrativeResolution(expected) => {
+                current.administrative_resolution_head() == expected
+            }
+        };
+        if !expectation_matches {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        stage_erasure_record_sql(conn, record, &record_bytes, &state_bytes)
+    });
+    finish_erasure_transaction(conn, result)
+}
+
+fn load_sqlite_erasure_record(
+    conn: &Connection,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
+        params![request.digest().as_slice()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+    .map(|bytes| ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes))
+    .transpose()
 }
 
 fn stage_erasure_record_sql(
@@ -12532,15 +12608,15 @@ pub(super) mod key_registry_coverage {
             pos_core::ErasureCoordinatorRecordPartsV1 {
                 request,
                 state,
-                reserved_targets: Vec::new(),
                 targets: Vec::new(),
                 acknowledgements: Vec::new(),
                 receipt: None,
                 receipt_input: None,
                 authorize_provenance: None,
                 freeze_provenance: None,
-                freeze_admission: None,
                 dispatch_provenance: None,
+                scope_extension_ledger: None,
+                administrative_resolution_head: None,
                 supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
             },
             erasure_reference(8),
@@ -12579,15 +12655,15 @@ pub(super) mod key_registry_coverage {
             pos_core::ErasureCoordinatorRecordPartsV1 {
                 request: submitted.request().clone(),
                 state,
-                reserved_targets: Vec::new(),
                 targets: Vec::new(),
                 acknowledgements: Vec::new(),
                 receipt: None,
                 receipt_input: None,
                 authorize_provenance: Some(erasure_reference(10)),
                 freeze_provenance: None,
-                freeze_admission: None,
                 dispatch_provenance: None,
+                scope_extension_ledger: None,
+                administrative_resolution_head: None,
                 supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
             },
             submitted.state().coordinator(),

@@ -1,24 +1,25 @@
 //! Public-interface regressions for ADR-060 review findings.
 
 use ciborium::value::Value;
-use pos_core::erasure::{
-    target_closure_digest, ErasureAuthorizationDecisionV1, ErasureFreezeAdmissionV1,
-};
+use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, selected_obligations_reference,
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
-    ErasureArtifactTransitionV1, ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1,
-    ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
-    ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
-    ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1,
+    ErasureAttemptOutcomeV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1,
+    ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
+    ErasureSupportingRecordsV1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -350,7 +351,7 @@ fn complete_receipt(
         coordinator: reference(62),
         lifecycle: ErasureLifecycleV1::Complete,
         freeze_position: 10,
-        required_targets: vec![inventory.target],
+        frozen_targets: vec![inventory.target],
         acknowledgements: vec![ErasureAcknowledgementV1 {
             obligation: inventory.obligation_reference(),
             target: inventory.target,
@@ -512,6 +513,24 @@ impl ErasurePersistencePortV1 for PublicPort {
         self.states = staged_states;
         Ok(())
     }
+
+    fn compare_and_swap_scope_extension(
+        &mut self,
+        _request: ErasureReferenceV1,
+        _expected_ledger: ErasureReferenceV1,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.commit_record(record)
+    }
+
+    fn compare_and_swap_administrative_resolution(
+        &mut self,
+        _request: ErasureReferenceV1,
+        _expected_head: Option<ErasureReferenceV1>,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.commit_record(record)
+    }
 }
 
 fn public_port(fail_commits: bool) -> PublicPort {
@@ -544,30 +563,46 @@ impl ErasureCoordinatorPortV1 for PublicPort {
         Ok(())
     }
 
-    fn required_targets(
+    fn admit_corrected_submission(
         &self,
-        _request: ErasureReferenceV1,
-    ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
-        Ok(self.targets.clone())
-    }
-    fn affected_scope(
-        &self,
-        _request: ErasureReferenceV1,
-    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-        Ok(vec![reference(3)])
+        _request: &ErasureRequestV1,
+        _correction: &pos_core::ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
     }
 
-    fn admit_freeze(
+    fn admit_atomic_freeze(
         &self,
-        _request: ErasureReferenceV1,
+        request: ErasureReferenceV1,
         _requested: &ErasureStateTransitionV1,
-        targets: &[ErasureRequiredTargetV1],
-    ) -> Result<ErasureFreezeAdmissionV1, ErasureErrorV1> {
-        Ok(ErasureFreezeAdmissionV1 {
+    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+        let target = self.targets[0];
+        let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target,
+            owner: target.replica_id,
+            command_identity: destruction_command_reference(request, target),
+        })?;
+        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request,
+            obligations: vec![obligation.reference()],
+            policy: reference(6),
+            trust: reference(7),
+        })?;
+        ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+            targets: vec![target],
+            scope: ErasureScopeCommitmentInputV1 {
+                request,
+                scope_members: vec![reference(3)],
+                target_closure: target_closure_digest(&[target]),
+                lineage_rule: None,
+            },
+            obligations: vec![obligation],
+            obligation_set,
             freeze_position: 10,
-            provenance: reference(90),
-            target_closure: target_closure_digest(targets),
+            host_evidence: reference(90),
         })
+        .map(ErasureAtomicFreezeResultV1::Admitted)
     }
 
     fn dispatch_destruction(
@@ -586,13 +621,24 @@ impl ErasureCoordinatorPortV1 for PublicPort {
 
     fn admit_acknowledgement(
         &self,
-        _request: ErasureReferenceV1,
-        _acknowledgement: &ErasureAcknowledgementV1,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
     fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+    fn admit_scope_extension(
+        &self,
+        _extension: &pos_core::ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+    fn admit_administrative_resolution(
+        &self,
+        _resolution: &pos_core::ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 }

@@ -1183,10 +1183,6 @@ impl ErasurePersistencePortV1 for MemoryStore {
             .transpose()
     }
 
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        self.commit_records(std::slice::from_ref(&record))
-    }
-
     fn commit_records(
         &mut self,
         records: &[ErasureCoordinatorRecordV1],
@@ -1203,6 +1199,50 @@ impl ErasurePersistencePortV1 for MemoryStore {
                 self.erasure_states = staged_states;
             })
     }
+
+    fn compare_and_swap_scope_extension(
+        &mut self,
+        request: ErasureReferenceV1,
+        expected_ledger: ErasureReferenceV1,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let current = load_memory_erasure_record(&self.erasure_records, request)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if current == record {
+            return Ok(());
+        }
+        if current.scope_extension_ledger() != Some(expected_ledger) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.commit_record(record)
+    }
+
+    fn compare_and_swap_administrative_resolution(
+        &mut self,
+        request: ErasureReferenceV1,
+        expected_head: Option<ErasureReferenceV1>,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let current = load_memory_erasure_record(&self.erasure_records, request)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if current == record {
+            return Ok(());
+        }
+        if current.administrative_resolution_head() != expected_head {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.commit_record(record)
+    }
+}
+
+fn load_memory_erasure_record(
+    records: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    request: ErasureReferenceV1,
+) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
+    records
+        .get(&request)
+        .map(|bytes| ErasureCoordinatorRecordV1::from_canonical_cbor(bytes))
+        .transpose()
 }
 
 fn stage_erasure_record(
@@ -5346,15 +5386,15 @@ mod coverage_entrypoints {
             pos_core::ErasureCoordinatorRecordPartsV1 {
                 request,
                 state,
-                reserved_targets: Vec::new(),
                 targets: Vec::new(),
                 acknowledgements: Vec::new(),
                 receipt: None,
                 receipt_input: None,
                 authorize_provenance: None,
                 freeze_provenance: None,
-                freeze_admission: None,
                 dispatch_provenance: None,
+                scope_extension_ledger: None,
+                administrative_resolution_head: None,
                 supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
             },
             erasure_reference(8),

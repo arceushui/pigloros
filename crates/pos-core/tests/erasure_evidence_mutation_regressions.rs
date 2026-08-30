@@ -8,15 +8,18 @@ use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
+    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureCoordinatorRecordPartsV1,
     ErasureCoordinatorRecordV1, ErasureErrorV1, ErasureFreezeFailureInputV1,
     ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
-    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
+    ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeV1, ErasureStateV1,
+    ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
 };
 
 fn replace_cbor_field(
@@ -118,29 +121,29 @@ fn administrative_resolution_action_code_is_bound_to_public_wire_roundtrip(
 
 const fn scope_input(
     request: ErasureReferenceV1,
-    affected_scope: Vec<ErasureReferenceV1>,
+    scope_members: Vec<ErasureReferenceV1>,
     target_closure: ErasureReferenceV1,
-    extension_head: Option<ErasureReferenceV1>,
+    lineage_rule: Option<ErasureReferenceV1>,
 ) -> ErasureScopeCommitmentInputV1 {
     ErasureScopeCommitmentInputV1 {
         request,
-        affected_scope,
+        scope_members,
         target_closure,
-        extension_head,
+        lineage_rule,
     }
 }
 
 fn scope_commitment(
     request: ErasureReferenceV1,
-    affected_scope: Vec<ErasureReferenceV1>,
+    scope_members: Vec<ErasureReferenceV1>,
     target_closure: ErasureReferenceV1,
-    extension_head: Option<ErasureReferenceV1>,
+    lineage_rule: Option<ErasureReferenceV1>,
 ) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
     ErasureScopeCommitmentV1::new(scope_input(
         request,
-        affected_scope,
+        scope_members,
         target_closure,
-        extension_head,
+        lineage_rule,
     ))
 }
 
@@ -149,24 +152,24 @@ fn scope_commitment_binds_scope_extension_encoding_and_content_address(
 ) -> Result<(), ErasureErrorV1> {
     let input = scope_input(
         reference(1),
-        vec![reference(3), reference(2)],
+        vec![reference(2), reference(3)],
         reference(4),
         None,
     );
     let record = ErasureScopeCommitmentV1::new(input)?;
-    assert_eq!(record.affected_scope(), &[reference(2), reference(3)]);
-    assert_eq!(record.extension_head(), None);
+    assert_eq!(record.scope_members(), &[reference(2), reference(3)]);
+    assert_eq!(record.lineage_rule(), None);
     assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureScopeCommitmentV1::to_canonical_cbor,
         ErasureScopeCommitmentV1::from_canonical_cbor,
     )?;
-    assert_eq!(decoded.extension_head(), None);
+    assert_eq!(decoded.lineage_rule(), None);
 
     let changed_target = ErasureScopeCommitmentV1::new(scope_input(
         reference(1),
-        vec![reference(3), reference(2)],
+        vec![reference(2), reference(3)],
         reference(5),
         None,
     ))?;
@@ -174,11 +177,11 @@ fn scope_commitment_binds_scope_extension_encoding_and_content_address(
 
     let extended = ErasureScopeCommitmentV1::new(scope_input(
         reference(1),
-        vec![reference(3), reference(2)],
+        vec![reference(2), reference(3)],
         reference(4),
         Some(reference(6)),
     ))?;
-    assert_eq!(extended.extension_head(), Some(reference(6)));
+    assert_eq!(extended.lineage_rule(), Some(reference(6)));
     assert_ne!(extended.reference(), record.reference());
     roundtrip(
         &extended,
@@ -192,56 +195,117 @@ fn scope_commitment_binds_scope_extension_encoding_and_content_address(
     Ok(())
 }
 
+#[test]
+fn public_atomic_freeze_decision_binds_explicit_category_obligations_and_exact_matrix(
+) -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let target = required_target();
+    let mut obligations = [
+        ErasureInventoryCategoryV1::Artifact,
+        ErasureInventoryCategoryV1::Key,
+        ErasureInventoryCategoryV1::Replica,
+        ErasureInventoryCategoryV1::Backup,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, category)| {
+        ErasureObligationV1::new(ErasureObligationInputV1 {
+            category,
+            target,
+            owner: reference([20, 21, 22, 23][index]),
+            command_identity: pos_core::destruction_command_reference(request, target),
+        })
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: obligations
+            .iter()
+            .map(ErasureObligationV1::reference)
+            .collect(),
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+        targets: vec![target],
+        scope: ErasureScopeCommitmentInputV1 {
+            request,
+            scope_members: vec![reference(2)],
+            target_closure: pos_core::erasure::target_closure_digest(&[target]),
+            lineage_rule: Some(reference(3)),
+        },
+        obligations: obligations.clone(),
+        obligation_set: obligation_set.clone(),
+        freeze_position: 0,
+        host_evidence: reference(6),
+    })?;
+    assert_eq!(admission.freeze_position(), 0);
+    assert_eq!(admission.obligations(), obligations.as_slice());
+    assert_eq!(admission.obligation_set(), &obligation_set);
+    assert_eq!(
+        ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+            targets: vec![target],
+            scope: ErasureScopeCommitmentInputV1 {
+                request,
+                scope_members: vec![reference(2)],
+                target_closure: reference(0),
+                lineage_rule: Some(reference(3)),
+            },
+            obligations,
+            obligation_set,
+            freeze_position: 0,
+            host_evidence: reference(6),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
 const fn freeze_input(
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,
-    evidence: ErasureReferenceV1,
-    extension_head: Option<ErasureReferenceV1>,
+    obligation_set: ErasureReferenceV1,
+    host_evidence: ErasureReferenceV1,
 ) -> ErasureFreezeProvenanceInputV1 {
     ErasureFreezeProvenanceInputV1 {
         request,
         scope_commitment,
+        obligation_set,
         freeze_position: 10,
-        evidence,
-        extension_head,
+        host_evidence,
     }
 }
 
 #[test]
-fn freeze_provenance_binds_optional_extension_encoding_and_content_address(
+fn freeze_provenance_binds_obligation_matrix_encoding_and_content_address(
 ) -> Result<(), ErasureErrorV1> {
-    let input = freeze_input(reference(1), reference(2), reference(3), None);
+    let input = freeze_input(reference(1), reference(2), reference(3), reference(4));
     let record = ErasureFreezeProvenanceV1::new(input)?;
-    assert_eq!(record.extension_head(), None);
+    assert_eq!(record.obligation_set(), reference(3));
     assert_ne!(record.reference(), reference(0));
     let decoded = roundtrip(
         &record,
         ErasureFreezeProvenanceV1::to_canonical_cbor,
         ErasureFreezeProvenanceV1::from_canonical_cbor,
     )?;
-    assert_eq!(decoded.extension_head(), None);
+    assert_eq!(decoded.host_evidence(), reference(4));
 
     let changed_evidence = ErasureFreezeProvenanceV1::new(freeze_input(
         reference(1),
         reference(2),
-        reference(4),
-        None,
+        reference(3),
+        reference(5),
     ))?;
     assert_ne!(changed_evidence.reference(), record.reference());
 
-    let extended = ErasureFreezeProvenanceV1::new(freeze_input(
+    let changed_matrix = ErasureFreezeProvenanceV1::new(freeze_input(
         reference(1),
         reference(2),
-        reference(3),
-        Some(reference(5)),
+        reference(6),
+        reference(4),
     ))?;
-    assert_eq!(extended.extension_head(), Some(reference(5)));
-    assert_ne!(extended.reference(), record.reference());
-    roundtrip(
-        &extended,
-        ErasureFreezeProvenanceV1::to_canonical_cbor,
-        ErasureFreezeProvenanceV1::from_canonical_cbor,
-    )?;
+    assert_ne!(changed_matrix.reference(), record.reference());
     Ok(())
 }
 
@@ -454,7 +518,7 @@ fn receipt(
         lifecycle: ErasureLifecycleV1::Complete,
         freeze_position: 10,
         acknowledgements: vec![acknowledgement()],
-        required_targets: vec![required_target()],
+        frozen_targets: vec![required_target()],
         pending_owners: Vec::new(),
         failed_owners: Vec::new(),
         inventories: ErasureReceiptInventoriesV1 {
@@ -878,15 +942,15 @@ fn submitted_record(
         ErasureCoordinatorRecordPartsV1 {
             request,
             state,
-            reserved_targets: Vec::new(),
             targets: Vec::new(),
             acknowledgements: Vec::new(),
             receipt: None,
             receipt_input: None,
             authorize_provenance: None,
             freeze_provenance: None,
-            freeze_admission: None,
             dispatch_provenance: None,
+            scope_extension_ledger: None,
+            administrative_resolution_head: None,
             supporting_records,
         },
         coordinator(),

@@ -9,11 +9,13 @@ use pos_core::{
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinatorPortV1,
+    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureCoordinatorPortV1,
     ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
     ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureFreezeAdmissionV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
     ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
@@ -182,6 +184,53 @@ fn administrative_resolution(
     })
 }
 
+fn atomic_admission(
+    request: ErasureReferenceV1,
+    mut targets: Vec<ErasureRequiredTargetV1>,
+    mismatched_closure: bool,
+    lineage_rule: Option<ErasureReferenceV1>,
+) -> Result<ErasureAtomicFreezeAdmissionV1, ErasureErrorV1> {
+    targets.sort_unstable();
+    let mut obligations = targets
+        .iter()
+        .map(|target| {
+            ErasureObligationV1::new(ErasureObligationInputV1 {
+                category: ErasureInventoryCategoryV1::Artifact,
+                target: *target,
+                owner: target.replica_id,
+                command_identity: destruction_command_reference(request, *target),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: obligations
+            .iter()
+            .map(ErasureObligationV1::reference)
+            .collect(),
+        policy: reference(6),
+        trust: reference(94),
+    })?;
+    ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+        targets: targets.clone(),
+        scope: ErasureScopeCommitmentInputV1 {
+            request,
+            scope_members: vec![reference(3)],
+            target_closure: if mismatched_closure {
+                reference(91)
+            } else {
+                target_closure_digest(&targets)
+            },
+            lineage_rule,
+        },
+        obligations,
+        obligation_set,
+        freeze_position: 10,
+        host_evidence: reference(90),
+    })
+}
+
 fn corrected_record_for(
     rejected_request: ErasureReferenceV1,
     rejected_terminal_state: ErasureReferenceV1,
@@ -203,15 +252,15 @@ fn corrected_record_for(
         ErasureCoordinatorRecordPartsV1 {
             request: corrected_request,
             state: corrected_state,
-            reserved_targets: Vec::new(),
             targets: Vec::new(),
             acknowledgements: Vec::new(),
             receipt: None,
             receipt_input: None,
             authorize_provenance: None,
             freeze_provenance: None,
-            freeze_admission: None,
             dispatch_provenance: None,
+            scope_extension_ledger: None,
+            administrative_resolution_head: None,
             supporting_records: supporting,
         },
         COORDINATOR,
@@ -238,7 +287,7 @@ fn receipt_input(
         lifecycle,
         freeze_position: 10,
         acknowledgements: vec![acknowledgement],
-        required_targets: vec![target],
+        frozen_targets: vec![target],
         pending_owners: Vec::new(),
         failed_owners,
         inventories: ErasureReceiptInventoriesV1 {
@@ -265,7 +314,7 @@ const fn deadline_receipt_input(issue_position: u64) -> ErasureReceiptInputV1 {
         lifecycle: ErasureLifecycleV1::PartialFailure,
         freeze_position: 10,
         acknowledgements: Vec::new(),
-        required_targets: Vec::new(),
+        frozen_targets: Vec::new(),
         pending_owners: Vec::new(),
         failed_owners: Vec::new(),
         inventories: ErasureReceiptInventoriesV1 {
@@ -289,10 +338,11 @@ struct PortState {
     record_history: Vec<ErasureCoordinatorRecordV1>,
     states: Vec<ErasureStateV1>,
     targets: Vec<ErasureRequiredTargetV1>,
-    required_targets_error: Option<ErasureErrorV1>,
-    affected_scope_error: Option<ErasureErrorV1>,
+    frozen_targets_error: Option<ErasureErrorV1>,
+    scope_members_error: Option<ErasureErrorV1>,
     freeze_error: Option<ErasureErrorV1>,
     mismatched_freeze_closure: bool,
+    lineage_rule: Option<ErasureReferenceV1>,
     attempt_error: Option<ErasureErrorV1>,
     dispatch_error: Option<ErasureErrorV1>,
     acknowledgement_error: Option<ErasureErrorV1>,
@@ -371,6 +421,38 @@ impl ErasurePersistencePortV1 for SharedPort {
         state.record_history = staged_history;
         Ok(())
     }
+
+    fn compare_and_swap_scope_extension(
+        &mut self,
+        request: ErasureReferenceV1,
+        expected_ledger: ErasureReferenceV1,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if self
+            .load_record(request)?
+            .and_then(|current| current.scope_extension_ledger())
+            != Some(expected_ledger)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.commit_record(record)
+    }
+
+    fn compare_and_swap_administrative_resolution(
+        &mut self,
+        request: ErasureReferenceV1,
+        expected_head: Option<ErasureReferenceV1>,
+        record: ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if self
+            .load_record(request)?
+            .and_then(|current| current.administrative_resolution_head())
+            != expected_head
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.commit_record(record)
+    }
 }
 
 impl ErasureCoordinatorPortV1 for SharedPort {
@@ -387,45 +469,34 @@ impl ErasureCoordinatorPortV1 for SharedPort {
         Ok(())
     }
 
-    fn required_targets(
+    fn admit_corrected_submission(
         &self,
-        _request: ErasureReferenceV1,
-    ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
-        let state = self.state.borrow();
-        state
-            .required_targets_error
-            .map_or_else(|| Ok(state.targets.clone()), Err)
+        _request: &ErasureRequestV1,
+        _correction: &ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
     }
 
-    fn affected_scope(
+    fn admit_atomic_freeze(
         &self,
-        _request: ErasureReferenceV1,
-    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-        self.state
-            .borrow()
-            .affected_scope_error
-            .map_or_else(|| Ok(vec![reference(3)]), Err)
-    }
-
-    fn admit_freeze(
-        &self,
-        _request: ErasureReferenceV1,
+        request: ErasureReferenceV1,
         _requested: &ErasureStateTransitionV1,
-        targets: &[ErasureRequiredTargetV1],
-    ) -> Result<ErasureFreezeAdmissionV1, ErasureErrorV1> {
+    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
         let state = self.state.borrow();
-        if let Some(error) = state.freeze_error {
+        if let Some(error) = state
+            .frozen_targets_error
+            .or(state.scope_members_error)
+            .or(state.freeze_error)
+        {
             return Err(error);
         }
-        Ok(ErasureFreezeAdmissionV1 {
-            freeze_position: 10,
-            provenance: reference(90),
-            target_closure: if state.mismatched_freeze_closure {
-                reference(91)
-            } else {
-                target_closure_digest(targets)
-            },
-        })
+        atomic_admission(
+            request,
+            state.targets.clone(),
+            state.mismatched_freeze_closure,
+            state.lineage_rule,
+        )
+        .map(ErasureAtomicFreezeResultV1::Admitted)
     }
 
     fn dispatch_destruction(
@@ -442,8 +513,7 @@ impl ErasureCoordinatorPortV1 for SharedPort {
 
     fn admit_acknowledgement(
         &self,
-        _request: ErasureReferenceV1,
-        _acknowledgement: &ErasureAcknowledgementV1,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<(), ErasureErrorV1> {
         self.state
             .borrow()
@@ -453,6 +523,18 @@ impl ErasureCoordinatorPortV1 for SharedPort {
 
     fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
         self.state.borrow().receipt_error.map_or(Ok(()), Err)
+    }
+    fn admit_scope_extension(
+        &self,
+        _extension: &pos_core::ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+    fn admit_administrative_resolution(
+        &self,
+        _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
     }
 }
 
@@ -468,10 +550,11 @@ fn submitted_fixture(targets: Vec<ErasureRequiredTargetV1>) -> Result<Fixture, E
         record_history: Vec::new(),
         states: Vec::new(),
         targets,
-        required_targets_error: None,
-        affected_scope_error: None,
+        frozen_targets_error: None,
+        scope_members_error: None,
         freeze_error: None,
         mismatched_freeze_closure: false,
+        lineage_rule: None,
         attempt_error: None,
         dispatch_error: None,
         acknowledgement_error: None,
@@ -595,9 +678,14 @@ fn historical_record(
 fn supporting_input(supporting: &ErasureSupportingRecordsV1) -> ErasureSupportingRecordsInputV1 {
     ErasureSupportingRecordsInputV1 {
         correction_provenance: supporting.correction_provenance().cloned(),
+        authorization_rejection: supporting.authorization_rejection(),
         scope_commitment: supporting.scope_commitment().cloned(),
         freeze_provenance: supporting.freeze_provenance(),
         freeze_failure: supporting.freeze_failure(),
+        obligations: supporting.obligations().to_vec(),
+        obligation_set: supporting.obligation_set().cloned(),
+        scope_extensions: supporting.scope_extensions().to_vec(),
+        scope_extension_ledgers: supporting.scope_extension_ledgers().to_vec(),
         retry_admissions: supporting.retry_admissions().to_vec(),
         acknowledgement_provenance: supporting.acknowledgement_provenance().to_vec(),
         attempt_outcomes: supporting.attempt_outcomes().to_vec(),
@@ -611,15 +699,15 @@ fn record_parts(record: &ErasureCoordinatorRecordV1) -> ErasureCoordinatorRecord
     ErasureCoordinatorRecordPartsV1 {
         request: record.request().clone(),
         state: record.state().clone(),
-        reserved_targets: record.reserved_targets().to_vec(),
         targets: record.targets().to_vec(),
         acknowledgements: record.acknowledgements().to_vec(),
         receipt: record.receipt().cloned(),
         receipt_input: record.receipt_input().cloned(),
         authorize_provenance: record.authorize_provenance(),
         freeze_provenance: record.freeze_provenance(),
-        freeze_admission: record.freeze_admission(),
         dispatch_provenance: record.dispatch_provenance(),
+        scope_extension_ledger: record.scope_extension_ledger(),
+        administrative_resolution_head: record.administrative_resolution_head(),
         supporting_records: record.supporting_records().clone(),
     }
 }
@@ -677,10 +765,6 @@ fn durable_record_scope_and_lifecycle_shapes_reject_each_public_near_miss(
 
     let frozen = frozen_fixture(vec![target(10), target(20)])?;
     let frozen_record = latest_record(&frozen.state, frozen.request)?;
-
-    let mut reserved_after_authorization = record_parts(&frozen_record);
-    reserved_after_authorization.reserved_targets = vec![target(10)];
-    assert_invalid_parts(reserved_after_authorization);
 
     let mut empty_frozen = record_parts(&frozen_record);
     empty_frozen.targets.clear();
@@ -805,15 +889,15 @@ fn replacement_validation_rejects_identity_and_evidence_regressions() -> Result<
         ErasureCoordinatorRecordPartsV1 {
             request: other_request,
             state: other_state,
-            reserved_targets: Vec::new(),
             targets: Vec::new(),
             acknowledgements: Vec::new(),
             receipt: None,
             receipt_input: None,
             authorize_provenance: None,
             freeze_provenance: None,
-            freeze_admission: None,
             dispatch_provenance: None,
+            scope_extension_ledger: None,
+            administrative_resolution_head: None,
             supporting_records: ErasureSupportingRecordsV1::default(),
         },
         COORDINATOR,
@@ -898,15 +982,6 @@ fn replacement_validation_accepts_each_same_state_persistence_extension(
         submitted_record.validate_replacement(&with_resolution),
         Ok(())
     );
-
-    let frozen = frozen_fixture(vec![target(10)])?;
-    let authorized = historical_record(&frozen.state, ErasureLifecycleV1::Authorized, |record| {
-        record.reserved_targets().is_empty()
-    })?;
-    let reserved = historical_record(&frozen.state, ErasureLifecycleV1::Authorized, |record| {
-        !record.reserved_targets().is_empty()
-    })?;
-    assert_eq!(authorized.validate_replacement(&reserved), Ok(()));
 
     let awaiting = awaiting_fixture(vec![target(10)])?;
     let frozen_without_intent = historical_record(
@@ -1111,21 +1186,10 @@ fn correction_predecessor_requires_the_exact_rejected_record() -> Result<(), Era
 }
 
 #[test]
-fn freeze_admission_binds_closure_scope_evidence_and_position() -> Result<(), ErasureErrorV1> {
+fn atomic_freeze_binds_closure_scope_evidence_and_position() -> Result<(), ErasureErrorV1> {
     let fixture = frozen_fixture(vec![target(10)])?;
     let frozen = latest_record(&fixture.state, fixture.request)?;
     assert!(frozen.to_canonical_cbor().is_ok());
-
-    let mut admission_mismatch = record_parts(&frozen);
-    admission_mismatch
-        .freeze_admission
-        .as_mut()
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?
-        .target_closure = reference(91);
-    assert_eq!(
-        ErasureCoordinatorRecordV1::from_parts(admission_mismatch, COORDINATOR),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
 
     let original_scope = frozen
         .supporting_records()
@@ -1138,16 +1202,16 @@ fn freeze_admission_binds_closure_scope_evidence_and_position() -> Result<(), Er
 
     let changed_scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: original_scope.request(),
-        affected_scope: original_scope.affected_scope().to_vec(),
+        scope_members: original_scope.scope_members().to_vec(),
         target_closure: reference(92),
-        extension_head: original_scope.extension_head(),
+        lineage_rule: original_scope.lineage_rule(),
     })?;
     let changed_scope_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request: original_freeze.request(),
         scope_commitment: changed_scope.reference(),
+        obligation_set: original_freeze.obligation_set(),
         freeze_position: original_freeze.freeze_position(),
-        evidence: original_freeze.evidence(),
-        extension_head: original_freeze.extension_head(),
+        host_evidence: original_freeze.host_evidence(),
     })?;
     let mut scope_mismatch = record_parts(&frozen);
     let mut scope_supporting = supporting_input(frozen.supporting_records());
@@ -1162,9 +1226,9 @@ fn freeze_admission_binds_closure_scope_evidence_and_position() -> Result<(), Er
     let changed_evidence_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request: original_freeze.request(),
         scope_commitment: original_freeze.scope_commitment(),
+        obligation_set: original_freeze.obligation_set(),
         freeze_position: original_freeze.freeze_position(),
-        evidence: reference(93),
-        extension_head: original_freeze.extension_head(),
+        host_evidence: reference(93),
     })?;
     let mut evidence_mismatch = record_parts(&frozen);
     let mut evidence_supporting = supporting_input(frozen.supporting_records());
@@ -1185,9 +1249,9 @@ fn freeze_admission_binds_closure_scope_evidence_and_position() -> Result<(), Er
     let changed_position_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request: original_freeze.request(),
         scope_commitment: original_freeze.scope_commitment(),
+        obligation_set: original_freeze.obligation_set(),
         freeze_position: 11,
-        evidence: original_freeze.evidence(),
-        extension_head: original_freeze.extension_head(),
+        host_evidence: original_freeze.host_evidence(),
     })?;
     let mut position_mismatch = record_parts(&frozen);
     let mut position_supporting = supporting_input(frozen.supporting_records());
@@ -1243,9 +1307,9 @@ fn supporting_lifecycle_rejects_evidence_at_the_wrong_boundary() -> Result<(), E
     let empty_targets = Vec::new();
     let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: authorized.request,
-        affected_scope: vec![reference(3)],
+        scope_members: vec![reference(3)],
         target_closure: target_closure_digest(&empty_targets),
-        extension_head: None,
+        lineage_rule: None,
     })?;
     let mut authorized_parts = record_parts(&authorized_record);
     let mut authorized_supporting = supporting_input(authorized_record.supporting_records());
@@ -1260,9 +1324,9 @@ fn supporting_lifecycle_rejects_evidence_at_the_wrong_boundary() -> Result<(), E
     let rejected_record = latest_record(&rejected.state, rejected.request)?;
     let rejected_scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: rejected.request,
-        affected_scope: vec![reference(3)],
+        scope_members: vec![reference(3)],
         target_closure: target_closure_digest(&[]),
-        extension_head: None,
+        lineage_rule: None,
     })?;
     let mut rejected_with_scope = record_parts(&rejected_record);
     rejected_with_scope.supporting_records =
@@ -1412,10 +1476,10 @@ fn freeze_preserves_closed_port_errors_and_rejects_closed_scope_failures(
         let mut fixture = authorized_fixture(vec![target(10)])?;
         match field {
             FreezePortFailure::RequiredTargets => {
-                fixture.state.borrow_mut().required_targets_error = Some(error);
+                fixture.state.borrow_mut().frozen_targets_error = Some(error);
             }
             FreezePortFailure::AffectedScope => {
-                fixture.state.borrow_mut().affected_scope_error = Some(error);
+                fixture.state.borrow_mut().scope_members_error = Some(error);
             }
             FreezePortFailure::Admission => {
                 fixture.state.borrow_mut().freeze_error = Some(error);

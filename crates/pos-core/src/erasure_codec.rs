@@ -3,20 +3,27 @@ use super::{
     ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureCorrectionProvenanceInputV1,
+    ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionInputV1,
+    ErasureAuthorizationRejectionV1, ErasureCorrectionProvenanceInputV1,
     ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeFailureInputV1,
     ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
-    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
+    ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionLedgerInputV1, ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1,
     ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
     ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
-    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
-    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_INVENTORY_RESULTS,
-    ERASURE_MAX_REFERENCES, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
-    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERC1, ERCR1, ERQ1, ERS1, VERSION,
+    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
+    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
+    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS,
+    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERC1, ERCR1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -85,14 +92,33 @@ pub(super) fn correction_provenance_from_fields(
     })
 }
 
+pub(super) fn authorization_rejection_value(record: &ErasureAuthorizationRejectionV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_AUTHORIZATION_REJECTION_TAG_V1),
+        uint(VERSION),
+        digest(record.input.request),
+        digest(record.input.authorization_provenance),
+    ])
+}
+
+pub(super) fn authorization_rejection_from_fields(
+    fields: &[Value],
+) -> Result<ErasureAuthorizationRejectionV1, ErasureErrorV1> {
+    header(fields, ERASURE_AUTHORIZATION_REJECTION_TAG_V1)?;
+    ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request: bytes32(&fields[2])?,
+        authorization_provenance: bytes32(&fields[3])?,
+    })
+}
+
 pub(super) fn scope_commitment_value(record: &ErasureScopeCommitmentV1) -> Value {
     Value::Array(vec![
         text(ERASURE_SCOPE_COMMITMENT_TAG_V1),
         uint(VERSION),
         digest(record.input.request),
-        references_value(&record.input.affected_scope),
+        references_value(&record.input.scope_members),
         digest(record.input.target_closure),
-        optional_digest(record.input.extension_head),
+        optional_digest(record.input.lineage_rule),
     ])
 }
 
@@ -102,9 +128,13 @@ pub(super) fn scope_commitment_from_fields(
     header(fields, ERASURE_SCOPE_COMMITMENT_TAG_V1)?;
     ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
         request: bytes32(&fields[2])?,
-        affected_scope: references_from_value(&fields[3], true)?,
+        scope_members: bounded_references_from_value(
+            &fields[3],
+            ERASURE_MAX_SCOPE_EXTENSIONS,
+            true,
+        )?,
         target_closure: bytes32(&fields[4])?,
-        extension_head: optional_bytes32(&fields[5])?,
+        lineage_rule: optional_bytes32(&fields[5])?,
     })
 }
 
@@ -114,9 +144,9 @@ pub(super) fn freeze_provenance_value(record: &ErasureFreezeProvenanceV1) -> Val
         uint(VERSION),
         digest(record.input.request),
         digest(record.input.scope_commitment),
+        digest(record.input.obligation_set),
         uint(record.input.freeze_position),
-        digest(record.input.evidence),
-        optional_digest(record.input.extension_head),
+        digest(record.input.host_evidence),
     ])
 }
 
@@ -127,9 +157,9 @@ pub(super) fn freeze_provenance_from_fields(
     ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request: bytes32(&fields[2])?,
         scope_commitment: bytes32(&fields[3])?,
-        freeze_position: unsigned(&fields[4])?,
-        evidence: bytes32(&fields[5])?,
-        extension_head: optional_bytes32(&fields[6])?,
+        obligation_set: bytes32(&fields[4])?,
+        freeze_position: unsigned(&fields[5])?,
+        host_evidence: bytes32(&fields[6])?,
     })
 }
 
@@ -153,6 +183,100 @@ pub(super) fn freeze_failure_from_fields(
         error: ErasureErrorV1::from_code(unsigned(&fields[3])?)?,
         authorization_provenance: bytes32(&fields[4])?,
         evidence: bytes32(&fields[5])?,
+    })
+}
+
+pub(super) fn obligation_value(record: &ErasureObligationV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_OBLIGATION_TAG_V1),
+        uint(VERSION),
+        uint(record.input.category.code()),
+        target_value(record.input.target),
+        digest(record.input.owner),
+        digest(record.input.command_identity),
+    ])
+}
+
+pub(super) fn obligation_from_fields(
+    fields: &[Value],
+) -> Result<ErasureObligationV1, ErasureErrorV1> {
+    header(fields, ERASURE_OBLIGATION_TAG_V1)?;
+    ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::from_code(unsigned(&fields[2])?)?,
+        target: target_from_value(&fields[3])?,
+        owner: bytes32(&fields[4])?,
+        command_identity: bytes32(&fields[5])?,
+    })
+}
+
+pub(super) fn obligation_set_value(record: &ErasureObligationSetV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_OBLIGATION_SET_TAG_V1),
+        uint(VERSION),
+        digest(record.input.request),
+        references_value(&record.input.obligations),
+        digest(record.input.policy),
+        digest(record.input.trust),
+    ])
+}
+
+pub(super) fn obligation_set_from_fields(
+    fields: &[Value],
+) -> Result<ErasureObligationSetV1, ErasureErrorV1> {
+    header(fields, ERASURE_OBLIGATION_SET_TAG_V1)?;
+    ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request: bytes32(&fields[2])?,
+        obligations: bounded_references_from_value(&fields[3], ERASURE_MAX_OBLIGATIONS, true)?,
+        policy: bytes32(&fields[4])?,
+        trust: bytes32(&fields[5])?,
+    })
+}
+
+pub(super) fn scope_extension_value(record: &ErasureScopeExtensionV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_SCOPE_EXTENSION_TAG_V1),
+        uint(VERSION),
+        digest(record.input.request),
+        digest(record.input.scope_commitment),
+        digest(record.input.fork),
+        digest(record.input.lineage_rule),
+        optional_digest(record.input.predecessor_extension),
+        digest(record.input.admission_provenance),
+    ])
+}
+
+pub(super) fn scope_extension_from_fields(
+    fields: &[Value],
+) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+    header(fields, ERASURE_SCOPE_EXTENSION_TAG_V1)?;
+    ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: bytes32(&fields[2])?,
+        scope_commitment: bytes32(&fields[3])?,
+        fork: bytes32(&fields[4])?,
+        lineage_rule: bytes32(&fields[5])?,
+        predecessor_extension: optional_bytes32(&fields[6])?,
+        admission_provenance: bytes32(&fields[7])?,
+    })
+}
+
+pub(super) fn scope_extension_ledger_value(record: &ErasureScopeExtensionLedgerV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1),
+        uint(VERSION),
+        digest(record.input.scope_commitment),
+        references_value(&record.input.extensions),
+        optional_digest(record.input.head),
+    ])
+}
+
+pub(super) fn scope_extension_ledger_from_fields(
+    fields: &[Value],
+) -> Result<ErasureScopeExtensionLedgerV1, ErasureErrorV1> {
+    header(fields, ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1)?;
+    ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        scope_commitment: bytes32(&fields[2])?,
+        extensions: unordered_references_from_value(&fields[3], ERASURE_MAX_SCOPE_EXTENSIONS)?,
+        head: optional_bytes32(&fields[4])?,
     })
 }
 
@@ -182,8 +306,16 @@ pub(super) fn retry_admission_from_fields(
         request: bytes32(&fields[2])?,
         attempt_ordinal: unsigned(&fields[3])?,
         source_receipt: optional_bytes32(&fields[4])?,
-        unresolved_obligations: portable_references_from_value(&fields[5])?,
-        command_identities: portable_references_from_value(&fields[6])?,
+        unresolved_obligations: bounded_references_from_value(
+            &fields[5],
+            ERASURE_MAX_OBLIGATIONS,
+            true,
+        )?,
+        command_identities: bounded_references_from_value(
+            &fields[6],
+            ERASURE_MAX_OBLIGATIONS,
+            true,
+        )?,
         policy: bytes32(&fields[7])?,
         trust: bytes32(&fields[8])?,
         admitted_position: unsigned(&fields[9])?,
@@ -502,7 +634,7 @@ pub(super) fn receipt_fields(input: &ErasureReceiptInputV1) -> Vec<Value> {
         digest(input.terminal_state),
         uint(input.lifecycle.code()),
         uint(input.freeze_position),
-        targets_value(&input.required_targets),
+        targets_value(&input.frozen_targets),
         Value::Array(
             input
                 .acknowledgements
@@ -547,7 +679,7 @@ pub(super) fn receipt_from_fields(fields: &[Value]) -> Result<ErasureReceiptV1, 
     let terminal_state = bytes32(&fields[3])?;
     let lifecycle = ErasureLifecycleV1::from_code(unsigned(&fields[4])?)?;
     let freeze_position = unsigned(&fields[5])?;
-    let required_targets = targets_from_value(&fields[6])?;
+    let frozen_targets = targets_from_value(&fields[6])?;
     let acknowledgements = acknowledgements_from_value(&fields[7])?;
     let pending_owners = references_from_value(&fields[8], false)?;
     let failed_owners = references_from_value(&fields[9], false)?;
@@ -563,7 +695,7 @@ pub(super) fn receipt_from_fields(fields: &[Value]) -> Result<ErasureReceiptV1, 
         lifecycle,
         freeze_position,
         acknowledgements,
-        required_targets,
+        frozen_targets,
         pending_owners,
         failed_owners,
         inventories,
@@ -587,7 +719,6 @@ pub(super) fn record_value(record: &super::ErasureCoordinatorRecordV1) -> Value 
         uint(VERSION),
         request_value(&record.request.0),
         state_value(&record.state),
-        targets_value(&record.reserved_targets),
         targets_value(&record.targets),
         Value::Array(
             record
@@ -603,14 +734,9 @@ pub(super) fn record_value(record: &super::ErasureCoordinatorRecordV1) -> Value 
             .map_or(Value::Null, |receipt| receipt_value(&receipt.0)),
         optional_digest(record.authorize_provenance),
         optional_digest(record.freeze_provenance),
-        record.freeze_admission.map_or(Value::Null, |admission| {
-            Value::Array(vec![
-                uint(admission.freeze_position),
-                digest(admission.provenance),
-                digest(admission.target_closure),
-            ])
-        }),
         optional_digest(record.dispatch_provenance),
+        optional_digest(record.scope_extension_ledger),
+        optional_digest(record.administrative_resolution_head),
         supporting_records_value(&record.supporting_records),
     ])
 }
@@ -621,6 +747,10 @@ pub(super) fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> 
             .correction_provenance
             .as_ref()
             .map_or(Value::Null, correction_provenance_value),
+        records
+            .authorization_rejection
+            .as_ref()
+            .map_or(Value::Null, authorization_rejection_value),
         records
             .scope_commitment
             .as_ref()
@@ -633,6 +763,25 @@ pub(super) fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> 
             .freeze_failure
             .as_ref()
             .map_or(Value::Null, freeze_failure_value),
+        Value::Array(records.obligations.iter().map(obligation_value).collect()),
+        records
+            .obligation_set
+            .as_ref()
+            .map_or(Value::Null, obligation_set_value),
+        Value::Array(
+            records
+                .scope_extensions
+                .iter()
+                .map(scope_extension_value)
+                .collect(),
+        ),
+        Value::Array(
+            records
+                .scope_extension_ledgers
+                .iter()
+                .map(scope_extension_ledger_value)
+                .collect(),
+        ),
         Value::Array(
             records
                 .retry_admissions
@@ -681,53 +830,79 @@ pub(super) fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> 
 pub(super) fn supporting_records_from_value(
     value: &Value,
 ) -> Result<ErasureSupportingRecordsV1, ErasureErrorV1> {
-    let fields = exact_array(value, 10)?;
+    let fields = exact_array(value, 15)?;
     let correction_provenance = match &fields[0] {
         Value::Null => None,
         value => Some(correction_provenance_from_fields(exact_array(value, 6)?)?),
     };
-    let scope_commitment = match &fields[1] {
+    let authorization_rejection = match &fields[1] {
+        Value::Null => None,
+        value => Some(authorization_rejection_from_fields(exact_array(value, 4)?)?),
+    };
+    let scope_commitment = match &fields[2] {
         Value::Null => None,
         value => Some(scope_commitment_from_fields(exact_array(value, 6)?)?),
     };
-    let freeze_provenance = match &fields[2] {
+    let freeze_provenance = match &fields[3] {
         Value::Null => None,
         value => Some(freeze_provenance_from_fields(exact_array(value, 7)?)?),
     };
-    let freeze_failure = match &fields[3] {
+    let freeze_failure = match &fields[4] {
         Value::Null => None,
         value => Some(freeze_failure_from_fields(exact_array(value, 6)?)?),
     };
-    let retry_admissions = array(&fields[4], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let obligations = array(&fields[5], ERASURE_MAX_OBLIGATIONS)?
+        .iter()
+        .map(|value| obligation_from_fields(exact_array(value, 6)?))
+        .collect::<Result<Vec<_>, _>>()?;
+    let obligation_set = match &fields[6] {
+        Value::Null => None,
+        value => Some(obligation_set_from_fields(exact_array(value, 6)?)?),
+    };
+    let scope_extensions = array(&fields[7], ERASURE_MAX_SCOPE_EXTENSIONS)?
+        .iter()
+        .map(|value| scope_extension_from_fields(exact_array(value, 8)?))
+        .collect::<Result<Vec<_>, _>>()?;
+    let scope_extension_ledgers =
+        array(&fields[8], ERASURE_MAX_SCOPE_EXTENSIONS.saturating_add(1))?
+            .iter()
+            .map(|value| scope_extension_ledger_from_fields(exact_array(value, 5)?))
+            .collect::<Result<Vec<_>, _>>()?;
+    let retry_admissions = array(&fields[9], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| retry_admission_from_fields(exact_array(value, 12)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let acknowledgement_provenance = array(&fields[5], ERASURE_MAX_INVENTORY_RESULTS)?
+    let acknowledgement_provenance = array(&fields[10], ERASURE_MAX_OBLIGATIONS)?
         .iter()
         .map(|value| acknowledgement_provenance_from_fields(exact_array(value, 12)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let attempt_outcomes = array(&fields[6], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let attempt_outcomes = array(&fields[11], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| attempt_outcome_from_fields(exact_array(value, 11)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let receipts = array(&fields[7], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let receipts = array(&fields[12], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| receipt_from_fields(exact_array(value, 19)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let receipt_provenance = array(&fields[8], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let receipt_provenance = array(&fields[13], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| receipt_provenance_from_fields(exact_array(value, 11)?))
         .collect::<Result<Vec<_>, _>>()?;
     let administrative_resolutions =
-        array(&fields[9], super::ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)?
+        array(&fields[14], super::ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)?
             .iter()
             .map(|value| administrative_resolution_from_fields(exact_array(value, 13)?))
             .collect::<Result<Vec<_>, _>>()?;
     ErasureSupportingRecordsV1::from_canonical_input(ErasureSupportingRecordsInputV1 {
         correction_provenance,
+        authorization_rejection,
         scope_commitment,
         freeze_provenance,
         freeze_failure,
+        obligations,
+        obligation_set,
+        scope_extensions,
+        scope_extension_ledgers,
         retry_admissions,
         acknowledgement_provenance,
         attempt_outcomes,
@@ -743,27 +918,17 @@ pub(super) fn record_from_fields(
     header(fields, ERCR1)?;
     let request = exact_array(&fields[2], 12).and_then(request_from_fields)?;
     let state = exact_array(&fields[3], 12).and_then(state_from_fields)?;
-    let reserved_targets = targets_from_value(&fields[4])?;
-    let targets = targets_from_value(&fields[5])?;
-    let acknowledgements = acknowledgements_from_value(&fields[6])?;
-    let receipt = match &fields[7] {
+    let targets = targets_from_value(&fields[4])?;
+    let acknowledgements = acknowledgements_from_value(&fields[5])?;
+    let receipt = match &fields[6] {
         Value::Null => None,
         value => Some(receipt_from_fields(exact_array(value, 19)?)?),
     };
-    let authorize_provenance = optional_bytes32(&fields[8])?;
-    let freeze_provenance = optional_bytes32(&fields[9])?;
-    let freeze_admission = match &fields[10] {
-        Value::Null => None,
-        value => {
-            let admission = exact_array(value, 3)?;
-            Some(super::ErasureFreezeAdmissionV1 {
-                freeze_position: unsigned(&admission[0])?,
-                provenance: bytes32(&admission[1])?,
-                target_closure: bytes32(&admission[2])?,
-            })
-        }
-    };
-    let dispatch_provenance = optional_bytes32(&fields[11])?;
+    let authorize_provenance = optional_bytes32(&fields[7])?;
+    let freeze_provenance = optional_bytes32(&fields[8])?;
+    let dispatch_provenance = optional_bytes32(&fields[9])?;
+    let scope_extension_ledger = optional_bytes32(&fields[10])?;
+    let administrative_resolution_head = optional_bytes32(&fields[11])?;
     let supporting_records = supporting_records_from_value(&fields[12])?;
     let receipt_input = receipt.as_ref().map(|value| {
         let mut input = value.0.clone();
@@ -774,15 +939,15 @@ pub(super) fn record_from_fields(
         super::ErasureCoordinatorRecordPartsV1 {
             request,
             state: state.clone(),
-            reserved_targets,
             targets,
             acknowledgements,
             receipt,
             receipt_input,
             authorize_provenance,
             freeze_provenance,
-            freeze_admission,
             dispatch_provenance,
+            scope_extension_ledger,
+            administrative_resolution_head,
             supporting_records,
         },
         state.coordinator(),
@@ -1107,7 +1272,7 @@ pub(super) fn weakest_inventory_claim(
     .unwrap_or(ErasureReplayClaimV1::UnverifiableArtifactsMissing)
 }
 pub(super) fn inventories_match_closure(
-    required_targets: &[ErasureRequiredTargetV1],
+    frozen_targets: &[ErasureRequiredTargetV1],
     inventories: &ErasureReceiptInventoriesV1,
 ) -> bool {
     let mut targets = inventories
@@ -1120,7 +1285,7 @@ pub(super) fn inventories_match_closure(
         .collect::<Vec<_>>();
     targets.sort_unstable();
     targets.dedup();
-    targets == required_targets
+    targets == frozen_targets
 }
 pub(super) fn has_duplicate_by_target(acknowledgements: &[ErasureAcknowledgementV1]) -> bool {
     acknowledgements
@@ -1128,11 +1293,11 @@ pub(super) fn has_duplicate_by_target(acknowledgements: &[ErasureAcknowledgement
         .any(|pair| (pair[0].obligation, pair[0].owner) == (pair[1].obligation, pair[1].owner))
 }
 pub(super) fn acknowledgements_are_closure_subset(
-    required_targets: &[ErasureRequiredTargetV1],
+    frozen_targets: &[ErasureRequiredTargetV1],
     acknowledgements: &[ErasureAcknowledgementV1],
 ) -> bool {
     acknowledgements.iter().all(|acknowledgement| {
-        required_targets
+        frozen_targets
             .binary_search(&acknowledgement.target)
             .is_ok()
     })
@@ -1144,41 +1309,34 @@ pub(super) fn references_from_value(
     value: &Value,
     required: bool,
 ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-    array(value, ERASURE_MAX_REFERENCES).and_then(|values| {
-        if required && values.is_empty() {
-            Err(ErasureErrorV1::ScopeInvalid)
-        } else {
-            values
-                .iter()
-                .map(bytes32)
-                .collect::<Result<Vec<_>, _>>()
-                .and_then(|references| {
-                    if strictly_increasing(&references) {
-                        Ok(references)
-                    } else {
-                        Err(ErasureErrorV1::ScopeInvalid)
-                    }
-                })
-        }
-    })
+    bounded_references_from_value(value, ERASURE_MAX_REFERENCES, required)
 }
 
 pub(super) fn portable_references_from_value(
     value: &Value,
 ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-    array(value, ERASURE_MAX_INVENTORY_RESULTS).and_then(|values| {
-        values
-            .iter()
-            .map(bytes32)
-            .collect::<Result<Vec<_>, _>>()
-            .and_then(|references| {
-                if strictly_increasing(&references) {
-                    Ok(references)
-                } else {
-                    Err(ErasureErrorV1::ScopeInvalid)
-                }
-            })
+    bounded_references_from_value(value, ERASURE_MAX_INVENTORY_RESULTS, false)
+}
+
+pub(super) fn bounded_references_from_value(
+    value: &Value,
+    maximum: usize,
+    required: bool,
+) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+    unordered_references_from_value(value, maximum).and_then(|references| {
+        if (required && references.is_empty()) || !strictly_increasing(&references) {
+            Err(ErasureErrorV1::ScopeInvalid)
+        } else {
+            Ok(references)
+        }
     })
+}
+
+pub(super) fn unordered_references_from_value(
+    value: &Value,
+    maximum: usize,
+) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+    array(value, maximum).and_then(|values| values.iter().map(bytes32).collect())
 }
 
 pub(super) fn header(fields: &[Value], contract: &str) -> Result<(), ErasureErrorV1> {
