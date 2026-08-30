@@ -3351,7 +3351,6 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        self.supporting_records.validate()?;
         self.supporting_records
             .validates_request(self.request.reference())?;
         if let Some(correction) = self.supporting_records.correction_provenance() {

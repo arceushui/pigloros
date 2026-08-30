@@ -737,6 +737,27 @@ fn portable_reference_decoders_reject_duplicate_entries() -> Result<(), ErasureE
     Ok(())
 }
 
+#[test]
+fn portable_decoders_reject_unknown_closed_enum_codes() -> Result<(), ErasureErrorV1> {
+    let input = complete_supporting_input(reference(1))?;
+    let outcome = changed_array(&input.attempt_outcomes[0].to_canonical_cbor()?, |fields| {
+        fields[5] = Value::Integer(99.into())
+    });
+    assert_eq!(
+        ErasureAttemptOutcomeV1::from_canonical_cbor(&outcome),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    let resolution = changed_array(
+        &input.administrative_resolutions[0].to_canonical_cbor()?,
+        |fields| fields[4] = Value::Integer(99.into()),
+    );
+    assert_eq!(
+        ErasureAdministrativeResolutionV1::from_canonical_cbor(&resolution),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    Ok(())
+}
+
 fn coordinator_with_complete_supporting_records(
 ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
@@ -793,6 +814,7 @@ fn changed_supporting_records(bytes: &[u8], change: impl FnOnce(&mut Vec<Value>)
 fn coordinator_decoder_exercises_every_supporting_record_path() -> Result<(), ErasureErrorV1> {
     let record = coordinator_with_complete_supporting_records()?;
     let bytes = record.to_canonical_cbor()?;
+    assert!(record.validate_replacement(&record).is_ok());
     assert_eq!(
         ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes)?,
         record
@@ -836,6 +858,13 @@ fn coordinator_decoder_exercises_every_supporting_record_path() -> Result<(), Er
         ErasureCoordinatorRecordV1::from_canonical_cbor(&wrong_correction),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    let malformed_correction = changed_supporting_records(&bytes, |fields| {
+        let Value::Array(correction) = &mut fields[0] else {
+            return;
+        };
+        correction[2] = Value::Bool(false);
+    });
+    assert!(ErasureCoordinatorRecordV1::from_canonical_cbor(&malformed_correction).is_err());
     Ok(())
 }
 
