@@ -1491,6 +1491,7 @@ fn decode_role(value: &Value) -> Result<BundleMemberRoleV1, BundleContractErrorV
         _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
     })
 }
+#[path = "independent_bundle_verifier.rs"]
 mod independent_bundle_verifier;
 pub use independent_bundle_verifier::{
     verify_archive_independently, verify_release_tree_independently,
