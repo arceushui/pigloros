@@ -2387,6 +2387,72 @@ fn materialize_rejects_an_unused_required_provider() -> TestResult {
 }
 
 #[test]
+fn archive_validation_rejects_provider_and_execution_closure_drift() -> TestResult {
+    let mut undeclared_package = current_bundle_inputs(BundleModeV1::Local)?;
+    undeclared_package
+        .members
+        .push(BundleMemberV1::fixture_provider_package(
+            "authority/providers/undeclared.cbor",
+            Vec::new(),
+        ));
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &undeclared_package.profile,
+            BundleModeV1::Local,
+            undeclared_package.members,
+            undeclared_package.expected,
+        ),
+        Err(BundleContractErrorV1::UndeclaredMember),
+    );
+
+    let undeclared_execution = mutate_profile_archive(|profile| {
+        let replacement = Value::Bytes(vec![42; 32]);
+        replace_value(
+            array_field(profile, 7, "profile executions")?,
+            0,
+            replacement.clone(),
+            "profile execution digest",
+        )?;
+        for fixture in array_field(profile, 9, "fixtures")? {
+            let Value::Array(fields) = fixture else {
+                return Err("fixture is not an array".into());
+            };
+            replace_value(fields, 6, replacement.clone(), "fixture execution digest")?;
+        }
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&undeclared_execution, "undeclared execution profile");
+
+    let undeclared_provider = mutate_profile_archive(|profile| {
+        let replacement = Value::Array(vec![
+            Value::Text("pigloros.fixture.undeclared".to_owned()),
+            Value::Text("1.0.0".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Integer(0_u64.into()),
+        ]);
+        replace_value(
+            array_field(
+                array_field(profile, 8, "provider binding")?,
+                1,
+                "required providers",
+            )?,
+            0,
+            replacement.clone(),
+            "required provider",
+        )?;
+        for fixture in array_field(profile, 9, "fixtures")? {
+            let Value::Array(fields) = fixture else {
+                return Err("fixture is not an array".into());
+            };
+            replace_value(fields, 4, replacement.clone(), "fixture provider")?;
+        }
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&undeclared_provider, "undeclared provider");
+    Ok(())
+}
+
+#[test]
 fn materialize_rejects_unknown_provider_and_family_schema_mismatch() -> TestResult {
     let mut unknown_provider = current_bundle_inputs(BundleModeV1::Local)?;
     let mut other_provider = provider_key();
