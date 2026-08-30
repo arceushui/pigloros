@@ -112,7 +112,8 @@ fn await_staged_regular_files(
     staging: &Path,
     child: &mut std::process::Child,
 ) -> TestResult<Vec<PathBuf>> {
-    for _ in 0..200_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             return Err(format!(
                 "materializer exited before staged files were observable: {status}"
@@ -123,7 +124,7 @@ fn await_staged_regular_files(
         if files.len() >= 2 {
             return Ok(files);
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     child.kill()?;
     child.wait()?;
