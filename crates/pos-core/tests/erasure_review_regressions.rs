@@ -518,7 +518,7 @@ fn public_port(fail_commits: bool) -> PublicPort {
     public_port_with_targets(fail_commits, vec![target()])
 }
 
-fn public_port_with_targets(
+const fn public_port_with_targets(
     fail_commits: bool,
     targets: Vec<ErasureRequiredTargetV1>,
 ) -> PublicPort {
