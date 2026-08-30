@@ -5,12 +5,11 @@ use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
     verify_archive_release_filename, verify_release_tree_independently, ArtifactDescriptorV1,
-    BundleContractErrorV1,
-    BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1,
-    BundleModeV1, CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1,
-    ConformanceProfileV1, DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1,
-    ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1,
-    FixtureProviderEntryV1, FixtureProviderKeyV1, FixtureProviderPackageV1,
+    BundleContractErrorV1, BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1,
+    BundleMemberV1, BundleModeV1, CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1,
+    ConformanceBundleV1, ConformanceProfileV1, DeterministicBudgetV1, EvaluatorHardCapsV1,
+    EvaluatorProtocolV1, ExecutionModeV1, FixtureDescriptorV1, FixtureFamilyV1,
+    FixtureProvenanceV1, FixtureProviderEntryV1, FixtureProviderKeyV1, FixtureProviderPackageV1,
     FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1, IndependenceRequirementsV1,
     NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1,
     RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
@@ -1174,7 +1173,10 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(archives.len(), 14);
-    let archive_bytes = archives.iter().map(fs::read).collect::<Result<Vec<_>, _>>()?;
+    let archive_bytes = archives
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()?;
     let archive_refs = archive_bytes.iter().map(Vec::as_slice).collect::<Vec<_>>();
     verify_release_tree_independently(&archive_refs)?;
     assert_eq!(
@@ -1255,11 +1257,16 @@ fn root_materializer_test_drops_groups_gid_and_uid_before_publication() -> TestR
             "0707070707070707070707070707070707070707070707070707070707070707",
         )
         .status()?;
-    assert!(status.success(), "unprivileged materialization must succeed");
+    assert!(
+        status.success(),
+        "unprivileged materialization must succeed"
+    );
     assert_eq!(
         release_files(&publication)?
             .iter()
-            .filter(|path| path.extension().is_some_and(|extension| extension == "cfb1"))
+            .filter(|path| path
+                .extension()
+                .is_some_and(|extension| extension == "cfb1"))
             .count(),
         14
     );

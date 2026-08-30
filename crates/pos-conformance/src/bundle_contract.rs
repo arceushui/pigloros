@@ -890,9 +890,7 @@ pub fn verify_archive_independently(archive_bytes: &[u8]) -> Result<(), BundleCo
 ///
 /// Returns a closed bundle error if any archive is invalid, a profile mode pair
 /// is incomplete, registries differ, or any registry provider is unreferenced.
-pub fn verify_release_tree_independently(
-    archives: &[&[u8]],
-) -> Result<(), BundleContractErrorV1> {
+pub fn verify_release_tree_independently(archives: &[&[u8]]) -> Result<(), BundleContractErrorV1> {
     let mut registry_bytes: Option<Vec<u8>> = None;
     let mut registry_providers: Option<BTreeSet<RawProviderKey>> = None;
     let mut profile_modes = BTreeMap::<[u8; 32], BTreeSet<u64>>::new();
@@ -1066,12 +1064,12 @@ fn raw_archive_profile(manifest: &[Value], members: &[Value]) -> Result<(), Bund
                             uint(&manifest[2]).and_then(|mode| {
                                 raw_registry_and_packages(profile_fields, members, mode).and_then(
                                     |()| {
-                                    raw_expected_results(
-                                        &manifest[5],
-                                        profile_fields,
-                                        members,
-                                        mode,
-                                    )
+                                        raw_expected_results(
+                                            &manifest[5],
+                                            profile_fields,
+                                            members,
+                                            mode,
+                                        )
                                     },
                                 )
                             })
@@ -1196,9 +1194,7 @@ fn raw_fixture_oracle_relationships(
         let failure = array(&oracle[2], 3)?;
         let provider = array(&fixture[4], 4)?;
         let owner = text(&failure[0])?;
-        if owner != "pigloros.core"
-            && (failure[0] != provider[0] || failure[1] != provider[1])
-        {
+        if owner != "pigloros.core" && (failure[0] != provider[0] || failure[1] != provider[1]) {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
     }
@@ -1208,9 +1204,7 @@ fn raw_fixture_oracle_relationships(
 fn raw_fixture_claim_relationship(fixture: &[Value]) -> Result<(), BundleContractErrorV1> {
     let replay = uint(&fixture[14])?;
     let redaction = uint(&fixture[15])?;
-    if replay == 4
-        || matches!((redaction, replay), (0, _) | (1, 1) | (2, 2) | (3, 3))
-    {
+    if replay == 4 || matches!((redaction, replay), (0, _) | (1, 1) | (2, 2) | (3, 3)) {
         Ok(())
     } else {
         Err(BundleContractErrorV1::ProfileInvalid)
@@ -1528,13 +1522,14 @@ fn raw_protocol(value: &Value) -> Result<(), BundleContractErrorV1> {
                             128,
                             1024 * 1024,
                         ];
-                        let valid = caps.iter().zip(maxima).enumerate().all(
-                            |(index, (value, maximum))| {
-                                uint(value).is_ok_and(|cap| {
-                                    cap <= maximum && (index == 9 || cap > 0)
-                                })
-                            },
-                        );
+                        let valid =
+                            caps.iter()
+                                .zip(maxima)
+                                .enumerate()
+                                .all(|(index, (value, maximum))| {
+                                    uint(value)
+                                        .is_ok_and(|cap| cap <= maximum && (index == 9 || cap > 0))
+                                });
                         if valid {
                             Ok(())
                         } else {
@@ -1652,33 +1647,33 @@ fn raw_fixture_provider_bindings(
         .iter()
         .filter(|fixture| raw_fixture_selects_mode(fixture, mode))
         .try_for_each(|fixture| {
-        let fixture_fields = array(fixture, 24)?;
-        let fixture_provider = array(&fixture_fields[4], 4)?;
-        let provider = providers
-            .iter()
-            .find_map(|candidate| {
-                array(candidate, 7).ok().filter(|entry| {
-                    entry[..4] == *fixture_provider
-                        && entry[4] == fixture_fields[2]
-                        && entry[5] == fixture_fields[5]
+            let fixture_fields = array(fixture, 24)?;
+            let fixture_provider = array(&fixture_fields[4], 4)?;
+            let provider = providers
+                .iter()
+                .find_map(|candidate| {
+                    array(candidate, 7).ok().filter(|entry| {
+                        entry[..4] == *fixture_provider
+                            && entry[4] == fixture_fields[2]
+                            && entry[5] == fixture_fields[5]
+                    })
                 })
-            })
-            .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-        raw_fixture_schema_binding(fixture_fields, provider, members)
-            .and_then(|()| raw_bound_artifact(&fixture_fields[9], members, 0))
-            .and_then(|()| {
-                array_values(&fixture_fields[10])?
-                    .iter()
-                    .try_for_each(|artifact| raw_bound_artifact_any(artifact, members))
-            })
-            .and_then(|()| {
-                let oracle = array(&fixture_fields[11], 4)?;
-                if uint(&oracle[0])? == 0 {
-                    raw_bound_artifact_any(&oracle[1], members)
-                } else {
-                    Ok(())
-                }
-            })
+                .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+            raw_fixture_schema_binding(fixture_fields, provider, members)
+                .and_then(|()| raw_bound_artifact(&fixture_fields[9], members, 0))
+                .and_then(|()| {
+                    array_values(&fixture_fields[10])?
+                        .iter()
+                        .try_for_each(|artifact| raw_bound_artifact_any(artifact, members))
+                })
+                .and_then(|()| {
+                    let oracle = array(&fixture_fields[11], 4)?;
+                    if uint(&oracle[0])? == 0 {
+                        raw_bound_artifact_any(&oracle[1], members)
+                    } else {
+                        Ok(())
+                    }
+                })
         })
 }
 
@@ -1694,8 +1689,8 @@ fn raw_fixture_schema_binding(
     let package = decode(package_bytes)?;
     let package_fields = array(&package, 12)?;
     let schemas = array_values(&package_fields[5])?;
-    let family = usize::try_from(uint(&fixture[3])?)
-        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    let family =
+        usize::try_from(uint(&fixture[3])?).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
     let schema = schemas
         .get(family)
         .ok_or(BundleContractErrorV1::ProfileInvalid)?;
@@ -1707,10 +1702,7 @@ fn raw_fixture_schema_binding(
     }
 }
 
-fn raw_bound_artifact_any(
-    value: &Value,
-    members: &[Value],
-) -> Result<(), BundleContractErrorV1> {
+fn raw_bound_artifact_any(value: &Value, members: &[Value]) -> Result<(), BundleContractErrorV1> {
     raw_artifact(value).and_then(|()| {
         let descriptor = array(value, 4)?;
         let path = text(&descriptor[0])?;

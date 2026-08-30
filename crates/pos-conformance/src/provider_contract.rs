@@ -829,7 +829,6 @@ fn decode_artifact_descriptor(
     decode_artifact_descriptor_value(value).ok_or(ProviderContractErrorV1::InvalidEncoding)
 }
 
-
 fn encode_value(value: &Value) -> Result<Vec<u8>, ProviderContractErrorV1> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)

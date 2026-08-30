@@ -2,17 +2,16 @@
 
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
-    expected_result_member_path, verify_archive_release_filename, verify_release_tree_independently,
-    ArtifactDescriptorV1,
-    BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
-    ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1,
-    DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureContractTransitionV1,
-    FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderEntryV1,
-    FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryBindingV1,
-    FixtureProviderRegistryV1, IndependenceRequirementsV1, NamespacedFailureV1,
-    OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1, RedactionStateV1,
-    ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1,
-    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    expected_result_member_path, verify_archive_release_filename,
+    verify_release_tree_independently, ArtifactDescriptorV1, BundleExpectedResultV1,
+    BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1, ClaimLayerV1,
+    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, DeterministicBudgetV1,
+    EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureContractTransitionV1, FixtureDescriptorV1,
+    FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderEntryV1, FixtureProviderKeyV1,
+    FixtureProviderPackageV1, FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1,
+    IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
+    ProviderFamilySchemaV1, RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1,
+    SubjectAdapterKindV1, VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 #[cfg(target_os = "linux")]
 use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
