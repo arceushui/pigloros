@@ -4163,20 +4163,26 @@ impl ErasureCoordinatorRecordV1 {
         // facts instead of repeating equivalent predicates.
         match lifecycle {
             ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => {
-                if scope.is_some() || failure.is_some() {
+                if (scope.is_some(), freeze.is_some(), failure.is_some()) != (false, false, false) {
                     return Err(ErasureErrorV1::PolicyConflict);
                 }
             }
             ErasureLifecycleV1::Rejected => {
                 if let Some(failure) = failure {
-                    if failure.authorization_provenance()
-                        != self
-                            .authorize_provenance
-                            .ok_or(ErasureErrorV1::ProvenanceMissing)?
-                        || self.state.provenance() != failure.reference()
+                    let authorization = self
+                        .authorize_provenance
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                    if (
+                        scope.is_some(),
+                        freeze.is_some(),
+                        failure.authorization_provenance(),
+                        self.state.provenance(),
+                    ) != (false, false, authorization, failure.reference())
                     {
                         return Err(ErasureErrorV1::ProvenanceMissing);
                     }
+                } else if (scope.is_some(), freeze.is_some()) != (false, false) {
+                    return Err(ErasureErrorV1::PolicyConflict);
                 }
             }
             ErasureLifecycleV1::AccessFrozen
@@ -4184,7 +4190,7 @@ impl ErasureCoordinatorRecordV1 {
             | ErasureLifecycleV1::AwaitingAcknowledgements
             | ErasureLifecycleV1::Complete
             | ErasureLifecycleV1::PartialFailure => {
-                if freeze.is_none() {
+                if (scope.is_some(), freeze.is_some(), failure.is_some()) != (true, true, false) {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
