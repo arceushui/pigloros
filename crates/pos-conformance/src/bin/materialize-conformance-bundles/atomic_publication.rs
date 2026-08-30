@@ -963,6 +963,74 @@ mod tests {
             "remove empty sibling",
         );
 
+        let regular_name = c"regular-entry".to_owned();
+        let regular_path = root.0.join(regular_name.to_string_lossy().as_ref());
+        ok(
+            std::fs::write(&regular_path, b"not a directory"),
+            "create regular sibling",
+        );
+        assert_error(
+            configure_private_staging(
+                &publication.parent,
+                &regular_name,
+                publication.parent_identity,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+        assert_error(
+            open_or_create_directory(&publication.parent, &regular_name),
+            "untrusted output directory",
+        );
+        let regular_file = ok(std::fs::File::open(&regular_path), "open regular sibling");
+        let regular_metadata = ok(fs::fstat(&regular_file), "stat regular sibling");
+        assert_error(
+            validate_private_staging(
+                regular_metadata,
+                publication.parent_identity,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+        drop(regular_file);
+        ok(
+            std::fs::remove_file(&regular_path),
+            "remove regular sibling",
+        );
+
+        let staging_metadata = ok(fs::fstat(&publication.staging), "stat retained staging");
+        assert_error(
+            validate_private_staging(
+                staging_metadata,
+                publication.parent_identity,
+                effective_uid() ^ 1,
+            ),
+            "untrusted output directory",
+        );
+        let wrong_device = DirectoryIdentity {
+            device: publication.parent_identity.device ^ 1,
+            inode: publication.parent_identity.inode,
+        };
+        assert_error(
+            validate_private_staging(staging_metadata, wrong_device, effective_uid()),
+            "untrusted output directory",
+        );
+
+        let rejected_name = c"rejected-staging".to_owned();
+        ok(
+            fs::mkdirat(&publication.parent, rejected_name.as_c_str(), Mode::RWXU),
+            "create rejected staging",
+        );
+        assert_error(
+            configure_private_staging(
+                &publication.parent,
+                &rejected_name,
+                wrong_device,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+
         ok(
             fs::mknodat(
                 &publication.staging,

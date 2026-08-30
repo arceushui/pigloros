@@ -253,7 +253,7 @@ mod coverage_entrypoints {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn scalar_replacements(value: &ciborium::Value) -> Vec<ciborium::Value> {
         match value {
-            ciborium::Value::Integer(_) => (0_u64..=9)
+            ciborium::Value::Integer(_) => (0_u64..=13)
                 .chain([u64::from(u16::MAX), u64::from(u32::MAX), u64::MAX])
                 .map(|value| ciborium::Value::Integer(value.into()))
                 .collect(),
@@ -294,6 +294,7 @@ mod coverage_entrypoints {
     fn exercise_scalar_boundaries<T, E>(
         value: &ciborium::Value,
         decode: impl Fn(&[u8]) -> Result<T, E>,
+        encode: impl Fn(&T) -> Result<Vec<u8>, E>,
     ) -> usize {
         let mut paths = Vec::new();
         structural_paths(value, &mut Vec::new(), &mut paths);
@@ -306,7 +307,9 @@ mod coverage_entrypoints {
                 let mut mutant = value.clone();
                 replace_at_path(&mut mutant, &path, replacement);
                 let bytes = encode_value(&mutant);
-                drop(decode(&bytes));
+                if let Ok(canonical) = decode(&bytes).and_then(|decoded| encode(&decoded)) {
+                    drop(decode(&canonical));
+                }
                 exercised += 1;
             }
         }
@@ -423,8 +426,11 @@ mod coverage_entrypoints {
         let result = ok(tests::evidence().to_verification_result());
         let result_value = decode_value(ok(result.to_canonical_cbor()));
         assert!(
-            exercise_scalar_boundaries(&result_value, VerificationResultV1::from_canonical_cbor,)
-                > 100
+            exercise_scalar_boundaries(
+                &result_value,
+                VerificationResultV1::from_canonical_cbor,
+                VerificationResultV1::to_canonical_cbor,
+            ) > 100
         );
         expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
             &replace_field(result_value, 17, ciborium::Value::Bytes(vec![0; 32])),
@@ -464,8 +470,11 @@ mod coverage_entrypoints {
         report.report_digest = ok(report.digest());
         let report_value = decode_value(ok(report.to_canonical_cbor()));
         assert!(
-            exercise_scalar_boundaries(&report_value, DivergenceReportV1::from_canonical_cbor)
-                > 100
+            exercise_scalar_boundaries(
+                &report_value,
+                DivergenceReportV1::from_canonical_cbor,
+                DivergenceReportV1::to_canonical_cbor,
+            ) > 100
         );
         expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
             &replace_field(report_value, 21, ciborium::Value::Bytes(vec![0; 32])),
@@ -502,7 +511,13 @@ mod coverage_entrypoints {
     fn public_evidence_decoder_closes_scalar_and_length_boundaries() {
         let evidence = tests::evidence();
         let value = decode_value(ok(evidence.to_canonical_cbor()));
-        assert!(exercise_scalar_boundaries(&value, MoatProofEvidenceV1::from_canonical_cbor) > 0);
+        assert!(
+            exercise_scalar_boundaries(
+                &value,
+                MoatProofEvidenceV1::from_canonical_cbor,
+                MoatProofEvidenceV1::to_canonical_cbor,
+            ) > 0
+        );
     }
 }
 
