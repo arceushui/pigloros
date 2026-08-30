@@ -260,6 +260,14 @@ struct CatalogFixture {
     strict_oracle: CatalogStrictOracle,
 }
 
+struct FixtureExpectation {
+    strict_oracle: StrictOracleV1,
+    verification_outcome: VerificationOutcomeV1,
+    verification_error: Option<NamespacedFailureV1>,
+    replay_claim: ReplayClaimV1,
+    redaction_state: RedactionStateV1,
+}
+
 struct LayerCatalogEntry {
     claim_layer: ClaimLayerV1,
     name: &'static str,
@@ -631,7 +639,8 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
     let inventory_bytes =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
     let catalog = layer_catalog()?;
-    let providers = provider_catalog(&catalog)?;
+    let providers = provider_catalog(&catalog)
+        .map_err(|error| contextual_error("provider catalog", error))?;
     let context = MaterializationContext {
         signing_key,
         inventory_bytes,
@@ -715,7 +724,7 @@ fn materialize_profile(
     let prefix = format!("{}/draft", layer.name);
     profile
         .to_canonical_cbor()
-        .map_err(Into::into)
+        .map_err(|error| contextual_error("CPF1 profile encoding", error))
         .and_then(|profile_bytes| {
             let [local, air_gapped] = bundle_modes
                 .map(|mode| signed_bundle(context, layer, &profile, mode.bundle_mode()));
@@ -750,8 +759,12 @@ fn signed_bundle(
         context.providers,
     )?;
     ConformanceBundleV1::materialize(profile, mode, members, expected_results)
-        .and_then(|bundle| bundle.sign(context.signing_key))
-        .map_err(Into::into)
+        .map_err(|error| contextual_error("CFB1 bundle materialization", error))
+        .and_then(|bundle| {
+            bundle
+                .sign(context.signing_key)
+                .map_err(|error| contextual_error("CFB1 bundle signing", error))
+        })
 }
 
 fn materialized_profile_outputs(
@@ -1018,7 +1031,73 @@ fn fixture_descriptor_from_record(
     let fixture_record_digest =
         labeled_digest("PiglorOS.CPF1FixtureRecord.v1", fixture_record.as_bytes());
     let auxiliary = artifact_descriptor(&expected_path, "application/json", fixture.expected);
-    let (strict_oracle, expected_verification_outcome, expected_verification_error) =
+    let expectation = fixture_expectation(fixture, &auxiliary);
+    let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
+    let mut descriptor = FixtureDescriptorV1 {
+        case_id: fixture.record.case_id.clone(),
+        mandatory: true,
+        claim_layer: context.claim_layer,
+        family: fixture.record.family.provider_family(),
+        provider_key: provider_key.clone(),
+        execution_profile_digest,
+        modes: vec![mode],
+        subject_adapter: layer.subject_adapter,
+        schema: artifact_descriptor(
+            &fixture.record.schema,
+            "application/schema+json",
+            fixture.schema,
+        ),
+        payload: artifact_descriptor(&payload_path, "application/json", fixture.input),
+        auxiliary: vec![auxiliary],
+        strict_oracle: expectation.strict_oracle,
+        expected_verification_outcome: expectation.verification_outcome,
+        expected_verification_error: expectation.verification_error,
+        replay_claim: expectation.replay_claim,
+        redaction_state: expectation.redaction_state,
+        deterministic_budget: fixture_budget(),
+        operational_safety: fixture_operational_safety(),
+        capability_policy: fixture_capability_policy(fixture.record.family),
+        provenance: fixture_provenance(context),
+        trust_policy_snapshot_digest: downgrade.then(|| {
+            labeled_digest(
+                "PiglorOS.DowngradeTrustPolicy.v1",
+                &[
+                    context.profile_record_digest.as_slice(),
+                    fixture_record_digest.as_slice(),
+                ]
+                .concat(),
+            )
+        }),
+        release_admission_digest: downgrade.then(|| {
+            labeled_digest(
+                "PiglorOS.DowngradeReleaseAdmission.v1",
+                &[
+                    context.profile_record_digest.as_slice(),
+                    fixture_record_digest.as_slice(),
+                ]
+                .concat(),
+            )
+        }),
+        transition: downgrade.then(|| FixtureContractTransitionV1 {
+            from: FixtureProviderKeyV1 {
+                provider_id: provider_key.provider_id.clone(),
+                contract_version: provider_key.contract_version.clone(),
+                abi_major: provider_key.abi_major,
+                abi_minor: 1,
+            },
+            to: provider_key.clone(),
+        }),
+        fixture_digest: [0; 32],
+    };
+    descriptor.fixture_digest = descriptor.digest();
+    descriptor
+}
+
+fn fixture_expectation(
+    fixture: &CatalogFixture,
+    auxiliary: &ArtifactDescriptorV1,
+) -> FixtureExpectation {
+    let (strict_oracle, verification_outcome, verification_error) =
         match &fixture.strict_oracle {
             CatalogStrictOracle::CanonicalOutput => (
                 StrictOracleV1 {
@@ -1069,65 +1148,13 @@ fn fixture_descriptor_from_record(
         }
         _ => (ReplayClaimV1::Exact, RedactionStateV1::None),
     };
-    let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
-    let mut descriptor = FixtureDescriptorV1 {
-        case_id: fixture.record.case_id.clone(),
-        mandatory: true,
-        claim_layer: context.claim_layer,
-        family: fixture.record.family.provider_family(),
-        provider_key: provider_key.clone(),
-        execution_profile_digest,
-        modes: vec![mode],
-        subject_adapter: layer.subject_adapter,
-        schema: artifact_descriptor(
-            &fixture.record.schema,
-            "application/schema+json",
-            fixture.schema,
-        ),
-        payload: artifact_descriptor(&payload_path, "application/json", fixture.input),
-        auxiliary: vec![auxiliary],
+    FixtureExpectation {
         strict_oracle,
-        expected_verification_outcome,
-        expected_verification_error,
+        verification_outcome,
+        verification_error,
         replay_claim,
         redaction_state,
-        deterministic_budget: fixture_budget(),
-        operational_safety: fixture_operational_safety(),
-        capability_policy: fixture_capability_policy(fixture.record.family),
-        provenance: fixture_provenance(context),
-        trust_policy_snapshot_digest: downgrade.then(|| {
-            labeled_digest(
-                "PiglorOS.DowngradeTrustPolicy.v1",
-                &[
-                    context.profile_record_digest.as_slice(),
-                    fixture_record_digest.as_slice(),
-                ]
-                .concat(),
-            )
-        }),
-        release_admission_digest: downgrade.then(|| {
-            labeled_digest(
-                "PiglorOS.DowngradeReleaseAdmission.v1",
-                &[
-                    context.profile_record_digest.as_slice(),
-                    fixture_record_digest.as_slice(),
-                ]
-                .concat(),
-            )
-        }),
-        transition: downgrade.then(|| FixtureContractTransitionV1 {
-            from: FixtureProviderKeyV1 {
-                provider_id: provider_key.provider_id.clone(),
-                contract_version: provider_key.contract_version.clone(),
-                abi_major: provider_key.abi_major,
-                abi_minor: 1,
-            },
-            to: provider_key.clone(),
-        }),
-        fixture_digest: [0; 32],
-    };
-    descriptor.fixture_digest = descriptor.digest();
-    descriptor
+    }
 }
 
 const fn fixture_budget() -> DeterministicBudgetV1 {
@@ -1363,10 +1390,15 @@ fn verify_public_archive(
     release_filename: &str,
 ) -> Result<(), Box<dyn Error>> {
     ConformanceBundleV1::from_canonical_cbor(archive_bytes)
-        .map_err(Into::into)
+        .map_err(|error| contextual_error("typed CFB1 verification", error))
         .and_then(|_| {
-            verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
+            verify_archive_release_filename(archive_bytes, release_filename)
+                .map_err(|error| contextual_error("independent CFB1 verification", error))
         })
+}
+
+fn contextual_error(context: &str, error: impl std::fmt::Display) -> Box<dyn Error> {
+    format!("{context}: {error}").into()
 }
 
 #[cfg(target_os = "linux")]
