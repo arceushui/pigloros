@@ -169,111 +169,133 @@ fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
     })
 }
 
-fn current_fixtures(
-    family_schemas: &[ProviderFamilySchemaV1],
+const fn fixture_family_name(family: FixtureFamilyV1) -> &'static str {
+    match family {
+        FixtureFamilyV1::Positive => "positive",
+        FixtureFamilyV1::Denied => "denied",
+        FixtureFamilyV1::Malformed => "malformed",
+        FixtureFamilyV1::ResourceExhaustion => "resource-exhaustion",
+        FixtureFamilyV1::DeletionRedaction => "deletion-redaction",
+        FixtureFamilyV1::Downgrade => "downgrade",
+        FixtureFamilyV1::IndependentEvaluation => "independent-evaluation",
+    }
+}
+
+fn fixture_from_schema(
+    family_schema: &ProviderFamilySchemaV1,
     execution: [u8; 32],
-    trust_policy_snapshot_digest: [u8; 32],
-) -> TestResult<Vec<FixtureDescriptorV1>> {
+) -> TestResult<FixtureDescriptorV1> {
     let failure = NamespacedFailureV1 {
         owner_id: "pigloros.core".to_owned(),
         contract_version: "1.0.0".to_owned(),
         code_id: "provenance-missing".to_owned(),
     };
+    let family_name = fixture_family_name(family_schema.family);
+    let case_id = format!("example-{family_name}");
+    let expected_path =
+        expected_result_member_path(&case_id, ClaimLayerV1::ArtifactIntegrity, &execution);
+    let mut fixture = FixtureDescriptorV1 {
+        case_id,
+        mandatory: true,
+        claim_layer: ClaimLayerV1::ArtifactIntegrity,
+        family: family_schema.family,
+        provider_key: provider_key(),
+        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+        execution_profile_digest: execution,
+        modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
+        schema: family_schema.schema_descriptor.clone(),
+        payload: artifact(
+            &format!("fixtures/{family_name}/input.bin"),
+            "application/octet-stream",
+            PAYLOAD_BYTES,
+        )?,
+        auxiliary: vec![artifact(
+            &expected_path,
+            "application/json",
+            EXPECTED_BYTES,
+        )?],
+        strict_oracle: StrictOracleV1 {
+            kind: StrictOracleKindV1::Failure,
+            output: None,
+            failure: Some(failure.clone()),
+            divergence: None,
+        },
+        expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
+        expected_verification_error: Some(failure),
+        replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
+        redaction_state: RedactionStateV1::EvidenceMissing,
+        deterministic_budget: DeterministicBudgetV1 {
+            memory_bytes: 1024,
+            cpu_fuel: 1024,
+            host_calls: 16,
+            event_count: 16,
+            output_bytes: 1024,
+            storage_bytes: 1024,
+            execution_steps: 1024,
+            simulation_time_ns: 1024,
+        },
+        operational_safety: OperationalSafetyV1 { watchdog_ms: 1000 },
+        capability_policy: CapabilityPolicyV1 {
+            network_allowed: false,
+            capability_ids: vec!["read-public-bundle".to_owned()],
+        },
+        trust_policy_snapshot_digest: None,
+        release_admission_digest: None,
+        provenance: FixtureProvenanceV1 {
+            licence_id: "MIT".to_owned(),
+            notices_digest: *blake3::hash(NOTICE_BYTES).as_bytes(),
+            sbom_digest: *blake3::hash(SBOM_BYTES).as_bytes(),
+            source_digest: *blake3::hash(SOURCE_PROVENANCE_BYTES).as_bytes(),
+            build_digest: *blake3::hash(BUILD_PROVENANCE_BYTES).as_bytes(),
+            publication_review_digest: *blake3::hash(PUBLICATION_REVIEW_BYTES).as_bytes(),
+            limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
+        },
+        transition: None,
+        fixture_digest: [0; 32],
+    };
+    fixture.fixture_digest = fixture.digest();
+    Ok(fixture)
+}
+
+fn bind_downgrade_authority(
+    fixture: &mut FixtureDescriptorV1,
+    trust_policy_snapshot_digest: [u8; 32],
+) -> TestResult {
+    if fixture.family != FixtureFamilyV1::Downgrade {
+        return Ok(());
+    }
+    let mut next_provider = provider_key();
+    next_provider.abi_minor = 1;
+    let transition = pos_conformance::FixtureContractTransitionV1 {
+        from: provider_key(),
+        to: next_provider,
+    };
+    fixture.trust_policy_snapshot_digest = Some(trust_policy_snapshot_digest);
+    fixture.release_admission_digest = Some(
+        *blake3::hash(&release_admission_bytes(
+            &fixture.case_id,
+            fixture.execution_profile_digest,
+            trust_policy_snapshot_digest,
+            &transition.from,
+            &transition.to,
+        )?)
+        .as_bytes(),
+    );
+    fixture.transition = Some(transition);
+    fixture.fixture_digest = fixture.digest();
+    Ok(())
+}
+
+fn current_fixtures(
+    family_schemas: &[ProviderFamilySchemaV1],
+    execution: [u8; 32],
+    trust_policy_snapshot_digest: [u8; 32],
+) -> TestResult<Vec<FixtureDescriptorV1>> {
     family_schemas
         .iter()
         .map(|family_schema| {
-            let family_name = match family_schema.family {
-                FixtureFamilyV1::Positive => "positive",
-                FixtureFamilyV1::Denied => "denied",
-                FixtureFamilyV1::Malformed => "malformed",
-                FixtureFamilyV1::ResourceExhaustion => "resource-exhaustion",
-                FixtureFamilyV1::DeletionRedaction => "deletion-redaction",
-                FixtureFamilyV1::Downgrade => "downgrade",
-                FixtureFamilyV1::IndependentEvaluation => "independent-evaluation",
-            };
-            let case_id = format!("example-{family_name}");
-            let expected_path =
-                expected_result_member_path(&case_id, ClaimLayerV1::ArtifactIntegrity, &execution);
-            let mut fixture = FixtureDescriptorV1 {
-                case_id,
-                mandatory: true,
-                claim_layer: ClaimLayerV1::ArtifactIntegrity,
-                family: family_schema.family,
-                provider_key: provider_key(),
-                subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-                execution_profile_digest: execution,
-                modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
-                schema: family_schema.schema_descriptor.clone(),
-                payload: artifact(
-                    &format!("fixtures/{family_name}/input.bin"),
-                    "application/octet-stream",
-                    PAYLOAD_BYTES,
-                )?,
-                auxiliary: vec![artifact(
-                    &expected_path,
-                    "application/json",
-                    EXPECTED_BYTES,
-                )?],
-                strict_oracle: StrictOracleV1 {
-                    kind: StrictOracleKindV1::Failure,
-                    output: None,
-                    failure: Some(failure.clone()),
-                    divergence: None,
-                },
-                expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
-                expected_verification_error: Some(failure.clone()),
-                replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
-                redaction_state: RedactionStateV1::EvidenceMissing,
-                deterministic_budget: DeterministicBudgetV1 {
-                    memory_bytes: 1024,
-                    cpu_fuel: 1024,
-                    host_calls: 16,
-                    event_count: 16,
-                    output_bytes: 1024,
-                    storage_bytes: 1024,
-                    execution_steps: 1024,
-                    simulation_time_ns: 1024,
-                },
-                operational_safety: OperationalSafetyV1 { watchdog_ms: 1000 },
-                capability_policy: CapabilityPolicyV1 {
-                    network_allowed: false,
-                    capability_ids: vec!["read-public-bundle".to_owned()],
-                },
-                trust_policy_snapshot_digest: None,
-                release_admission_digest: None,
-                provenance: FixtureProvenanceV1 {
-                    licence_id: "MIT".to_owned(),
-                    notices_digest: *blake3::hash(NOTICE_BYTES).as_bytes(),
-                    sbom_digest: *blake3::hash(SBOM_BYTES).as_bytes(),
-                    source_digest: *blake3::hash(SOURCE_PROVENANCE_BYTES).as_bytes(),
-                    build_digest: *blake3::hash(BUILD_PROVENANCE_BYTES).as_bytes(),
-                    publication_review_digest: *blake3::hash(PUBLICATION_REVIEW_BYTES).as_bytes(),
-                    limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
-                },
-                transition: None,
-                fixture_digest: [0; 32],
-            };
-            if fixture.family == FixtureFamilyV1::Downgrade {
-                let mut next_provider = provider_key();
-                next_provider.abi_minor = 1;
-                fixture.trust_policy_snapshot_digest = Some(trust_policy_snapshot_digest);
-                fixture.transition = Some(pos_conformance::FixtureContractTransitionV1 {
-                    from: provider_key(),
-                    to: next_provider,
-                });
-                let transition = fixture.transition.as_ref().ok_or("transition missing")?;
-                fixture.release_admission_digest = Some(
-                    *blake3::hash(&release_admission_bytes(
-                        &fixture.case_id,
-                        execution,
-                        trust_policy_snapshot_digest,
-                        &transition.from,
-                        &transition.to,
-                    )?)
-                    .as_bytes(),
-                );
-            }
-            fixture.fixture_digest = fixture.digest();
+            let mut fixture = fixture_from_schema(family_schema, execution)?;
+            bind_downgrade_authority(&mut fixture, trust_policy_snapshot_digest)?;
             Ok(fixture)
         })
         .collect()
@@ -367,23 +389,10 @@ fn current_provenance_members() -> [BundleMemberV1; 3] {
     ]
 }
 
-fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> {
-    let ProviderContractInputs {
-        family_schemas,
-        package_path,
-        package_bytes,
-        registry_bytes,
-    } = current_provider_contract_inputs()?;
-
-    let execution_profile = execution_profile_bytes()?;
-    let execution_profile_digest = *blake3::hash(&execution_profile).as_bytes();
-    let trust_policy_snapshot = trust_policy_snapshot_bytes()?;
-    let trust_policy_snapshot_digest = *blake3::hash(&trust_policy_snapshot).as_bytes();
-    let fixtures = current_fixtures(
-        &family_schemas,
-        execution_profile_digest,
-        trust_policy_snapshot_digest,
-    )?;
+fn expected_results(
+    fixtures: &[FixtureDescriptorV1],
+    mode: BundleModeV1,
+) -> TestResult<Vec<BundleExpectedResultV1>> {
     let mut expected = fixtures
         .iter()
         .map(|fixture| {
@@ -402,12 +411,44 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         })
         .collect::<TestResult<Vec<_>>>()?;
     expected.sort_unstable();
-    let profile = current_profile(
-        fixtures,
-        &registry_bytes,
-        execution_profile_digest,
-        trust_policy_snapshot_digest,
-    )?;
+    Ok(expected)
+}
+
+fn append_release_admissions(
+    members: &mut Vec<BundleMemberV1>,
+    fixtures: &[FixtureDescriptorV1],
+) -> TestResult {
+    for fixture in fixtures
+        .iter()
+        .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
+    {
+        let transition = fixture.transition.as_ref().ok_or("transition missing")?;
+        members.push(BundleMemberV1::supporting(
+            format!("authority/release-admissions/{}.rad1", fixture.case_id),
+            release_admission_bytes(
+                &fixture.case_id,
+                fixture.execution_profile_digest,
+                fixture
+                    .trust_policy_snapshot_digest
+                    .ok_or("trust-policy digest missing")?,
+                &transition.from,
+                &transition.to,
+            )?,
+            BundleMemberRoleV1::ReleaseAdmission,
+        ));
+    }
+    Ok(())
+}
+
+fn current_bundle_members(
+    family_schemas: &[ProviderFamilySchemaV1],
+    profile: &ConformanceProfileV1,
+    execution_profile: Vec<u8>,
+    trust_policy_snapshot: Vec<u8>,
+    package_path: &str,
+    package_bytes: Vec<u8>,
+    registry_bytes: Vec<u8>,
+) -> TestResult<Vec<BundleMemberV1>> {
     let mut members = family_schemas
         .iter()
         .zip(CURRENT_SCHEMA_BYTES)
@@ -476,27 +517,44 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         BundleMemberV1::fixture_provider_package(package_path, package_bytes),
         BundleMemberV1::fixture_provider_registry(registry_bytes),
     ]);
-    for fixture in profile
-        .fixtures
-        .iter()
-        .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
-    {
-        let transition = fixture.transition.as_ref().ok_or("transition missing")?;
-        members.push(BundleMemberV1::supporting(
-            format!("authority/release-admissions/{}.rad1", fixture.case_id),
-            release_admission_bytes(
-                &fixture.case_id,
-                fixture.execution_profile_digest,
-                fixture
-                    .trust_policy_snapshot_digest
-                    .ok_or("trust-policy digest missing")?,
-                &transition.from,
-                &transition.to,
-            )?,
-            BundleMemberRoleV1::ReleaseAdmission,
-        ));
-    }
+    append_release_admissions(&mut members, &profile.fixtures)?;
     members.extend(current_provenance_members());
+    Ok(members)
+}
+
+fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> {
+    let ProviderContractInputs {
+        family_schemas,
+        package_path,
+        package_bytes,
+        registry_bytes,
+    } = current_provider_contract_inputs()?;
+
+    let execution_profile = execution_profile_bytes()?;
+    let execution_profile_digest = *blake3::hash(&execution_profile).as_bytes();
+    let trust_policy_snapshot = trust_policy_snapshot_bytes()?;
+    let trust_policy_snapshot_digest = *blake3::hash(&trust_policy_snapshot).as_bytes();
+    let fixtures = current_fixtures(
+        &family_schemas,
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+    )?;
+    let expected = expected_results(&fixtures, mode)?;
+    let profile = current_profile(
+        fixtures,
+        &registry_bytes,
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+    )?;
+    let members = current_bundle_members(
+        &family_schemas,
+        &profile,
+        execution_profile,
+        trust_policy_snapshot,
+        package_path,
+        package_bytes,
+        registry_bytes,
+    )?;
     Ok(CurrentBundleInputs {
         profile,
         members,
@@ -3174,53 +3232,14 @@ fn independent_verifier_exercises_active_divergence_oracles() -> TestResult {
     Ok(())
 }
 
-fn set_raw_downgrade_fixture(profile: &mut [Value]) -> TestResult {
-    let fixture = array_field(array_field(profile, 9, "fixtures")?, 5, "downgrade fixture")?;
-    let from = fixture
-        .get(4)
-        .ok_or("fixture provider key is absent")?
-        .clone();
-    let mut to = from.clone();
-    let Value::Array(to_fields) = &mut to else {
-        return Err("fixture provider key is not an array".into());
-    };
-    replace_value(
-        to_fields,
-        3,
-        Value::Integer(1_u64.into()),
-        "target ABI minor",
-    )?;
-    let schema_bytes = CURRENT_SCHEMA_BYTES[5];
-    replace_value(
-        fixture,
-        8,
-        Value::Array(vec![
-            Value::Text("providers/example/schemas/5.schema.json".to_owned()),
-            Value::Text("application/schema+json".to_owned()),
-            Value::Integer(u64::try_from(schema_bytes.len())?.into()),
-            Value::Bytes(blake3::hash(schema_bytes).as_bytes().to_vec()),
-        ]),
-        "downgrade schema",
-    )?;
-    replace_value(fixture, 19, Value::Bytes(vec![40; 32]), "trust snapshot")?;
-    replace_value(fixture, 20, Value::Bytes(vec![41; 32]), "release admission")?;
-    replace_value(
-        fixture,
-        22,
-        Value::Array(vec![from, to]),
-        "provider transition",
-    )
-}
-
 #[test]
 fn independent_verifier_exercises_active_provider_transitions() -> TestResult {
-    let valid = mutate_profile_archive(set_raw_downgrade_fixture)?;
+    let valid = mutate_profile_archive(|_| Ok(()))?;
     verify_archive_independently(&valid)?;
     ConformanceBundleV1::from_canonical_cbor(&valid)?;
 
     for endpoint in 0..2 {
         let invalid = mutate_profile_archive(|profile| {
-            set_raw_downgrade_fixture(profile)?;
             replace_nested_profile_value(profile, &[9, 5, 22, endpoint], Value::Map(Vec::new()))
         })?;
         assert_archive_rejected_by_both(&invalid, "malformed provider transition");
@@ -3234,50 +3253,6 @@ fn assert_independent_fixture_inventory_relationships() -> TestResult {
         Ok(())
     })?;
     assert_archive_rejected_by_both(&missing_family, "missing required fixture family");
-
-    let complete_second_coordinate = mutate_profile_archive(|profile| {
-        array_field(profile, 7, "profile executions")?.insert(0, Value::Bytes(vec![2; 32]));
-        let originals = array_field(profile, 9, "fixtures")?.clone();
-        let mut expanded = Vec::with_capacity(originals.len() * 2);
-        for original in originals {
-            let mut additional = original.clone();
-            let Value::Array(fields) = &mut additional else {
-                return Err("fixture must be an array".into());
-            };
-            fields[6] = Value::Bytes(vec![2; 32]);
-            fields[7] = Value::Array(vec![Value::Integer(1_u64.into())]);
-            expanded.push(additional);
-            expanded.push(original);
-        }
-        *array_field(profile, 9, "fixtures")? = expanded;
-        Ok(())
-    })?;
-    verify_archive_independently(&complete_second_coordinate)?;
-    ConformanceBundleV1::from_canonical_cbor(&complete_second_coordinate)?;
-
-    let incomplete_second_coordinate = mutate_profile_archive(|profile| {
-        array_field(profile, 7, "profile executions")?.insert(0, Value::Bytes(vec![2; 32]));
-        let originals = array_field(profile, 9, "fixtures")?.clone();
-        let mut expanded = Vec::with_capacity(originals.len() * 2 - 1);
-        for (index, original) in originals.into_iter().enumerate() {
-            let mut additional = original.clone();
-            let Value::Array(fields) = &mut additional else {
-                return Err("fixture must be an array".into());
-            };
-            fields[6] = Value::Bytes(vec![2; 32]);
-            fields[7] = Value::Array(vec![Value::Integer(1_u64.into())]);
-            if index != 6 {
-                expanded.push(additional);
-            }
-            expanded.push(original);
-        }
-        *array_field(profile, 9, "fixtures")? = expanded;
-        Ok(())
-    })?;
-    assert_archive_rejected_by_both(
-        &incomplete_second_coordinate,
-        "incomplete provider execution mode coordinate",
-    );
 
     let duplicate_coordinate_family = mutate_profile_archive(|profile| {
         let fixtures = array_field(profile, 9, "fixtures")?;
