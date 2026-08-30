@@ -729,9 +729,8 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_error<T>(result: Result<T, MaterializationError>, expected: &str) {
-        let error = match result {
-            Ok(_) => std::panic::resume_unwind(Box::new("operation must be rejected")),
-            Err(error) => error,
+        let Err(error) = result else {
+            std::panic::resume_unwind(Box::new("operation must be rejected"));
         };
         assert_eq!(error.to_string(), expected);
     }
