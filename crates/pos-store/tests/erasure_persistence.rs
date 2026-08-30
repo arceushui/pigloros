@@ -113,11 +113,13 @@ const fn target(value: u8) -> ErasureRequiredTargetV1 {
     }
 }
 
-const fn acknowledgement(
-    target: ErasureRequiredTargetV1,
-    evidence: u8,
-) -> ErasureAcknowledgementV1 {
+fn acknowledgement(target: ErasureRequiredTargetV1, evidence: u8) -> ErasureAcknowledgementV1 {
     ErasureAcknowledgementV1 {
+        obligation: pos_core::inventory_obligation_reference(
+            ErasureInventoryCategoryV1::Artifact,
+            target,
+            target.replica_id,
+        ),
         target,
         owner: target.replica_id,
         evidence: reference(evidence),
@@ -133,7 +135,7 @@ const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 
             from: ErasureReplayClaimV1::Exact,
             to: ErasureReplayClaimV1::StructuralOnly,
             reason: reference(50),
-            owner: reference(51),
+            owner: target.replica_id,
             acknowledgements: reference(52),
             provenance: reference(53),
         },
@@ -293,6 +295,12 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
     ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
         Ok(self.targets.clone())
     }
+    fn affected_scope(
+        &self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(vec![reference(3)])
+    }
 
     fn admit_freeze(
         &self,
@@ -312,6 +320,9 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
         _request: ErasureReferenceV1,
         _commands: &[pos_core::ErasureDestructionCommandV1],
     ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+    fn admit_attempt(&self, _admission: &ErasureRetryAdmissionV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
@@ -354,12 +365,14 @@ fn run_full_lifecycle<S: ErasurePersistencePortV1>(
     Ok((shared, receipt))
 }
 
-fn assert_generic_event_store_is_frozen<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+fn assert_unrelated_event_store_remains_available<S>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>>
 where
     S: ErasurePersistencePortV1 + EventStore,
 {
     let (shared, _) = run_full_lifecycle(store)?;
-    let timeline = shared.borrow_mut().create_timeline("frozen")?;
+    let timeline = shared.borrow_mut().create_timeline("unrelated")?;
     let timeline_id = timeline.id();
     let draft = EventDraft::new(
         EntityId::new(),
@@ -367,20 +380,21 @@ where
         CanonicalBytes::from_static(b"payload"),
     );
 
-    assert!(matches!(
-        shared.borrow_mut().append(timeline_id, &[draft]),
-        Err(CoreError::Storage(message)) if message.contains("frozen by ErasureCoordinator")
-    ));
-    assert!(matches!(
+    let appended = shared.borrow_mut().append(timeline_id, &[draft])?;
+    assert_eq!(appended.len(), 1);
+    assert_eq!(
         shared
             .borrow()
-            .read(timeline_id, pos_core::SeqRange::all()),
-        Err(CoreError::Storage(message)) if message.contains("frozen by ErasureCoordinator")
-    ));
-    assert!(matches!(
-        pos_store::export_timeline(&*shared.borrow(), timeline_id),
-        Err(CoreError::Storage(message)) if message.contains("frozen by ErasureCoordinator")
-    ));
+            .read(timeline_id, pos_core::SeqRange::all())?
+            .len(),
+        1
+    );
+    assert_eq!(
+        pos_store::export_timeline(&*shared.borrow(), timeline_id)?
+            .events
+            .len(),
+        1
+    );
 
     // Administrative rollback/deletion remains distinct from subject erasure.
     shared.borrow_mut().delete_timeline(timeline_id)?;
@@ -639,9 +653,9 @@ fn memory_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
 }
 
 #[test]
-fn memory_generic_event_store_cannot_bypass_a_frozen_erasure(
+fn memory_keeps_unrelated_event_store_available_after_erasure(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_generic_event_store_is_frozen(MemoryStore::new())
+    assert_unrelated_event_store_remains_available(MemoryStore::new())
 }
 
 #[test]
@@ -959,9 +973,9 @@ fn sqlite_load_record_validates_the_complete_predecessor_chain(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_generic_event_store_cannot_bypass_a_frozen_erasure(
+fn sqlite_keeps_unrelated_event_store_available_after_erasure(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_generic_event_store_is_frozen(SqliteStore::open_in_memory()?)
+    assert_unrelated_event_store_remains_available(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]

@@ -4,17 +4,19 @@ use super::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
     ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureCorrectionProvenanceInputV1,
-    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
-    ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
-    ErasureSupportingRecordsV1, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
-    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
-    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES,
-    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1, ERC1, ERCR1, ERQ1, ERS1,
-    VERSION,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeFailureInputV1,
+    ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
+    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
+    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_INVENTORY_RESULTS,
+    ERASURE_MAX_REFERENCES, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERC1, ERCR1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -80,6 +82,77 @@ pub(super) fn correction_provenance_from_fields(
         rejected_terminal_state: bytes32(&fields[3])?,
         correction_reason: bytes32(&fields[4])?,
         authorization_provenance: bytes32(&fields[5])?,
+    })
+}
+
+pub(super) fn scope_commitment_value(record: &ErasureScopeCommitmentV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_SCOPE_COMMITMENT_TAG_V1),
+        uint(VERSION),
+        digest(record.input.request),
+        references_value(&record.input.affected_scope),
+        digest(record.input.target_closure),
+        optional_digest(record.input.extension_head),
+    ])
+}
+
+pub(super) fn scope_commitment_from_fields(
+    fields: &[Value],
+) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+    header(fields, ERASURE_SCOPE_COMMITMENT_TAG_V1)?;
+    ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: bytes32(&fields[2])?,
+        affected_scope: references_from_value(&fields[3], true)?,
+        target_closure: bytes32(&fields[4])?,
+        extension_head: optional_bytes32(&fields[5])?,
+    })
+}
+
+pub(super) fn freeze_provenance_value(record: &ErasureFreezeProvenanceV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_FREEZE_PROVENANCE_TAG_V1),
+        uint(VERSION),
+        digest(record.input.request),
+        digest(record.input.scope_commitment),
+        uint(record.input.freeze_position),
+        digest(record.input.evidence),
+        optional_digest(record.input.extension_head),
+    ])
+}
+
+pub(super) fn freeze_provenance_from_fields(
+    fields: &[Value],
+) -> Result<ErasureFreezeProvenanceV1, ErasureErrorV1> {
+    header(fields, ERASURE_FREEZE_PROVENANCE_TAG_V1)?;
+    ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request: bytes32(&fields[2])?,
+        scope_commitment: bytes32(&fields[3])?,
+        freeze_position: unsigned(&fields[4])?,
+        evidence: bytes32(&fields[5])?,
+        extension_head: optional_bytes32(&fields[6])?,
+    })
+}
+
+pub(super) fn freeze_failure_value(record: &ErasureFreezeFailureV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_FREEZE_FAILURE_TAG_V1),
+        uint(VERSION),
+        digest(record.input.request),
+        uint(record.input.error.code()),
+        digest(record.input.authorization_provenance),
+        digest(record.input.evidence),
+    ])
+}
+
+pub(super) fn freeze_failure_from_fields(
+    fields: &[Value],
+) -> Result<ErasureFreezeFailureV1, ErasureErrorV1> {
+    header(fields, ERASURE_FREEZE_FAILURE_TAG_V1)?;
+    ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request: bytes32(&fields[2])?,
+        error: ErasureErrorV1::from_code(unsigned(&fields[3])?)?,
+        authorization_provenance: bytes32(&fields[4])?,
+        evidence: bytes32(&fields[5])?,
     })
 }
 
@@ -461,6 +534,7 @@ pub(super) fn receipt_core_value(input: &ErasureReceiptInputV1) -> Value {
 }
 pub(super) fn acknowledgement_value(ack: ErasureAcknowledgementV1) -> Value {
     Value::Array(vec![
+        digest(ack.obligation),
         target_value(ack.target),
         digest(ack.owner),
         digest(ack.evidence),
@@ -541,12 +615,24 @@ pub(super) fn record_value(record: &super::ErasureCoordinatorRecordV1) -> Value 
     ])
 }
 
-fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> Value {
+pub(super) fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> Value {
     Value::Array(vec![
         records
             .correction_provenance
             .as_ref()
             .map_or(Value::Null, correction_provenance_value),
+        records
+            .scope_commitment
+            .as_ref()
+            .map_or(Value::Null, scope_commitment_value),
+        records
+            .freeze_provenance
+            .as_ref()
+            .map_or(Value::Null, freeze_provenance_value),
+        records
+            .freeze_failure
+            .as_ref()
+            .map_or(Value::Null, freeze_failure_value),
         Value::Array(
             records
                 .retry_admissions
@@ -592,41 +678,56 @@ fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> Value {
     ])
 }
 
-fn supporting_records_from_value(
+pub(super) fn supporting_records_from_value(
     value: &Value,
 ) -> Result<ErasureSupportingRecordsV1, ErasureErrorV1> {
-    let fields = exact_array(value, 7)?;
+    let fields = exact_array(value, 10)?;
     let correction_provenance = match &fields[0] {
         Value::Null => None,
         value => Some(correction_provenance_from_fields(exact_array(value, 6)?)?),
     };
-    let retry_admissions = array(&fields[1], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let scope_commitment = match &fields[1] {
+        Value::Null => None,
+        value => Some(scope_commitment_from_fields(exact_array(value, 6)?)?),
+    };
+    let freeze_provenance = match &fields[2] {
+        Value::Null => None,
+        value => Some(freeze_provenance_from_fields(exact_array(value, 7)?)?),
+    };
+    let freeze_failure = match &fields[3] {
+        Value::Null => None,
+        value => Some(freeze_failure_from_fields(exact_array(value, 6)?)?),
+    };
+    let retry_admissions = array(&fields[4], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| retry_admission_from_fields(exact_array(value, 12)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let acknowledgement_provenance = array(&fields[2], ERASURE_MAX_INVENTORY_RESULTS)?
+    let acknowledgement_provenance = array(&fields[5], ERASURE_MAX_INVENTORY_RESULTS)?
         .iter()
         .map(|value| acknowledgement_provenance_from_fields(exact_array(value, 12)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let attempt_outcomes = array(&fields[3], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let attempt_outcomes = array(&fields[6], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| attempt_outcome_from_fields(exact_array(value, 11)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let receipts = array(&fields[4], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let receipts = array(&fields[7], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| receipt_from_fields(exact_array(value, 19)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let receipt_provenance = array(&fields[5], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let receipt_provenance = array(&fields[8], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| receipt_provenance_from_fields(exact_array(value, 11)?))
         .collect::<Result<Vec<_>, _>>()?;
     let administrative_resolutions =
-        array(&fields[6], super::ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)?
+        array(&fields[9], super::ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)?
             .iter()
             .map(|value| administrative_resolution_from_fields(exact_array(value, 13)?))
             .collect::<Result<Vec<_>, _>>()?;
-    ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+    ErasureSupportingRecordsV1::from_canonical_input(ErasureSupportingRecordsInputV1 {
         correction_provenance,
+        scope_commitment,
+        freeze_provenance,
+        freeze_failure,
         retry_admissions,
         acknowledgement_provenance,
         attempt_outcomes,
@@ -729,18 +830,21 @@ pub(super) fn acknowledgements_from_value(
         values
             .iter()
             .map(|value| {
-                exact_array(value, 4).and_then(|fields| {
-                    target_from_value(&fields[0]).and_then(|target| {
-                        bytes32(&fields[1]).and_then(|owner| {
-                            bytes32(&fields[2]).and_then(|evidence| {
-                                unsigned(&fields[3])
-                                    .and_then(ErasureAcknowledgementOutcomeV1::from_code)
-                                    .map(|outcome| ErasureAcknowledgementV1 {
-                                        target,
-                                        owner,
-                                        evidence,
-                                        outcome,
-                                    })
+                exact_array(value, 5).and_then(|fields| {
+                    bytes32(&fields[0]).and_then(|obligation| {
+                        target_from_value(&fields[1]).and_then(|target| {
+                            bytes32(&fields[2]).and_then(|owner| {
+                                bytes32(&fields[3]).and_then(|evidence| {
+                                    unsigned(&fields[4])
+                                        .and_then(ErasureAcknowledgementOutcomeV1::from_code)
+                                        .map(|outcome| ErasureAcknowledgementV1 {
+                                            obligation,
+                                            target,
+                                            owner,
+                                            evidence,
+                                            outcome,
+                                        })
+                                })
                             })
                         })
                     })
@@ -1015,22 +1119,13 @@ pub(super) fn inventories_match_closure(
         .map(|entry| entry.target)
         .collect::<Vec<_>>();
     targets.sort_unstable();
+    targets.dedup();
     targets == required_targets
 }
 pub(super) fn has_duplicate_by_target(acknowledgements: &[ErasureAcknowledgementV1]) -> bool {
     acknowledgements
         .windows(2)
-        .any(|pair| pair[0].target == pair[1].target)
-}
-pub(super) fn acknowledgements_match_closure(
-    required_targets: &[ErasureRequiredTargetV1],
-    acknowledgements: &[ErasureAcknowledgementV1],
-) -> bool {
-    required_targets.len() == acknowledgements.len()
-        && required_targets
-            .iter()
-            .zip(acknowledgements)
-            .all(|(target, acknowledgement)| target == &acknowledgement.target)
+        .any(|pair| (pair[0].obligation, pair[0].owner) == (pair[1].obligation, pair[1].owner))
 }
 pub(super) fn acknowledgements_are_closure_subset(
     required_targets: &[ErasureRequiredTargetV1],

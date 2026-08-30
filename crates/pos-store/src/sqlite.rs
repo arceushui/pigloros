@@ -1774,36 +1774,11 @@ impl SqliteStore {
         }
     }
 
-    fn ensure_generic_erasure_access(&self) -> Result<(), CoreError> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT record_cbor FROM erasure_records")
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        let records = statement
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
-            .map_err(|error| CoreError::Storage(error.to_string()))?;
-        for bytes in records {
-            let bytes = bytes.map_err(|error| CoreError::Storage(error.to_string()))?;
-            let record =
-                ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).map_err(|error| {
-                    CoreError::Storage(format!("invalid persisted erasure record: {error}"))
-                })?;
-            if record.state().lifecycle().blocks_generic_timeline_access() {
-                return Err(CoreError::Storage(
-                    "generic EventStore access is frozen by ErasureCoordinator".to_owned(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     fn ensure_generic_timeline_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
-        self.ensure_generic_erasure_access().and_then(|()| {
-            crate::ensure_generic_timeline_visibility(
-                self.timeline_contains_geographic_evidence(timeline),
-                timeline,
-            )
-        })
+        crate::ensure_generic_timeline_visibility(
+            self.timeline_contains_geographic_evidence(timeline),
+            timeline,
+        )
     }
 
     fn ensure_admin_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
@@ -1852,7 +1827,6 @@ impl SqliteStore {
         permit: Option<ConsentAppendPermit>,
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.ensure_generic_erasure_access()?;
         if gateway_consent {
             let bound_permit = self.consent_authority_permit.ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
@@ -3790,7 +3764,6 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         events: &[Event],
     ) -> Result<(), CoreError> {
-        self.ensure_generic_erasure_access()?;
         if events.is_empty() {
             let _ = self
                 .get_timeline(timeline)?
@@ -4183,6 +4156,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
                             Err(ErasureErrorV1::ProvenanceMissing),
                             |_| {
                                 record.state().verify_predecessor_chain(self)?;
+                                validate_sqlite_correction(&self.conn, &record)?;
                                 Ok(record)
                             },
                         )
@@ -4235,6 +4209,7 @@ fn stage_erasure_record_sql(
     state_bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
     let request = record.request().reference();
+    validate_sqlite_correction(conn, record)?;
     let state_digest = record.state().state_digest();
     let existing_state_digest = validate_erasure_record_slot(conn, request, record, record_bytes)?;
     persist_erasure_state(
@@ -4246,6 +4221,26 @@ fn stage_erasure_record_sql(
         existing_state_digest,
     )?;
     insert_erasure_record(conn, request, state_digest, record_bytes)
+}
+
+fn validate_sqlite_correction(
+    conn: &Connection,
+    record: &ErasureCoordinatorRecordV1,
+) -> Result<(), ErasureErrorV1> {
+    let Some(correction) = record.supporting_records().correction_provenance() else {
+        return Ok(());
+    };
+    let bytes = conn
+        .query_row(
+            "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
+            params![correction.rejected_request().digest().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let predecessor = ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes)?;
+    record.validate_correction_predecessor(&predecessor)
 }
 
 fn validate_erasure_record_slot(

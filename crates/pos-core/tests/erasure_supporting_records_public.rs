@@ -2,20 +2,21 @@
 
 use ciborium::value::Value;
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
-    ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureCoordinatorRecordPartsV1,
-    ErasureCoordinatorRecordV1, ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeV1,
-    ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
-    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    acknowledgement_inventory_reference, erasure_evidence_set_reference,
+    selected_obligations_reference, ErasureAcknowledgementOutcomeV1,
+    ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
+    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAttemptOutcomeInputV1,
+    ErasureAttemptOutcomeV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
+    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
+    ErasureSupportingRecordsV1, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
+    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RETRY_ADMISSION_MAX_BYTES,
 };
 
@@ -73,10 +74,15 @@ const fn required_target() -> ErasureRequiredTargetV1 {
     }
 }
 
-const fn acknowledgement() -> ErasureAcknowledgementV1 {
+fn acknowledgement() -> ErasureAcknowledgementV1 {
     ErasureAcknowledgementV1 {
+        obligation: pos_core::inventory_obligation_reference(
+            ErasureInventoryCategoryV1::Artifact,
+            required_target(),
+            reference(36),
+        ),
         target: required_target(),
-        owner: reference(33),
+        owner: reference(36),
         evidence: reference(34),
         outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
     }
@@ -98,7 +104,10 @@ const fn inventory() -> ErasureInventoryResultV1 {
     }
 }
 
-fn complete_receipt(request: ErasureReferenceV1) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+fn complete_receipt(
+    request: ErasureReferenceV1,
+    provenance: ErasureReferenceV1,
+) -> Result<ErasureReceiptV1, ErasureErrorV1> {
     ErasureReceiptV1::new(ErasureReceiptInputV1 {
         request,
         terminal_state: reference(40),
@@ -118,7 +127,7 @@ fn complete_receipt(request: ErasureReferenceV1) -> Result<ErasureReceiptV1, Era
         replay_claim: ErasureReplayClaimV1::Exact,
         policy: reference(4),
         trust: reference(5),
-        provenance: reference(42),
+        provenance,
         issue_position: 20,
         signature: reference(43),
         receipt_digest: reference(0),
@@ -132,7 +141,7 @@ fn initial_admission(
         request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: vec![reference(2)],
+        unresolved_obligations: vec![acknowledgement().obligation],
         command_identities: vec![reference(3)],
         policy: reference(4),
         trust: reference(5),
@@ -142,7 +151,7 @@ fn initial_admission(
     })
 }
 
-const fn acknowledgement_provenance_input(
+fn acknowledgement_provenance_input(
     request: ErasureReferenceV1,
     attempt: ErasureReferenceV1,
 ) -> ErasureAcknowledgementProvenanceInputV1 {
@@ -150,8 +159,8 @@ const fn acknowledgement_provenance_input(
         request,
         command: reference(3),
         attempt,
-        obligation: reference(2),
-        owner: reference(33),
+        obligation: acknowledgement().obligation,
+        owner: acknowledgement().owner,
         scope: reference(44),
         outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
         evidence: reference(34),
@@ -189,41 +198,49 @@ fn complete_supporting_input(
         authorization_provenance: reference(73),
     })?;
     let admission = initial_admission(request)?;
-    let receipt = complete_receipt(request)?;
     let attempt = admission.reference();
+    let acknowledgement_provenance = ErasureAcknowledgementProvenanceV1::new(
+        acknowledgement_provenance_input(request, attempt),
+    )?;
+    let acknowledgement_reference = acknowledgement_provenance.reference();
+    let receipt_provenance = ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
+        request,
+        attempt,
+        attempt_ordinal: 0,
+        predecessor_receipt: None,
+        terminal_state: reference(40),
+        evidence_set: erasure_evidence_set_reference(&[acknowledgement_reference]),
+        policy: reference(4),
+        trust: reference(5),
+        issue_position: 20,
+    })?;
+    let receipt = complete_receipt(request, receipt_provenance.reference())?;
     Ok(ErasureSupportingRecordsInputV1 {
         correction_provenance: Some(correction),
+        scope_commitment: None,
+        freeze_provenance: None,
+        freeze_failure: None,
         retry_admissions: vec![admission],
-        acknowledgement_provenance: vec![ErasureAcknowledgementProvenanceV1::new(
-            acknowledgement_provenance_input(request, attempt),
-        )?],
+        acknowledgement_provenance: vec![acknowledgement_provenance],
         attempt_outcomes: vec![ErasureAttemptOutcomeV1::new(
             ErasureAttemptOutcomeInputV1 {
                 request,
                 attempt,
                 source_receipt: None,
                 lifecycle: ErasureLifecycleV1::Complete,
-                selected_obligations: reference(45),
-                acknowledgement_inventory: reference(46),
+                selected_obligations: selected_obligations_reference(&[
+                    acknowledgement().obligation
+                ]),
+                acknowledgement_inventory: acknowledgement_inventory_reference(&[
+                    acknowledgement_reference,
+                ]),
                 terminal_position: 20,
                 policy: reference(4),
                 trust: reference(5),
             },
         )?],
         receipts: vec![receipt.clone()],
-        receipt_provenance: vec![ErasureReceiptProvenanceV1::new(
-            ErasureReceiptProvenanceInputV1 {
-                request,
-                attempt,
-                attempt_ordinal: 0,
-                predecessor_receipt: None,
-                terminal_state: receipt.terminal_state(),
-                evidence_set: reference(47),
-                policy: reference(4),
-                trust: reference(5),
-                issue_position: 20,
-            },
-        )?],
+        receipt_provenance: vec![receipt_provenance],
         administrative_resolutions: vec![administrative_resolution(request, None)?],
     })
 }
@@ -604,8 +621,6 @@ fn lifecycle_distinguishes_request_terminality_from_attempt_terminality() {
     assert!(ErasureLifecycleV1::PartialFailure.is_attempt_terminal());
     assert!(ErasureLifecycleV1::Complete.is_terminal());
     assert!(ErasureLifecycleV1::Rejected.is_terminal());
-    assert!(ErasureLifecycleV1::PartialFailure.blocks_generic_timeline_access());
-    assert!(!ErasureLifecycleV1::Rejected.blocks_generic_timeline_access());
 }
 
 #[test]

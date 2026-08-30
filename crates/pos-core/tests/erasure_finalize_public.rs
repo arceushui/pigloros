@@ -108,6 +108,12 @@ impl ErasureCoordinatorPortV1 for PublicPort {
     ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
         Ok(vec![self.target])
     }
+    fn affected_scope(
+        &self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(vec![reference(7)])
+    }
 
     fn admit_freeze(
         &self,
@@ -126,6 +132,12 @@ impl ErasureCoordinatorPortV1 for PublicPort {
         &self,
         _request: ErasureReferenceV1,
         _commands: &[pos_core::ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+    fn admit_attempt(
+        &self,
+        _admission: &pos_core::ErasureRetryAdmissionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }

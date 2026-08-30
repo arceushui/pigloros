@@ -889,7 +889,6 @@ impl MemoryStore {
         permit: Option<ConsentAppendPermit>,
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
-        self.ensure_generic_erasure_access()?;
         if gateway_consent {
             let bound_permit = self.consent_authority_permit.ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
@@ -1040,29 +1039,11 @@ impl MemoryStore {
         Ok(self.geographic_timelines.contains(&timeline))
     }
 
-    fn ensure_generic_erasure_access(&self) -> Result<(), CoreError> {
-        self.erasure_records.values().try_for_each(|bytes| {
-            let record =
-                ErasureCoordinatorRecordV1::from_canonical_cbor(bytes).map_err(|error| {
-                    CoreError::Storage(format!("invalid persisted erasure record: {error}"))
-                })?;
-            if record.state().lifecycle().blocks_generic_timeline_access() {
-                Err(CoreError::Storage(
-                    "generic EventStore access is frozen by ErasureCoordinator".to_owned(),
-                ))
-            } else {
-                Ok(())
-            }
-        })
-    }
-
     fn ensure_generic_timeline_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
-        self.ensure_generic_erasure_access().and_then(|()| {
-            crate::ensure_generic_timeline_visibility(
-                self.timeline_contains_geographic_evidence(timeline),
-                timeline,
-            )
-        })
+        crate::ensure_generic_timeline_visibility(
+            self.timeline_contains_geographic_evidence(timeline),
+            timeline,
+        )
     }
 
     fn ensure_admin_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
@@ -1187,6 +1168,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
                             Err(ErasureErrorV1::ProvenanceMissing),
                             |_| {
                                 record.state().verify_predecessor_chain(self)?;
+                                validate_memory_correction(&record, &self.erasure_records)?;
                                 Ok(record)
                             },
                         )
@@ -1223,6 +1205,7 @@ fn stage_erasure_record(
     record: &ErasureCoordinatorRecordV1,
 ) -> Result<(), ErasureErrorV1> {
     let request = record.request().reference();
+    validate_memory_correction(record, records)?;
     let record_bytes = record.to_canonical_cbor()?;
     let existing_state_digest = if let Some(existing_bytes) = records.get(&request) {
         let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(existing_bytes)?;
@@ -1257,6 +1240,20 @@ fn stage_erasure_record(
     }
     records.insert(request, record_bytes);
     Ok(())
+}
+
+fn validate_memory_correction(
+    record: &ErasureCoordinatorRecordV1,
+    records: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
+) -> Result<(), ErasureErrorV1> {
+    let Some(correction) = record.supporting_records().correction_provenance() else {
+        return Ok(());
+    };
+    let bytes = records
+        .get(&correction.rejected_request())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let predecessor = ErasureCoordinatorRecordV1::from_canonical_cbor(bytes)?;
+    record.validate_correction_predecessor(&predecessor)
 }
 
 impl OwnTracksEnrollmentStore for MemoryStore {

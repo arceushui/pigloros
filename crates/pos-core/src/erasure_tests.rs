@@ -129,6 +129,12 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         }
         Ok(self.targets.clone())
     }
+    fn affected_scope(
+        &self,
+        _request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(vec![reference(7), reference(8)])
+    }
     fn admit_freeze(
         &self,
         _request: ErasureReferenceV1,
@@ -163,6 +169,9 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         if let Some(error) = self.dispatch_error {
             return Err(error);
         }
+        Ok(())
+    }
+    fn admit_attempt(&self, _admission: &ErasureRetryAdmissionV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
     fn admit_acknowledgement(
@@ -364,15 +373,21 @@ pub(super) fn acknowledgement(
     owner: u8,
     outcome: ErasureAcknowledgementOutcomeV1,
 ) -> ErasureAcknowledgementV1 {
+    let target = ErasureRequiredTargetV1 {
+        artifact_class: ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: reference(owner),
+        key_role: ErasureKeyRoleV1::DataEncryption,
+        key_digest: reference(owner + 10),
+        replica_set: reference(owner + 30),
+        replica_id: reference(owner + 40),
+    };
     ErasureAcknowledgementV1 {
-        target: ErasureRequiredTargetV1 {
-            artifact_class: ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest: reference(owner),
-            key_role: ErasureKeyRoleV1::DataEncryption,
-            key_digest: reference(owner + 10),
-            replica_set: reference(owner + 30),
-            replica_id: reference(owner + 40),
-        },
+        obligation: inventory_obligation_reference(
+            ErasureInventoryCategoryV1::Artifact,
+            target,
+            reference(owner + 40),
+        ),
+        target,
         owner: reference(owner + 40),
         evidence: reference(owner + 20),
         outcome,
@@ -386,7 +401,7 @@ fn inventory_result(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1
             from: ErasureReplayClaimV1::Exact,
             to: ErasureReplayClaimV1::StructuralOnly,
             reason: reference(50),
-            owner: reference(51),
+            owner: target.replica_id,
             acknowledgements: reference(52),
             provenance: reference(53),
         },
