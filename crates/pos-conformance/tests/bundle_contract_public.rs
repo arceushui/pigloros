@@ -2076,7 +2076,8 @@ fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
         41..=48 => mutate_profile_fixture_tail_fields(profile, mutation),
         49..=73 => mutate_profile_text_contracts(profile, mutation),
         74..=90 => mutate_profile_nested_contracts(profile, mutation),
-        91..=104 => mutate_profile_order_and_shape_contracts(profile, mutation),
+        91..=101 => mutate_profile_order_and_shape_contracts(profile, mutation),
+        102..=104 => mutate_profile_authority_shape(profile, mutation),
         _ => Err(format!("unsupported profile mutation {mutation}").into()),
     }
 }
@@ -2168,6 +2169,12 @@ fn mutate_profile_order_and_shape_contracts(profile: &mut [Value], mutation: usi
             Value::Text("é.0.0".to_owned()),
             "non-ASCII semantic version",
         ),
+        _ => Err(format!("unsupported order or shape mutation {mutation}").into()),
+    }
+}
+
+fn mutate_profile_authority_shape(profile: &mut [Value], mutation: usize) -> TestResult {
+    match mutation {
         102 => replace_value(
             array_field(
                 array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
@@ -2185,7 +2192,7 @@ fn mutate_profile_order_and_shape_contracts(profile: &mut [Value], mutation: usi
             "bound normative specification digest",
         ),
         104 => replace_value(profile, 9, Value::Array(Vec::new()), "fixture inventory"),
-        _ => Err(format!("unsupported order or shape mutation {mutation}").into()),
+        _ => Err(format!("unsupported authority shape mutation {mutation}").into()),
     }
 }
 
