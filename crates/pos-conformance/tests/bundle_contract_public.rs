@@ -113,9 +113,11 @@ fn await_stopped_process(child: &mut std::process::Child) -> TestResult {
 fn await_staged_file(path: &Path, child: &mut std::process::Child) -> TestResult {
     for _ in 0..200_000 {
         if let Some(status) = child.try_wait()? {
-            return Err(
-                format!("materializer exited before {path:?} was observable: {status}").into(),
-            );
+            return Err(format!(
+                "materializer exited before {} was observable: {status}",
+                path.display()
+            )
+            .into());
         }
         if path.is_file() {
             return Ok(());
@@ -124,7 +126,7 @@ fn await_staged_file(path: &Path, child: &mut std::process::Child) -> TestResult
     }
     child.kill()?;
     child.wait()?;
-    Err(format!("staged file {path:?} was not observable").into())
+    Err(format!("staged file {} was not observable", path.display()).into())
 }
 
 #[cfg(target_os = "linux")]
