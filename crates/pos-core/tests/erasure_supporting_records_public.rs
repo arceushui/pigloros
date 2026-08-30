@@ -285,6 +285,78 @@ fn complete_supporting_input(
     })
 }
 
+fn partial_failure_supporting_input(
+    request: ErasureReferenceV1,
+) -> Result<ErasureSupportingRecordsInputV1, ErasureErrorV1> {
+    let obligation = obligation(request)?;
+    let scope = scope_commitment(request)?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let admission = initial_admission(request)?;
+    let attempt = admission.reference();
+    let receipt_provenance = ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
+        request,
+        attempt,
+        attempt_ordinal: 0,
+        predecessor_receipt: None,
+        terminal_state: reference(40),
+        evidence_set: erasure_evidence_set_reference(&[]),
+        policy: reference(4),
+        trust: reference(5),
+        issue_position: 20,
+    })?;
+    let receipt = ErasureReceiptV1::new(ErasureReceiptInputV1 {
+        request,
+        terminal_state: reference(40),
+        coordinator: reference(41),
+        lifecycle: ErasureLifecycleV1::PartialFailure,
+        freeze_position: 10,
+        frozen_targets: vec![required_target()],
+        acknowledgements: Vec::new(),
+        pending_owners: vec![obligation.owner()],
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: vec![inventory()],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(4),
+        trust: reference(5),
+        provenance: receipt_provenance.reference(),
+        issue_position: 20,
+        signature: reference(43),
+        receipt_digest: reference(0),
+    })?;
+    Ok(ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope),
+        obligations: vec![obligation],
+        obligation_set: Some(obligation_set),
+        retry_admissions: vec![admission],
+        attempt_outcomes: vec![ErasureAttemptOutcomeV1::new(
+            ErasureAttemptOutcomeInputV1 {
+                request,
+                attempt,
+                source_receipt: None,
+                lifecycle: ErasureLifecycleV1::PartialFailure,
+                selected_obligations: selected_obligations_reference(&[obligation.reference()]),
+                acknowledgement_inventory: acknowledgement_inventory_reference(&[]),
+                terminal_position: 20,
+                policy: reference(4),
+                trust: reference(5),
+            },
+        )?],
+        receipts: vec![receipt],
+        receipt_provenance: vec![receipt_provenance],
+        ..ErasureSupportingRecordsInputV1::default()
+    })
+}
+
 #[test]
 fn correction_provenance_roundtrips_and_rejects_shape_changes() -> Result<(), ErasureErrorV1> {
     let record = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
@@ -699,46 +771,24 @@ fn supporting_record_decoders_enforce_their_public_size_bounds() {
 #[test]
 fn supporting_records_accept_one_active_attempt_and_a_nonbranching_resolution(
 ) -> Result<(), ErasureErrorV1> {
-    let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
-        request: reference(1),
-        attempt_ordinal: 0,
-        source_receipt: None,
-        unresolved_obligations: vec![reference(2)],
-        command_identities: vec![reference(3)],
+    let request = reference(1);
+    let scope = scope_commitment(request)?;
+    let obligation = obligation(request)?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
         policy: reference(4),
         trust: reference(5),
-        admitted_position: 10,
-        deadline_position: 20,
-        authorization_provenance: reference(6),
     })?;
-    let acknowledgement =
-        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
-            request: reference(1),
-            command: reference(3),
-            attempt: admission.reference(),
-            obligation: reference(2),
-            owner: reference(7),
-            scope: reference(8),
-            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
-            evidence: reference(9),
-            policy: reference(4),
-            trust: reference(5),
-        })?;
-    let resolution =
-        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
-            request: reference(1),
-            affected_digests: vec![reference(9)],
-            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
-            scope_commitment: reference(8),
-            policy: reference(4),
-            trust: reference(5),
-            principal: reference(10),
-            authorization_provenance: reference(11),
-            reason: reference(12),
-            issue_position: 21,
-            predecessor_resolution: None,
-        })?;
+    let admission = initial_admission(request)?;
+    let acknowledgement = ErasureAcknowledgementProvenanceV1::new(
+        acknowledgement_provenance_input(request, admission.reference())?,
+    )?;
+    let resolution = administrative_resolution(request, scope.reference(), None)?;
     let records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope),
+        obligations: vec![obligation],
+        obligation_set: Some(obligation_set),
         retry_admissions: vec![admission.clone()],
         acknowledgement_provenance: vec![acknowledgement],
         administrative_resolutions: vec![resolution.clone()],
@@ -752,6 +802,9 @@ fn supporting_records_accept_one_active_attempt_and_a_nonbranching_resolution(
     assert!(records.receipt_provenance().is_empty());
     assert_eq!(records.administrative_resolutions(), &[resolution]);
     let duplicate_arrival = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+        scope_commitment: records.scope_commitment().cloned(),
+        obligations: records.obligations().to_vec(),
+        obligation_set: records.obligation_set().cloned(),
         retry_admissions: records.retry_admissions().to_vec(),
         acknowledgement_provenance: vec![
             records.acknowledgement_provenance()[0],
@@ -759,8 +812,8 @@ fn supporting_records_accept_one_active_attempt_and_a_nonbranching_resolution(
         ],
         administrative_resolutions: records.administrative_resolutions().to_vec(),
         ..ErasureSupportingRecordsInputV1::default()
-    })?;
-    assert_eq!(duplicate_arrival, records);
+    });
+    assert_eq!(duplicate_arrival, Err(ErasureErrorV1::PolicyConflict));
     Ok(())
 }
 
@@ -987,7 +1040,7 @@ fn supporting_attempt_chain_rejects_gaps_and_identity_mismatches() -> Result<(),
         })?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(wrong_ordinal),
-        Err(ErasureErrorV1::ProvenanceMissing)
+        Err(ErasureErrorV1::PolicyConflict)
     );
 
     let mut wrong_outcome = input.clone();
@@ -1032,14 +1085,15 @@ fn supporting_attempt_chain_rejects_gaps_and_identity_mismatches() -> Result<(),
 #[test]
 fn supporting_attempt_chain_links_one_active_retry_to_the_previous_receipt(
 ) -> Result<(), ErasureErrorV1> {
-    let input = complete_supporting_input(reference(1))?;
+    let input = partial_failure_supporting_input(reference(1))?;
     let previous_receipt = input.receipts[0].receipt_digest();
+    let obligation = input.obligations[0];
     let retry_input = ErasureRetryAdmissionInputV1 {
         request: reference(1),
         attempt_ordinal: 1,
         source_receipt: Some(previous_receipt),
-        unresolved_obligations: vec![reference(8)],
-        command_identities: vec![reference(9)],
+        unresolved_obligations: vec![obligation.reference()],
+        command_identities: vec![obligation.command_identity()],
         policy: reference(4),
         trust: reference(5),
         admitted_position: 21,

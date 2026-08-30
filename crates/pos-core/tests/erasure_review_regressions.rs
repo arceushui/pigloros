@@ -253,7 +253,7 @@ fn mutate_acknowledgement_provenance(
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     let provenance = supporting_fields
-        .get_mut(5)
+        .get_mut(10)
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let Value::Array(provenance) = provenance else {
         return Err(ErasureErrorV1::InvalidEncoding);
@@ -687,28 +687,38 @@ impl ErasureCoordinatorPortV1 for PublicPort {
         request: ErasureReferenceV1,
         _requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-        let target = self.targets[0];
-        let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
-            category: ErasureInventoryCategoryV1::Artifact,
-            target,
-            owner: target.replica_id,
-            command_identity: destruction_command_reference(request, target),
-        })?;
+        let mut obligations = self
+            .targets
+            .iter()
+            .copied()
+            .map(|target| {
+                ErasureObligationV1::new(ErasureObligationInputV1 {
+                    category: ErasureInventoryCategoryV1::Artifact,
+                    target,
+                    owner: target.replica_id,
+                    command_identity: destruction_command_reference(request, target),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        obligations.sort_unstable_by_key(ErasureObligationV1::reference);
         let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
             request,
-            obligations: vec![obligation.reference()],
+            obligations: obligations
+                .iter()
+                .map(ErasureObligationV1::reference)
+                .collect(),
             policy: reference(6),
             trust: reference(7),
         })?;
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
-            targets: vec![target],
+            targets: self.targets.clone(),
             scope: ErasureScopeCommitmentInputV1 {
                 request,
                 scope_members: vec![reference(3)],
-                target_closure: target_closure_digest(&[target]),
+                target_closure: target_closure_digest(&self.targets),
                 lineage_rule: None,
             },
-            obligations: vec![obligation],
+            obligations,
             obligation_set,
             freeze_position: 10,
             host_evidence: reference(90),
@@ -772,10 +782,11 @@ fn state_after_acknowledgements(
 ) -> Result<ErasureStateV1, ErasureErrorV1> {
     let submitted_request = request()?;
     let request_reference = submitted_request.reference();
-    let targets = acknowledgements
+    let mut targets = acknowledgements
         .iter()
         .map(|acknowledgement| acknowledgement.target)
-        .collect();
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
         public_port_with_targets(false, targets),
         reference(91),
@@ -798,7 +809,7 @@ fn state_after_acknowledgements(
             })
             .collect(),
         policy: reference(6),
-        trust: reference(94),
+        trust: reference(7),
         admitted_position: 9,
         deadline_position: 10,
         authorization_provenance: reference(94),
@@ -838,8 +849,9 @@ fn public_coordinator_rejects_conflicting_retries_and_propagates_commit_failure(
 #[test]
 fn coordinator_acknowledgement_arrival_order_does_not_change_ers1_identity(
 ) -> Result<(), ErasureErrorV1> {
-    let first = acknowledgement(reference(95), reference(96))?;
-    let second = acknowledgement_for_target(second_target(), reference(97), reference(98))?;
+    let first = acknowledgement(target().replica_id, reference(96))?;
+    let second =
+        acknowledgement_for_target(second_target(), second_target().replica_id, reference(98))?;
     let forward = state_after_acknowledgements(&[first, second])?;
     let reverse = state_after_acknowledgements(&[second, first])?;
     assert_eq!(forward, reverse);
