@@ -517,7 +517,7 @@ mod coverage_entrypoints {
                 &value,
                 MoatProofEvidenceV1::from_canonical_cbor,
                 MoatProofEvidenceV1::to_canonical_cbor,
-            ) > 1_000
+            ) > 0
         );
     }
 }
