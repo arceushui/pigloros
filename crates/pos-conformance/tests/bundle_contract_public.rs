@@ -1370,12 +1370,13 @@ fn privileged_materializer_test_drops_identity_and_rejects_foreign_parent() -> T
     let output = materialize
         .current_dir(&root)
         .args(["--clear-groups", "--regid", gid, "--reuid", uid, "--"])
+        .arg("env")
+        .arg(concat!(
+            "PIGLOROS_CONFORMANCE_SIGNING_KEY=",
+            "0707070707070707070707070707070707070707070707070707070707070707"
+        ))
         .arg(&executable)
         .arg(&publication)
-        .env(
-            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
-            "0707070707070707070707070707070707070707070707070707070707070707",
-        )
         .output()?;
     assert!(
         !output.status.success(),
