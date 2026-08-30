@@ -160,7 +160,22 @@ struct DraftExecutionProfileDeclaration {
     semantic_version: String,
     network_allowed: bool,
     capability_ids: Vec<String>,
-    reproducibility_classes: Vec<String>,
+    reproducibility_classes: Vec<DraftReproducibilityClass>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+enum DraftReproducibilityClass {
+    ProfileRecomputation,
+    CrossProfileConformance,
+}
+
+impl DraftReproducibilityClass {
+    fn value(self) -> Value {
+        match self {
+            Self::ProfileRecomputation => Value::Integer(1_u64.into()),
+            Self::CrossProfileConformance => Value::Integer(2_u64.into()),
+        }
+    }
 }
 
 fn draft_authority() -> Result<DraftAuthorityDeclaration, Box<dyn Error>> {
@@ -210,12 +225,9 @@ fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, 
     let reproducibility_classes = declaration
         .reproducibility_classes
         .iter()
-        .map(|class| match class.as_str() {
-            "ProfileRecomputation" => Ok(Value::Integer(1_u64.into())),
-            "CrossProfileConformance" => Ok(Value::Integer(2_u64.into())),
-            _ => Err("Draft authority declares an unknown reproducibility class"),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .copied()
+        .map(DraftReproducibilityClass::value)
+        .collect::<Vec<_>>();
     let fields = vec![
         Value::Text("EPF1".to_owned()),
         Value::Integer(1_u64.into()),
@@ -755,6 +767,10 @@ fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
         .iter()
         .map(catalog_entry)
         .collect::<Result<Vec<_>, _>>()?;
+    finish_layer_catalog(entries)
+}
+
+fn finish_layer_catalog(entries: Vec<LayerCatalogEntry>) -> Result<LayerCatalog, Box<dyn Error>> {
     let bundle_modes = entries
         .first()
         .map_or(CatalogBundleMode::ALL, |entry| entry.bundle_modes);
@@ -1958,6 +1974,16 @@ fn catalog_entry_rejects_profile_and_provider_drift() -> Result<(), Box<dyn Erro
     };
     assert!(catalog_entry(&changed).is_err());
 
+    let mut profile: serde_json::Value = serde_json::from_slice(source.profile_record)?;
+    profile["execution_profiles"] = serde_json::json!(["deterministic-local-v1"]);
+    let profile = Box::leak(serde_json::to_vec(&profile)?.into_boxed_slice());
+    let changed = LayerSource {
+        profile_record: profile,
+        provider_record: source.provider_record,
+        fixtures: source.fixtures,
+    };
+    assert!(catalog_entry(&changed).is_err());
+
     let mut provider: serde_json::Value = serde_json::from_slice(source.provider_record)?;
     provider["claim_layer"] = serde_json::Value::String("replay-conformance".to_owned());
     let provider = Box::leak(serde_json::to_vec(&provider)?.into_boxed_slice());
@@ -1967,6 +1993,57 @@ fn catalog_entry_rejects_profile_and_provider_drift() -> Result<(), Box<dyn Erro
         fixtures: source.fixtures,
     };
     assert!(catalog_entry(&changed).is_err());
+
+    for field in ["fixture_contracts", "fixture_operations", "schemas"] {
+        let mut provider: serde_json::Value = serde_json::from_slice(source.provider_record)?;
+        provider[field]
+            .as_object_mut()
+            .expect("provider contract maps are objects")
+            .remove("positive");
+        let provider = Box::leak(serde_json::to_vec(&provider)?.into_boxed_slice());
+        let changed = LayerSource {
+            profile_record: source.profile_record,
+            provider_record: provider,
+            fixtures: source.fixtures,
+        };
+        assert!(catalog_entry(&changed).is_err());
+    }
+
+    let mut provider: serde_json::Value = serde_json::from_slice(source.provider_record)?;
+    provider["schemas"]["positive"] = serde_json::Value::String("wrong-schema.json".to_owned());
+    let provider = Box::leak(serde_json::to_vec(&provider)?.into_boxed_slice());
+    let changed = LayerSource {
+        profile_record: source.profile_record,
+        provider_record: provider,
+        fixtures: source.fixtures,
+    };
+    assert!(catalog_entry(&changed).is_err());
+
+    let mut entries = LAYER_SOURCES
+        .iter()
+        .map(catalog_entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    entries[0].bundle_modes = [CatalogBundleMode::AirGapped, CatalogBundleMode::Local];
+    assert!(finish_layer_catalog(entries).is_err());
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn draft_authority_rejects_invalid_keys_and_classes() -> Result<(), Box<dyn Error>> {
+    let mut authority = draft_authority()?;
+    authority.fixture_authority_public_key_hex = "00".to_owned();
+    assert!(authority_public_key(&authority).is_err());
+
+    authority.fixture_authority_public_key_hex = "00".repeat(32);
+    assert!(authority_signing_key(&authority).is_err());
+
+    let mut declaration: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/conformance/support/draft-execution-authority.json"
+    ))?;
+    declaration["execution_profiles"][0]["reproducibility_classes"][0] =
+        serde_json::Value::String("UnknownClass".to_owned());
+    assert!(serde_json::from_value::<DraftAuthorityDeclaration>(declaration).is_err());
     Ok(())
 }
 fn verify_public_archive(

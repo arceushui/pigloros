@@ -62,7 +62,22 @@ struct DraftExecutionProfileContract {
     semantic_version: String,
     network_allowed: bool,
     capability_ids: Vec<String>,
-    reproducibility_classes: Vec<String>,
+    reproducibility_classes: Vec<DraftReproducibilityClass>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+enum DraftReproducibilityClass {
+    ProfileRecomputation,
+    CrossProfileConformance,
+}
+
+impl DraftReproducibilityClass {
+    fn value(self) -> Value {
+        match self {
+            Self::ProfileRecomputation => Value::Integer(1_u64.into()),
+            Self::CrossProfileConformance => Value::Integer(2_u64.into()),
+        }
+    }
 }
 
 fn draft_authority_contract() -> Result<DraftAuthorityContract, BundleContractErrorV1> {
@@ -694,12 +709,9 @@ fn validate_execution_profile_fields(
             let classes = declaration
                 .reproducibility_classes
                 .iter()
-                .map(|class| match class.as_str() {
-                    "ProfileRecomputation" => Ok(Value::Integer(1_u64.into())),
-                    "CrossProfileConformance" => Ok(Value::Integer(2_u64.into())),
-                    _ => Err(BundleContractErrorV1::ProfileInvalid),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                .copied()
+                .map(DraftReproducibilityClass::value)
+                .collect::<Vec<_>>();
             let capabilities = declaration
                 .capability_ids
                 .into_iter()
@@ -2192,12 +2204,9 @@ fn raw_execution_profile_fields(path: &str, fields: &[Value]) -> Result<(), Bund
             let classes = declaration
                 .reproducibility_classes
                 .iter()
-                .map(|class| match class.as_str() {
-                    "ProfileRecomputation" => Ok(Value::Integer(1_u64.into())),
-                    "CrossProfileConformance" => Ok(Value::Integer(2_u64.into())),
-                    _ => Err(BundleContractErrorV1::ProfileInvalid),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+                .copied()
+                .map(DraftReproducibilityClass::value)
+                .collect::<Vec<_>>();
             let capabilities = declaration
                 .capability_ids
                 .into_iter()
