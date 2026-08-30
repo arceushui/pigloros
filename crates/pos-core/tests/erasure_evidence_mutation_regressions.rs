@@ -770,8 +770,16 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
+    assert_freeze_failure_conflicts(scope, obligations, obligation_set)
+}
+
+fn assert_freeze_failure_conflicts(
+    scope: ErasureScopeCommitmentV1,
+    obligations: Vec<ErasureObligationV1>,
+    obligation_set: ErasureObligationSetV1,
+) -> Result<(), ErasureErrorV1> {
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
-        request,
+        reference(1),
         scope.reference(),
         obligation_set.reference(),
         reference(6),
@@ -786,7 +794,7 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
             scope_commitment: Some(scope.clone()),
             freeze_provenance: Some(freeze),
             freeze_failure: Some(failure),
-            obligations: obligations.clone(),
+            obligations,
             obligation_set: Some(obligation_set),
             ..ErasureSupportingRecordsInputV1::default()
         }),
