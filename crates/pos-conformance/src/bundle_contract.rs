@@ -1191,7 +1191,7 @@ enum RawArchiveMode {
 }
 
 impl RawArchiveMode {
-    fn from_code(code: u64) -> Result<Self, BundleContractErrorV1> {
+    const fn from_code(code: u64) -> Result<Self, BundleContractErrorV1> {
         match code {
             0 => Ok(Self::Local),
             1 => Ok(Self::AirGapped),
