@@ -357,6 +357,16 @@ fn retry_admission_rejects_invalid_ordinals_deadlines_and_obligation_sets() {
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
+    let mut oversized_obligations = retry_input();
+    oversized_obligations.unresolved_obligations =
+        vec![reference(20); ERASURE_MAX_INVENTORY_RESULTS + 1];
+    oversized_obligations.command_identities =
+        vec![reference(21); ERASURE_MAX_INVENTORY_RESULTS + 1];
+    assert_eq!(
+        ErasureRetryAdmissionV1::new(oversized_obligations),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
     let mut duplicate_obligations = retry_input();
     duplicate_obligations.unresolved_obligations[1] = reference(5);
     assert_eq!(
