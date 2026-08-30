@@ -1176,7 +1176,8 @@ fn current_bundle_pair_requires_profile_parity() -> TestResult {
     mismatched.air_gapped.manifest.profile_digest[0] ^= 1;
     let error = mismatched
         .validate()
-        .expect_err("mismatched profile identity must reject the bundle pair");
+        .err()
+        .ok_or("mismatched profile identity accepted the bundle pair")?;
     assert!([
         BundleContractErrorV1::ProfileInvalid,
         BundleContractErrorV1::SignatureInvalid,
@@ -2800,8 +2801,7 @@ fn independent_verifier_exercises_active_provider_transitions() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestResult {
+fn assert_independent_fixture_inventory_relationships() -> TestResult {
     let missing_family = mutate_profile_archive(|profile| {
         array_field(profile, 9, "fixtures")?.pop();
         Ok(())
@@ -2869,7 +2869,10 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
         &duplicate_coordinate_family,
         "duplicate family in one provider execution mode coordinate",
     );
+    Ok(())
+}
 
+fn assert_independent_fixture_semantic_relationships() -> TestResult {
     let unknown_provider = mutate_profile_archive(|profile| {
         replace_value(
             array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?
@@ -2957,7 +2960,12 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
 }
 
 #[test]
-fn independent_verifier_reaches_deep_raw_relationship_rejections() -> TestResult {
+fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestResult {
+    assert_independent_fixture_inventory_relationships()?;
+    assert_independent_fixture_semantic_relationships()
+}
+
+fn assert_deep_raw_profile_rejections() -> TestResult {
     for field in 0..3 {
         let invalid_manifest_header = mutate_archive(|archive| {
             replace_value(
@@ -3044,7 +3052,10 @@ fn independent_verifier_reaches_deep_raw_relationship_rejections() -> TestResult
         )
     })?;
     assert_archive_rejected_by_both(&missing_bound_member, "unbound fixture payload");
+    Ok(())
+}
 
+fn assert_deep_raw_archive_rejections() -> TestResult {
     let malformed_registry_bytes = mutate_archive(|archive| {
         let bytes = [0xff];
         replace_archive_member_bytes(archive, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, &bytes)?;
@@ -3127,6 +3138,12 @@ fn independent_verifier_reaches_deep_raw_relationship_rejections() -> TestResult
         "release-tree verification accepted an invalid archive"
     );
     Ok(())
+}
+
+#[test]
+fn independent_verifier_reaches_deep_raw_relationship_rejections() -> TestResult {
+    assert_deep_raw_profile_rejections()?;
+    assert_deep_raw_archive_rejections()
 }
 
 #[test]
@@ -3820,16 +3837,18 @@ fn independent_verifier_preflights_resource_bounds_before_decoding() {
 }
 
 #[test]
-fn independent_verifier_rejects_noncanonical_or_incomplete_archives() {
+fn independent_verifier_rejects_noncanonical_or_incomplete_archives() -> TestResult {
     let malformed = [0x84, 0x80, 0x80, 0x40, 0x40];
     let error = verify_archive_independently(&malformed)
-        .expect_err("noncanonical archive must be rejected");
+        .err()
+        .ok_or("noncanonical archive was accepted")?;
     assert!([
         BundleContractErrorV1::ArchiveEncodingInvalid,
         BundleContractErrorV1::LifecycleInvalid,
         BundleContractErrorV1::MemberMissing,
     ]
     .contains(&error));
+    Ok(())
 }
 
 #[test]
