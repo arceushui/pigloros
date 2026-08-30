@@ -1143,7 +1143,7 @@ fn active_retry_can_commit_a_new_partial_failure_receipt() -> Result<(), Erasure
             target,
             retry_acknowledgement,
             ErasureLifecycleV1::PartialFailure,
-            13,
+            20,
         ),
     )?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
