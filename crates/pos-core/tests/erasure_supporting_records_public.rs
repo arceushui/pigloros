@@ -222,6 +222,7 @@ fn portable_scope_and_obligation_records_expose_canonical_public_seams(
 fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<(), ErasureErrorV1> {
     let request = reference(1);
     let scope = scope_commitment(request)?;
+    let other_obligation = obligation(reference(9))?;
     let obligation = obligation(request)?;
     let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
         request,
@@ -331,7 +332,7 @@ fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<()
     );
     let wrong_obligation_objects = ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope.clone()),
-        obligations: vec![obligation(reference(9))?],
+        obligations: vec![other_obligation],
         obligation_set: Some(obligation_set),
         ..ErasureSupportingRecordsInputV1::default()
     };

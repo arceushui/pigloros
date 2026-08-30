@@ -1760,16 +1760,8 @@ fn coordinator_cas_methods_advance_and_retry_exact_evidence() -> Result<(), Eras
         predecessor_extension: None,
         admission_provenance: reference(57),
     })?;
-    ErasureCoordinator::append_scope_extension(
-        &mut fixture.machine,
-        fixture.request,
-        extension.clone(),
-    )?;
-    ErasureCoordinator::append_scope_extension(
-        &mut fixture.machine,
-        fixture.request,
-        extension.clone(),
-    )?;
+    ErasureCoordinator::append_scope_extension(&mut fixture.machine, fixture.request, extension)?;
+    ErasureCoordinator::append_scope_extension(&mut fixture.machine, fixture.request, extension)?;
     let extended = latest_record(&fixture.state, fixture.request)?;
     assert_eq!(
         extended.supporting_records().scope_extensions().last(),
