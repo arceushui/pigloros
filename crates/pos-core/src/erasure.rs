@@ -4418,6 +4418,24 @@ mod erasure_coverage_tests {
             ..ErasureSupportingRecordsInputV1::default()
         })?;
         assert!(!with_correction.is_prefix_of(&ErasureSupportingRecordsV1::default()));
+
+        let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+            request: ErasureReferenceV1::from_digest([7; 32]),
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![ErasureReferenceV1::from_digest([8; 32])],
+            command_identities: vec![ErasureReferenceV1::from_digest([9; 32])],
+            policy: ErasureReferenceV1::from_digest([10; 32]),
+            trust: ErasureReferenceV1::from_digest([11; 32]),
+            admitted_position: 12,
+            deadline_position: 12,
+            authorization_provenance: ErasureReferenceV1::from_digest([13; 32]),
+        })?;
+        let with_admission = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
+            retry_admissions: vec![admission],
+            ..ErasureSupportingRecordsInputV1::default()
+        })?;
+        assert!(!with_admission.is_prefix_of(&ErasureSupportingRecordsV1::default()));
         Ok(())
     }
 
