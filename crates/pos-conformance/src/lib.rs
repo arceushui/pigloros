@@ -4575,7 +4575,7 @@ pub mod strict_codec {
                     return;
                 };
                 consume(encode_verification_result(&result));
-                consume(verification_result_digest(&result));
+                let _ = std::hint::black_box(verification_result_digest(&result));
                 let verification_value = encode_verification_result_value(&result, true);
                 reject_each_field(&verification_value, |value| {
                     array(value, "verification_result", 18)

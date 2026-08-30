@@ -1855,7 +1855,9 @@ fn append_draft_release_admissions(
 
 #[cfg(test)]
 fn tested<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| panic!("test setup failed: {error:?}"))
+    result.unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!("test setup failed: {error:?}")))
+    })
 }
 
 #[cfg(test)]
