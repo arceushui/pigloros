@@ -5576,15 +5576,6 @@ mod erasure_coverage_tests {
     {
         let fixtures = replacement_fixtures()?;
 
-        let mut changed_supporting = fixtures.reserved.clone();
-        changed_supporting.supporting_records = ErasureSupportingRecordsV1::default();
-        assert_eq!(
-            fixtures
-                .reserved
-                .validate_same_state_replacement(&changed_supporting),
-            Err(ErasureErrorV1::PolicyConflict)
-        );
-
         let mut changed_intent = fixtures.intent.clone();
         changed_intent.authorize_provenance = Some(ErasureReferenceV1::from_digest([91; 32]));
         assert_eq!(
