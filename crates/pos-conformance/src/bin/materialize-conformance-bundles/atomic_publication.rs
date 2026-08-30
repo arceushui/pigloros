@@ -51,8 +51,8 @@ struct PendingStaging<'a> {
 impl Drop for PendingStaging<'_> {
     fn drop(&mut self) {
         if self.armed {
-            drop(fs::unlinkat(self.parent, self.name, AtFlags::REMOVEDIR));
-            drop(fs::fsync(self.parent));
+            let _unlink_result = fs::unlinkat(self.parent, self.name, AtFlags::REMOVEDIR);
+            let _sync_result = fs::fsync(self.parent);
         }
     }
 }
