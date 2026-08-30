@@ -319,6 +319,68 @@ mod coverage_entrypoints {
         exercised
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
+        let mut evidence = tests::evidence();
+        evidence.plugin_failures = vec![
+            PluginFailureV1 {
+                plugin: "crashing-plugin".to_owned(),
+                class: PluginFailureClassV1::PluginCrash,
+                tick: 1,
+                committed: false,
+                staged_event_count: 1,
+                committed_event_count: 0,
+                state_digest_before: [21; 32],
+                state_digest_after: [21; 32],
+                sibling_step_count: 2,
+            },
+            PluginFailureV1 {
+                plugin: "bounded-plugin".to_owned(),
+                class: PluginFailureClassV1::ResourceExhaustion,
+                tick: 2,
+                committed: false,
+                staged_event_count: 3,
+                committed_event_count: 0,
+                state_digest_before: [22; 32],
+                state_digest_after: [22; 32],
+                sibling_step_count: 4,
+            },
+        ];
+        evidence.contract.counterfactual.intervention = Some(InterventionV1 {
+            intervention_id: [23; 16],
+            target: "body".to_owned(),
+            operation: "set_velocity".to_owned(),
+            value_digest: [24; 32],
+            effective_tick: 1,
+            ordinal: 0,
+            principal_id: "principal:operator".to_owned(),
+            capability: "intervene".to_owned(),
+            consent_epoch: 0,
+            provenance_digest: [25; 32],
+        });
+        evidence
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn safe_error_codes() -> [SafeErrorCodeV1; 14] {
+        [
+            SafeErrorCodeV1::InvalidEncoding,
+            SafeErrorCodeV1::UnsupportedVersion,
+            SafeErrorCodeV1::FieldOutOfBounds,
+            SafeErrorCodeV1::NonCanonicalOrder,
+            SafeErrorCodeV1::DigestMismatch,
+            SafeErrorCodeV1::SignatureInvalid,
+            SafeErrorCodeV1::TrustRootUnknown,
+            SafeErrorCodeV1::TrustSnapshotRollback,
+            SafeErrorCodeV1::ArtifactRevoked,
+            SafeErrorCodeV1::ClosureIncomplete,
+            SafeErrorCodeV1::ProfileClassMismatch,
+            SafeErrorCodeV1::ProfileUnsupported,
+            SafeErrorCodeV1::ProvenanceMissing,
+            SafeErrorCodeV1::ResourceLimitExceeded,
+        ]
+    }
+
     #[test]
     fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
         let boundary = wave8_plugin_boundary();
@@ -512,7 +574,7 @@ mod coverage_entrypoints {
 
     #[test]
     fn public_evidence_decoder_closes_scalar_and_length_boundaries() {
-        let evidence = tests::evidence();
+        let evidence = evidence_with_optional_record_variants();
         let value = decode_value(ok(evidence.to_canonical_cbor()));
         assert!(
             exercise_scalar_boundaries(
@@ -521,6 +583,67 @@ mod coverage_entrypoints {
                 MoatProofEvidenceV1::to_canonical_cbor,
             ) > 0
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_record_variants_round_trip_at_the_wire_seam() {
+        let evidence = evidence_with_optional_record_variants();
+        let encoded = ok(evidence.to_canonical_cbor());
+        assert_eq!(
+            ok(MoatProofEvidenceV1::from_canonical_cbor(&encoded)),
+            evidence
+        );
+
+        for code in safe_error_codes() {
+            let mut with_error = evidence.clone();
+            with_error.contract.conformance_report.cases[0].expected_error = Some(code);
+            with_error.contract.conformance_report.cases[0].actual_error = Some(code);
+            let encoded = ok(with_error.to_canonical_cbor());
+            assert_eq!(
+                ok(MoatProofEvidenceV1::from_canonical_cbor(&encoded)),
+                with_error
+            );
+        }
+
+        let base = ok(tests::evidence().to_verification_result());
+        let outcomes = [
+            VerificationOutcomeV1::VerifiedExact,
+            VerificationOutcomeV1::Diverged,
+            VerificationOutcomeV1::InvalidManifest,
+            VerificationOutcomeV1::UnverifiableArtifactsMissing,
+            VerificationOutcomeV1::IncompatibleProfile,
+            VerificationOutcomeV1::ResourceLimitExceeded,
+        ];
+        for (outcome, code) in outcomes.into_iter().zip(safe_error_codes()) {
+            let mut result = base.clone();
+            result.verification_outcome = outcome;
+            match outcome {
+                VerificationOutcomeV1::VerifiedExact => {}
+                VerificationOutcomeV1::Diverged => {
+                    result.authoritative_result_digest = None;
+                    result.divergence_report_digest = Some([26; 32]);
+                }
+                VerificationOutcomeV1::InvalidManifest
+                | VerificationOutcomeV1::UnverifiableArtifactsMissing
+                | VerificationOutcomeV1::IncompatibleProfile
+                | VerificationOutcomeV1::ResourceLimitExceeded => {
+                    result.authoritative_result_digest = None;
+                    result.first_error = Some(VerificationErrorV1 {
+                        code,
+                        field_ordinal: Some(1),
+                        canonical_coordinate: Some(vec![2, 3]),
+                        related_digest: Some([27; 32]),
+                    });
+                }
+            }
+            result.result_digest = ok(result.digest());
+            let encoded = ok(result.to_canonical_cbor());
+            assert_eq!(
+                ok(VerificationResultV1::from_canonical_cbor(&encoded)),
+                result
+            );
+        }
     }
 }
 
