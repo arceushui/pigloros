@@ -90,8 +90,8 @@ fn record_with_supporting_provenance() -> Result<ErasureCoordinatorRecordV1, Era
     let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
         rejected_request: reference(20),
         rejected_terminal_state: reference(21),
-        rejection_provenance: reference(22),
-        justification: reference(23),
+        correction_reason: reference(22),
+        authorization_provenance: reference(23),
     })?;
     let request = request_with_provenance(correction.reference())?;
     let state = ErasureStateV1::submitted(request.reference(), reference(8), reference(9))?;
