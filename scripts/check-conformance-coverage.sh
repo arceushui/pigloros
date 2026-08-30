@@ -13,10 +13,13 @@ command -v jq >/dev/null || {
 
 sources=(
   crates/pos-conformance/src/bin/materialize-conformance-bundles.rs
+  crates/pos-conformance/src/bin/materialize-conformance-bundles/atomic_publication.rs
   crates/pos-conformance/src/bin/verify-conformance-bundle.rs
   crates/pos-conformance/src/bundle_contract.rs
   crates/pos-conformance/src/lib.rs
   crates/pos-conformance/src/profile_contract.rs
+  crates/pos-conformance/src/provider_contract.rs
+  crates/pos-conformance/src/wire_syntax.rs
 )
 
 failed=0

@@ -106,17 +106,6 @@ fn publish_materialized_tree(
 
 include!(concat!(env!("OUT_DIR"), "/materialization_assets.rs"));
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-enum CatalogFixtureFamily {
-    Positive,
-    Denied,
-    Malformed,
-    ResourceExhaustion,
-    DeletionRedaction,
-    Downgrade,
-    IndependentEvaluation,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogExecutionProfile {
     DeterministicLocalV1,
@@ -150,16 +139,28 @@ impl CatalogExecutionProfile {
 const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DraftAuthorityDeclaration {
+    #[serde(rename = "magic")]
+    _magic: String,
+    #[serde(rename = "version")]
+    _version: u64,
+    #[serde(rename = "lifecycle")]
+    _lifecycle: String,
+    #[serde(rename = "authority_kind")]
+    _authority_kind: String,
     trust_policy_id: String,
     trust_policy_epoch: u64,
     effective_timeline_position: u64,
     offline_valid_through: String,
     fixture_authority_key_id: String,
+    #[serde(rename = "fixture_authority_public_key_hex")]
+    _fixture_authority_public_key_hex: String,
     execution_profiles: Vec<DraftExecutionProfileDeclaration>,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DraftExecutionProfileDeclaration {
     profile_id: String,
     semantic_version: String,
@@ -336,30 +337,6 @@ impl CatalogBundleMode {
     }
 }
 
-impl CatalogFixtureFamily {
-    const ALL: [Self; 7] = [
-        Self::Positive,
-        Self::Denied,
-        Self::Malformed,
-        Self::ResourceExhaustion,
-        Self::DeletionRedaction,
-        Self::Downgrade,
-        Self::IndependentEvaluation,
-    ];
-
-    const fn provider_family(self) -> FixtureFamilyV1 {
-        match self {
-            Self::Positive => FixtureFamilyV1::Positive,
-            Self::Denied => FixtureFamilyV1::Denied,
-            Self::Malformed => FixtureFamilyV1::Malformed,
-            Self::ResourceExhaustion => FixtureFamilyV1::ResourceExhaustion,
-            Self::DeletionRedaction => FixtureFamilyV1::DeletionRedaction,
-            Self::Downgrade => FixtureFamilyV1::Downgrade,
-            Self::IndependentEvaluation => FixtureFamilyV1::IndependentEvaluation,
-        }
-    }
-}
-
 #[derive(Clone)]
 enum CatalogStrictOracle {
     CanonicalOutput,
@@ -387,7 +364,7 @@ struct CatalogFixtureContract {
 
 struct CatalogFixture {
     case_id: &'static str,
-    family: CatalogFixtureFamily,
+    family: FixtureFamilyV1,
     schema_path: &'static str,
     contract: CatalogFixtureContract,
     schema: &'static [u8],
@@ -610,9 +587,9 @@ fn provider_package(
         subject_adapter: layer.subject_adapter,
         family_schemas: schemas
             .iter()
-            .zip(CatalogFixtureFamily::ALL)
+            .zip(layer.fixtures.iter().map(|fixture| fixture.family))
             .map(|(schema, family)| ProviderFamilySchemaV1 {
-                family: family.provider_family(),
+                family,
                 schema_descriptor: schema.descriptor(),
             })
             .collect(),
@@ -1146,7 +1123,7 @@ fn fixture_descriptor_from_record(
     } else {
         vec![evidence, oracle_output]
     };
-    let downgrade = fixture.family == CatalogFixtureFamily::Downgrade;
+    let downgrade = fixture.family == FixtureFamilyV1::Downgrade;
     let transition = downgrade.then(|| FixtureContractTransitionV1 {
         from: FixtureProviderKeyV1 {
             provider_id: provider_key.provider_id.clone(),
@@ -1175,7 +1152,7 @@ fn fixture_descriptor_from_record(
                 case_id: fixture.case_id.to_owned(),
                 mandatory: true,
                 claim_layer: context.claim_layer,
-                family: fixture.family.provider_family(),
+                family: fixture.family,
                 provider_key: provider_key.clone(),
                 execution_profile_digest,
                 modes: vec![mode],
@@ -1243,10 +1220,8 @@ fn fixture_expectation(
                 code_id: (*code_id).to_owned(),
             };
             let outcome = match fixture.family {
-                CatalogFixtureFamily::ResourceExhaustion => {
-                    VerificationOutcomeV1::ResourceLimitExceeded
-                }
-                CatalogFixtureFamily::Downgrade => VerificationOutcomeV1::IncompatibleProfile,
+                FixtureFamilyV1::ResourceExhaustion => VerificationOutcomeV1::ResourceLimitExceeded,
+                FixtureFamilyV1::Downgrade => VerificationOutcomeV1::IncompatibleProfile,
                 _ => VerificationOutcomeV1::InvalidManifest,
             };
             (
@@ -1262,13 +1237,11 @@ fn fixture_expectation(
         }
     };
     let (replay_claim, redaction_state) = match fixture.family {
-        CatalogFixtureFamily::DeletionRedaction => (
+        FixtureFamilyV1::DeletionRedaction => (
             ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
             RedactionStateV1::RedactedViews,
         ),
-        CatalogFixtureFamily::Downgrade => {
-            (ReplayClaimV1::IncompatibleProfile, RedactionStateV1::None)
-        }
+        FixtureFamilyV1::Downgrade => (ReplayClaimV1::IncompatibleProfile, RedactionStateV1::None),
         _ => (ReplayClaimV1::Exact, RedactionStateV1::None),
     };
     FixtureExpectation {

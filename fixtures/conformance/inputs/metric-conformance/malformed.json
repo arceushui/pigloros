@@ -1,1 +1,1 @@
-{"case_id":"metric-conformance-malformed","claim_layer":"metric-conformance","family":"malformed","provider_contract":"pigloros.fixture.metric-conformance@1.0.0","subject_adapter":"exported-artifact","stimulus":"malformed-provider-payload","expected":{"failure_code":"malformed-payload"}}
+{"case_id":"metric-conformance-malformed","claim_layer":"metric-conformance","family":"malformed","provider_contract":"pigloros.fixture.metric-conformance@1.0.0","subject_adapter":"exported-artifact","stimulus":null,"expected":{"failure_code":"malformed-payload"}}

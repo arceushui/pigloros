@@ -8,8 +8,6 @@ use std::error::Error;
 #[cfg(target_os = "linux")]
 use std::ffi::CString;
 use std::fmt::Write as _;
-#[cfg(not(target_os = "linux"))]
-use std::fs;
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(not(target_os = "linux"))]
@@ -45,8 +43,6 @@ struct CatalogRoot {
     source: PathBuf,
     #[cfg(target_os = "linux")]
     directory: OwnedFd,
-    #[cfg(not(target_os = "linux"))]
-    canonical: PathBuf,
 }
 
 struct SourceSnapshots {
@@ -133,13 +129,13 @@ impl CatalogFixtureFamily {
 
     const fn rust_variant(self) -> &'static str {
         match self {
-            Self::Positive => "CatalogFixtureFamily::Positive",
-            Self::Denied => "CatalogFixtureFamily::Denied",
-            Self::Malformed => "CatalogFixtureFamily::Malformed",
-            Self::ResourceExhaustion => "CatalogFixtureFamily::ResourceExhaustion",
-            Self::DeletionRedaction => "CatalogFixtureFamily::DeletionRedaction",
-            Self::Downgrade => "CatalogFixtureFamily::Downgrade",
-            Self::IndependentEvaluation => "CatalogFixtureFamily::IndependentEvaluation",
+            Self::Positive => "FixtureFamilyV1::Positive",
+            Self::Denied => "FixtureFamilyV1::Denied",
+            Self::Malformed => "FixtureFamilyV1::Malformed",
+            Self::ResourceExhaustion => "FixtureFamilyV1::ResourceExhaustion",
+            Self::DeletionRedaction => "FixtureFamilyV1::DeletionRedaction",
+            Self::Downgrade => "FixtureFamilyV1::Downgrade",
+            Self::IndependentEvaluation => "FixtureFamilyV1::IndependentEvaluation",
         }
     }
 }
@@ -229,6 +225,7 @@ struct FixtureProvider {
 }
 
 #[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CatalogFixtureContract {
     deterministic_budget: CatalogDeterministicBudget,
     watchdog_ms: u64,
@@ -237,6 +234,7 @@ struct CatalogFixtureContract {
 }
 
 #[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CatalogDeterministicBudget {
     memory_bytes: u64,
     cpu_fuel: u64,
@@ -249,7 +247,7 @@ struct CatalogDeterministicBudget {
 }
 
 #[derive(Clone, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum CatalogStrictOracle {
     CanonicalOutput,
     NamespacedFailure {
@@ -260,11 +258,13 @@ enum CatalogStrictOracle {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FixtureOracleRecord {
     case_id: String,
     claim_layer: String,
     family: CatalogFixtureFamily,
     oracle: CatalogStrictOracle,
+    output: Option<Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -277,6 +277,7 @@ struct FixtureInputIdentity {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EvidenceStatusRecord {
     case_id: String,
     claim_layer: String,
@@ -288,6 +289,7 @@ struct EvidenceStatusRecord {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DraftAuthorityDeclaration {
     magic: String,
     version: u64,
@@ -303,6 +305,7 @@ struct DraftAuthorityDeclaration {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DraftExecutionProfile {
     profile_id: String,
     semantic_version: String,
@@ -362,40 +365,10 @@ fn catalog_root(manifest_dir: &Path) -> Result<CatalogRoot, io::Error> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn non_symlink_directory(path: &Path, description: &str) -> Result<(), io::Error> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        invalid_data(format!(
-            "{description} is unavailable at {}: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(invalid_data(format!(
-            "{description} must not be a symlink: {}",
-            path.display()
-        )));
-    }
-    if metadata.is_dir() {
-        Ok(())
-    } else {
-        Err(invalid_data(format!(
-            "{description} must be a directory: {}",
-            path.display()
-        )))
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn catalog_root(manifest_dir: &Path) -> Result<CatalogRoot, io::Error> {
-    let source = manifest_dir.join("../../fixtures/conformance");
-    non_symlink_directory(&source, "conformance fixture root")?;
-    let canonical = fs::canonicalize(&source).map_err(|error| {
-        invalid_data(format!(
-            "conformance fixture root cannot be canonicalized at {}: {error}",
-            source.display()
-        ))
-    })?;
-    Ok(CatalogRoot { source, canonical })
+fn catalog_root(_manifest_dir: &Path) -> Result<CatalogRoot, io::Error> {
+    Err(invalid_data(
+        "secure conformance fixture snapshot generation requires Linux openat2",
+    ))
 }
 
 fn relative_components<'a>(
@@ -485,81 +458,14 @@ fn read_fixture_relative(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn non_symlink_relative_path(
-    root: &CatalogRoot,
-    relative: &str,
-    description: &str,
-    final_is_directory: bool,
-) -> Result<PathBuf, io::Error> {
-    let components = relative_components(relative, description)?;
-    let mut candidate = root.canonical.clone();
-    let final_index = components.len() - 1;
-    for (index, component) in components.iter().enumerate() {
-        candidate.push(component);
-        let component_description = format!("{description} path component");
-        let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
-            invalid_data(format!(
-                "{component_description} is unavailable at {}: {error}",
-                candidate.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(invalid_data(format!(
-                "{component_description} must not be a symlink: {}",
-                candidate.display()
-            )));
-        }
-        let is_final_component = index == final_index;
-        if is_final_component && final_is_directory {
-            if !metadata.is_dir() {
-                return Err(invalid_data(format!(
-                    "{description} must be a directory: {}",
-                    candidate.display()
-                )));
-            }
-        } else if is_final_component {
-            if !metadata.is_file() {
-                return Err(invalid_data(format!(
-                    "{description} must be a regular file: {}",
-                    candidate.display()
-                )));
-            }
-        } else if !metadata.is_dir() {
-            return Err(invalid_data(format!(
-                "{component_description} must be a directory: {}",
-                candidate.display()
-            )));
-        }
-    }
-    let canonical = fs::canonicalize(&candidate).map_err(|error| {
-        invalid_data(format!(
-            "{description} cannot be canonicalized at {}: {error}",
-            candidate.display()
-        ))
-    })?;
-    if canonical.starts_with(&root.canonical) {
-        Ok(canonical)
-    } else {
-        Err(invalid_data(format!(
-            "{description} escapes the conformance fixture root: {}",
-            candidate.display()
-        )))
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
 fn read_fixture_relative(
-    root: &CatalogRoot,
-    relative: &str,
-    description: &str,
+    _root: &CatalogRoot,
+    _relative: &str,
+    _description: &str,
 ) -> Result<Vec<u8>, io::Error> {
-    let path = non_symlink_relative_path(root, relative, description, false)?;
-    fs::read(&path).map_err(|error| {
-        invalid_data(format!(
-            "{description} cannot be read at {}: {error}",
-            path.display()
-        ))
-    })
+    Err(invalid_data(
+        "secure conformance fixture snapshot generation requires Linux openat2",
+    ))
 }
 
 fn checksum_digest(hex: &str, description: &str) -> Result<[u8; 32], io::Error> {
@@ -761,6 +667,7 @@ fn validate_fixture_provider(
 fn validate_fixture_records(
     fixture: &Value,
     provider: &Value,
+    schema_bytes: &[u8],
     input_bytes: &[u8],
     expected_bytes: &[u8],
     oracle_bytes: &[u8],
@@ -813,11 +720,32 @@ fn validate_fixture_records(
         _ => false,
     };
     let input_digest = blake3::hash(input_bytes).to_hex().to_string();
+    let malformed_contract_matches = family != CatalogFixtureFamily::Malformed
+        || malformed_stimulus_is_rejected(
+            schema_bytes,
+            input
+                .get("stimulus")
+                .ok_or_else(|| invalid_data("malformed fixture input omits stimulus"))?,
+        )?;
+    let expected_shape_matches = if family == CatalogFixtureFamily::IndependentEvaluation {
+        input.get("expected").is_none()
+            && input
+                .get("expected_digest")
+                .and_then(Value::as_str)
+                .is_some_and(|digest| digest.len() == 64)
+    } else {
+        input.get("expected").is_some_and(Value::is_object)
+    };
+    let oracle_shape_matches = match &oracle.oracle {
+        CatalogStrictOracle::CanonicalOutput => oracle.output.is_some(),
+        CatalogStrictOracle::NamespacedFailure { .. } => oracle.output.is_none(),
+    };
     let identity_matches = input_identity.case_id == case_id
         && input_identity.claim_layer == claim_layer
         && input_identity.family == family
         && input_identity.provider_contract == provider_contract
         && input_identity.subject_adapter == subject_adapter
+        && expected_shape_matches
         && evidence.case_id == case_id
         && evidence.claim_layer == claim_layer
         && evidence.family == family
@@ -827,13 +755,53 @@ fn validate_fixture_records(
         && evidence.executed_at == Value::Null
         && oracle.case_id == case_id
         && oracle.claim_layer == claim_layer
-        && oracle.family == family;
+        && oracle.family == family
+        && oracle_shape_matches
+        && malformed_contract_matches;
     if operation_matches && identity_matches {
         Ok(oracle.oracle)
     } else {
         Err(invalid_data(format!(
             "fixture {case_id} does not match its profile/provider identity"
         )))
+    }
+}
+
+fn malformed_stimulus_is_rejected(
+    schema_bytes: &[u8],
+    stimulus: &Value,
+) -> Result<bool, io::Error> {
+    let schema: Value = serde_json::from_slice(schema_bytes)
+        .map_err(|error| invalid_data(format!("malformed fixture schema is invalid: {error}")))?;
+    let stimulus_schema = schema
+        .pointer("/properties/stimulus")
+        .ok_or_else(|| invalid_data("malformed fixture schema omits stimulus"))?;
+    match stimulus_schema.get("type").and_then(Value::as_str) {
+        Some("string") if stimulus_schema.get("minLength").and_then(Value::as_u64) == Some(1) => {
+            Ok(stimulus.as_str().is_none_or(str::is_empty))
+        }
+        Some("object")
+            if stimulus_schema
+                .pointer("/properties/operation/const")
+                .and_then(Value::as_str)
+                == Some("reduce")
+                && stimulus_schema
+                    .pointer("/properties/payload/type")
+                    .and_then(Value::as_str)
+                    == Some("string")
+                && stimulus_schema
+                    .pointer("/properties/payload/minLength")
+                    .and_then(Value::as_u64)
+                    == Some(1) =>
+        {
+            Ok(stimulus
+                .get("payload")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty))
+        }
+        _ => Err(invalid_data(
+            "malformed fixture schema is outside the supported public contract",
+        )),
     }
 }
 
@@ -930,6 +898,7 @@ fn profile_fixtures(
             let strict_oracle = validate_fixture_records(
                 fixture,
                 provider_value,
+                &schema.bytes,
                 &input.bytes,
                 &expected.bytes,
                 &oracle.bytes,
@@ -1040,22 +1009,11 @@ fn profile_manifests(root: &CatalogRoot) -> Result<Vec<String>, Box<dyn Error>> 
 }
 
 #[cfg(not(target_os = "linux"))]
-fn profile_manifests(root: &CatalogRoot) -> Result<Vec<String>, Box<dyn Error>> {
-    let profiles_directory = non_symlink_relative_path(root, "profiles", "profile root", true)?;
-    fs::read_dir(&profiles_directory)?
-        .map(|entry| {
-            let entry = entry?;
-            let entry_name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| invalid_data("profile directory name must be UTF-8"))?;
-            let directory = format!("profiles/{entry_name}");
-            let _opened_directory =
-                non_symlink_relative_path(root, &directory, "profile directory", true)?;
-            Ok(format!("{directory}/profile.json"))
-        })
-        .collect::<Result<Vec<_>, io::Error>>()
-        .map_err(Box::<dyn Error>::from)
+fn profile_manifests(_root: &CatalogRoot) -> Result<Vec<String>, Box<dyn Error>> {
+    Err(
+        invalid_data("secure conformance fixture snapshot generation requires Linux openat2")
+            .into(),
+    )
 }
 
 fn discover_profiles(

@@ -19,18 +19,21 @@ if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "
 fi
 
 jq -e '
+  (keys | sort) == (["families", "magic", "version"] | sort) and
   .magic == "FFM1" and .version == 1 and
   (.families | type == "array" and length > 0) and
   ([.families[].name] as $names |
     ($names | all(type == "string" and length > 0)) and
     ($names | unique | length == ($names | length))) and
   all(.families[];
+    (keys | sort) == (["name", "operation", "oracle"] | sort) and
     (.operation == "required" or .operation == "optional") and
     (.oracle.kind == "canonical-output" or .oracle.kind == "namespaced-failure") and
     (if .oracle.kind == "namespaced-failure" then
+       (.oracle | keys | sort) == (["code_id", "kind"] | sort) and
        (.oracle.code_id | type == "string" and length > 0)
      else
-       (has("code_id") | not)
+       (.oracle | keys) == ["kind"]
      end) and
     (has("input_with_operation") | not) and
     (has("input_without_operation") | not)
@@ -44,7 +47,8 @@ family_count="$(jq '.families | length' "${family_contract}")"
 
 matrix_path="${fixture_root}/matrix/execution-matrix.json"
 authority_path="${fixture_root}/expected-authority/inventory.json"
-[[ -s "${matrix_path}" && -s "${authority_path}" ]] || {
+draft_authority_path="${fixture_root}/support/draft-execution-authority.json"
+[[ -s "${matrix_path}" && -s "${authority_path}" && -s "${draft_authority_path}" ]] || {
   echo "missing conformance inventory artifacts" >&2
   exit 1
 }
@@ -61,6 +65,11 @@ esac
 jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
   '
   . as $root |
+  ($root | keys | sort) == ([
+    "case_count", "cases", "equality_predicates", "executed_case_count",
+    "expected_result_policy", "lifecycle", "magic", "matrix_id", "mode_count",
+    "row_count", "rows", "source", "variant_count", "version"
+  ] | sort) and
   $root.magic == "NIM1" and $root.version == 1 and $root.lifecycle == $matrix_lifecycle and
   $root.row_count == 12 and $root.variant_count == 4 and $root.mode_count == 4 and
   $root.case_count == 192 and ($root.rows | length == 12) and
@@ -73,17 +82,28 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
   ($root.equality_predicates | length == 12) and
   ([$root.equality_predicates[].fixture_id] == [$root.rows[].fixture_id]) and
   all($root.equality_predicates[];
+    (keys | sort) == (["AuthEq", "OpEq", "PublicEq", "fixture_id"] | sort) and
     (.AuthEq | type == "string") and
     (.PublicEq | type == "string") and
     (.OpEq | type == "string")
   ) and
   ($root.cases | length == 192) and
   ([$root.cases[].case_id] | unique | length == 192) and
-  all($root.rows[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
+  all($root.rows[];
+    (keys | sort) == ([
+      "case_count", "channel", "classification", "equality", "executed_case_count",
+      "fixture_id", "modes", "observable_surfaces", "sole_unauthorized_delta", "variants"
+    ] | sort) and
+    (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variants == ["S", "D", "W", "C"]) and
     (.modes == ["L", "A", "R", "F"]) and .case_count == 16 and
     .executed_case_count == 0) and
-  all($root.cases[]; (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
+  all($root.cases[];
+    (keys | sort) == ([
+      "authority_fixture_id", "authority_result_digest", "case_id", "executed",
+      "expected_result", "expected_result_digest", "fixture_id", "mode", "variant"
+    ] | sort) and
+    (.fixture_id | test("^NI-[A-Z]+-[0-9]{3}$")) and
     (.variant | IN("S", "D", "W", "C")) and
     (.mode | IN("L", "A", "R", "F")) and
     .case_id == ("\(.fixture_id)-\(.variant)-\(.mode)") and
@@ -98,6 +118,7 @@ jq -e --arg matrix_lifecycle "${matrix_lifecycle}" \
 }
 
 jq -e '
+  (keys | sort) == (["digest_algorithm", "entries", "lifecycle", "magic", "source", "version"] | sort) and
   .magic == "W8H1" and .version == 1 and
   .lifecycle == "Draft" and
   .digest_algorithm == "BLAKE3-256" and
@@ -108,12 +129,33 @@ jq -e '
   ]) and
   ([.entries[].fixture_id] | unique | length == 11) and
   all(.entries[];
+    (keys | sort) == ([
+      "execution_class", "expected_outcome", "expected_result_digest",
+      "expected_result_path", "fixture_bytes_digest", "fixture_bytes_path",
+      "fixture_id", "materialization_status"
+    ] | sort) and
     (.fixture_bytes_path == null) and (.expected_result_path == null) and
     (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
     .materialization_status == "pending"
   )
 ' "${authority_path}" >/dev/null || {
   echo "invalid #172 expected-authority inventory lifecycle or entries" >&2
+  exit 1
+}
+
+jq -e '
+  (keys | sort) == ([
+    "authority_kind", "effective_timeline_position", "execution_profiles",
+    "fixture_authority_key_id", "fixture_authority_public_key_hex", "lifecycle",
+    "magic", "offline_valid_through", "trust_policy_epoch", "trust_policy_id", "version"
+  ] | sort) and
+  all(.execution_profiles[];
+    (keys | sort) == ([
+      "capability_ids", "network_allowed", "profile_id", "reproducibility_classes",
+      "semantic_version"
+    ] | sort))
+' "${draft_authority_path}" >/dev/null || {
+  echo "invalid Draft authority declaration fields" >&2
   exit 1
 }
 
@@ -166,12 +208,22 @@ for layer in "${profile_layers[@]}"; do
     --argjson matrix_size "$(wc -c < "${matrix_path}")" \
     --argjson family_names "${family_names}" \
     --argjson family_count "${family_count}" \
-    '.claim_layer == $layer and
+    '((keys | sort) == (([
+        "authority_inventory", "authority_inventory_sha256_digest", "bundle_modes",
+        "claim_layer", "execution_profiles", "fixture_provider_manifest", "fixture_root",
+        "fixtures", "profile_id", "subject_adapter", "wire_code"
+      ] + (if $layer == "knowledge-non-interference" then [
+        "adr_059_execution_matrix", "adr_059_execution_matrix_blake3_digest",
+        "adr_059_execution_matrix_status", "matrix", "matrix_blake3_digest", "matrix_size_bytes"
+      ] else [] end)) | sort)) and
+      .claim_layer == $layer and
       .wire_code == $wire_code and .fixture_root == $layer and
       (.subject_adapter | type == "string" and length > 0) and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
       (.fixtures | length == $family_count) and
+      all(.fixtures[];
+        (keys | sort) == (["case_id", "claim_layer", "expected", "family", "input", "oracle", "schema"] | sort)) and
       all(.fixtures[]; .claim_layer == $layer) and
       all(.fixtures[]; .schema == ("providers/" + $layer + "/schemas/" + .family + ".schema.json")) and
       [.fixtures[].family] == $family_names and
@@ -199,7 +251,12 @@ for layer in "${profile_layers[@]}"; do
     exit 1
   }
   jq -e --arg layer "${layer}" --argjson family_names "${family_names}" --argjson family_count "${family_count}" \
-    '.claim_layer == $layer and
+    '(keys | sort) == ([
+       "abi_major", "abi_minor", "claim_layer", "contract_version", "fixture_contracts",
+       "fixture_operations", "fixture_payloads", "package_path", "provider_id", "schemas",
+       "subject_adapter"
+     ] | sort) and
+     .claim_layer == $layer and
      (.provider_id | type == "string" and length > 0) and
      (.contract_version | type == "string" and length > 0) and
      (.abi_major | type == "number") and (.abi_minor | type == "number") and
@@ -215,6 +272,7 @@ for layer in "${profile_layers[@]}"; do
      (.schemas | length == $family_count) and
      (.fixture_contracts | keys | sort) == ($family_names | sort) and
      all(.fixture_contracts[];
+       (keys | sort) == (["deterministic_budget", "minimum_capability_ids", "network_allowed", "watchdog_ms"] | sort) and
        (.deterministic_budget | keys | sort) == ([
          "memory_bytes", "cpu_fuel", "host_calls", "event_count",
          "output_bytes", "storage_bytes", "execution_steps", "simulation_time_ns"
@@ -292,6 +350,20 @@ for layer in "${profile_layers[@]}"; do
       echo "invalid input fixture record for ${layer}: ${input_path}" >&2
       exit 1
     }
+    if [[ "${family}" == "malformed" ]]; then
+      jq -e --slurpfile schema "${fixture_root}/${schema_path}" '
+        ($schema[0].properties.stimulus) as $stimulus_schema |
+        if $stimulus_schema.type == "string" then
+          (.stimulus | type) != "string"
+        elif $stimulus_schema.type == "object" then
+          .stimulus.operation == $stimulus_schema.properties.operation.const and
+          (.stimulus.payload | type) != "string"
+        else false end
+      ' "${fixture_root}/${input_path}" >/dev/null || {
+        echo "malformed fixture is valid against its pinned schema: ${input_path}" >&2
+        exit 1
+      }
+    fi
     input_blake3_digest="$(b3sum "${fixture_root}/${input_path}" | awk '{print $1}')"
     jq -e \
       --arg case_id "${case_id}" \
@@ -312,9 +384,13 @@ for layer in "${profile_layers[@]}"; do
     jq -e --arg case_id "${case_id}" --arg fixture_layer "${fixture_layer}" --arg family "${family}" --arg provider_id "${provider_id}" --arg contract_version "${contract_version}" --arg oracle_kind "${oracle_kind}" --arg oracle_code_id "${oracle_code_id}" \
       '.case_id == $case_id and .claim_layer == $fixture_layer and .family == $family and
        if $oracle_kind == "canonical-output" then
+         (keys | sort) == (["case_id", "claim_layer", "family", "oracle", "output"] | sort) and
+         (.oracle | keys) == ["kind"] and
          .oracle.kind == $oracle_kind and
          has("output") and (.output != null)
        elif $oracle_kind == "namespaced-failure" then
+         (keys | sort) == (["case_id", "claim_layer", "family", "oracle"] | sort) and
+         (.oracle | keys | sort) == (["code_id", "contract_version", "kind", "owner_id"] | sort) and
          .oracle.kind == $oracle_kind and
          (.oracle.owner_id == $provider_id) and
          (.oracle.contract_version == $contract_version) and

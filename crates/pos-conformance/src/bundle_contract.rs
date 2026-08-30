@@ -563,7 +563,27 @@ fn validate_profile_support_members(
                 BundleMemberRoleV1::AuthorityInventory,
                 AUTHORITY_INVENTORY_PATH,
             )
-            .map(|_| ())
+            .and_then(|member| {
+                if member.bytes == AUTHORITY_INVENTORY_BYTES_V1 {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                }
+            })
+        })
+        .and_then(|()| {
+            member_by_role_and_path(
+                members,
+                BundleMemberRoleV1::ExecutionMatrix,
+                EXECUTION_MATRIX_PATH,
+            )
+            .and_then(|member| {
+                if member.bytes == EXECUTION_MATRIX_BYTES_V1 {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                }
+            })
         })
         .and_then(|()| {
             member_by_role_and_path(
@@ -590,10 +610,12 @@ fn validate_execution_authority_members(
         .iter()
         .filter(|member| member.role == BundleMemberRoleV1::ExecutionProfile)
         .collect::<Vec<_>>();
-    let execution_digests = execution_members
+    let execution_profiles = execution_members
         .iter()
-        .map(|member| validate_execution_profile_member(member).map(|()| member.digest))
-        .collect::<Result<BTreeSet<_>, _>>();
+        .map(|member| {
+            validate_execution_profile_member(member).map(|profile_id| (profile_id, member.digest))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>();
     let snapshot_members = members
         .iter()
         .filter(|member| member.role == BundleMemberRoleV1::TrustPolicySnapshot)
@@ -615,10 +637,21 @@ fn validate_execution_authority_members(
     {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    execution_digests.and_then(|execution_digests| {
+    execution_profiles.and_then(|execution_profiles| {
+        let declared_profiles = draft_authority_contract()
+            .execution_profiles
+            .into_iter()
+            .map(|profile| profile.profile_id)
+            .collect::<BTreeSet<_>>();
+        let execution_digests = execution_profiles
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let execution_profile_ids = execution_profiles.keys().cloned().collect::<BTreeSet<_>>();
         if execution_members.len() != profile.execution_profile_digests.len()
-            || execution_digests.len() != profile.execution_profile_digests.len()
+            || execution_profiles.len() != profile.execution_profile_digests.len()
             || execution_digests != profile.execution_profile_digests.iter().copied().collect()
+            || execution_profile_ids != declared_profiles
         {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
@@ -645,7 +678,9 @@ fn validate_execution_authority_members(
     })
 }
 
-fn validate_execution_profile_member(member: &BundleMemberV1) -> Result<(), BundleContractErrorV1> {
+fn validate_execution_profile_member(
+    member: &BundleMemberV1,
+) -> Result<String, BundleContractErrorV1> {
     decode(&member.bytes).and_then(|value| {
         array(&value, 15)
             .and_then(|fields| validate_execution_profile_fields(member.path.as_str(), fields))
@@ -655,7 +690,7 @@ fn validate_execution_profile_member(member: &BundleMemberV1) -> Result<(), Bund
 fn validate_execution_profile_fields(
     path: &str,
     fields: &[Value],
-) -> Result<(), BundleContractErrorV1> {
+) -> Result<String, BundleContractErrorV1> {
     let decoded = (
         text(&fields[0]),
         uint(&fields[1]),
@@ -713,7 +748,7 @@ fn validate_execution_profile_fields(
                 && fields[13] == Value::Null
                 && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
             {
-                Ok(())
+                Ok(profile_id.to_owned())
             } else {
                 Err(BundleContractErrorV1::ProfileInvalid)
             }
@@ -2083,16 +2118,28 @@ fn raw_execution_authority_members(
         .iter()
         .filter(|member| member.role == RawMemberRole::ExecutionProfile)
         .collect::<Vec<_>>();
-    let execution_digests = execution_members
+    let execution_profiles = execution_members
         .iter()
         .map(|member| {
             raw_execution_profile(member.path, member.bytes)
-                .map(|()| *blake3::hash(member.bytes).as_bytes())
+                .map(|profile_id| (profile_id, *blake3::hash(member.bytes).as_bytes()))
         })
-        .collect::<Result<BTreeSet<_>, _>>();
-    execution_digests.and_then(|execution_digests| {
+        .collect::<Result<BTreeMap<_, _>, _>>();
+    execution_profiles.and_then(|execution_profiles| {
+        let declared_profiles = draft_authority_contract()
+            .execution_profiles
+            .into_iter()
+            .map(|profile| profile.profile_id)
+            .collect::<BTreeSet<_>>();
+        let execution_digests = execution_profiles
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let execution_profile_ids = execution_profiles.keys().cloned().collect::<BTreeSet<_>>();
         if execution_digests != profile.execution_digests
             || execution_members.len() != profile.execution_digests.len()
+            || execution_profiles.len() != profile.execution_digests.len()
+            || execution_profile_ids != declared_profiles
         {
             return Err(BundleContractErrorV1::ProfileInvalid);
         }
@@ -2144,13 +2191,16 @@ fn raw_execution_authority_members(
     })
 }
 
-fn raw_execution_profile(path: &str, bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+fn raw_execution_profile(path: &str, bytes: &[u8]) -> Result<String, BundleContractErrorV1> {
     decode(bytes).and_then(|value| {
         array(&value, 15).and_then(|fields| raw_execution_profile_fields(path, fields))
     })
 }
 
-fn raw_execution_profile_fields(path: &str, fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+fn raw_execution_profile_fields(
+    path: &str,
+    fields: &[Value],
+) -> Result<String, BundleContractErrorV1> {
     let decoded = (
         text(&fields[0]),
         uint(&fields[1]),
@@ -2208,7 +2258,7 @@ fn raw_execution_profile_fields(path: &str, fields: &[Value]) -> Result<(), Bund
                 && fields[13] == Value::Null
                 && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
             {
-                Ok(())
+                Ok(profile_id.to_owned())
             } else {
                 Err(BundleContractErrorV1::ProfileInvalid)
             }
@@ -2589,13 +2639,8 @@ fn raw_fixture_inventory(
 ) -> Result<(), BundleContractErrorV1> {
     let mut inventory =
         BTreeMap::<(RawProviderKey, [u8; 32], RawFixtureMode), BTreeSet<RawFixtureFamily>>::new();
-    let mut required_modes = BTreeMap::<[u8; 32], BTreeSet<RawFixtureMode>>::new();
     for fixture in fixtures {
         for mode in &fixture.modes {
-            required_modes
-                .entry(fixture.execution)
-                .or_default()
-                .insert(*mode);
             let coordinate = (fixture.provider.clone(), fixture.execution, *mode);
             if !inventory
                 .entry(coordinate)
@@ -2615,14 +2660,12 @@ fn raw_fixture_inventory(
         RawFixtureFamily::Downgrade,
         RawFixtureFamily::IndependentEvaluation,
     ]);
+    let required_modes = [RawFixtureMode::Local, RawFixtureMode::AirGapped];
     for provider in required {
         for execution in executions {
-            let Some(modes) = required_modes.get(execution) else {
-                return Err(BundleContractErrorV1::ProfileInvalid);
-            };
-            for mode in modes {
+            for mode in required_modes {
                 if inventory
-                    .get(&(provider.clone(), *execution, *mode))
+                    .get(&(provider.clone(), *execution, mode))
                     .is_none_or(|families| families != &required_families)
                 {
                     return Err(BundleContractErrorV1::ProfileInvalid);
@@ -4212,9 +4255,10 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
             _ => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
         };
         let end = index.saturating_add(width);
-        let encoded = bytes
-            .get(*index..end)
-            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let encoded = match bytes.get(*index..end) {
+            Some(encoded) => encoded,
+            None => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        };
         *index = end;
         let mut value = [0_u8; 8];
         value[8 - width..].copy_from_slice(encoded);
@@ -4225,12 +4269,16 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
         if depth > MAX_CONFORMANCE_NESTING_V1 {
             return Err(BundleContractErrorV1::MemberOutOfBounds);
         }
-        let initial = *bytes
-            .get(*index)
-            .ok_or(BundleContractErrorV1::ArchiveEncodingInvalid)?;
+        let initial = match bytes.get(*index) {
+            Some(initial) => *initial,
+            None => return Err(BundleContractErrorV1::ArchiveEncodingInvalid),
+        };
         *index += 1;
         let major = initial >> 5;
-        let length = read_length(bytes, index, initial & 0x1f)?;
+        let length = match read_length(bytes, index, initial & 0x1f) {
+            Ok(length) => length,
+            Err(error) => return Err(error),
+        };
         match major {
             0 | 1 => Ok(()),
             7 if matches!(initial & 0x1f, 20..=22) => Ok(()),
@@ -4253,7 +4301,9 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
                     return Err(BundleContractErrorV1::MemberOutOfBounds);
                 }
                 for _ in 0..length {
-                    item(bytes, index, depth.saturating_add(1))?;
+                    if let Err(error) = item(bytes, index, depth.saturating_add(1)) {
+                        return Err(error);
+                    }
                 }
                 Ok(())
             }
@@ -4262,7 +4312,9 @@ fn preflight_archive_cbor(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
     }
 
     let mut index = 0;
-    item(bytes, &mut index, 0)?;
+    if let Err(error) = item(bytes, &mut index, 0) {
+        return Err(error);
+    }
     if index == bytes.len() {
         Ok(())
     } else {

@@ -790,13 +790,8 @@ fn validate_fixture_inventory(
         (&FixtureProviderKeyV1, [u8; 32], ExecutionModeV1),
         BTreeSet<FixtureFamilyV1>,
     >::new();
-    let mut required_modes = BTreeMap::<[u8; 32], BTreeSet<ExecutionModeV1>>::new();
     for fixture in &profile.fixtures {
         for mode in &fixture.modes {
-            required_modes
-                .entry(fixture.execution_profile_digest)
-                .or_default()
-                .insert(*mode);
             let families = inventory.entry((
                 &fixture.provider_key,
                 fixture.execution_profile_digest,
@@ -807,14 +802,12 @@ fn validate_fixture_inventory(
             }
         }
     }
+    let required_modes = [ExecutionModeV1::Local, ExecutionModeV1::AirGapped];
     for provider_key in &profile.fixture_provider_registry.required_provider_keys {
         for execution_profile in &profile.execution_profile_digests {
-            let Some(modes) = required_modes.get(execution_profile) else {
-                return Err(ConformanceContractError::ExpectedResultMissing);
-            };
-            for mode in modes {
+            for mode in required_modes {
                 if inventory
-                    .get(&(provider_key, *execution_profile, *mode))
+                    .get(&(provider_key, *execution_profile, mode))
                     .is_none_or(|families| families != &required_families)
                 {
                     return Err(ConformanceContractError::ExpectedResultMissing);

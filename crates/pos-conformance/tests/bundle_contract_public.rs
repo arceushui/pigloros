@@ -209,7 +209,12 @@ fn fixture_from_schema(
         modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
         schema: family_schema.schema_descriptor.clone(),
         payload: artifact(
-            &format!("fixtures/{family_name}/input.bin"),
+            &fixture_input_member_path(
+                &case_id,
+                ClaimLayerV1::ArtifactIntegrity,
+                &execution,
+                "input.bin",
+            ),
             "application/octet-stream",
             PAYLOAD_BYTES,
         )?,
@@ -292,23 +297,35 @@ fn bind_downgrade_authority(
 
 fn current_fixtures(
     family_schemas: &[ProviderFamilySchemaV1],
-    execution: [u8; 32],
+    execution_profiles: &[[u8; 32]],
     trust_policy_snapshot_digest: [u8; 32],
 ) -> TestResult<Vec<FixtureDescriptorV1>> {
-    family_schemas
+    let mut fixtures = execution_profiles
         .iter()
-        .map(|family_schema| {
-            let mut fixture = fixture_from_schema(family_schema, execution)?;
-            bind_downgrade_authority(&mut fixture, trust_policy_snapshot_digest)?;
-            Ok(fixture)
+        .flat_map(|execution| {
+            family_schemas.iter().map(move |family_schema| {
+                let mut fixture = fixture_from_schema(family_schema, *execution)?;
+                bind_downgrade_authority(&mut fixture, trust_policy_snapshot_digest)?;
+                Ok(fixture)
+            })
         })
-        .collect()
+        .collect::<TestResult<Vec<_>>>()?;
+    fixtures.sort_by_key(|fixture| {
+        (
+            fixture.provider_key.clone(),
+            fixture.family,
+            fixture.case_id.clone(),
+            fixture.execution_profile_digest,
+            fixture.modes.clone(),
+        )
+    });
+    Ok(fixtures)
 }
 
 fn current_profile(
     fixtures: Vec<FixtureDescriptorV1>,
     registry_bytes: &[u8],
-    execution_profile_digest: [u8; 32],
+    execution_profile_digests: Vec<[u8; 32]>,
     trust_policy_snapshot_digest: [u8; 32],
 ) -> TestResult<ConformanceProfileV1> {
     let mut profile = ConformanceProfileV1 {
@@ -317,7 +334,7 @@ fn current_profile(
         lifecycle: ProfileLifecycleV1::Draft,
         normative_spec_digest: *blake3::hash(NORMATIVE_BYTES).as_bytes(),
         execution_matrix_digest: *blake3::hash(MATRIX_BYTES).as_bytes(),
-        execution_profile_digests: vec![execution_profile_digest],
+        execution_profile_digests,
         fixture_provider_registry: FixtureProviderRegistryBindingV1 {
             registry_artifact: artifact(
                 FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
@@ -428,7 +445,11 @@ fn append_release_admissions(
     {
         let transition = fixture.transition.as_ref().ok_or("transition missing")?;
         members.push(BundleMemberV1::supporting(
-            format!("authority/release-admissions/{}.rad1", fixture.case_id),
+            format!(
+                "authority/release-admissions/{}-{}.rad1",
+                fixture.case_id,
+                pos_conformance::hex_digest(&fixture.execution_profile_digest)
+            ),
             release_admission_bytes(
                 &fixture.case_id,
                 fixture.execution_profile_digest,
@@ -447,7 +468,7 @@ fn append_release_admissions(
 fn current_bundle_members(
     family_schemas: &[ProviderFamilySchemaV1],
     profile: &ConformanceProfileV1,
-    execution_profile: Vec<u8>,
+    execution_profiles: [Vec<u8>; 2],
     trust_policy_snapshot: Vec<u8>,
     package_path: &str,
     package_bytes: Vec<u8>,
@@ -520,7 +541,12 @@ fn current_bundle_members(
         BundleMemberV1::execution_matrix(MATRIX_BYTES.to_vec()),
         BundleMemberV1::supporting(
             "authority/execution-profiles/deterministic-local-v1.epf1",
-            execution_profile,
+            execution_profiles[0].clone(),
+            BundleMemberRoleV1::ExecutionProfile,
+        ),
+        BundleMemberV1::supporting(
+            "authority/execution-profiles/deterministic-air-gapped-v1.epf1",
+            execution_profiles[1].clone(),
             BundleMemberRoleV1::ExecutionProfile,
         ),
         BundleMemberV1::supporting(
@@ -544,26 +570,33 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         registry_bytes,
     } = current_provider_contract_inputs()?;
 
-    let execution_profile = execution_profile_bytes()?;
-    let execution_profile_digest = *blake3::hash(&execution_profile).as_bytes();
+    let execution_profiles = [
+        execution_profile_bytes("deterministic-local-v1")?,
+        execution_profile_bytes("deterministic-air-gapped-v1")?,
+    ];
+    let mut execution_profile_digests = execution_profiles
+        .iter()
+        .map(|profile| *blake3::hash(profile).as_bytes())
+        .collect::<Vec<_>>();
+    execution_profile_digests.sort_unstable();
     let trust_policy_snapshot = trust_policy_snapshot_bytes()?;
     let trust_policy_snapshot_digest = *blake3::hash(&trust_policy_snapshot).as_bytes();
     let fixtures = current_fixtures(
         &family_schemas,
-        execution_profile_digest,
+        &execution_profile_digests,
         trust_policy_snapshot_digest,
     )?;
     let expected = expected_results(&fixtures, mode)?;
     let profile = current_profile(
         fixtures,
         &registry_bytes,
-        execution_profile_digest,
+        execution_profile_digests,
         trust_policy_snapshot_digest,
     )?;
     let members = current_bundle_members(
         &family_schemas,
         &profile,
-        execution_profile,
+        execution_profiles,
         trust_policy_snapshot,
         package_path,
         package_bytes,
@@ -614,6 +647,39 @@ fn bundle_rejects_tampered_execution_authority_artifacts() -> TestResult {
 }
 
 #[test]
+fn bundle_rejects_a_self_consistent_partial_execution_authority() -> TestResult {
+    let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+    let omitted_path = "authority/execution-profiles/deterministic-air-gapped-v1.epf1";
+    let omitted_digest = inputs
+        .members
+        .iter()
+        .find(|member| member.path == omitted_path)
+        .map(|member| member.digest)
+        .ok_or("Air-Gapped execution profile is absent")?;
+    inputs.members.retain(|member| member.path != omitted_path);
+    inputs
+        .profile
+        .execution_profile_digests
+        .retain(|digest| digest != &omitted_digest);
+    inputs
+        .profile
+        .fixtures
+        .retain(|fixture| fixture.execution_profile_digest != omitted_digest);
+    inputs.profile.profile_digest = inputs.profile.digest();
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &inputs.profile,
+            BundleModeV1::Local,
+            inputs.members,
+            inputs.expected,
+        )
+        .err(),
+        Some(BundleContractErrorV1::ProfileInvalid)
+    );
+    Ok(())
+}
+
+#[test]
 fn bundle_rejects_tampered_policy_and_authority_declaration() -> TestResult {
     for (path, role) in [
         (
@@ -649,6 +715,38 @@ fn bundle_rejects_tampered_policy_and_authority_declaration() -> TestResult {
         replace_archive_member_bytes(fields, path, b"tampered")?;
         resign_archive(&mut archive)?;
         assert!(verify_archive_independently(&encode_value(&archive)?).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn bundle_rejects_self_declared_noncanonical_authority_sources() -> TestResult {
+    for (role, updates_profile_digest) in [
+        (BundleMemberRoleV1::ExecutionMatrix, true),
+        (BundleMemberRoleV1::AuthorityInventory, false),
+    ] {
+        let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+        let member = inputs
+            .members
+            .iter_mut()
+            .find(|member| member.role == role)
+            .ok_or("canonical authority source is absent")?;
+        member.bytes.push(b' ');
+        member.digest = *blake3::hash(&member.bytes).as_bytes();
+        if updates_profile_digest {
+            inputs.profile.execution_matrix_digest = member.digest;
+            inputs.profile.profile_digest = inputs.profile.digest();
+        }
+        assert_eq!(
+            ConformanceBundleV1::materialize(
+                &inputs.profile,
+                BundleModeV1::Local,
+                inputs.members,
+                inputs.expected,
+            )
+            .err(),
+            Some(BundleContractErrorV1::MemberDigestMismatch)
+        );
     }
     Ok(())
 }
@@ -784,11 +882,11 @@ fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(&preimage).as_bytes()
 }
 
-fn execution_profile_bytes() -> TestResult<Vec<u8>> {
+fn execution_profile_bytes(profile_id: &str) -> TestResult<Vec<u8>> {
     let fields = vec![
         Value::Text("EPF1".to_owned()),
         Value::Integer(1_u64.into()),
-        Value::Text("deterministic-local-v1".to_owned()),
+        Value::Text(profile_id.to_owned()),
         Value::Text("1.0.0".to_owned()),
         Value::Array(vec![
             Value::Integer(1_u64.into()),

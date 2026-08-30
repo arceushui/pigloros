@@ -2,7 +2,7 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-malformed",
   "family": "malformed",
-  "input_blake3_digest": "715a6e17700c59ac7a65928a268caa6e75184186a5e982280777889c89ddf212",
+  "input_blake3_digest": "3a35d909cdda87c00e07dc1e5cc926a0cfbe4475400c0bc499d382f72b27dbbf",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

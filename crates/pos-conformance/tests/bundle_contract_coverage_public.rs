@@ -410,6 +410,70 @@ fn public_typed_bundle_rejects_missing_or_malformed_authority() -> TestResult {
 }
 
 #[test]
+fn public_independent_verifier_rejects_partial_execution_authority_closure() -> TestResult {
+    let archive = current_archive()?;
+    let omitted_path = "authority/execution-profiles/deterministic-air-gapped-v1.epf1";
+    let archive_value: Value = ciborium::from_reader(archive.as_slice())?;
+    let omitted_digest = blake3::hash(&member_bytes(&archive_value, omitted_path)?)
+        .as_bytes()
+        .to_vec();
+    let omitted_digest_value = Value::Bytes(omitted_digest);
+    let reduced_profile = mutate_profile(&archive, |profile| {
+        array_field(profile, 7, "execution profile digests")?
+            .retain(|digest| digest != &omitted_digest_value);
+        array_field(profile, 9, "profile fixtures")?.retain(|fixture| match fixture {
+            Value::Array(fields) => fields.get(6) != Some(&omitted_digest_value),
+            _ => true,
+        });
+        Ok(())
+    })?;
+    let omitted_path_value = Value::Text(omitted_path.to_owned());
+    let partial_archive = mutate_archive(&reduced_profile, |archive_fields| {
+        array_field(archive_fields, 1, "archive members")?.retain(|member| match member {
+            Value::Array(fields) => fields.first() != Some(&omitted_path_value),
+            _ => true,
+        });
+        let manifest = array_field(archive_fields, 0, "manifest")?;
+        array_field(manifest, 4, "member descriptors")?.retain(|descriptor| match descriptor {
+            Value::Array(fields) => fields.first() != Some(&omitted_path_value),
+            _ => true,
+        });
+        Ok(())
+    })?;
+    assert_independent_rejects(
+        &partial_archive,
+        "a self-consistent partial execution authority closure",
+    )
+}
+
+#[test]
+fn public_independent_verifier_pins_canonical_authority_sources() -> TestResult {
+    let archive = current_archive()?;
+    for (path, profile_digest_field) in [
+        ("authority/execution-matrix.json", Some(6_usize)),
+        ("authority/expected-authority-inventory.json", None),
+    ] {
+        let archive_value: Value = ciborium::from_reader(archive.as_slice())?;
+        let mut changed_bytes = member_bytes(&archive_value, path)?;
+        changed_bytes.push(b' ');
+        let changed_digest = blake3::hash(&changed_bytes).as_bytes().to_vec();
+        let profile_bound = if let Some(field) = profile_digest_field {
+            mutate_profile(&archive, |profile| {
+                profile[field] = Value::Bytes(changed_digest);
+                Ok(())
+            })?
+        } else {
+            archive.clone()
+        };
+        let changed = mutate_archive(&profile_bound, |archive_fields| {
+            replace_member_bytes(archive_fields, path, &changed_bytes)
+        })?;
+        assert_independent_rejects(&changed, "noncanonical authority source bytes")?;
+    }
+    Ok(())
+}
+
+#[test]
 fn public_cfb1_decoders_reject_invalid_member_roles() -> TestResult {
     let archive = current_archive()?;
     let invalid_manifest_role = mutate_archive(&archive, |fields| {

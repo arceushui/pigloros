@@ -1,1 +1,1 @@
-{"case_id":"replay-conformance-malformed","claim_layer":"replay-conformance","family":"malformed","provider_contract":"pigloros.fixture.replay-conformance@1.0.0","subject_adapter":"exported-artifact","stimulus":"malformed-provider-payload","expected":{"failure_code":"malformed-payload"}}
+{"case_id":"replay-conformance-malformed","claim_layer":"replay-conformance","family":"malformed","provider_contract":"pigloros.fixture.replay-conformance@1.0.0","subject_adapter":"exported-artifact","stimulus":null,"expected":{"failure_code":"malformed-payload"}}
