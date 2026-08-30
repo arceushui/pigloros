@@ -1536,6 +1536,21 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
     let port = test_port(true, vec![acknowledgement.target]);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     let submitted_request = request()?;
+    let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: reference(1),
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![acknowledgement.obligation],
+        command_identities: vec![destruction_command_reference(
+            reference(1),
+            acknowledgement.target,
+        )],
+        policy: reference(5),
+        trust: reference(9),
+        admitted_position: 9,
+        deadline_position: u64::MAX,
+        authorization_provenance: reference(9),
+    })?;
     let submitted = {
         let api: &mut dyn ErasureCoordinator = &mut coordinator;
         let submitted = api.submit(submitted_request.clone())?;
@@ -1557,9 +1572,9 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
             ErasureLifecycleV1::AccessFrozen
         );
         assert_eq!(
-            api.dispatch_destruction(reference(1), reference(9))?
+            api.dispatch_destruction(reference(1), admission)?
                 .lifecycle(),
-            ErasureLifecycleV1::DestructionDispatched
+            ErasureLifecycleV1::AwaitingAcknowledgements
         );
         assert_eq!(
             api.acknowledge(reference(1), acknowledgement)?.lifecycle(),

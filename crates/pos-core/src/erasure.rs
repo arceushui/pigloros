@@ -26,7 +26,10 @@ pub const ERASURE_MAX_INVENTORY_RESULTS: usize = 65_536;
 pub const ERASURE_PORTABLE_RECORD_MAX_BYTES: usize = 1024 * 1024;
 /// Largest encoded retry-admission record.
 pub const ERASURE_RETRY_ADMISSION_MAX_BYTES: usize = 16 * 1024 * 1024;
-/// Maximum number of attempt outcomes or ERC1 receipts per ERQ1.
+/// Independent ordinal ceiling for attempt outcomes or ERC1 receipts.
+///
+/// The 64 MiB aggregate ledger bound remains authoritative and may bind
+/// before this defensive cardinality ceiling for unusually large evidence.
 pub const ERASURE_MAX_ATTEMPT_OUTCOMES: usize = 4_096;
 /// Maximum number of administrative resolutions per ERQ1.
 pub const ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS: usize = 4_096;
@@ -1464,7 +1467,12 @@ impl ErasureSupportingRecordsV1 {
             receipt_provenance: input.receipt_provenance,
             administrative_resolutions: input.administrative_resolutions,
         };
-        records.validate().map(|()| records)
+        records.validate()?;
+        encode_limited(
+            &supporting_records_value(&records),
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+        )?;
+        Ok(records)
     }
 
     /// Return correction provenance, when this ERQ1 replaces a rejection.
@@ -1535,7 +1543,9 @@ impl ErasureSupportingRecordsV1 {
             let Some(scope) = self.scope_commitment.as_ref() else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
-            let freeze_matches_scope = freeze.scope_commitment() == scope.reference()
+            let committed_scope = freeze.scope_commitment();
+            let resolved_scope = scope.reference();
+            let freeze_matches_scope = committed_scope == resolved_scope
                 && freeze.extension_head() == scope.extension_head();
             if !freeze_matches_scope {
                 return Err(ErasureErrorV1::ProvenanceMissing);
@@ -4947,7 +4957,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 .get(ordinal_index)
                 == Some(admission);
             if !already_admitted {
-                self.port.admit_attempt(&admission)?;
+                self.port.admit_attempt(admission)?;
                 record
                     .supporting_records
                     .retry_admissions
