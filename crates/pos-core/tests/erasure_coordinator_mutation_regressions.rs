@@ -1993,12 +1993,12 @@ fn finalization_requires_deadline_or_administrative_closure() -> Result<(), Eras
 
 #[test]
 fn finalization_rejects_inventory_outside_the_frozen_obligations() -> Result<(), ErasureErrorV1> {
-    let target = target(10);
-    let mut fixture = awaiting_fixture(vec![target])?;
+    let frozen_target = target(10);
+    let mut fixture = awaiting_fixture(vec![frozen_target])?;
     let acknowledgement = acknowledgement_for(
         fixture.request,
-        target,
-        target.replica_id,
+        frozen_target,
+        frozen_target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
     )?;
@@ -2007,7 +2007,7 @@ fn finalization_rejects_inventory_outside_the_frozen_obligations() -> Result<(),
         .acknowledge(fixture.request, acknowledgement)?;
     let mut input = receipt_input(
         fixture.request,
-        target,
+        frozen_target,
         acknowledgement,
         ErasureLifecycleV1::Complete,
         11,
