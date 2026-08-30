@@ -1019,6 +1019,10 @@ fn fixture_descriptor_from_record(
         context.claim_layer,
         &execution_profile_digest,
     );
+    let oracle_output_path = oracle_output_member_path(
+        &fixture.record.case_id,
+        &execution_profile_digest,
+    );
     let fixture_record = serde_json::json!({
         "case_id": &fixture.record.case_id,
         "claim_layer": &fixture.record.claim_layer,
@@ -1031,7 +1035,12 @@ fn fixture_descriptor_from_record(
     let fixture_record_digest =
         labeled_digest("PiglorOS.CPF1FixtureRecord.v1", fixture_record.as_bytes());
     let auxiliary = artifact_descriptor(&expected_path, "application/json", fixture.expected);
-    let expectation = fixture_expectation(fixture, &auxiliary);
+    let oracle_output = artifact_descriptor(
+        &oracle_output_path,
+        "application/json",
+        fixture.expected,
+    );
+    let expectation = fixture_expectation(fixture, &oracle_output);
     let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
     let mut descriptor = FixtureDescriptorV1 {
         case_id: fixture.record.case_id.clone(),
@@ -1216,6 +1225,13 @@ fn fixture_payload_member_path(case_id: &str, execution_profile_digest: &[u8; 32
     )
 }
 
+fn oracle_output_member_path(case_id: &str, execution_profile_digest: &[u8; 32]) -> String {
+    format!(
+        "oracles/{case_id}/{}.json",
+        pos_conformance::hex_digest(execution_profile_digest)
+    )
+}
+
 fn evaluator_protocol(profile_record_digest: [u8; 32]) -> EvaluatorProtocolV1 {
     EvaluatorProtocolV1 {
         protocol_id: "pigloros.evaluator.v1".to_owned(),
@@ -1309,6 +1325,21 @@ fn bundle_inputs_from_profile(
             digest: member.digest,
         });
         members.push(member);
+        if let Some(output) = fixture.strict_oracle.output.as_ref() {
+            let output_path =
+                oracle_output_member_path(&fixture.case_id, &fixture.execution_profile_digest);
+            if output
+                != &artifact_descriptor(&output_path, "application/json", source.expected)
+            {
+                return Err(
+                    "profile strict-oracle descriptor disagrees with public catalog asset".into(),
+                );
+            }
+            members.push(BundleMemberV1::expected_result(
+                output_path,
+                source.expected.to_vec(),
+            ));
+        }
     }
     expected_results.sort();
     append_supporting_members(&mut members, inventory_bytes, providers);
