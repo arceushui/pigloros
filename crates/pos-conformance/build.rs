@@ -457,7 +457,7 @@ fn checksum_manifest(
 }
 
 fn expected_source_paths(profiles: &[ProfilePaths]) -> BTreeSet<String> {
-    let mut paths = STATIC_SOURCE_PATHS.map(str::to_owned).into_iter().collect();
+    let mut paths: BTreeSet<String> = STATIC_SOURCE_PATHS.map(str::to_owned).into_iter().collect();
     for profile in profiles {
         paths.insert(profile.profile.clone());
         paths.insert(profile.provider_manifest.relative.clone());
