@@ -2576,6 +2576,16 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
         .arg(&output)
         .status()?
         .success());
+    let undeclared_key = Command::new(&materializer)
+        .env(
+            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
+            "0808080808080808080808080808080808080808080808080808080808080808",
+        )
+        .arg(&output)
+        .output()?;
+    assert!(!undeclared_key.status.success());
+    assert!(String::from_utf8_lossy(&undeclared_key.stderr)
+        .contains("conformance signing key is not declared by the Draft authority"));
     fs::create_dir_all(&output)?;
     assert!(!Command::new(&materializer)
         .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)

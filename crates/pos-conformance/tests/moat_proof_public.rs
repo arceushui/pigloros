@@ -770,6 +770,34 @@ fn divergence_report() -> DivergenceReportV1 {
 }
 
 #[test]
+fn public_consent_audit_codec_round_trips_and_rejects_each_field_type() {
+    let audit = ConsentAuditV1 {
+        subject: "gateway-subject".to_owned(),
+        requested_after_seq: 10,
+        effective_after_seq: 11,
+        revocation_event_seq: 12,
+        revocation_event_type: "consent.revoked.v1".to_owned(),
+        revocation_payload_digest: [13; 32],
+        halted_at_tick_boundary: true,
+    };
+    let encoded = strict_codec::encode_consent(&audit);
+    assert_eq!(ok(strict_codec::decode_consent(&encoded)), audit);
+
+    let ciborium::Value::Array(fields) = encoded else {
+        panic!("the public consent codec must emit its closed array shape");
+    };
+    let mut malformed = vec![ciborium::Value::Array(fields[..6].to_vec())];
+    for index in 0..fields.len() {
+        let mut changed = fields.clone();
+        changed[index] = ciborium::Value::Null;
+        malformed.push(ciborium::Value::Array(changed));
+    }
+    for value in malformed {
+        expect_err(&strict_codec::decode_consent(&value));
+    }
+}
+
+#[test]
 fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
     let boundary = wave8_plugin_boundary();
     assert_eq!(boundary.validate(), Ok(()));

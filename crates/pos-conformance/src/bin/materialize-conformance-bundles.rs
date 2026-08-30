@@ -91,13 +91,8 @@ include!(concat!(env!("OUT_DIR"), "/materialization_assets.rs"));
 // deployment trust root and is used solely to make Draft evidence reproducible.
 const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
 
-fn authority_signing_key(expected_public_key: [u8; 32]) -> Result<SigningKey, Box<dyn Error>> {
-    let key = SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES);
-    if key.verifying_key().to_bytes() == expected_public_key {
-        Ok(key)
-    } else {
-        Err("Draft fixture signing key does not match its public declaration".into())
-    }
+fn authority_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES)
 }
 
 fn cbor_bytes(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -123,13 +118,7 @@ fn execution_profile_bytes(
         Value::Text(declaration.semantic_version.to_owned()),
         Value::Array(reproducibility_classes),
         Value::Bool(declaration.network_allowed),
-        Value::Array(
-            declaration
-                .capability_ids
-                .iter()
-                .map(|capability| Value::Text((*capability).to_owned()))
-                .collect(),
-        ),
+        Value::Array(Vec::new()),
         Value::Text("fixture-scheduler-v1".to_owned()),
         Value::Text("fixture-numeric-v1".to_owned()),
         Value::Text("fixture-schema-v1".to_owned()),
@@ -153,7 +142,7 @@ fn execution_profile_digest(
 }
 
 fn trust_policy_snapshot_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
-    let key = authority_signing_key(DRAFT_AUTHORITY_PUBLIC_KEY_BYTES)?;
+    let key = authority_signing_key();
     let fields = vec![
         Value::Text("TPS1".to_owned()),
         Value::Integer(1_u64.into()),
@@ -195,7 +184,7 @@ fn release_admission_bytes(
     from: &FixtureProviderKeyV1,
     to: &FixtureProviderKeyV1,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let key = authority_signing_key(DRAFT_AUTHORITY_PUBLIC_KEY_BYTES)?;
+    let key = authority_signing_key();
     let fields = vec![
         Value::Text("RAD1".to_owned()),
         Value::Integer(1_u64.into()),
@@ -368,7 +357,7 @@ struct ProviderPackage {
 struct ProviderCatalog {
     registry: PublicArtifact,
     packages: Vec<ProviderPackage>,
-    package_support: Vec<PublicArtifact>,
+    package_support: [PublicArtifact; 5],
 }
 
 impl ProviderCatalog {
@@ -402,12 +391,9 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
     }
 }
 
-fn package_support_artifacts() -> Vec<PublicArtifact> {
-    MATERIALIZATION_SUPPORT_ARTIFACTS
-        .iter()
-        .filter(|artifact| artifact.provider_package)
+fn package_support_artifacts() -> [PublicArtifact; 5] {
+    MATERIALIZATION_PROVIDER_PACKAGE_SUPPORT
         .map(|artifact| public_artifact(artifact.path, artifact.media_type, artifact.bytes))
-        .collect()
 }
 
 fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
@@ -487,21 +473,11 @@ fn provider_package(
     claim_layer: ClaimLayerV1,
     subject_adapter: SubjectAdapterKindV1,
     catalog_provider: &CatalogFixtureProvider,
-    package_support: &[PublicArtifact],
+    package_support: &[PublicArtifact; 5],
 ) -> Result<ProviderPackage, Box<dyn Error>> {
     let provider_key = catalog_provider.provider.key();
     let schemas = provider_schema_artifacts(catalog_provider);
-    let support = |path| {
-        package_support
-            .iter()
-            .find(|artifact| artifact.path == path)
-            .ok_or_else(|| -> Box<dyn Error> { format!("support package omits {path}").into() })
-    };
-    let licence = support("support/LICENSE")?;
-    let notices = support("support/NOTICE")?;
-    let sbom = support("support/sbom.json")?;
-    let source_provenance = support("support/source-provenance.json")?;
-    let limitations = support("support/limitations.md")?;
+    let [licence, notices, sbom, source_provenance, limitations] = package_support;
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
         claim_layer,

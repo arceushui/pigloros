@@ -206,30 +206,30 @@ impl RawMemberRole {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct RawClaimLayer(u64);
+struct RawClaimLayer(u8);
 
 impl RawClaimLayer {
     fn from_value(value: &Value) -> Result<Self, BundleContractErrorV1> {
-        uint(value).and_then(|code| {
-            if code <= 6 {
-                Ok(Self(code))
-            } else {
-                Err(BundleContractErrorV1::ProfileInvalid)
-            }
-        })
+        let code = uint(value)?;
+        let code = u8::try_from(code).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+        if code <= 6 {
+            Ok(Self(code))
+        } else {
+            Err(BundleContractErrorV1::ProfileInvalid)
+        }
     }
 
-    const fn catalog_name(self) -> Result<&'static str, BundleContractErrorV1> {
-        match self.0 {
-            0 => Ok("artifact-integrity"),
-            1 => Ok("replay-conformance"),
-            2 => Ok("knowledge-non-interference"),
-            3 => Ok("gateway-client-conformance"),
-            4 => Ok("plugin-conformance"),
-            5 => Ok("metric-conformance"),
-            6 => Ok("empirical-evaluation"),
-            _ => Err(BundleContractErrorV1::ProfileInvalid),
-        }
+    fn catalog_name(self) -> &'static str {
+        const NAMES: [&str; 7] = [
+            "artifact-integrity",
+            "replay-conformance",
+            "knowledge-non-interference",
+            "gateway-client-conformance",
+            "plugin-conformance",
+            "metric-conformance",
+            "empirical-evaluation",
+        ];
+        NAMES[usize::from(self.0)]
     }
 }
 
@@ -803,18 +803,13 @@ fn raw_execution_profile_fields(
                 .copied()
                 .map(|code| Value::Integer(code.into()))
                 .collect::<Vec<_>>();
-            let capabilities = declaration
-                .capability_ids
-                .iter()
-                .map(|capability| Value::Text((*capability).to_owned()))
-                .collect::<Vec<_>>();
             if magic == "EPF1"
                 && version == 1
                 && path == format!("authority/execution-profiles/{profile_id}.epf1")
                 && semantic_version == declaration.semantic_version
                 && fields[4] == Value::Array(classes)
                 && fields[5] == Value::Bool(declaration.network_allowed)
-                && fields[6] == Value::Array(capabilities)
+                && fields[6] == Value::Array(Vec::new())
                 && scheduler == "fixture-scheduler-v1"
                 && numeric == "fixture-numeric-v1"
                 && schema == "fixture-schema-v1"
@@ -2005,15 +2000,13 @@ fn raw_validate_draft_evidence(
     }
     raw_member(members, &evidence[0].path, RawMemberRole::EvidenceStatus).and_then(|member| {
         raw_artifact_matches_member(evidence[0], member).and_then(|()| {
-            fixture.claim_layer.catalog_name().and_then(|claim_layer| {
-                raw_validate_draft_evidence_json(
-                    member.bytes,
-                    &fixture.case_id,
-                    claim_layer,
-                    fixture.family.catalog_name(),
-                    *blake3::hash(payload.bytes).as_bytes(),
-                )
-            })
+            raw_validate_draft_evidence_json(
+                member.bytes,
+                &fixture.case_id,
+                fixture.claim_layer.catalog_name(),
+                fixture.family.catalog_name(),
+                *blake3::hash(payload.bytes).as_bytes(),
+            )
         })
     })
 }

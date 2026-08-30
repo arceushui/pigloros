@@ -287,7 +287,7 @@ struct SupportArtifactDeclaration {
     provider_package: bool,
 }
 
-#[derive(Clone, Copy, serde::Deserialize)]
+#[derive(Clone, Copy, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum SupportArtifactRole {
     NormativeSpecification,
@@ -1755,19 +1755,12 @@ fn emit_draft_authority(
              profile_id: &'static str,\n\
              semantic_version: &'static str,\n\
              network_allowed: bool,\n\
-             capability_ids: &'static [&'static str],\n\
              reproducibility_classes: &'static [u64],\n\
          }}\n\
          const DRAFT_EXECUTION_PROFILES: [DraftExecutionProfileSource; {}] = [",
         declaration.execution_profiles.len()
     )?;
     for profile in &declaration.execution_profiles {
-        let capabilities = profile
-            .capability_ids
-            .iter()
-            .map(|capability| format!("{capability:?}"))
-            .collect::<Vec<_>>()
-            .join(", ");
         let classes = profile
             .reproducibility_classes
             .iter()
@@ -1778,11 +1771,10 @@ fn emit_draft_authority(
             .join(", ");
         writeln!(
             generated,
-            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}] }},",
+            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, reproducibility_classes: &[{}] }},",
             profile.profile_id,
             profile.semantic_version,
             profile.network_allowed,
-            capabilities,
             classes,
         )?;
     }
@@ -1910,7 +1902,6 @@ fn emit_materialization_assets(
              media_type: &'static str,\n\
              bytes: &'static [u8],\n\
              role: BundleMemberRoleV1,\n\
-             provider_package: bool,\n\
          }\n",
     );
     let support = support_package_manifest(snapshots)?;
@@ -1926,15 +1917,56 @@ fn emit_materialization_assets(
         "const MATERIALIZATION_SUPPORT_ARTIFACTS: [MaterializationSupportArtifact; {}] = [",
         support.artifacts.len()
     )?;
-    for artifact in support.artifacts {
+    for artifact in &support.artifacts {
         let bytes_constant = support_constant_name(&artifact.path);
         writeln!(
             generated,
-            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: {bytes_constant}, role: {}, provider_package: {} }},",
+            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: {bytes_constant}, role: {} }},",
             artifact.path,
             artifact.media_type,
             artifact.role.rust_variant(),
-            artifact.provider_package,
+        )?;
+    }
+    generated.push_str("];\n");
+    let provider_roles = [
+        SupportArtifactRole::Licence,
+        SupportArtifactRole::Notice,
+        SupportArtifactRole::Sbom,
+        SupportArtifactRole::Provenance,
+        SupportArtifactRole::Limitations,
+    ];
+    if support
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.provider_package)
+        .count()
+        != provider_roles.len()
+    {
+        return Err(invalid_data("provider package support set is not closed").into());
+    }
+    let provider_support = provider_roles
+        .iter()
+        .map(|role| {
+            support
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.provider_package && artifact.role == *role)
+                .ok_or_else(|| invalid_data("provider package support roles are incomplete"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    writeln!(
+        generated,
+        "const MATERIALIZATION_PROVIDER_PACKAGE_SUPPORT: [MaterializationSupportArtifact; {}] = [",
+        provider_support.len()
+    )?;
+    for artifact in provider_support {
+        let bytes_constant = support_constant_name(&artifact.path);
+        writeln!(
+            generated,
+            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: {bytes_constant}, role: {} }},",
+            artifact.path,
+            artifact.media_type,
+            artifact.role.rust_variant(),
         )?;
     }
     generated.push_str("];\n");
