@@ -1192,32 +1192,26 @@ impl ErasureSupportingRecordsV1 {
     }
 
     fn validate_attempt_chain(&self) -> Result<(), ErasureErrorV1> {
-        for (ordinal, admission) in self.retry_admissions.iter().enumerate() {
-            let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?;
-            let expected_predecessor = ordinal.checked_sub(1).and_then(|index| {
-                usize::try_from(index)
-                    .ok()
-                    .and_then(|index| self.receipts.get(index))
-                    .map(ErasureReceiptV1::receipt_digest)
-            });
+        let mut ordinal = 0_u64;
+        let mut expected_predecessor = None;
+        let mut receipt_digests = self.receipts.iter().map(ErasureReceiptV1::receipt_digest);
+        for admission in &self.retry_admissions {
             if admission.attempt_ordinal() != ordinal
                 || admission.source_receipt() != expected_predecessor
             {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
+            expected_predecessor = receipt_digests.next();
+            ordinal += 1;
         }
-        for (ordinal, ((outcome, receipt), provenance)) in self
+        let mut ordinal = 0_u64;
+        for (((outcome, receipt), provenance), admission) in self
             .attempt_outcomes
             .iter()
             .zip(&self.receipts)
             .zip(&self.receipt_provenance)
-            .enumerate()
+            .zip(&self.retry_admissions)
         {
-            let admission = self
-                .retry_admissions
-                .get(ordinal)
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?;
             let outcome_matches = (
                 outcome.request(),
                 outcome.attempt(),
@@ -1253,6 +1247,7 @@ impl ErasureSupportingRecordsV1 {
             if !outcome_matches || !provenance_matches {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
+            ordinal += 1;
         }
         Ok(())
     }
