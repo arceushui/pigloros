@@ -946,7 +946,7 @@ fn public_comparisons_classify_each_authoritative_difference() -> Result<(), pos
     );
 
     right = left.clone();
-    right.host_closure.provenance_digest = [30; 32];
+    right.host_closure.closure_payload_digest = [30; 32];
     assert_eq!(
         compare(&left, &right)?.divergence,
         DivergenceClassV1::Observability
