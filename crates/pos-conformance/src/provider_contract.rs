@@ -691,10 +691,10 @@ fn decode_package(value: &Value) -> Result<FixtureProviderPackageV1, ProviderCon
 /// Compose ordered provider-field decoders without propagation branches or
 /// deeply nested hand-written control flow.
 macro_rules! decode_provider_fields {
-    ($decoder:expr => $binding:ident, $($remaining:tt)*) => {
+    ($decoder:expr_2021 => $binding:ident, $($remaining:tt)*) => {
         $decoder.and_then(|$binding| decode_provider_fields!($($remaining)*))
     };
-    ($result:expr $(,)?) => {
+    ($result:expr_2021 $(,)?) => {
         $result
     };
 }
@@ -707,11 +707,11 @@ struct DecodedPackageIdentity {
 }
 
 struct DecodedPackageArtifacts {
-    licence_descriptor: ArtifactDescriptorV1,
-    notices_descriptor: ArtifactDescriptorV1,
-    sbom_descriptor: ArtifactDescriptorV1,
-    source_provenance_descriptor: ArtifactDescriptorV1,
-    limitations_descriptor: ArtifactDescriptorV1,
+    licence: ArtifactDescriptorV1,
+    notices: ArtifactDescriptorV1,
+    sbom: ArtifactDescriptorV1,
+    source_provenance: ArtifactDescriptorV1,
+    limitations: ArtifactDescriptorV1,
 }
 
 fn decode_package_fields(
@@ -727,11 +727,11 @@ fn decode_package_fields(
             claim_layer: identity.claim_layer,
             subject_adapter: identity.subject_adapter,
             family_schemas: identity.family_schemas,
-            licence_descriptor: artifacts.licence_descriptor,
-            notices_descriptor: artifacts.notices_descriptor,
-            sbom_descriptor: artifacts.sbom_descriptor,
-            source_provenance_descriptor: artifacts.source_provenance_descriptor,
-            limitations_descriptor: artifacts.limitations_descriptor,
+            licence_descriptor: artifacts.licence,
+            notices_descriptor: artifacts.notices,
+            sbom_descriptor: artifacts.sbom,
+            source_provenance_descriptor: artifacts.source_provenance,
+            limitations_descriptor: artifacts.limitations,
             package_digest,
         })
     }
@@ -772,17 +772,17 @@ fn decode_package_artifacts(
     fields: &[Value],
 ) -> Result<DecodedPackageArtifacts, ProviderContractErrorV1> {
     decode_provider_fields! {
-        decode_artifact_descriptor(&fields[6]) => licence_descriptor,
-        decode_artifact_descriptor(&fields[7]) => notices_descriptor,
-        decode_artifact_descriptor(&fields[8]) => sbom_descriptor,
-        decode_artifact_descriptor(&fields[9]) => source_provenance_descriptor,
-        decode_artifact_descriptor(&fields[10]) => limitations_descriptor,
+        decode_artifact_descriptor(&fields[6]) => licence,
+        decode_artifact_descriptor(&fields[7]) => notices,
+        decode_artifact_descriptor(&fields[8]) => sbom,
+        decode_artifact_descriptor(&fields[9]) => source_provenance,
+        decode_artifact_descriptor(&fields[10]) => limitations,
         Ok(DecodedPackageArtifacts {
-            licence_descriptor,
-            notices_descriptor,
-            sbom_descriptor,
-            source_provenance_descriptor,
-            limitations_descriptor,
+            licence,
+            notices,
+            sbom,
+            source_provenance,
+            limitations,
         })
     }
 }

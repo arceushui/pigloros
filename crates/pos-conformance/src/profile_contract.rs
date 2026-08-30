@@ -1692,10 +1692,10 @@ fn encode_output_capability(value: &EvaluatorOutputCapabilityV1) -> Value {
 /// Compose ordered field decoders without introducing propagation branches in
 /// the public CPF1 decoding path.
 macro_rules! decode_fields {
-    ($decoder:expr => $binding:ident, $($remaining:tt)*) => {
+    ($decoder:expr_2021 => $binding:ident, $($remaining:tt)*) => {
         $decoder.and_then(|$binding| decode_fields!($($remaining)*))
     };
-    ($result:expr $(,)?) => {
+    ($result:expr_2021 $(,)?) => {
         $result
     };
 }

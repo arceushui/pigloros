@@ -92,7 +92,7 @@ pub(crate) fn preflight_array_cbor(
         maximum_items,
         allow_simple_values,
     )
-    .and_then(|()| {
+    .and({
         if index == bytes.len() {
             Ok(())
         } else {
