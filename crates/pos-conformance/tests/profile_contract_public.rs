@@ -1181,14 +1181,14 @@ fn public_request_rejects_invalid_selected_profile_authorities() -> TestResult {
         Err(ConformanceContractError::ProvenanceMissing)
     );
 
-    let mut invalid_caps = profile.evaluator_protocol.hard_caps;
+    let mut invalid_caps = profile.evaluator_protocol.hard_caps.clone();
     invalid_caps.max_cases = 0;
     assert_eq!(
         request.validate_with_hard_caps(&invalid_caps),
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut invalid_protocol = profile.evaluator_protocol;
+    let mut invalid_protocol = profile.evaluator_protocol.clone();
     invalid_protocol.protocol_id.clear();
     assert_eq!(
         request.validate_with_protocol(&invalid_protocol),
