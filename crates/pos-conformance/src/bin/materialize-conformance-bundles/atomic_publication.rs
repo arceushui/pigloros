@@ -42,22 +42,26 @@ struct VerifiedPublication(AtomicPublication);
 
 #[cfg(target_os = "linux")]
 impl AtomicPublication {
-    fn prepare(destination: &Path) -> Result<Self, MaterializationError> {
-        output_parent_and_name(destination).and_then(|(parent_path, destination_name)| {
-            let effective_uid = effective_uid();
-            open_trusted_parent(parent_path, effective_uid).and_then(|(parent, parent_identity)| {
-                create_private_staging(&parent, parent_identity, effective_uid).map(
-                    |(staging_name, staging, staging_identity)| Self {
-                        parent,
-                        staging,
-                        staging_name,
-                        destination_name,
-                        parent_identity,
-                        staging_identity,
-                        staging_present: true,
-                    },
-                )
-            })
+    fn prepare(destination: &Path, destination_name: &str) -> Result<Self, MaterializationError> {
+        let parent_path = destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let destination_name = CString::new(destination_name)
+            .expect("a hexadecimal source-inventory digest contains no NUL byte");
+        let effective_uid = effective_uid();
+        open_trusted_parent(parent_path, effective_uid).and_then(|(parent, parent_identity)| {
+            create_private_staging(&parent, parent_identity, effective_uid).map(
+                |(staging_name, staging, staging_identity)| Self {
+                    parent,
+                    staging,
+                    staging_name,
+                    destination_name,
+                    parent_identity,
+                    staging_identity,
+                    staging_present: true,
+                },
+            )
         })
     }
 
@@ -209,21 +213,6 @@ fn publish_materialized_tree(
 }
 
 #[cfg(target_os = "linux")]
-fn output_parent_and_name(destination: &Path) -> Result<(&Path, CString), MaterializationError> {
-    let parent = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let file_name = destination
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .ok_or(MaterializationError::UntrustedOutputDirectory)?;
-    CString::new(file_name.as_bytes())
-        .map_err(|_| MaterializationError::UntrustedOutputDirectory)
-        .map(|name| (parent, name))
-}
-
-#[cfg(target_os = "linux")]
 fn open_trusted_parent(
     parent: &Path,
     effective_uid: u32,
@@ -252,23 +241,10 @@ fn create_private_staging(
     parent_identity: DirectoryIdentity,
     effective_uid: u32,
 ) -> Result<(CString, OwnedFd, DirectoryIdentity), MaterializationError> {
-    revalidate_parent(parent, parent_identity, effective_uid)?;
-    for _ in 0..16 {
-        let attempt = random_staging_name().and_then(|name| {
-            match fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
-                Ok(()) => configure_private_staging(parent, &name, parent_identity, effective_uid)
-                    .map(Some),
-                Err(Errno::EXIST) => Ok(None),
-                Err(error) => Err(map_open_error(error)),
-            }
-        });
-        match attempt {
-            Ok(Some(staging)) => return Ok(staging),
-            Ok(None) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(MaterializationError::UntrustedOutputDirectory)
+    revalidate_parent(parent, effective_uid)?;
+    let name = random_staging_name()?;
+    fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)).map_err(map_open_error)?;
+    configure_private_staging(parent, &name, parent_identity, effective_uid)
 }
 
 #[cfg(target_os = "linux")]
@@ -278,40 +254,55 @@ fn configure_private_staging(
     parent_identity: DirectoryIdentity,
     effective_uid: u32,
 ) -> Result<(CString, OwnedFd, DirectoryIdentity), MaterializationError> {
-    let staging = match open_directory(parent, staging_name) {
-        Ok(staging) => staging,
-        Err(error) => {
-            remove_empty_staging(parent, staging_name)?;
-            return Err(error);
-        }
-    };
-    let configured = fs::fchmod(&staging, Mode::from_raw_mode(0o700))
-        .map_err(map_sync_error)
-        .and_then(|()| sync_fd(&staging))
-        .and_then(|()| {
-            staging_identity(
-                parent,
-                staging_name,
-                &staging,
-                parent_identity,
-                effective_uid,
-            )
-        });
+    let configured = open_directory(parent, staging_name).and_then(|staging| {
+        configure_open_staging(
+            parent,
+            staging_name,
+            &staging,
+            parent_identity,
+            effective_uid,
+        )
+        .map(|identity| (staging, identity))
+    });
     match configured {
-        Ok(staging_identity) => Ok((staging_name.clone(), staging, staging_identity)),
-        Err(error) => {
-            drop(staging);
-            remove_empty_staging(parent, staging_name)?;
-            Err(error)
-        }
+        Ok((staging, identity)) => Ok((staging_name.clone(), staging, identity)),
+        Err(error) => cleanup_failed_staging(parent, staging_name, error),
     }
 }
 
 #[cfg(target_os = "linux")]
+fn configure_open_staging(
+    parent: &OwnedFd,
+    staging_name: &CStr,
+    staging: &OwnedFd,
+    parent_identity: DirectoryIdentity,
+    effective_uid: u32,
+) -> Result<DirectoryIdentity, MaterializationError> {
+    fs::fchmod(staging, Mode::from_raw_mode(0o700)).map_err(map_sync_error)?;
+    sync_fd(staging)?;
+    staging_identity(
+        parent,
+        staging_name,
+        staging,
+        parent_identity,
+        effective_uid,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_failed_staging<T>(
+    parent: &OwnedFd,
+    staging_name: &CStr,
+    error: MaterializationError,
+) -> Result<T, MaterializationError> {
+    remove_empty_staging(parent, staging_name)?;
+    Err(error)
+}
+
+#[cfg(target_os = "linux")]
 fn remove_empty_staging(parent: &OwnedFd, staging_name: &CStr) -> Result<(), MaterializationError> {
-    fs::unlinkat(parent, staging_name, AtFlags::REMOVEDIR)
-        .map_err(map_cleanup_error)
-        .and_then(|()| sync_fd(parent))
+    fs::unlinkat(parent, staging_name, AtFlags::REMOVEDIR).map_err(map_cleanup_error)?;
+    sync_fd(parent)
 }
 
 #[cfg(target_os = "linux")]
@@ -320,10 +311,10 @@ fn random_staging_name() -> Result<CString, MaterializationError> {
     File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut random))
         .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
-        .and_then(|()| {
+        .map(|()| {
             let suffix = blake3::hash(&random).to_hex();
             CString::new(format!(".pigloros-conformance-staging-{suffix}"))
-                .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
+                .expect("a hexadecimal random suffix contains no NUL byte")
         })
 }
 
@@ -429,18 +420,8 @@ const fn directory_identity(metadata: rustix::fs::Stat) -> DirectoryIdentity {
 }
 
 #[cfg(target_os = "linux")]
-fn revalidate_parent(
-    parent: &OwnedFd,
-    expected_identity: DirectoryIdentity,
-    effective_uid: u32,
-) -> Result<(), MaterializationError> {
-    trusted_parent_identity(parent, effective_uid).and_then(|actual_identity| {
-        if actual_identity == expected_identity {
-            Ok(())
-        } else {
-            Err(MaterializationError::UntrustedOutputDirectory)
-        }
-    })
+fn revalidate_parent(parent: &OwnedFd, effective_uid: u32) -> Result<(), MaterializationError> {
+    trusted_parent_identity(parent, effective_uid).map(|_| ())
 }
 
 #[cfg(target_os = "linux")]
@@ -493,7 +474,7 @@ fn validate_private_staging(
 #[cfg(target_os = "linux")]
 impl AtomicPublication {
     fn revalidate_for_publish(&self) -> Result<(), MaterializationError> {
-        revalidate_parent(&self.parent, self.parent_identity, effective_uid()).and_then(|()| {
+        revalidate_parent(&self.parent, effective_uid()).and_then(|()| {
             staging_identity(
                 &self.parent,
                 self.staging_name.as_c_str(),
@@ -514,7 +495,7 @@ fn remove_staging_tree(
     staging_identity_expected: DirectoryIdentity,
     effective_uid: u32,
 ) -> Result<(), MaterializationError> {
-    revalidate_parent(parent, parent_identity, effective_uid).and_then(|()| {
+    revalidate_parent(parent, effective_uid).and_then(|()| {
         open_directory(parent, staging_name).and_then(|staging| {
             staging_identity(
                 parent,
@@ -601,50 +582,46 @@ fn sync_fd<Fd: std::os::fd::AsFd>(fd: Fd) -> Result<(), MaterializationError> {
 
 #[cfg(target_os = "linux")]
 fn map_open_error(error: Errno) -> MaterializationError {
-    if error == Errno::LOOP {
-        MaterializationError::SymlinkDetected
-    } else if atomic_publication_is_unsupported(error) {
-        MaterializationError::AtomicPublicationUnsupported
-    } else {
-        MaterializationError::UntrustedOutputDirectory
-    }
+    map_atomic_error(AtomicOperation::Open, error)
 }
 
 #[cfg(target_os = "linux")]
 fn map_publish_error(error: Errno) -> MaterializationError {
-    if error == Errno::EXIST {
-        MaterializationError::DestinationExists
-    } else if atomic_publication_is_unsupported(error) {
-        MaterializationError::AtomicPublicationUnsupported
-    } else {
-        MaterializationError::UntrustedOutputDirectory
-    }
+    map_atomic_error(AtomicOperation::Publish, error)
 }
 
 #[cfg(target_os = "linux")]
-const fn map_sync_error(error: Errno) -> MaterializationError {
-    if atomic_publication_is_unsupported(error) {
-        MaterializationError::AtomicPublicationUnsupported
-    } else {
-        MaterializationError::DurabilitySyncFailed
-    }
+fn map_sync_error(error: Errno) -> MaterializationError {
+    map_atomic_error(AtomicOperation::Sync, error)
 }
 
 #[cfg(target_os = "linux")]
 fn map_cleanup_error(error: Errno) -> MaterializationError {
-    if error == Errno::LOOP {
-        MaterializationError::SymlinkDetected
-    } else if atomic_publication_is_unsupported(error) {
-        MaterializationError::AtomicPublicationUnsupported
-    } else {
-        MaterializationError::UntrustedOutputDirectory
-    }
+    map_atomic_error(AtomicOperation::Cleanup, error)
 }
 
 #[cfg(target_os = "linux")]
-const fn atomic_publication_is_unsupported(error: Errno) -> bool {
-    matches!(
-        error,
-        Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV
-    )
+#[derive(Clone, Copy)]
+enum AtomicOperation {
+    Open,
+    Publish,
+    Sync,
+    Cleanup,
+}
+
+#[cfg(target_os = "linux")]
+fn map_atomic_error(operation: AtomicOperation, error: Errno) -> MaterializationError {
+    match (operation, error) {
+        (AtomicOperation::Publish, Errno::EXIST) => MaterializationError::DestinationExists,
+        (AtomicOperation::Open | AtomicOperation::Cleanup, Errno::LOOP) => {
+            MaterializationError::SymlinkDetected
+        }
+        (_, Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV) => {
+            MaterializationError::AtomicPublicationUnsupported
+        }
+        (AtomicOperation::Sync, _) => MaterializationError::DurabilitySyncFailed,
+        (AtomicOperation::Open | AtomicOperation::Publish | AtomicOperation::Cleanup, _) => {
+            MaterializationError::UntrustedOutputDirectory
+        }
+    }
 }

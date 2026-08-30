@@ -42,6 +42,7 @@ fn materializer_process_guard() -> MutexGuard<'static, ()> {
 enum StagingMutation {
     ReplaceIdentity,
     RelaxPermissions,
+    RelaxRetainedPermissions,
     InjectSymlink,
     InjectFifo,
     BlockFutureDirectory,
@@ -142,6 +143,13 @@ fn mutate_live_staging(
         }
         StagingMutation::RelaxPermissions => {
             fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))
+        }
+        StagingMutation::RelaxRetainedPermissions => {
+            let retained = root.join("retained-staging");
+            fs::rename(&staging, &retained)
+                .and_then(|()| fs::set_permissions(&retained, fs::Permissions::from_mode(0o755)))
+                .and_then(|()| fs::create_dir(&staging))
+                .and_then(|()| fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)))
         }
         StagingMutation::InjectSymlink => symlink("/dev/null", staging.join("injected-link"))
             .and_then(|()| fs::create_dir(&destination)),
@@ -2764,6 +2772,7 @@ fn public_materializer_rejects_live_staging_replacement_and_contamination() -> T
     for mutation in [
         StagingMutation::ReplaceIdentity,
         StagingMutation::RelaxPermissions,
+        StagingMutation::RelaxRetainedPermissions,
     ] {
         let stderr = mutate_live_staging(materializer.as_os_str(), key, mutation)?;
         assert!(stderr.contains("UntrustedOutputDirectory"));

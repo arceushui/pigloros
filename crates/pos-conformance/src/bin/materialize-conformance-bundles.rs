@@ -571,24 +571,23 @@ fn prepare_command(
     command: MaterializationCommand,
 ) -> Result<PreparedMaterializationCommand, Box<dyn Error>> {
     match command {
-        MaterializationCommand::Publish(output_root) => {
-            validate_source_inventory_address(&output_root)
-                .and_then(|()| AtomicPublication::prepare(&output_root))
-                .map(PreparedMaterializationCommand::Publish)
-                .map_err(Into::into)
-        }
+        MaterializationCommand::Publish(output_root) => prepare_atomic_publication(&output_root)
+            .map(PreparedMaterializationCommand::Publish)
+            .map_err(Into::into),
         MaterializationCommand::Fingerprint => Ok(PreparedMaterializationCommand::Fingerprint),
     }
 }
 
-fn validate_source_inventory_address(destination: &Path) -> Result<(), MaterializationError> {
+fn prepare_atomic_publication(
+    destination: &Path,
+) -> Result<AtomicPublication, MaterializationError> {
     let expected = pos_conformance::hex_digest(&SOURCE_INVENTORY_DIGEST);
     if destination
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == expected)
     {
-        Ok(())
+        AtomicPublication::prepare(destination, &expected)
     } else {
         Err(MaterializationError::SourceInventoryAddressMismatch)
     }
