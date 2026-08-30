@@ -167,6 +167,23 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  conformance-non-linux:
+    name: conformance-non-linux
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: conformance-non-linux
+      - name: Reject unsupported atomic publication through the public CLI
+        run: >
+          cargo test -p pos-conformance --test bundle_contract_public --locked
+          public_materializer_reports_unsupported_atomic_publication -- --exact
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -537,6 +554,7 @@ jobs:
       - test
       - conformance-fixtures
       - materialize-conformance-bundles
+      - conformance-non-linux
       - clippy
       - coverage
       - audit
@@ -557,6 +575,7 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           CONFORMANCE_FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
           MATERIALIZE_CONFORMANCE_BUNDLES_RESULT: ${{ needs.materialize-conformance-bundles.result }}
+          CONFORMANCE_NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
           AUDIT_RESULT: ${{ needs.audit.result }}
@@ -572,7 +591,8 @@ jobs:
           failed=0
           for result_name in \
             FMT_RESULT RUSTDOC_RESULT TEST_RESULT CONFORMANCE_FIXTURES_RESULT \
-            MATERIALIZE_CONFORMANCE_BUNDLES_RESULT CLIPPY_RESULT COVERAGE_RESULT \
+            MATERIALIZE_CONFORMANCE_BUNDLES_RESULT CONFORMANCE_NON_LINUX_RESULT \
+            CLIPPY_RESULT COVERAGE_RESULT \
             AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
             DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT; do
             result="${!result_name}"
