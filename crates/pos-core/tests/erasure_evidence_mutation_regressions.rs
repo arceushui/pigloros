@@ -380,7 +380,7 @@ fn evidence_decoders_reject_each_malformed_public_field() -> Result<(), ErasureE
         reference(1),
         scope.reference(),
         reference(4),
-        None,
+        reference(5),
     ))?;
     let freeze_bytes = freeze.to_canonical_cbor()?;
     for index in [0, 2, 3, 4, 5] {
@@ -690,56 +690,77 @@ fn supporting_record_decoder_rejects_each_malformed_nested_collection() -> Resul
 
 #[test]
 fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), ErasureErrorV1> {
-    let scope = scope_commitment(reference(1), vec![reference(2)], reference(3), None)?;
-    let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
-        reference(1),
-        scope.reference(),
-        reference(4),
+    let request = reference(1);
+    let target = required_target();
+    let obligation = obligation(request, target, reference(36))?;
+    let obligations = vec![obligation];
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let scope = scope_commitment(
+        request,
+        vec![reference(2)],
+        pos_core::erasure::target_closure_digest(&[target]),
         None,
+    )?;
+    let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
+        request,
+        scope.reference(),
+        obligation_set.reference(),
+        reference(6),
     ))?;
     let valid = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope.clone()),
         freeze_provenance: Some(freeze),
+        obligations: obligations.clone(),
+        obligation_set: Some(obligation_set.clone()),
         ..ErasureSupportingRecordsInputV1::default()
     })?;
     assert_eq!(valid.scope_commitment(), Some(&scope));
     assert_eq!(valid.freeze_provenance(), Some(freeze));
 
-    let mismatched_extension = ErasureFreezeProvenanceV1::new(freeze_input(
-        reference(1),
+    let mismatched_matrix = ErasureFreezeProvenanceV1::new(freeze_input(
+        request,
         scope.reference(),
-        reference(4),
-        Some(reference(5)),
+        reference(99),
+        reference(6),
     ))?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
             scope_commitment: Some(scope.clone()),
-            freeze_provenance: Some(mismatched_extension),
+            freeze_provenance: Some(mismatched_matrix),
+            obligations: obligations.clone(),
+            obligation_set: Some(obligation_set.clone()),
             ..ErasureSupportingRecordsInputV1::default()
         }),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let mismatched_scope = ErasureFreezeProvenanceV1::new(freeze_input(
-        reference(1),
+        request,
         reference(6),
-        reference(4),
-        None,
+        obligation_set.reference(),
+        reference(7),
     ))?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
-            scope_commitment: Some(scope),
+            scope_commitment: Some(scope.clone()),
             freeze_provenance: Some(mismatched_scope),
+            obligations: obligations.clone(),
+            obligation_set: Some(obligation_set.clone()),
             ..ErasureSupportingRecordsInputV1::default()
         }),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
-        reference(1),
+        request,
         reference(6),
-        reference(4),
-        None,
+        obligation_set.reference(),
+        reference(7),
     ))?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
@@ -749,12 +770,11 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let scope = scope_commitment(reference(1), vec![reference(2)], reference(3), None)?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
-        reference(1),
+        request,
         scope.reference(),
-        reference(4),
-        None,
+        obligation_set.reference(),
+        reference(6),
     ))?;
     let failure = ErasureFreezeFailureV1::new(freeze_failure_input(
         reference(1),
@@ -766,6 +786,8 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
             scope_commitment: Some(scope.clone()),
             freeze_provenance: Some(freeze),
             freeze_failure: Some(failure),
+            obligations: obligations.clone(),
+            obligation_set: Some(obligation_set),
             ..ErasureSupportingRecordsInputV1::default()
         }),
         Err(ErasureErrorV1::PolicyConflict)
@@ -1070,16 +1092,26 @@ fn supporting_records_validate_every_public_request_binding() -> Result<(), Eras
     )?)?;
 
     let scope = scope_commitment(reference(1), vec![reference(3)], reference(4), None)?;
+    let target = required_target();
+    let obligation = obligation(reference(1), target, reference(36))?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request: reference(1),
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
         reference(2),
         scope.reference(),
-        reference(5),
-        None,
+        obligation_set.reference(),
+        reference(6),
     ))?;
     assert_request_binding_rejected(ErasureSupportingRecordsV1::new(
         ErasureSupportingRecordsInputV1 {
             scope_commitment: Some(scope),
             freeze_provenance: Some(freeze),
+            obligations: vec![obligation],
+            obligation_set: Some(obligation_set),
             ..ErasureSupportingRecordsInputV1::default()
         },
     )?)?;
