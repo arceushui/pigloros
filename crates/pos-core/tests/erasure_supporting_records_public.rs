@@ -467,7 +467,7 @@ fn supporting_records_accept_one_active_attempt_and_a_nonbranching_resolution(
         retry_admissions: vec![admission.clone()],
         acknowledgement_provenance: vec![acknowledgement.clone()],
         administrative_resolutions: vec![resolution.clone()],
-        ..Default::default()
+        ..ErasureSupportingRecordsInputV1::default()
     })?;
     assert!(records.correction_provenance().is_none());
     assert_eq!(records.retry_admissions(), &[admission]);
@@ -483,7 +483,7 @@ fn supporting_records_accept_one_active_attempt_and_a_nonbranching_resolution(
             records.acknowledgement_provenance()[0],
         ],
         administrative_resolutions: records.administrative_resolutions().to_vec(),
-        ..Default::default()
+        ..ErasureSupportingRecordsInputV1::default()
     })?;
     assert_eq!(duplicate_arrival, records);
     Ok(())

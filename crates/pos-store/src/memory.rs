@@ -5097,7 +5097,7 @@ mod erasure_coverage_tests {
                 freeze_provenance: None,
                 freeze_admission: None,
                 dispatch_provenance: None,
-                supporting_records: Default::default(),
+                supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
             },
             reference(8),
         )?)
@@ -5159,7 +5159,7 @@ mod erasure_coverage_tests {
             freeze_provenance: None,
             freeze_admission: None,
             dispatch_provenance: None,
-            supporting_records: Default::default(),
+            supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
         };
         Ok(ErasureCoordinatorRecordV1::from_parts(
             parts,
@@ -5658,7 +5658,7 @@ mod coverage_entrypoints {
                 freeze_provenance: None,
                 freeze_admission: None,
                 dispatch_provenance: None,
-                supporting_records: Default::default(),
+                supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
             },
             pos_core::ErasureReferenceV1::from_digest([8; 32]),
         )?)
@@ -5707,7 +5707,7 @@ mod coverage_entrypoints {
                 freeze_provenance: None,
                 freeze_admission: None,
                 dispatch_provenance: None,
-                supporting_records: Default::default(),
+                supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
             },
             submitted.state().coordinator(),
         )?)

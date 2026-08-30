@@ -36,7 +36,7 @@ fn submitted_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
             freeze_provenance: None,
             freeze_admission: None,
             dispatch_provenance: None,
-            supporting_records: Default::default(),
+            supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
         },
         coordinator,
     )

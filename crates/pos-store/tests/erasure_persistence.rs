@@ -57,7 +57,7 @@ fn submitted_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
             freeze_provenance: None,
             freeze_admission: None,
             dispatch_provenance: None,
-            supporting_records: Default::default(),
+            supporting_records: ErasureSupportingRecordsV1::default(),
         },
         reference(8),
     )
@@ -97,7 +97,7 @@ fn record_with_active_attempt() -> Result<ErasureCoordinatorRecordV1, ErasureErr
     let mut parts = record_parts(&record);
     parts.supporting_records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
         retry_admissions: vec![admission],
-        ..Default::default()
+        ..ErasureSupportingRecordsInputV1::default()
     })?;
     ErasureCoordinatorRecordV1::from_parts(parts, record.state().coordinator())
 }
@@ -1002,7 +1002,7 @@ fn sqlite_erasure_persistence_rejects_a_record_under_the_wrong_request_key(
             freeze_provenance: None,
             freeze_admission: None,
             dispatch_provenance: None,
-            supporting_records: Default::default(),
+            supporting_records: ErasureSupportingRecordsV1::default(),
         },
         reference(8),
     )?;

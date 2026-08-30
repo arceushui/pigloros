@@ -1218,20 +1218,20 @@ impl ErasureSupportingRecordsV1 {
                 .get(ordinal)
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
             let ordinal = u64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?;
-            if outcome.request() != admission.request()
-                || outcome.attempt() != admission.reference()
-                || outcome.source_receipt() != admission.source_receipt()
-                || provenance.request() != admission.request()
-                || provenance.attempt() != admission.reference()
-                || provenance.attempt_ordinal() != ordinal
-                || provenance.predecessor_receipt() != admission.source_receipt()
-                || provenance.terminal_state() != receipt.terminal_state()
-                || outcome.lifecycle() != receipt.lifecycle()
-                || outcome.policy() != admission.policy()
-                || outcome.trust() != admission.trust()
-                || provenance.policy() != admission.policy()
-                || provenance.trust() != admission.trust()
-            {
+            let outcome_matches = outcome.request() == admission.request()
+                && outcome.attempt() == admission.reference()
+                && outcome.source_receipt() == admission.source_receipt()
+                && outcome.lifecycle() == receipt.lifecycle()
+                && outcome.policy() == admission.policy()
+                && outcome.trust() == admission.trust();
+            let provenance_matches = provenance.request() == admission.request()
+                && provenance.attempt() == admission.reference()
+                && provenance.attempt_ordinal() == ordinal
+                && provenance.predecessor_receipt() == admission.source_receipt()
+                && provenance.terminal_state() == receipt.terminal_state()
+                && provenance.policy() == admission.policy()
+                && provenance.trust() == admission.trust();
+            if !outcome_matches || !provenance_matches {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
@@ -1312,8 +1312,10 @@ impl ErasureSupportingRecordsV1 {
     }
 
     fn is_prefix_of(&self, next: &Self) -> bool {
-        option_is_unchanged(&self.correction_provenance, &next.correction_provenance)
-            && next.retry_admissions.starts_with(&self.retry_admissions)
+        option_is_unchanged(
+            self.correction_provenance.as_ref(),
+            next.correction_provenance.as_ref(),
+        ) && next.retry_admissions.starts_with(&self.retry_admissions)
             && next
                 .acknowledgement_provenance
                 .starts_with(&self.acknowledgement_provenance)
@@ -1328,10 +1330,8 @@ impl ErasureSupportingRecordsV1 {
     }
 }
 
-fn option_is_unchanged<T: PartialEq>(current: &Option<T>, next: &Option<T>) -> bool {
-    current
-        .as_ref()
-        .map_or(true, |value| next.as_ref() == Some(value))
+fn option_is_unchanged<T: PartialEq>(current: Option<&T>, next: Option<&T>) -> bool {
+    current.is_none_or(|value| next == Some(value))
 }
 
 impl ErasureAdministrativeResolutionV1 {
@@ -3787,7 +3787,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                             freeze_provenance: None,
                             freeze_admission: None,
                             dispatch_provenance: None,
-                            supporting_records: Default::default(),
+                            supporting_records: ErasureSupportingRecordsV1::default(),
                         };
                         self.commit(record).map(|()| state)
                     })
@@ -4547,7 +4547,7 @@ mod erasure_coverage_tests {
                 freeze_provenance: None,
                 freeze_admission: None,
                 dispatch_provenance: None,
-                supporting_records: Default::default(),
+                supporting_records: ErasureSupportingRecordsV1::default(),
             },
             coordinator(),
         )?;
