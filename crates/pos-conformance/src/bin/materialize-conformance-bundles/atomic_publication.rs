@@ -683,3 +683,201 @@ const _: () = {
         MaterializationError::AtomicPublicationUnsupported
     ));
 };
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn create(label: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos());
+            let path = std::env::temp_dir().join(format!(
+                "pigloros-atomic-publication-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).expect("create atomic-publication test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn assert_error<T>(result: Result<T, MaterializationError>, expected: &str) {
+        let error = result.err().expect("operation must be rejected");
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn pure_path_and_errno_boundaries_are_closed() {
+        assert_error(
+            output_parent_and_name(Path::new("")),
+            "untrusted output directory",
+        );
+        let nul_name = PathBuf::from(OsString::from_vec(b"bad\0name".to_vec()));
+        assert_error(
+            output_parent_and_name(&nul_name),
+            "untrusted output directory",
+        );
+        assert_error(
+            relative_file_path(Path::new("")),
+            "untrusted output directory",
+        );
+        assert_error(
+            relative_file_path(Path::new("../archive")),
+            "untrusted output directory",
+        );
+        assert_error(relative_file_path(&nul_name), "untrusted output directory");
+
+        assert!(matches!(
+            map_open_error(Errno::LOOP),
+            MaterializationError::SymlinkDetected
+        ));
+        for error in [Errno::NOSYS, Errno::INVAL, Errno::OPNOTSUPP, Errno::XDEV] {
+            assert!(matches!(
+                map_open_error(error),
+                MaterializationError::AtomicPublicationUnsupported
+            ));
+            assert!(matches!(
+                map_publish_error(error),
+                MaterializationError::AtomicPublicationUnsupported
+            ));
+            assert!(matches!(
+                map_sync_error(error),
+                MaterializationError::AtomicPublicationUnsupported
+            ));
+            assert!(matches!(
+                map_cleanup_error(error),
+                MaterializationError::AtomicPublicationUnsupported
+            ));
+        }
+        assert!(matches!(
+            map_open_error(Errno::ACCES),
+            MaterializationError::UntrustedOutputDirectory
+        ));
+        assert!(matches!(
+            map_publish_error(Errno::EXIST),
+            MaterializationError::DestinationExists
+        ));
+        assert!(matches!(
+            map_publish_error(Errno::ACCES),
+            MaterializationError::UntrustedOutputDirectory
+        ));
+        assert!(matches!(
+            map_sync_error(Errno::IO),
+            MaterializationError::DurabilitySyncFailed
+        ));
+        assert!(matches!(
+            map_cleanup_error(Errno::LOOP),
+            MaterializationError::SymlinkDetected
+        ));
+        assert!(matches!(
+            map_cleanup_error(Errno::ACCES),
+            MaterializationError::UntrustedOutputDirectory
+        ));
+    }
+
+    #[test]
+    fn retained_directory_identity_and_staged_bytes_are_revalidated() {
+        let root = TestDirectory::create("revalidation");
+        let destination = root.0.join("published");
+        let mut publication = AtomicPublication::prepare(&destination).expect("prepare staging");
+
+        let original_parent_identity = publication.parent_identity;
+        publication.parent_identity.inode ^= 1;
+        assert_error(
+            publication.revalidate_for_publish(),
+            "untrusted output directory",
+        );
+        publication.parent_identity = original_parent_identity;
+
+        let original_staging_identity = publication.staging_identity;
+        publication.staging_identity.inode ^= 1;
+        assert_error(
+            publication.revalidate_for_publish(),
+            "untrusted output directory",
+        );
+        publication.staging_identity = original_staging_identity;
+
+        publication
+            .write_file("result.cbor", b"changed")
+            .expect("write staged file");
+        assert_error(
+            publication.verify_and_sync(&[MaterializedFile {
+                relative_path: "result.cbor".to_owned(),
+                bytes: b"expected".to_vec(),
+                archive_release_filename: None,
+            }]),
+            "staged archive digest mismatch",
+        );
+    }
+
+    #[test]
+    fn metadata_and_cleanup_reject_untrusted_objects() {
+        let root = TestDirectory::create("metadata");
+        let destination = root.0.join("published");
+        let publication = AtomicPublication::prepare(&destination).expect("prepare staging");
+
+        let mut parent_metadata = fs::fstat(&publication.parent).expect("inspect parent");
+        parent_metadata.st_uid = parent_metadata.st_uid.wrapping_add(1);
+        assert_error(
+            validate_trusted_parent(parent_metadata, effective_uid()),
+            "untrusted output directory",
+        );
+
+        let mut staging_metadata = fs::fstat(&publication.staging).expect("inspect staging");
+        staging_metadata.st_mode = 0o600;
+        assert_error(
+            validate_private_staging(
+                staging_metadata,
+                publication.parent_identity,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+
+        let mut wrong_identity = publication.staging_identity;
+        wrong_identity.inode ^= 1;
+        assert_error(
+            remove_staging_tree(
+                &publication.parent,
+                publication.parent_identity,
+                publication.staging_name.as_c_str(),
+                wrong_identity,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+
+        let symlink_name = CString::new("unsafe-link").expect("literal has no NUL");
+        std::os::unix::fs::symlink(
+            "missing-target",
+            root.0
+                .join(publication.staging_name.to_string_lossy().as_ref())
+                .join("unsafe-link"),
+        )
+        .expect("create staged symlink");
+        assert_error(
+            remove_directory_entry(&publication.staging, symlink_name.as_c_str()),
+            "symbolic link detected in output path",
+        );
+        fs::unlinkat(
+            &publication.staging,
+            symlink_name.as_c_str(),
+            AtFlags::empty(),
+        )
+        .expect("remove staged symlink");
+    }
+}

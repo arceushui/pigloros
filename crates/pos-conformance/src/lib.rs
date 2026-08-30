@@ -201,6 +201,30 @@ mod coverage_entrypoints {
         })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn malformed_variants(value: &ciborium::Value) -> Vec<ciborium::Value> {
+        let mut variants = vec![
+            ciborium::Value::Map(Vec::new()),
+            ciborium::Value::Array(Vec::new()),
+            ciborium::Value::Text("not-a-canonical-value".to_owned()),
+            ciborium::Value::Integer(u64::MAX.into()),
+            ciborium::Value::Bytes(vec![0; 129]),
+        ];
+        if let ciborium::Value::Array(fields) = value {
+            if !fields.is_empty() {
+                variants.push(ciborium::Value::Array(fields[..fields.len() - 1].to_vec()));
+            }
+            for (index, field) in fields.iter().enumerate() {
+                for replacement in malformed_variants(field) {
+                    let mut changed = fields.clone();
+                    changed[index] = replacement;
+                    variants.push(ciborium::Value::Array(changed));
+                }
+            }
+        }
+        variants
+    }
+
     #[test]
     fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
         let boundary = wave8_plugin_boundary();
@@ -221,8 +245,11 @@ mod coverage_entrypoints {
 
         let evidence = tests::evidence();
         assert!(evidence.digest().is_ok());
-        let evidence_bytes = evidence.to_canonical_cbor();
-        assert!(evidence_bytes.is_ok());
+        let evidence_bytes = ok(evidence.to_canonical_cbor());
+        assert_eq!(
+            ok(MoatProofEvidenceV1::from_canonical_cbor(&evidence_bytes)),
+            evidence
+        );
         let verification = evidence.to_verification_result();
         assert!(verification.is_ok());
         let verification = verification.map(|result| {
@@ -281,6 +308,13 @@ mod coverage_entrypoints {
             &evidence.authoritative_events,
         ));
         let value = decode_value(ok(evidence.to_canonical_cbor()));
+        let rejected = malformed_variants(&value)
+            .into_iter()
+            .filter(|mutant| {
+                MoatProofEvidenceV1::from_canonical_cbor(&encode_value(mutant)).is_err()
+            })
+            .count();
+        assert!(rejected > 100);
         expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &replace_field(value.clone(), 0, ciborium::Value::Text("wrong".to_owned())),
         )));
