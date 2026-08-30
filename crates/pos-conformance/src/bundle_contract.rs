@@ -2327,6 +2327,12 @@ struct RawExpectedResults {
     member_paths: BTreeSet<String>,
 }
 
+struct RawExpectedResult {
+    key: (String, u64),
+    bytes: Vec<u8>,
+    path: String,
+}
+
 fn raw_expected_results(
     value: &Value,
     profile: &RawCpf1Summary,
@@ -2341,9 +2347,9 @@ fn raw_expected_results(
             let mut results = BTreeMap::new();
             let mut member_paths = BTreeSet::new();
             for record in expected {
-                let (key, bytes, path) = raw_expected_result(record, profile, members, mode)?;
-                results.insert(key, bytes);
-                member_paths.insert(path);
+                let result = raw_expected_result(record, profile, members, mode)?;
+                results.insert(result.key, result.bytes);
+                member_paths.insert(result.path);
             }
             let selected = profile
                 .fixtures
@@ -2367,7 +2373,7 @@ fn raw_expected_result(
     profile: &RawCpf1Summary,
     members: &[RawArchiveMember<'_>],
     mode: u64,
-) -> Result<((String, u64), Vec<u8>, String), BundleContractErrorV1> {
+) -> Result<RawExpectedResult, BundleContractErrorV1> {
     let fields = array(value, 6)?;
     let case_id = text(&fields[0])?;
     let claim_layer = uint(&fields[1])?;
@@ -2392,11 +2398,11 @@ fn raw_expected_result(
     {
         Err(BundleContractErrorV1::ExpectedResultMismatch)
     } else {
-        Ok((
-            (case_id.to_owned(), claim_layer),
-            member_bytes.to_vec(),
-            path.to_owned(),
-        ))
+        Ok(RawExpectedResult {
+            key: (case_id.to_owned(), claim_layer),
+            bytes: member_bytes.to_vec(),
+            path: path.to_owned(),
+        })
     }
 }
 
