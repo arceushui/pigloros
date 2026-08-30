@@ -4456,6 +4456,56 @@ mod erasure_coverage_tests {
         Ok(())
     }
 
+    #[test]
+    fn independent_supporting_collections_enforce_their_public_bounds() -> Result<(), ErasureErrorV1>
+    {
+        let acknowledgement =
+            ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+                request: ErasureReferenceV1::from_digest([1; 32]),
+                command: ErasureReferenceV1::from_digest([2; 32]),
+                attempt: ErasureReferenceV1::from_digest([3; 32]),
+                obligation: ErasureReferenceV1::from_digest([4; 32]),
+                owner: ErasureReferenceV1::from_digest([5; 32]),
+                scope: ErasureReferenceV1::from_digest([6; 32]),
+                outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+                evidence: ErasureReferenceV1::from_digest([7; 32]),
+                policy: ErasureReferenceV1::from_digest([8; 32]),
+                trust: ErasureReferenceV1::from_digest([9; 32]),
+            })?;
+        let oversized_acknowledgements = ErasureSupportingRecordsV1 {
+            acknowledgement_provenance: vec![acknowledgement; ERASURE_MAX_INVENTORY_RESULTS + 1],
+            ..ErasureSupportingRecordsV1::default()
+        };
+        assert_eq!(
+            oversized_acknowledgements.validate(),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+
+        let mut oversized_admission = ErasureRetryAdmissionInputV1 {
+            request: ErasureReferenceV1::from_digest([1; 32]),
+            attempt_ordinal: 0,
+            source_receipt: None,
+            unresolved_obligations: vec![
+                ErasureReferenceV1::from_digest([2; 32]);
+                ERASURE_MAX_INVENTORY_RESULTS + 1
+            ],
+            command_identities: vec![
+                ErasureReferenceV1::from_digest([3; 32]);
+                ERASURE_MAX_INVENTORY_RESULTS + 1
+            ],
+            policy: ErasureReferenceV1::from_digest([4; 32]),
+            trust: ErasureReferenceV1::from_digest([5; 32]),
+            admitted_position: 10,
+            deadline_position: 10,
+            authorization_provenance: ErasureReferenceV1::from_digest([6; 32]),
+        };
+        assert_eq!(
+            normalize_retry_admission(&mut oversized_admission),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+        Ok(())
+    }
+
     fn transition(
         lifecycle: ErasureLifecycleV1,
         freeze_position: Option<u64>,

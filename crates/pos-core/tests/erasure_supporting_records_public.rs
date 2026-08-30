@@ -908,6 +908,13 @@ fn supporting_attempt_chain_rejects_gaps_and_identity_mismatches() -> Result<(),
     let input = complete_supporting_input(reference(1))?;
     assert!(ErasureSupportingRecordsV1::new(input.clone()).is_ok());
 
+    let mut missing_admission = input.clone();
+    missing_admission.retry_admissions.clear();
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(missing_admission),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
     let mut unequal_lengths = input.clone();
     unequal_lengths.receipt_provenance.clear();
     assert_eq!(
