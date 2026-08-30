@@ -238,6 +238,21 @@ impl ErasureLifecycleV1 {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Complete | Self::PartialFailure | Self::Rejected)
     }
+    /// Report whether generic EventStore access must be rejected.
+    ///
+    /// V1 uses a conservative store-wide boundary because the scope-aware
+    /// Timeline integration is owned by the subsequent access-freeze work.
+    #[must_use]
+    pub const fn blocks_generic_timeline_access(self) -> bool {
+        matches!(
+            self,
+            Self::AccessFrozen
+                | Self::DestructionDispatched
+                | Self::AwaitingAcknowledgements
+                | Self::Complete
+                | Self::PartialFailure
+        )
+    }
 }
 
 /// Host-admitted outcome for a submitted ERQ1.
@@ -750,6 +765,22 @@ impl ErasureStateV1 {
             Err(ErasureErrorV1::ProvenanceMissing)
         }
     }
+    /// Verify the complete bounded predecessor chain for this state.
+    ///
+    /// A decoded ERS1 state proves only its own digest and shape. Callers that
+    /// load a state from durable storage must also resolve every predecessor
+    /// back to the submitted root before treating the state as authoritative.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when a predecessor is
+    /// absent, malformed, mismatched, or deeper than the V1 history bound.
+    pub fn verify_predecessor_chain<R: ErasureStateResolverV1>(
+        &self,
+        resolver: &R,
+    ) -> Result<(), ErasureErrorV1> {
+        verify_predecessor_chain(self.clone(), resolver)
+    }
     /// Return owners whose required target has not positively acknowledged.
     #[must_use]
     pub fn pending_owners(&self) -> &[ErasureReferenceV1] {
@@ -1225,6 +1256,9 @@ pub trait ErasureStateResolverV1 {
 /// conflicting replacement.
 pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     /// Load the authoritative record for one request after a process restart.
+    /// Implementations must validate the complete bounded ERS1 predecessor
+    /// chain before returning a record; validating only the current row is not
+    /// sufficient provenance.
     ///
     /// # Errors
     ///

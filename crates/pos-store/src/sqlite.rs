@@ -1774,7 +1774,39 @@ impl SqliteStore {
         }
     }
 
+    fn ensure_generic_erasure_access(&self) -> Result<(), CoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT record_cbor FROM erasure_records")
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        let records = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        for bytes in records {
+            let bytes = bytes.map_err(|error| CoreError::Storage(error.to_string()))?;
+            let record =
+                ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).map_err(|error| {
+                    CoreError::Storage(format!("invalid persisted erasure record: {error}"))
+                })?;
+            if record.state().lifecycle().blocks_generic_timeline_access() {
+                return Err(CoreError::Storage(
+                    "generic EventStore access is frozen by ErasureCoordinator".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_generic_timeline_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
+        self.ensure_generic_erasure_access().and_then(|()| {
+            crate::ensure_generic_timeline_visibility(
+                self.timeline_contains_geographic_evidence(timeline),
+                timeline,
+            )
+        })
+    }
+
+    fn ensure_admin_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
         crate::ensure_generic_timeline_visibility(
             self.timeline_contains_geographic_evidence(timeline),
             timeline,
@@ -1820,6 +1852,7 @@ impl SqliteStore {
         permit: Option<ConsentAppendPermit>,
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
+        self.ensure_generic_erasure_access()?;
         if gateway_consent {
             let bound_permit = self.consent_authority_permit.ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
@@ -3757,6 +3790,7 @@ impl EventStore for SqliteStore {
         timeline: TimelineId,
         events: &[Event],
     ) -> Result<(), CoreError> {
+        self.ensure_generic_erasure_access()?;
         if events.is_empty() {
             let _ = self
                 .get_timeline(timeline)?
@@ -3829,7 +3863,7 @@ impl EventStore for SqliteStore {
     }
 
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
-        self.ensure_generic_timeline_visibility(id).and_then(|()| {
+        self.ensure_admin_visibility(id).and_then(|()| {
             let id_str = id.to_string();
             // Refuse delete while child forks still reference this timeline.
             let child_count_query = self.conn.query_row(
@@ -4145,8 +4179,13 @@ impl ErasurePersistencePortV1 for SqliteStore {
                         if expected_digest != record.state().state_digest() {
                             return Err(ErasureErrorV1::ProvenanceMissing);
                         }
-                        self.resolve_state(expected_digest)?
-                            .map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| Ok(record))
+                        self.resolve_state(expected_digest)?.map_or(
+                            Err(ErasureErrorV1::ProvenanceMissing),
+                            |_| {
+                                record.state().verify_predecessor_chain(self)?;
+                                Ok(record)
+                            },
+                        )
                     } else {
                         Err(ErasureErrorV1::ProvenanceMissing)
                     }
@@ -4248,7 +4287,10 @@ fn validate_erasure_record_slot(
     Ok(Some(existing.state().state_digest()))
 }
 
-type ErasureStateRow = (Vec<u8>, Vec<u8>);
+struct ErasureStateRow {
+    request_digest: Vec<u8>,
+    state_cbor: Vec<u8>,
+}
 
 fn load_erasure_state_row(
     conn: &Connection,
@@ -4260,8 +4302,10 @@ fn load_erasure_state_row(
         params![digest.digest().as_slice()],
         |row| {
             row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
-                row.get::<_, Vec<u8>>(1)
-                    .map(|state_cbor| (request_digest, state_cbor))
+                row.get::<_, Vec<u8>>(1).map(|state_cbor| ErasureStateRow {
+                    request_digest,
+                    state_cbor,
+                })
             })
         },
     )
@@ -4277,8 +4321,8 @@ fn persist_erasure_state(
     state_bytes: &[u8],
     existing_state_digest: Option<ErasureReferenceV1>,
 ) -> Result<(), ErasureErrorV1> {
-    if let Some((request_digest, stored_state)) = load_erasure_state_row(conn, state_digest)? {
-        validate_erasure_state_row(request, state_bytes, request_digest, &stored_state)
+    if let Some(row) = load_erasure_state_row(conn, state_digest)? {
+        validate_erasure_state_row(request, state_bytes, row.request_digest, &row.state_cbor)
     } else {
         if existing_state_digest == Some(state_digest) {
             return Err(ErasureErrorV1::ProvenanceMissing);
@@ -4325,12 +4369,12 @@ fn validate_erasure_predecessor(
     let Some(previous) = record.state().previous_state() else {
         return Ok(());
     };
-    let (request_digest, previous_bytes) =
-        load_erasure_state_row(conn, previous)?.ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let metadata_request: [u8; 32] = request_digest
+    let row = load_erasure_state_row(conn, previous)?.ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let metadata_request: [u8; 32] = row
+        .request_digest
         .try_into()
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-    let decoded_previous = pos_core::ErasureStateV1::from_canonical_cbor(&previous_bytes)?;
+    let decoded_previous = pos_core::ErasureStateV1::from_canonical_cbor(&row.state_cbor)?;
     if ErasureReferenceV1::from_digest(metadata_request) != request {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }

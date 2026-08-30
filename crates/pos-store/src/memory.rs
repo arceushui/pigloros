@@ -257,7 +257,7 @@ fn mutable_state(
 #[inline(never)]
 fn delete_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
     store
-        .ensure_generic_timeline_visibility(id)
+        .ensure_admin_visibility(id)
         .and_then(|()| delete_visible_timeline(store, id))
 }
 
@@ -889,6 +889,7 @@ impl MemoryStore {
         permit: Option<ConsentAppendPermit>,
         cleanup_scope: Option<AppendDedupScope>,
     ) -> Result<Option<Vec<Event>>, CoreError> {
+        self.ensure_generic_erasure_access()?;
         if gateway_consent {
             let bound_permit = self.consent_authority_permit.ok_or_else(|| {
                 CoreError::Storage("Gateway consent authority is not bound".to_owned())
@@ -1039,7 +1040,32 @@ impl MemoryStore {
         Ok(self.geographic_timelines.contains(&timeline))
     }
 
+    fn ensure_generic_erasure_access(&self) -> Result<(), CoreError> {
+        self.erasure_records.values().try_for_each(|bytes| {
+            let record =
+                ErasureCoordinatorRecordV1::from_canonical_cbor(bytes).map_err(|error| {
+                    CoreError::Storage(format!("invalid persisted erasure record: {error}"))
+                })?;
+            if record.state().lifecycle().blocks_generic_timeline_access() {
+                Err(CoreError::Storage(
+                    "generic EventStore access is frozen by ErasureCoordinator".to_owned(),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
     fn ensure_generic_timeline_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
+        self.ensure_generic_erasure_access().and_then(|()| {
+            crate::ensure_generic_timeline_visibility(
+                self.timeline_contains_geographic_evidence(timeline),
+                timeline,
+            )
+        })
+    }
+
+    fn ensure_admin_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
         crate::ensure_generic_timeline_visibility(
             self.timeline_contains_geographic_evidence(timeline),
             timeline,
@@ -1157,8 +1183,13 @@ impl ErasurePersistencePortV1 for MemoryStore {
                 ErasureCoordinatorRecordV1::from_canonical_cbor(bytes).and_then(|record| {
                     if record.request().reference() == request {
                         let state_digest = record.state().state_digest();
-                        self.resolve_state(state_digest)?
-                            .map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| Ok(record))
+                        self.resolve_state(state_digest)?.map_or(
+                            Err(ErasureErrorV1::ProvenanceMissing),
+                            |_| {
+                                record.state().verify_predecessor_chain(self)?;
+                                Ok(record)
+                            },
+                        )
                     } else {
                         Err(ErasureErrorV1::ProvenanceMissing)
                     }
@@ -5161,6 +5192,27 @@ mod erasure_coverage_tests {
         staged_states.insert(state_digest, vec![0]);
         assert_eq!(
             stage_erasure_record(&mut staged_records, &mut staged_states, &record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn erasure_record_load_validates_the_complete_predecessor_chain(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let submitted = record()?;
+        let next = record_with_predecessor(submitted.state().state_digest())?;
+        let mut store = MemoryStore::new();
+        store
+            .erasure_records
+            .insert(next.request().reference(), next.to_canonical_cbor()?);
+        store.erasure_states.insert(
+            next.state().state_digest(),
+            next.state().to_canonical_cbor()?,
+        );
+
+        assert_eq!(
+            store.load_record(next.request().reference()),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         Ok(())

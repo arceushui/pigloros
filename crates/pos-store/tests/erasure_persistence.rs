@@ -4,14 +4,14 @@
 
 use pos_core::erasure::target_closure_digest;
 use pos_core::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
-    ErasureArtifactTransitionV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1,
-    ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
-    ErasureFreezeAdmissionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
+    CanonicalBytes, CoreError, EntityId, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
+    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinatorPortV1,
+    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
+    ErasureErrorV1, ErasureFreezeAdmissionV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
     ErasureKeyRoleV1, ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1, EventDraft, EventStore, Kind,
 };
 use pos_store::memory::MemoryStore;
 use std::cell::RefCell;
@@ -328,6 +328,39 @@ fn run_full_lifecycle<S: ErasurePersistencePortV1>(
     Ok((shared, receipt))
 }
 
+fn assert_generic_event_store_is_frozen<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: ErasurePersistencePortV1 + EventStore,
+{
+    let (shared, _) = run_full_lifecycle(store)?;
+    let timeline = shared.borrow_mut().create_timeline("frozen")?;
+    let timeline_id = timeline.id();
+    let draft = EventDraft::new(
+        EntityId::new(),
+        Kind::new("test.event"),
+        CanonicalBytes::from_static(b"payload"),
+    );
+
+    assert!(matches!(
+        shared.borrow_mut().append(timeline_id, &[draft]),
+        Err(CoreError::Storage(message)) if message.contains("frozen by ErasureCoordinator")
+    ));
+    assert!(matches!(
+        shared
+            .borrow()
+            .read(timeline_id, pos_core::SeqRange::all()),
+        Err(CoreError::Storage(message)) if message.contains("frozen by ErasureCoordinator")
+    ));
+    assert!(matches!(
+        pos_store::export_timeline(&*shared.borrow(), timeline_id),
+        Err(CoreError::Storage(message)) if message.contains("frozen by ErasureCoordinator")
+    ));
+
+    // Administrative rollback/deletion remains distinct from subject erasure.
+    shared.borrow_mut().delete_timeline(timeline_id)?;
+    Ok(())
+}
+
 fn full_receipt_input(
     first: ErasureRequiredTargetV1,
     second: ErasureRequiredTargetV1,
@@ -557,6 +590,12 @@ fn memory_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
     assert_eq!(receipt.acknowledgements().len(), 2);
     assert_eq!(receipt.acknowledgements()[0].target, target(10));
     Ok(())
+}
+
+#[test]
+fn memory_generic_event_store_cannot_bypass_a_frozen_erasure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_generic_event_store_is_frozen(MemoryStore::new())
 }
 
 #[test]
@@ -812,6 +851,47 @@ fn sqlite_erasure_terminal_retry_survives_reopen_with_noncanonical_inventory_ord
         receipt
     );
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_load_record_validates_the_complete_predecessor_chain(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or("temporary database path is not UTF-8")?;
+    let (shared, _) = run_full_lifecycle(SqliteStore::open(path)?)?;
+    let previous = shared
+        .borrow()
+        .load_record(reference(1))?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .state()
+        .previous_state()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    drop(shared);
+
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute(
+        "DELETE FROM erasure_states WHERE state_digest = ?1",
+        rusqlite::params![previous.digest().as_slice()],
+    )?;
+    drop(connection);
+
+    let reopened = SqliteStore::open(path)?;
+    assert_eq!(
+        reopened.load_record(reference(1)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_generic_event_store_cannot_bypass_a_frozen_erasure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_generic_event_store_is_frozen(SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
