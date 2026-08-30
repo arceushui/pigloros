@@ -1003,15 +1003,6 @@ fn validate_provider_registry(
     registry: &FixtureProviderRegistryV1,
 ) -> Result<(), BundleContractErrorV1> {
     let binding = &profile.fixture_provider_registry;
-    let used = profile
-        .fixtures
-        .iter()
-        .map(|f| f.provider_key.clone())
-        .collect::<BTreeSet<_>>();
-    if used.iter().collect::<Vec<_>>() != binding.required_provider_keys.iter().collect::<Vec<_>>()
-    {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
     let registry_package_paths = registry
         .providers
         .iter()

@@ -470,6 +470,46 @@ fn assert_provider_binding_rejections(archive: &[u8]) -> TestResult {
     )
 }
 
+fn assert_raw_inventory_boundary_rejections(archive: &[u8]) -> TestResult {
+    let extra_provider_coordinate = mutate_profile(archive, |profile| {
+        let fixtures = array_field(profile, 9, "profile fixtures")?;
+        let mut extra = fixtures
+            .last()
+            .cloned()
+            .ok_or("profile fixture is absent")?;
+        array_mut(&mut extra, "fixture")?[4] = Value::Array(vec![
+            Value::Text("zz.provider".to_owned()),
+            Value::Text("1.0.0".to_owned()),
+            Value::Integer(1_u64.into()),
+            Value::Integer(0_u64.into()),
+        ]);
+        fixtures.push(extra);
+        Ok(())
+    })?;
+    assert_independent_rejects(
+        &extra_provider_coordinate,
+        "an undeclared provider inventory coordinate",
+    )?;
+
+    let undeclared_execution_coordinate = mutate_profile(archive, |profile| {
+        array_field(profile, 7, "execution profile digests")?.insert(0, Value::Bytes(vec![2; 32]));
+        let originals = array_field(profile, 9, "profile fixtures")?.clone();
+        let mut expanded = Vec::with_capacity(originals.len() * 2);
+        for original in originals {
+            let mut additional = original.clone();
+            array_mut(&mut additional, "fixture")?[6] = Value::Bytes(vec![2; 32]);
+            expanded.push(additional);
+            expanded.push(original);
+        }
+        *array_field(profile, 9, "profile fixtures")? = expanded;
+        Ok(())
+    })?;
+    assert_independent_rejects(
+        &undeclared_execution_coordinate,
+        "a complete but undeclared execution inventory coordinate",
+    )
+}
+
 #[test]
 fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
     let archive = current_archive()?;
@@ -520,6 +560,7 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
     assert_independent_rejects(&mismatched_snapshot, "a mismatched trust-policy snapshot")?;
 
     assert_provider_binding_rejections(&archive)?;
+    assert_raw_inventory_boundary_rejections(&archive)?;
 
     let unordered_artifacts = mutate_profile(&archive, |profile| {
         let fixtures = array_field(profile, 9, "profile fixtures")?;
