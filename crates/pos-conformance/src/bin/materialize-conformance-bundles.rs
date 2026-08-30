@@ -976,11 +976,7 @@ fn prepare_command(
 }
 
 fn validate_source_inventory_address(destination: &Path) -> Result<(), MaterializationError> {
-    let digest: [u8; 32] = Sha256::digest(include_bytes!(
-        "../../../../fixtures/conformance/SHA256SUMS"
-    ))
-    .into();
-    let expected = pos_conformance::hex_digest(&digest);
+    let expected = pos_conformance::hex_digest(&SOURCE_INVENTORY_DIGEST);
     if destination
         .file_name()
         .and_then(|name| name.to_str())

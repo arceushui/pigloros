@@ -1,5 +1,6 @@
 use rustix::fs::{self as rustix_fs, Dir, FileType, Mode, OFlags, ResolveFlags, CWD};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
@@ -13,6 +14,22 @@ use std::path::{Component, Path, PathBuf};
 
 const PROFILE_COUNT: usize = 7;
 const FIXTURES_PER_PROFILE: usize = 7;
+const STATIC_SOURCE_PATHS: [&str; 14] = [
+    "BLAKE3SUMS",
+    "expected-authority/inventory.json",
+    "matrix/execution-matrix.json",
+    "support/LICENSE",
+    "support/NOTICE",
+    "support/build-provenance.json",
+    "support/draft-execution-authority.json",
+    "support/fixture-family-contract.json",
+    "support/limitations.md",
+    "support/normative-requirements.md",
+    "support/publication-review.json",
+    "support/sbom.json",
+    "support/schema-cpf1-v1.cddl",
+    "support/source-provenance.json",
+];
 
 struct CatalogRoot {
     source: PathBuf,
@@ -194,6 +211,107 @@ fn read_fixture_relative(
         ))
     })?;
     Ok(bytes)
+}
+
+fn checksum_digest(hex: &str, description: &str) -> Result<[u8; 32], io::Error> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return Err(invalid_data(format!(
+            "{description} must contain 64 ASCII hex digits"
+        )));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let pair = std::str::from_utf8(pair)
+            .map_err(|_| invalid_data(format!("{description} is not UTF-8")))?;
+        digest[index] = u8::from_str_radix(pair, 16)
+            .map_err(|_| invalid_data(format!("{description} contains a non-hex digit")))?;
+    }
+    Ok(digest)
+}
+
+fn checksum_manifest(
+    bytes: &[u8],
+    description: &str,
+) -> Result<std::collections::BTreeMap<String, [u8; 32]>, io::Error> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| invalid_data(format!("{description} must be UTF-8")))?;
+    if text.is_empty() || !text.ends_with('\n') {
+        return Err(invalid_data(format!(
+            "{description} must be non-empty and newline-terminated"
+        )));
+    }
+    text.lines()
+        .try_fold(std::collections::BTreeMap::new(), |mut entries, line| {
+            let (hex, relative) = line.split_once("  ").ok_or_else(|| {
+                invalid_data(format!("{description} contains a malformed record"))
+            })?;
+            let _ = relative_components(relative, description)?;
+            let digest = checksum_digest(hex, description)?;
+            if entries.insert(relative.to_owned(), digest).is_some() {
+                return Err(invalid_data(format!(
+                    "{description} contains duplicate path {relative}"
+                )));
+            }
+            Ok(entries)
+        })
+}
+
+fn expected_source_paths(profiles: &[ProfilePaths]) -> BTreeSet<String> {
+    let mut paths = STATIC_SOURCE_PATHS.map(str::to_owned).into_iter().collect();
+    for profile in profiles {
+        paths.insert(profile.profile.clone());
+        paths.insert(profile.provider.relative.clone());
+        for fixture in &profile.fixtures {
+            paths.insert(fixture.schema.relative.clone());
+            paths.insert(fixture.input.relative.clone());
+            paths.insert(fixture.expected.relative.clone());
+            paths.insert(fixture.oracle.relative.clone());
+        }
+    }
+    paths
+}
+
+fn verify_source_inventory(
+    root: &CatalogRoot,
+    profiles: &[ProfilePaths],
+) -> Result<[u8; 32], io::Error> {
+    let sha256_bytes = read_fixture_relative(root, "SHA256SUMS", "SHA-256 source inventory")?;
+    let sha256_entries = checksum_manifest(&sha256_bytes, "SHA-256 source inventory")?;
+    let expected_paths = expected_source_paths(profiles);
+    let declared_paths = sha256_entries.keys().cloned().collect::<BTreeSet<_>>();
+    if declared_paths != expected_paths {
+        return Err(invalid_data(
+            "SHA-256 source inventory does not declare the complete materialization closure",
+        ));
+    }
+    for (relative, expected) in &sha256_entries {
+        let bytes = read_fixture_relative(root, relative, "SHA-256 inventoried source")?;
+        let actual: [u8; 32] = Sha256::digest(&bytes).into();
+        if &actual != expected {
+            return Err(invalid_data(format!(
+                "SHA-256 source inventory digest mismatch for {relative}"
+            )));
+        }
+    }
+
+    let blake3_bytes = read_fixture_relative(root, "BLAKE3SUMS", "BLAKE3 source inventory")?;
+    let blake3_entries = checksum_manifest(&blake3_bytes, "BLAKE3 source inventory")?;
+    let mut blake3_paths = expected_paths;
+    blake3_paths.remove("BLAKE3SUMS");
+    if blake3_entries.keys().cloned().collect::<BTreeSet<_>>() != blake3_paths {
+        return Err(invalid_data(
+            "BLAKE3 source inventory does not declare the complete materialization closure",
+        ));
+    }
+    for (relative, expected) in blake3_entries {
+        let bytes = read_fixture_relative(root, &relative, "BLAKE3 inventoried source")?;
+        if blake3::hash(&bytes).as_bytes() != &expected {
+            return Err(invalid_data(format!(
+                "BLAKE3 source inventory digest mismatch for {relative}"
+            )));
+        }
+    }
+    Ok(Sha256::digest(&sha256_bytes).into())
 }
 
 fn json_field<'a>(value: &'a Value, field: &str) -> Result<&'a Value, io::Error> {
@@ -547,8 +665,11 @@ fn draft_authority_public_key(root: &CatalogRoot) -> Result<[u8; 32], io::Error>
     Ok(key)
 }
 
-fn emit_draft_authority(key: [u8; 32]) -> String {
-    format!("const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n")
+fn emit_build_contract(key: [u8; 32], source_inventory_digest: [u8; 32]) -> String {
+    format!(
+        "const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n\
+         const SOURCE_INVENTORY_DIGEST: [u8; 32] = {source_inventory_digest:?};\n"
+    )
 }
 
 fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
@@ -579,6 +700,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let root = catalog_root(&manifest_dir)?;
     let profiles = discover_profiles(&root)?;
+    let source_inventory_digest = verify_source_inventory(&root, &profiles)?;
     let draft_authority_key = draft_authority_public_key(&root)?;
     emit_rerun_directives(&root, &profiles);
     println!(
@@ -596,7 +718,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     std::fs::write(
         out_dir.join("draft_authority.rs"),
-        emit_draft_authority(draft_authority_key),
+        emit_build_contract(draft_authority_key, source_inventory_digest),
     )?;
     Ok(())
 }
