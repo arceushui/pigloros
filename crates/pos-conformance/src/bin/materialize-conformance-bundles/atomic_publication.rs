@@ -622,7 +622,7 @@ fn map_publish_error(error: Errno) -> MaterializationError {
 }
 
 #[cfg(target_os = "linux")]
-fn map_sync_error(error: Errno) -> MaterializationError {
+const fn map_sync_error(error: Errno) -> MaterializationError {
     if atomic_publication_is_unsupported(error) {
         MaterializationError::AtomicPublicationUnsupported
     } else {

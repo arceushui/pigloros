@@ -43,6 +43,7 @@ enum StagingMutation {
     InjectSymlink,
     InjectSocket,
     BlockFutureDirectory,
+    TamperStagedFile,
 }
 
 #[cfg(target_os = "linux")]
@@ -109,6 +110,25 @@ fn await_stopped_process(child: &mut std::process::Child) -> TestResult {
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn await_staged_file(path: &Path, child: &mut std::process::Child) -> TestResult {
+    for _ in 0..200_000 {
+        if let Some(status) = child.try_wait()? {
+            return Err(
+                format!("materializer exited before {path:?} was observable: {status}").into(),
+            );
+        }
+        if path.is_file() {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+    child.kill()?;
+    child.wait()?;
+    Err(format!("staged file {path:?} was not observable").into())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn mutate_live_staging(
     materializer: &std::ffi::OsStr,
     key: &str,
@@ -128,13 +148,18 @@ fn mutate_live_staging(
         .stderr(Stdio::piped())
         .spawn()?;
     let staging = await_staging_directory(&root, &mut child)?;
+    if matches!(mutation, StagingMutation::TamperStagedFile) {
+        await_staged_file(&staging.join("MATERIALIZATION-METADATA.json"), &mut child)?;
+    }
     signal_process(&child, "STOP")?;
     await_stopped_process(&mut child)?;
 
     let mutation_result = match mutation {
         StagingMutation::ReplaceIdentity => {
             let retained = root.join("retained-staging");
-            fs::rename(&staging, retained).and_then(|()| fs::create_dir(&staging))
+            fs::rename(&staging, retained)
+                .and_then(|()| fs::create_dir(&staging))
+                .and_then(|()| fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)))
         }
         StagingMutation::RelaxPermissions => {
             fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))
@@ -149,6 +174,10 @@ fn mutate_live_staging(
         StagingMutation::BlockFutureDirectory => {
             symlink("/dev/null", staging.join("empirical-evaluation"))
         }
+        StagingMutation::TamperStagedFile => fs::write(
+            staging.join("MATERIALIZATION-METADATA.json"),
+            b"tampered metadata",
+        ),
     };
     let resume_result = signal_process(&child, "CONT");
     if let Err(error) = mutation_result {
@@ -2777,6 +2806,13 @@ fn public_materializer_rejects_live_staging_replacement_and_contamination() -> T
         StagingMutation::BlockFutureDirectory,
     )?;
     assert!(stderr.contains("SymlinkDetected"));
+
+    let stderr = mutate_live_staging(
+        materializer.as_os_str(),
+        key,
+        StagingMutation::TamperStagedFile,
+    )?;
+    assert!(stderr.contains("ArchiveDigestMismatch"));
     Ok(())
 }
 
