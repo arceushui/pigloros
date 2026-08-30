@@ -6050,6 +6050,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let record = self.record(request)?;
         if record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements {
+            let admission = record
+                .supporting_records
+                .retry_admissions()
+                .last()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            if admission.authorization_provenance() != provenance {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
             return Ok(record.state);
         }
         if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen {

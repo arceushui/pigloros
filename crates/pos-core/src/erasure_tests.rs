@@ -1339,7 +1339,7 @@ fn durable_record_atomic_freeze_evidence_bindings_are_checked() -> Result<(), Er
     frozen_without_matrix.supporting_records.obligation_set = None;
     assert_eq!(
         ErasureCoordinatorRecordV1::from_parts(frozen_without_matrix, reference(2)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     let mut frozen_without_obligations = record_parts(&frozen);
     frozen_without_obligations
@@ -1549,7 +1549,8 @@ fn assert_complete_trait_record(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(freeze.host_evidence(), reference(9));
     assert_eq!(persisted.freeze_provenance(), Some(freeze.reference()));
-    assert_eq!(admission.trust(), reference(9));
+    assert_eq!(admission.authorization_provenance(), reference(9));
+    assert_eq!(admission.trust(), reference(3));
     assert_eq!(persisted.dispatch_provenance(), Some(admission.reference()));
     Ok(())
 }
@@ -1876,7 +1877,8 @@ fn dispatch_intent_is_persisted_before_host_dispatch() -> Result<(), ErasureErro
         .retry_admissions()
         .last()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    assert_eq!(admission.trust(), reference(9));
+    assert_eq!(admission.authorization_provenance(), reference(9));
+    assert_eq!(admission.trust(), reference(3));
     assert_eq!(persisted.dispatch_provenance(), Some(admission.reference()));
 
     let mut retry_port = restart_port;
@@ -2671,7 +2673,7 @@ fn receipt_public_seam_rejections() {
     mismatched_owner.acknowledgements[0].owner = reference(99);
     assert_eq!(
         ErasureReceiptV1::new(mismatched_owner),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     let mut missing_inventory = receipt_input(
         ErasureLifecycleV1::Complete,
@@ -4306,14 +4308,13 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
 }
 
 #[test]
-fn replacement_validation_rejects_removed_acknowledgements() -> Result<(), ErasureErrorV1> {
+fn durable_validation_rejects_removed_acknowledgements() -> Result<(), ErasureErrorV1> {
     let acknowledged = record_after_acknowledgement()?;
     let mut missing_ack_parts = record_parts(&acknowledged);
     missing_ack_parts.acknowledgements.clear();
-    let missing_ack = ErasureCoordinatorRecordV1::from_parts(missing_ack_parts, reference(2))?;
     assert_eq!(
-        acknowledged.validate_replacement(&missing_ack),
-        Err(ErasureErrorV1::PolicyConflict)
+        ErasureCoordinatorRecordV1::from_parts(missing_ack_parts, reference(2)),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
