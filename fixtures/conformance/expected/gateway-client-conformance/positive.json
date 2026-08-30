@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "c5c65e5e90a6df21c851ee9c2a898febac0ed3a0a48ee0951f2c0068086e16f7",
+  "input_blake3_digest": "0d7a6e470cb95acf01ac34889f7315967a76236995d371cfc2b6fcfd617ef036",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

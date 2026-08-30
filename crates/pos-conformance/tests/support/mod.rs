@@ -119,6 +119,7 @@ impl DescriptorField {
 
 #[derive(Clone, Copy)]
 pub enum ProfileField {
+    Lifecycle,
     ExecutionMatrixDigest,
     ExecutionProfileDigests,
     ProviderRegistryBinding,
@@ -132,6 +133,7 @@ impl ProfileField {
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
+            Self::Lifecycle => 4,
             Self::ExecutionMatrixDigest => 6,
             Self::ExecutionProfileDigests => 7,
             Self::ProviderRegistryBinding => 8,
@@ -528,6 +530,39 @@ pub fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[
     )
 }
 
+fn rebuild_archive_descriptors(archive: &mut [Value]) -> TestResult {
+    let descriptors = array_field(archive, ArchiveField::Members.index(), "archive members")?
+        .iter()
+        .map(|member| {
+            let fields = match member {
+                Value::Array(fields) => fields,
+                _ => return Err("archive member is not an array".into()),
+            };
+            let path = fields
+                .get(MemberField::Path.index())
+                .ok_or("archive member path is absent")?
+                .clone();
+            let bytes = match fields.get(MemberField::Bytes.index()) {
+                Some(Value::Bytes(bytes)) => bytes,
+                _ => return Err("archive member bytes are absent".into()),
+            };
+            let role = fields
+                .get(MemberField::Role.index())
+                .ok_or("archive member role is absent")?
+                .clone();
+            Ok(Value::Array(vec![
+                path,
+                Value::Integer(u64::try_from(bytes.len())?.into()),
+                Value::Bytes(blake3::hash(bytes).as_bytes().to_vec()),
+                role,
+            ]))
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    let manifest = array_field(archive, ArchiveField::Manifest.index(), "manifest")?;
+    manifest[ManifestField::MemberDescriptors.index()] = Value::Array(descriptors);
+    Ok(())
+}
+
 /// Re-signs an archive after a public-boundary mutation.
 ///
 /// # Errors
@@ -765,6 +800,7 @@ pub fn mutate_draft_evidence(
         PROFILE_MEMBER_PATH,
         &encode_value(&profile)?,
     )?;
+    rebuild_archive_descriptors(array_mut(&mut archive, "archive")?)?;
     let manifest = array_field(
         array_mut(&mut archive, "archive")?,
         ArchiveField::Manifest.index(),

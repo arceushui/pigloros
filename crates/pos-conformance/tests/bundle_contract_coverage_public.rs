@@ -90,7 +90,27 @@ fn public_verifiers_require_one_draft_evidence_record_per_fixture() -> TestResul
     };
     let without_profile_declaration = mutate_profile(&archive, |profile| {
         let fixtures = array_field(profile, ProfileField::Fixtures.index(), "profile fixtures")?;
-        let fixture = fixtures.first_mut().ok_or("profile fixture is absent")?;
+        let fixture = fixtures
+            .iter_mut()
+            .find(|fixture| {
+                let Value::Array(fields) = fixture else {
+                    return false;
+                };
+                matches!(
+                    fields.get(FixtureField::Auxiliary.index()),
+                    Some(Value::Array(auxiliary)) if auxiliary.iter().any(|descriptor| {
+                        matches!(
+                            descriptor,
+                            Value::Array(fields)
+                                if matches!(
+                                    fields.get(ArtifactDescriptorField::Path.index()),
+                                    Some(Value::Text(path)) if path == &evidence_path
+                                )
+                        )
+                    })
+                )
+            })
+            .ok_or("profile fixture does not declare the evidence member")?;
         let fields = array_mut(fixture, "fixture")?;
         array_field(
             fields,
@@ -102,26 +122,11 @@ fn public_verifiers_require_one_draft_evidence_record_per_fixture() -> TestResul
         });
         Ok(())
     })?;
-    let without_evidence = mutate_archive(&without_profile_declaration, |archive| {
-        array_field(archive, ArchiveField::Members.index(), "archive members")?.retain(|member| {
-            !matches!(member, Value::Array(fields) if fields.get(MemberField::Path.index()) == Some(&Value::Text(evidence_path.clone())))
-        });
-        let manifest = array_field(archive, ArchiveField::Manifest.index(), "manifest")?;
-        array_field(
-            manifest,
-            ManifestField::MemberDescriptors.index(),
-            "manifest descriptors",
-        )?
-        .retain(|descriptor| {
-            !matches!(descriptor, Value::Array(fields) if fields.get(DescriptorField::Path.index()) == Some(&Value::Text(evidence_path.clone())))
-        });
-        Ok(())
-    })?;
     assert_eq!(
-        ConformanceBundleV1::from_canonical_cbor(&without_evidence),
+        ConformanceBundleV1::from_canonical_cbor(&without_profile_declaration),
         Err(BundleContractErrorV1::ExpectedResultMismatch)
     );
-    assert_independent_rejects(&without_evidence, "missing Draft evidence")
+    assert_independent_rejects(&without_profile_declaration, "missing Draft evidence")
 }
 
 #[test]
@@ -533,4 +538,18 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
         Ok(())
     })?;
     assert_independent_rejects(&invalid_identifier, "an invalid provider identifier")
+}
+
+#[test]
+fn public_verifiers_reject_profile_lifecycle_mismatched_with_archive() -> TestResult {
+    let archive = current_archive()?;
+    let candidate_profile = mutate_profile(&archive, |profile| {
+        profile[ProfileField::Lifecycle.index()] = Value::Integer(1_u64.into());
+        Ok(())
+    })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&candidate_profile),
+        Err(BundleContractErrorV1::LifecycleInvalid)
+    );
+    assert_independent_rejects(&candidate_profile, "profile lifecycle mismatch")
 }

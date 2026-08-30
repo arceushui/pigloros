@@ -449,6 +449,9 @@ impl ConformanceBundleV1 {
                 ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
                     .map_err(|_| BundleContractErrorV1::ProfileInvalid)
                     .and_then(|profile| {
+                        if profile.lifecycle != self.manifest.lifecycle {
+                            return Err(BundleContractErrorV1::LifecycleInvalid);
+                        }
                         if profile.profile_digest != self.manifest.profile_digest {
                             return Err(BundleContractErrorV1::ProfileInvalid);
                         }
