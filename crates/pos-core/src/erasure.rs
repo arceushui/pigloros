@@ -4228,7 +4228,9 @@ impl ErasureCoordinatorRecordV1 {
                 .retry_admissions()
                 .last()
                 .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            if self.state.provenance() != admission.reference() {
+            if self.state.provenance() != admission.reference()
+                || self.dispatch_provenance != Some(admission.reference())
+            {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
