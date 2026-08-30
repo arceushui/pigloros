@@ -198,6 +198,12 @@ fn fixture_from_schema(
     let case_id = format!("example-{family_name}");
     let expected_path =
         expected_result_member_path(&case_id, ClaimLayerV1::ArtifactIntegrity, &execution);
+    let payload_path = fixture_input_member_path(
+        &case_id,
+        ClaimLayerV1::ArtifactIntegrity,
+        &execution,
+        "input.bin",
+    );
     let mut fixture = FixtureDescriptorV1 {
         case_id,
         mandatory: true,
@@ -208,16 +214,7 @@ fn fixture_from_schema(
         execution_profile_digest: execution,
         modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
         schema: family_schema.schema_descriptor.clone(),
-        payload: artifact(
-            &fixture_input_member_path(
-                &case_id,
-                ClaimLayerV1::ArtifactIntegrity,
-                &execution,
-                "input.bin",
-            ),
-            "application/octet-stream",
-            PAYLOAD_BYTES,
-        )?,
+        payload: artifact(&payload_path, "application/octet-stream", PAYLOAD_BYTES)?,
         auxiliary: vec![artifact(
             &expected_path,
             "application/json",
