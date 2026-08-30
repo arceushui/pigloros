@@ -1,1 +1,1 @@
-{"oracle":{"kind":"canonical-output"},"output":{"result":"accepted","post_state":{"committed":true}}}
+{"case_id":"replay-conformance-positive","claim_layer":"replay-conformance","family":"positive","oracle":{"kind":"canonical-output"},"output":{"replay":"deterministic","final_sequence":1}}

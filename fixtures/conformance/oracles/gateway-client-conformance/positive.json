@@ -1,1 +1,1 @@
-{"oracle":{"kind":"canonical-output"},"output":{"result":"accepted","post_state":{"committed":true}}}
+{"case_id":"gateway-client-conformance-positive","claim_layer":"gateway-client-conformance","family":"positive","oracle":{"kind":"canonical-output"},"output":{"response":{"status":200,"body":{"accepted":true}}}}

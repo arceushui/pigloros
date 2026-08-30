@@ -54,6 +54,10 @@ const MATRIX_BYTES: &[u8] =
 const AUTHORITY_INVENTORY_BYTES: &[u8] =
     include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
 const PROFILE_SCHEMA_BYTES: &[u8] = b"cpf1 schema";
+const FIXTURE_CONTRACT_POLICY_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/fixture-family-contract.json");
+const DRAFT_AUTHORITY_DECLARATION_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/draft-execution-authority.json");
 const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
 const PAYLOAD_BYTES: &[u8] = b"public fixture payload";
 const DRAFT_FIXTURE_AUTHORITY_KEY: [u8; 32] = [7; 32];
@@ -359,7 +363,7 @@ fn current_profile(
             trust_policy_snapshot_digest,
             requirements_digest: digest(55),
         },
-        fixture_contract_policy_digest: *blake3::hash(PROFILE_SCHEMA_BYTES).as_bytes(),
+        fixture_contract_policy_digest: *blake3::hash(FIXTURE_CONTRACT_POLICY_BYTES).as_bytes(),
         limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
         provenance_digest: *blake3::hash(PUBLICATION_REVIEW_BYTES).as_bytes(),
         previous_profile_digest: None,
@@ -502,6 +506,16 @@ fn current_bundle_members(
             PROFILE_SCHEMA_BYTES.to_vec(),
             BundleMemberRoleV1::Schema,
         ),
+        BundleMemberV1::supporting(
+            "support/fixture-family-contract.json",
+            FIXTURE_CONTRACT_POLICY_BYTES.to_vec(),
+            BundleMemberRoleV1::FixtureContractPolicy,
+        ),
+        BundleMemberV1::supporting(
+            "support/draft-execution-authority.json",
+            DRAFT_AUTHORITY_DECLARATION_BYTES.to_vec(),
+            BundleMemberRoleV1::AuthorityDeclaration,
+        ),
         BundleMemberV1::authority_inventory(AUTHORITY_INVENTORY_BYTES.to_vec()),
         BundleMemberV1::execution_matrix(MATRIX_BYTES.to_vec()),
         BundleMemberV1::supporting(
@@ -595,6 +609,46 @@ fn bundle_rejects_tampered_execution_authority_artifacts() -> TestResult {
             inputs.expected,
         )
         .is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn bundle_rejects_tampered_policy_and_authority_declaration() -> TestResult {
+    for (path, role) in [
+        (
+            "support/fixture-family-contract.json",
+            BundleMemberRoleV1::FixtureContractPolicy,
+        ),
+        (
+            "support/draft-execution-authority.json",
+            BundleMemberRoleV1::AuthorityDeclaration,
+        ),
+    ] {
+        let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+        let member = inputs
+            .members
+            .iter_mut()
+            .find(|member| member.path == path && member.role == role)
+            .ok_or("bound support member is absent")?;
+        member.bytes.push(b' ');
+        member.digest = *blake3::hash(&member.bytes).as_bytes();
+        assert!(ConformanceBundleV1::materialize(
+            &inputs.profile,
+            BundleModeV1::Local,
+            inputs.members,
+            inputs.expected,
+        )
+        .is_err());
+
+        let bundle = signed_current_bundle(BundleModeV1::Local)?;
+        let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
+        let Value::Array(fields) = &mut archive else {
+            return Err("archive is not an array".into());
+        };
+        replace_archive_member_bytes(fields, path, b"tampered")?;
+        resign_archive(&mut archive)?;
+        assert!(verify_archive_independently(&encode_value(&archive)?).is_err());
     }
     Ok(())
 }
@@ -4312,16 +4366,20 @@ fn member_constructors_hash_exact_raw_bytes_and_assign_current_roles() {
     let input = BundleMemberV1::fixture_input("fixtures/positive/input.json", b"input".to_vec());
     let expected =
         BundleMemberV1::expected_result("fixtures/positive/result.json", b"result".to_vec());
+    let evidence =
+        BundleMemberV1::evidence_status("evidence/positive/status.json", b"pending".to_vec());
     let registry = BundleMemberV1::fixture_provider_registry(b"registry".to_vec());
     let package =
         BundleMemberV1::fixture_provider_package("providers/example.fpp1", b"package".to_vec());
 
     assert_eq!(input.role, BundleMemberRoleV1::FixtureInput);
     assert_eq!(expected.role, BundleMemberRoleV1::ExpectedResult);
+    assert_eq!(evidence.role, BundleMemberRoleV1::EvidenceStatus);
     assert_eq!(registry.role, BundleMemberRoleV1::FixtureProviderRegistry);
     assert_eq!(package.role, BundleMemberRoleV1::FixtureProviderPackage);
     assert_eq!(input.digest, *blake3::hash(b"input").as_bytes());
     assert_eq!(expected.digest, *blake3::hash(b"result").as_bytes());
+    assert_eq!(evidence.digest, *blake3::hash(b"pending").as_bytes());
     assert_eq!(registry.digest, *blake3::hash(b"registry").as_bytes());
     assert_eq!(package.digest, *blake3::hash(b"package").as_bytes());
 }
@@ -4530,6 +4588,12 @@ fn every_public_member_role_is_constructible() {
         BundleMemberRoleV1::ExecutionMatrix,
         BundleMemberRoleV1::FixtureProviderRegistry,
         BundleMemberRoleV1::FixtureProviderPackage,
+        BundleMemberRoleV1::ExecutionProfile,
+        BundleMemberRoleV1::TrustPolicySnapshot,
+        BundleMemberRoleV1::ReleaseAdmission,
+        BundleMemberRoleV1::EvidenceStatus,
+        BundleMemberRoleV1::FixtureContractPolicy,
+        BundleMemberRoleV1::AuthorityDeclaration,
     ];
     for role in roles {
         let member = BundleMemberV1::supporting(format!("support/{role:?}"), vec![1], role);

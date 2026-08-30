@@ -2,7 +2,7 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "8e475e8616bf90476750bd38fa576fb6cfac3bdf159d32c36b6cc69f61c0dc27",
+  "input_blake3_digest": "755862848634804fa869a18a99bbbccec8d2e9bc931c60e817b0f11273f9e66a",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

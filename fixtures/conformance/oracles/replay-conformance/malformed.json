@@ -1,1 +1,1 @@
-{"oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.replay-conformance","contract_version":"1.0.0","code_id":"malformed-payload"}}
+{"case_id":"replay-conformance-malformed","claim_layer":"replay-conformance","family":"malformed","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.replay-conformance","contract_version":"1.0.0","code_id":"malformed-payload"}}

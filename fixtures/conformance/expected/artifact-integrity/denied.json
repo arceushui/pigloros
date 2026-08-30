@@ -2,7 +2,7 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-denied",
   "family": "denied",
-  "input_blake3_digest": "ff9d7a29073c065ea30cbb688259c03aae6a38597d8c842ed484dc8730d1490f",
+  "input_blake3_digest": "3dcc5b193fcbb4325aeb839f4871fd2cc03e24e1637cc8783c74e023d6d87d07",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

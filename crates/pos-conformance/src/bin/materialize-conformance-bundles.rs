@@ -110,7 +110,7 @@ enum CatalogFixtureFamily {
     IndependentEvaluation,
 }
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 enum CatalogExecutionProfile {
     DeterministicLocalV1,
@@ -139,14 +139,59 @@ impl CatalogExecutionProfile {
     }
 }
 
-const DRAFT_FIXTURE_AUTHORITY_KEY_ID: &str = "pigloros.fixture.conformance-authority";
 // This seed is repository test-fixture authority only.  It is never a
 // deployment trust root and is used solely to make Draft evidence reproducible.
 const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
-const DRAFT_FIXTURE_AUTHORITY_PUBLIC_BYTES: [u8; 32] = [
-    0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e, 0xc5, 0xf9,
-    0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69, 0x14, 0x46, 0xd2, 0x2c,
-];
+
+#[derive(Deserialize)]
+struct DraftAuthorityDeclaration {
+    trust_policy_id: String,
+    trust_policy_epoch: u64,
+    effective_timeline_position: u64,
+    offline_valid_through: String,
+    fixture_authority_key_id: String,
+    fixture_authority_public_key_hex: String,
+    execution_profiles: Vec<DraftExecutionProfileDeclaration>,
+}
+
+#[derive(Deserialize)]
+struct DraftExecutionProfileDeclaration {
+    profile_id: String,
+    semantic_version: String,
+    network_allowed: bool,
+    capability_ids: Vec<String>,
+    reproducibility_classes: Vec<String>,
+}
+
+fn draft_authority() -> Result<DraftAuthorityDeclaration, Box<dyn Error>> {
+    serde_json::from_slice(include_bytes!(
+        "../../../../fixtures/conformance/support/draft-execution-authority.json"
+    ))
+    .map_err(Into::into)
+}
+
+fn authority_public_key(authority: &DraftAuthorityDeclaration) -> Result<[u8; 32], Box<dyn Error>> {
+    let bytes = authority.fixture_authority_public_key_hex.as_bytes();
+    if bytes.len() != 64 {
+        return Err("Draft fixture authority public key must contain 64 hex digits".into());
+    }
+    let mut key = [0_u8; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        key[index] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+    }
+    Ok(key)
+}
+
+fn authority_signing_key(
+    authority: &DraftAuthorityDeclaration,
+) -> Result<SigningKey, Box<dyn Error>> {
+    let key = SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES);
+    if key.verifying_key().to_bytes() == authority_public_key(authority)? {
+        Ok(key)
+    } else {
+        Err("Draft fixture signing key does not match its public declaration".into())
+    }
+}
 
 fn cbor_bytes(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = Vec::new();
@@ -156,17 +201,36 @@ fn cbor_bytes(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, Box<dyn Error>> {
+    let authority = draft_authority()?;
+    let declaration = authority
+        .execution_profiles
+        .iter()
+        .find(|candidate| candidate.profile_id == profile.name())
+        .ok_or("Draft authority omits an execution profile")?;
+    let reproducibility_classes = declaration
+        .reproducibility_classes
+        .iter()
+        .map(|class| match class.as_str() {
+            "ProfileRecomputation" => Ok(Value::Integer(1_u64.into())),
+            "CrossProfileConformance" => Ok(Value::Integer(2_u64.into())),
+            _ => Err("Draft authority declares an unknown reproducibility class"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let fields = vec![
         Value::Text("EPF1".to_owned()),
         Value::Integer(1_u64.into()),
-        Value::Text(profile.name().to_owned()),
-        Value::Text("1.0.0".to_owned()),
-        Value::Array(vec![
-            Value::Integer(1_u64.into()),
-            Value::Integer(2_u64.into()),
-        ]),
-        Value::Bool(false),
-        Value::Array(Vec::new()),
+        Value::Text(declaration.profile_id.clone()),
+        Value::Text(declaration.semantic_version.clone()),
+        Value::Array(reproducibility_classes),
+        Value::Bool(declaration.network_allowed),
+        Value::Array(
+            declaration
+                .capability_ids
+                .iter()
+                .cloned()
+                .map(Value::Text)
+                .collect(),
+        ),
         Value::Text("fixture-scheduler-v1".to_owned()),
         Value::Text("fixture-numeric-v1".to_owned()),
         Value::Text("fixture-schema-v1".to_owned()),
@@ -184,22 +248,24 @@ fn execution_profile_bytes(profile: CatalogExecutionProfile) -> Result<Vec<u8>, 
 }
 
 fn trust_policy_snapshot_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
+    let authority = draft_authority()?;
+    let public_key = authority_public_key(&authority)?;
+    let key = authority_signing_key(&authority)?;
     let fields = vec![
         Value::Text("TPS1".to_owned()),
         Value::Integer(1_u64.into()),
-        Value::Text("pigloros.fixture.conformance-draft".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Integer(0_u64.into()),
-        Value::Text(DRAFT_FIXTURE_AUTHORITY_KEY_ID.to_owned()),
-        Value::Bytes(DRAFT_FIXTURE_AUTHORITY_PUBLIC_BYTES.to_vec()),
+        Value::Text(authority.trust_policy_id),
+        Value::Integer(authority.trust_policy_epoch.into()),
+        Value::Integer(authority.effective_timeline_position.into()),
+        Value::Text(authority.fixture_authority_key_id),
+        Value::Bytes(public_key.to_vec()),
         Value::Array(Vec::new()),
         Value::Array(Vec::new()),
         Value::Array(Vec::new()),
-        Value::Text("2030-01-01T00:00:00Z".to_owned()),
+        Value::Text(authority.offline_valid_through),
         Value::Null,
     ];
     cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
-        let key = SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES);
         let mut signed_fields = fields;
         signed_fields.push(Value::Bytes(key.sign(&unsigned).to_bytes().to_vec()));
         cbor_bytes(&Value::Array(signed_fields))
@@ -226,6 +292,8 @@ fn release_admission_bytes(
     from: &FixtureProviderKeyV1,
     to: &FixtureProviderKeyV1,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
+    let authority = draft_authority()?;
+    let key = authority_signing_key(&authority)?;
     let fields = vec![
         Value::Text("RAD1".to_owned()),
         Value::Integer(1_u64.into()),
@@ -236,17 +304,16 @@ fn release_admission_bytes(
         provider_key_value(from),
         provider_key_value(to),
         Value::Bool(false),
-        Value::Text(DRAFT_FIXTURE_AUTHORITY_KEY_ID.to_owned()),
+        Value::Text(authority.fixture_authority_key_id),
     ];
     cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
-        let key = SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES);
         let mut signed_fields = fields;
         signed_fields.push(Value::Bytes(key.sign(&unsigned).to_bytes().to_vec()));
         cbor_bytes(&Value::Array(signed_fields))
     })
 }
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 enum CatalogBundleMode {
     Local,
@@ -298,10 +365,13 @@ impl CatalogFixtureFamily {
 #[derive(Deserialize)]
 struct ProfileCatalogRecord {
     profile_id: String,
+    claim_layer: String,
     wire_code: u8,
     subject_adapter: String,
+    fixture_root: String,
     fixtures: Vec<ProfileFixtureRecord>,
     execution_profiles: [CatalogExecutionProfile; 2],
+    bundle_modes: [CatalogBundleMode; 2],
 }
 
 #[derive(Deserialize)]
@@ -328,7 +398,30 @@ enum CatalogStrictOracle {
 
 #[derive(Deserialize)]
 struct FixtureOracleRecord {
+    case_id: String,
+    claim_layer: String,
+    family: CatalogFixtureFamily,
     oracle: CatalogStrictOracle,
+}
+
+#[derive(Deserialize)]
+struct FixtureInputIdentity {
+    case_id: String,
+    claim_layer: String,
+    family: CatalogFixtureFamily,
+    provider_contract: String,
+    subject_adapter: String,
+}
+
+#[derive(Deserialize)]
+struct EvidenceStatusRecord {
+    case_id: String,
+    claim_layer: String,
+    family: CatalogFixtureFamily,
+    input_blake3_digest: String,
+    status: String,
+    execution_result: Option<serde_json::Value>,
+    executed_at: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -337,7 +430,11 @@ struct FixtureProviderRecord {
     contract_version: String,
     abi_major: u16,
     abi_minor: u16,
+    claim_layer: String,
+    subject_adapter: String,
     package_path: String,
+    fixture_operations: BTreeMap<CatalogFixtureFamily, Option<String>>,
+    schemas: BTreeMap<CatalogFixtureFamily, String>,
     fixture_contracts: BTreeMap<CatalogFixtureFamily, CatalogFixtureContract>,
 }
 
@@ -403,6 +500,7 @@ struct LayerCatalogEntry {
     profile_record: &'static [u8],
     fixtures: Vec<CatalogFixture>,
     execution_profiles: [CatalogExecutionProfile; 2],
+    bundle_modes: [CatalogBundleMode; 2],
 }
 
 struct LayerCatalog {
@@ -648,19 +746,50 @@ fn provider_schema_artifacts(layer: &LayerCatalogEntry) -> Vec<PublicArtifact> {
         .collect()
 }
 
-fn layer_catalog() -> LayerCatalog {
-    let entries = LAYER_SOURCES.iter().map(catalog_entry).collect::<Vec<_>>();
-    LayerCatalog {
-        entries,
-        bundle_modes: CatalogBundleMode::ALL,
-    }
+fn invalid_catalog(message: &str) -> Box<dyn Error> {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message).into()
 }
 
-fn catalog_entry(source: &LayerSource) -> LayerCatalogEntry {
-    let input = catalog_entry_input(source);
-    let (claim_layer, subject_adapter) = catalog_identity(&input.record);
-    let fixtures = catalog_fixtures(source, &input.record, &input.fixture_provider);
-    LayerCatalogEntry {
+fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
+    let entries = LAYER_SOURCES
+        .iter()
+        .map(catalog_entry)
+        .collect::<Result<Vec<_>, _>>()?;
+    let bundle_modes = entries
+        .first()
+        .map_or(CatalogBundleMode::ALL, |entry| entry.bundle_modes);
+    if entries
+        .iter()
+        .any(|entry| entry.bundle_modes != bundle_modes)
+    {
+        return Err(invalid_catalog("profile bundle modes disagree"));
+    }
+    Ok(LayerCatalog {
+        entries,
+        bundle_modes,
+    })
+}
+
+fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Error>> {
+    let input = catalog_entry_input(source)?;
+    let (claim_layer, subject_adapter) = catalog_identity(&input.record)?;
+    let fixtures_match_profile = input.record.fixtures.len() == CatalogFixtureFamily::ALL.len()
+        && input
+            .record
+            .fixtures
+            .iter()
+            .zip(CatalogFixtureFamily::ALL)
+            .all(|(fixture, family)| {
+                fixture.family == family && fixture.claim_layer == input.record.claim_layer
+            });
+    if !fixtures_match_profile
+        || input.record.execution_profiles != CatalogExecutionProfile::ALL
+        || input.record.bundle_modes != CatalogBundleMode::ALL
+    {
+        return Err(invalid_catalog("profile catalog shape is invalid"));
+    }
+    let fixtures = catalog_fixtures(source, &input.record, &input.fixture_provider)?;
+    Ok(LayerCatalogEntry {
         claim_layer,
         name: claim_layer.catalog_name(),
         profile_id: input.record.profile_id,
@@ -669,42 +798,76 @@ fn catalog_entry(source: &LayerSource) -> LayerCatalogEntry {
         profile_record: source.profile_record,
         fixtures,
         execution_profiles: input.record.execution_profiles,
-    }
+        bundle_modes: input.record.bundle_modes,
+    })
 }
 
-fn catalog_entry_input(source: &LayerSource) -> CatalogEntryInput {
-    let record = embedded_catalog_result(serde_json::from_slice(source.profile_record));
-    let fixture_provider = embedded_catalog_result(serde_json::from_slice(source.provider_record));
-    CatalogEntryInput {
+fn catalog_entry_input(source: &LayerSource) -> Result<CatalogEntryInput, Box<dyn Error>> {
+    let record = serde_json::from_slice(source.profile_record)?;
+    let fixture_provider = serde_json::from_slice(source.provider_record)?;
+    Ok(CatalogEntryInput {
         record,
         fixture_provider,
-    }
+    })
 }
 
-fn catalog_identity(record: &ProfileCatalogRecord) -> (ClaimLayerV1, SubjectAdapterKindV1) {
-    let claim_layer = embedded_catalog_option(ClaimLayerV1::from_wire_code(record.wire_code));
-    let subject_adapter = embedded_catalog_option(SubjectAdapterKindV1::from_catalog_name(
-        &record.subject_adapter,
-    ));
-    (claim_layer, subject_adapter)
+fn catalog_identity(
+    record: &ProfileCatalogRecord,
+) -> Result<(ClaimLayerV1, SubjectAdapterKindV1), Box<dyn Error>> {
+    let claim_layer = ClaimLayerV1::from_wire_code(record.wire_code)
+        .ok_or_else(|| invalid_catalog("profile wire code is invalid"))?;
+    let subject_adapter = SubjectAdapterKindV1::from_catalog_name(&record.subject_adapter)
+        .ok_or_else(|| invalid_catalog("profile subject adapter is invalid"))?;
+    if record.claim_layer != claim_layer.catalog_name() || record.fixture_root != record.claim_layer
+    {
+        return Err(invalid_catalog("profile identity is inconsistent"));
+    }
+    Ok((claim_layer, subject_adapter))
 }
 
 fn catalog_fixtures(
     source: &LayerSource,
     record: &ProfileCatalogRecord,
     fixture_provider: &FixtureProviderRecord,
-) -> Vec<CatalogFixture> {
+) -> Result<Vec<CatalogFixture>, Box<dyn Error>> {
+    let provider_contract = format!(
+        "{}@{}",
+        fixture_provider.provider_id, fixture_provider.contract_version
+    );
+    if fixture_provider.claim_layer != record.claim_layer
+        || fixture_provider.subject_adapter != record.subject_adapter
+        || source.fixtures.len() != record.fixtures.len()
+    {
+        return Err(invalid_catalog("provider identity is inconsistent"));
+    }
     source
         .fixtures
         .iter()
         .zip(record.fixtures.iter())
         .map(|(fixture_source, fixture_record)| {
-            let contract = embedded_catalog_option(
-                fixture_provider
-                    .fixture_contracts
-                    .get(&fixture_record.family),
-            );
-            catalog_fixture(fixture_record, fixture_source, contract)
+            let contract = fixture_provider
+                .fixture_contracts
+                .get(&fixture_record.family)
+                .ok_or_else(|| invalid_catalog("provider contract is missing"))?;
+            let operation = fixture_provider
+                .fixture_operations
+                .get(&fixture_record.family)
+                .ok_or_else(|| invalid_catalog("provider operation is missing"))?;
+            let schema = fixture_provider
+                .schemas
+                .get(&fixture_record.family)
+                .ok_or_else(|| invalid_catalog("provider schema is missing"))?;
+            if schema != &fixture_record.schema {
+                return Err(invalid_catalog("provider schema binding is inconsistent"));
+            }
+            catalog_fixture(
+                fixture_record,
+                fixture_source,
+                contract,
+                &provider_contract,
+                &record.subject_adapter,
+                operation.as_deref(),
+            )
         })
         .collect()
 }
@@ -713,10 +876,45 @@ fn catalog_fixture(
     record: &ProfileFixtureRecord,
     source: &FixtureSource,
     contract: &CatalogFixtureContract,
-) -> CatalogFixture {
-    let oracle: FixtureOracleRecord =
-        embedded_catalog_result(serde_json::from_slice(source.oracle));
-    CatalogFixture {
+    provider_contract: &str,
+    subject_adapter: &str,
+    operation: Option<&str>,
+) -> Result<CatalogFixture, Box<dyn Error>> {
+    let oracle: FixtureOracleRecord = serde_json::from_slice(source.oracle)?;
+    let input: FixtureInputIdentity = serde_json::from_slice(source.input)?;
+    let evidence: EvidenceStatusRecord = serde_json::from_slice(source.expected)?;
+    let input_digest = blake3::hash(source.input).to_hex().to_string();
+    let identity_matches = input.case_id == record.case_id
+        && input.claim_layer == record.claim_layer
+        && input.family == record.family
+        && input.provider_contract == provider_contract
+        && input.subject_adapter == subject_adapter
+        && evidence.case_id == record.case_id
+        && evidence.claim_layer == record.claim_layer
+        && evidence.family == record.family
+        && evidence.input_blake3_digest == input_digest
+        && evidence.status == "pending"
+        && evidence.execution_result.is_none()
+        && evidence.executed_at.is_none()
+        && oracle.case_id == record.case_id
+        && oracle.claim_layer == record.claim_layer
+        && oracle.family == record.family;
+    let operation_matches = operation.is_none_or(|expected| {
+        serde_json::from_slice::<serde_json::Value>(source.input)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/stimulus/operation")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .as_deref()
+            == Some(expected)
+    });
+    if !identity_matches || !operation_matches {
+        return Err(invalid_catalog("fixture identity is inconsistent"));
+    }
+    Ok(CatalogFixture {
         record: ProfileFixtureRecord {
             case_id: record.case_id.clone(),
             claim_layer: record.claim_layer.clone(),
@@ -732,7 +930,7 @@ fn catalog_fixture(
         expected: source.expected,
         oracle: source.oracle,
         strict_oracle: oracle.oracle,
-    }
+    })
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -811,7 +1009,7 @@ fn execute_command(
 fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
     let inventory_bytes =
         include_bytes!("../../../../fixtures/conformance/expected-authority/inventory.json");
-    let catalog = layer_catalog();
+    let catalog = layer_catalog()?;
     let providers = provider_catalog(&catalog);
     let context = MaterializationContext {
         signing_key,
@@ -1186,7 +1384,7 @@ fn profile_from_catalog(
                             ),
                         },
                         fixture_contract_policy_digest: *blake3::hash(include_bytes!(
-                            "../../../../fixtures/conformance/support/schema-cpf1-v1.cddl"
+                            "../../../../fixtures/conformance/support/fixture-family-contract.json"
                         ))
                         .as_bytes(),
                         limitations_digest: context.limitations_digest,
@@ -1460,7 +1658,7 @@ fn bundle_inputs_from_profile(
         );
         let evidence_path =
             evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
-        members.push(BundleMemberV1::expected_result(
+        members.push(BundleMemberV1::evidence_status(
             evidence_path,
             source.expected.to_vec(),
         ));
@@ -1540,6 +1738,18 @@ fn append_supporting_members(
         "support/schema-cpf1-v1.cddl",
         include_bytes!("../../../../fixtures/conformance/support/schema-cpf1-v1.cddl").to_vec(),
         BundleMemberRoleV1::Schema,
+    ));
+    members.push(BundleMemberV1::supporting(
+        "support/fixture-family-contract.json",
+        include_bytes!("../../../../fixtures/conformance/support/fixture-family-contract.json")
+            .to_vec(),
+        BundleMemberRoleV1::FixtureContractPolicy,
+    ));
+    members.push(BundleMemberV1::supporting(
+        "support/draft-execution-authority.json",
+        include_bytes!("../../../../fixtures/conformance/support/draft-execution-authority.json")
+            .to_vec(),
+        BundleMemberRoleV1::AuthorityDeclaration,
     ));
     for schema in providers
         .packages
@@ -1640,6 +1850,124 @@ fn append_draft_release_admissions(
                 ));
             })
         })
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    fn first_catalog_input() -> Result<CatalogEntryInput, Box<dyn Error>> {
+        catalog_entry_input(&LAYER_SOURCES[0])
+    }
+
+    #[test]
+    fn embedded_catalog_uses_manifest_owned_identity_modes_and_fixtures(
+    ) -> Result<(), Box<dyn Error>> {
+        let catalog = layer_catalog()?;
+        assert_eq!(catalog.entries.len(), 7);
+        assert_eq!(catalog.bundle_modes, CatalogBundleMode::ALL);
+        assert!(catalog.entries.iter().all(|entry| {
+            entry.name == entry.claim_layer.catalog_name()
+                && entry.bundle_modes == CatalogBundleMode::ALL
+                && entry.execution_profiles == CatalogExecutionProfile::ALL
+                && entry.fixtures.len() == CatalogFixtureFamily::ALL.len()
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_identity_rejects_each_conflicting_manifest_field() -> Result<(), Box<dyn Error>> {
+        let mut input = first_catalog_input()?;
+        input.record.claim_layer = "replay-conformance".to_owned();
+        assert!(catalog_identity(&input.record).is_err());
+
+        let mut input = first_catalog_input()?;
+        input.record.fixture_root = "other-root".to_owned();
+        assert!(catalog_identity(&input.record).is_err());
+
+        let mut input = first_catalog_input()?;
+        input.record.wire_code = u8::MAX;
+        assert!(catalog_identity(&input.record).is_err());
+
+        let mut input = first_catalog_input()?;
+        input.record.subject_adapter = "private-helper".to_owned();
+        assert!(catalog_identity(&input.record).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_fixture_rejects_conflicting_public_records() -> Result<(), Box<dyn Error>> {
+        let input = first_catalog_input()?;
+        let record = &input.record.fixtures[0];
+        let contract = input
+            .fixture_provider
+            .fixture_contracts
+            .get(&record.family)
+            .ok_or("fixture contract is absent")?;
+        let source = &LAYER_SOURCES[0].fixtures[0];
+        let provider_contract = format!(
+            "{}@{}",
+            input.fixture_provider.provider_id, input.fixture_provider.contract_version
+        );
+        let operation = input
+            .fixture_provider
+            .fixture_operations
+            .get(&record.family)
+            .and_then(|value| value.as_deref());
+        assert!(catalog_fixture(
+            record,
+            source,
+            contract,
+            &provider_contract,
+            &input.record.subject_adapter,
+            operation,
+        )
+        .is_ok());
+        assert!(catalog_fixture(
+            record,
+            source,
+            contract,
+            "wrong-provider@1.0.0",
+            &input.record.subject_adapter,
+            operation,
+        )
+        .is_err());
+        assert!(catalog_fixture(
+            record,
+            source,
+            contract,
+            &provider_contract,
+            &input.record.subject_adapter,
+            Some("wrong-operation"),
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_entry_rejects_profile_and_provider_drift() -> Result<(), Box<dyn Error>> {
+        let source = &LAYER_SOURCES[0];
+        let mut profile: serde_json::Value = serde_json::from_slice(source.profile_record)?;
+        profile["bundle_modes"] = serde_json::json!(["air-gapped", "local"]);
+        let profile = Box::leak(serde_json::to_vec(&profile)?.into_boxed_slice());
+        let changed = LayerSource {
+            profile_record: profile,
+            provider_record: source.provider_record,
+            fixtures: source.fixtures,
+        };
+        assert!(catalog_entry(&changed).is_err());
+
+        let mut provider: serde_json::Value = serde_json::from_slice(source.provider_record)?;
+        provider["claim_layer"] = serde_json::Value::String("replay-conformance".to_owned());
+        let provider = Box::leak(serde_json::to_vec(&provider)?.into_boxed_slice());
+        let changed = LayerSource {
+            profile_record: source.profile_record,
+            provider_record: provider,
+            fixtures: source.fixtures,
+        };
+        assert!(catalog_entry(&changed).is_err());
+        Ok(())
+    }
 }
 
 fn verify_public_archive(

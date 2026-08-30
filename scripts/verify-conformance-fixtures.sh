@@ -32,8 +32,8 @@ jq -e '
      else
        (has("code_id") | not)
      end) and
-    (.input_with_operation | type == "object") and
-    (if .operation == "optional" then (.input_without_operation | type == "object") else true end)
+    (has("input_with_operation") | not) and
+    (has("input_without_operation") | not)
   )
 ' "${family_contract}" >/dev/null || {
   echo "invalid canonical fixture-family contract" >&2
@@ -207,6 +207,11 @@ for layer in "${profile_layers[@]}"; do
      (.subject_adapter | type == "string" and length > 0) and
      (.fixture_operations | keys | sort) == ($family_names | sort) and
      all(.fixture_operations[]; . == null or (type == "string" and length > 0)) and
+     (.fixture_payloads | keys | sort) == ($family_names | sort) and
+     all(.fixture_payloads[];
+       (.with_operation | type == "object") and
+       ((has("without_operation") | not) or (.without_operation | type == "object"))
+     ) and
      (.schemas | length == $family_count) and
      (.fixture_contracts | keys | sort) == ($family_names | sort) and
      all(.fixture_contracts[];
@@ -260,8 +265,9 @@ for layer in "${profile_layers[@]}"; do
           (.properties.stimulus.type == "string" or (.properties | has("stimulus") | not))
         else
           ((.properties.stimulus.properties.operation.type == "string") or
-           (.properties.stimulus.properties.operation.const | type == "string")) and
-          ((.properties.stimulus.properties.operation.const // $fixture_operation) == $fixture_operation)
+           (.properties.stimulus.properties.operation.const | type == "string") or
+           (.properties.stimulus.const.operation | type == "string")) and
+          ((.properties.stimulus.properties.operation.const // .properties.stimulus.const.operation // $fixture_operation) == $fixture_operation)
         end)' \
       "${fixture_root}/${schema_path}" >/dev/null || {
       echo "invalid fixture-family schema for ${layer}: ${schema_path}" >&2
@@ -303,8 +309,9 @@ for layer in "${profile_layers[@]}"; do
       echo "invalid pending evidence-status record for ${layer}: ${expected_path}" >&2
       exit 1
     }
-    jq -e --arg provider_id "${provider_id}" --arg contract_version "${contract_version}" --arg oracle_kind "${oracle_kind}" --arg oracle_code_id "${oracle_code_id}" \
-      'if $oracle_kind == "canonical-output" then
+    jq -e --arg case_id "${case_id}" --arg fixture_layer "${fixture_layer}" --arg family "${family}" --arg provider_id "${provider_id}" --arg contract_version "${contract_version}" --arg oracle_kind "${oracle_kind}" --arg oracle_code_id "${oracle_code_id}" \
+      '.case_id == $case_id and .claim_layer == $fixture_layer and .family == $family and
+       if $oracle_kind == "canonical-output" then
          .oracle.kind == $oracle_kind and
          has("output") and (.output != null)
        elif $oracle_kind == "namespaced-failure" then

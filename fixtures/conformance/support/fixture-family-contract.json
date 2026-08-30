@@ -5,107 +5,54 @@
     {
       "name": "positive",
       "operation": "required",
-      "oracle": { "kind": "canonical-output" },
-      "input_with_operation": {
-        "stimulus": { "operation": "$operation", "arguments": { "seed": 1 } },
-        "expected": { "result": "accepted", "post_state": { "committed": true } }
+      "oracle": {
+        "kind": "canonical-output"
       }
     },
     {
       "name": "denied",
       "operation": "required",
-      "oracle": { "kind": "namespaced-failure", "code_id": "capability-denied" },
-      "input_with_operation": {
-        "stimulus": {
-          "operation": "$operation",
-          "required_capability": "mutate-subject",
-          "pre_state": { "revision": 1 }
-        },
-        "expected": {
-          "failure_code": "capability-denied",
-          "post_state": { "revision": 1 }
-        }
+      "oracle": {
+        "kind": "namespaced-failure",
+        "code_id": "capability-denied"
       }
     },
     {
       "name": "malformed",
       "operation": "optional",
-      "oracle": { "kind": "namespaced-failure", "code_id": "malformed-payload" },
-      "input_with_operation": {
-        "stimulus": { "operation": "$operation", "payload": "malformed-provider-payload" },
-        "expected": { "failure_code": "malformed-payload" }
-      },
-      "input_without_operation": {
-        "stimulus": "malformed-provider-payload",
-        "expected": { "failure_code": "malformed-payload" }
+      "oracle": {
+        "kind": "namespaced-failure",
+        "code_id": "malformed-payload"
       }
     },
     {
       "name": "resource-exhaustion",
       "operation": "required",
-      "oracle": { "kind": "namespaced-failure", "code_id": "resource-limit" },
-      "input_with_operation": {
-        "stimulus": { "operation": "$operation" },
-        "limit": { "kind": "execution-steps", "maximum": 10000000, "requested": 10000001 },
-        "expected": { "failure_code": "resource-limit" }
+      "oracle": {
+        "kind": "namespaced-failure",
+        "code_id": "resource-limit"
       }
     },
     {
       "name": "deletion-redaction",
       "operation": "required",
-      "oracle": { "kind": "canonical-output" },
-      "input_with_operation": {
-        "pre_state": {
-          "prohibited_data": "synthetic-secret",
-          "retained_metadata": { "record_id": "synthetic-1" }
-        },
-        "stimulus": { "operation": "$operation" },
-        "expected": {
-          "post_state": {
-            "prohibited_data_present": false,
-            "retained_metadata": { "record_id": "synthetic-1" }
-          }
-        }
+      "oracle": {
+        "kind": "canonical-output"
       }
     },
     {
       "name": "downgrade",
       "operation": "required",
-      "oracle": { "kind": "namespaced-failure", "code_id": "incompatible-contract" },
-      "input_with_operation": {
-        "stimulus": {
-          "operation": "$operation",
-          "from_provider": {
-            "provider_id": "$provider_id",
-            "contract_version": "$contract_version",
-            "abi_major": "$abi_major",
-            "abi_minor": "$abi_minor_next"
-          },
-          "to_provider": {
-            "provider_id": "$provider_id",
-            "contract_version": "$contract_version",
-            "abi_major": "$abi_major",
-            "abi_minor": "$abi_minor"
-          },
-          "allow_fallback": false
-        },
-        "expected": { "failure_code": "incompatible-contract" }
+      "oracle": {
+        "kind": "namespaced-failure",
+        "code_id": "incompatible-contract"
       }
     },
     {
       "name": "independent-evaluation",
       "operation": "optional",
-      "oracle": { "kind": "canonical-output" },
-      "input_with_operation": {
-        "stimulus": { "operation": "$operation" },
-        "algorithm": "BLAKE3-256",
-        "input": "$independent_input",
-        "expected_digest": "$independent_digest"
-      },
-      "input_without_operation": {
-        "algorithm": "BLAKE3-256",
-        "input": "$independent_input",
-        "expected_digest": "$independent_digest"
+      "oracle": {
+        "kind": "canonical-output"
       }
     }
   ]

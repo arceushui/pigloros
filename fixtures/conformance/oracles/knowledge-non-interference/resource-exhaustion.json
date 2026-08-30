@@ -1,1 +1,1 @@
-{"oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.knowledge-non-interference","contract_version":"1.0.0","code_id":"resource-limit"}}
+{"case_id":"knowledge-non-interference-resource-exhaustion","claim_layer":"knowledge-non-interference","family":"resource-exhaustion","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.knowledge-non-interference","contract_version":"1.0.0","code_id":"resource-limit"}}

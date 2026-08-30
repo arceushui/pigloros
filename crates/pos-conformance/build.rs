@@ -178,21 +178,25 @@ fn validate_fixture_provider(
 ) -> Result<(), io::Error> {
     let schemas = json_field(provider, "schemas")?.as_object();
     let operations = json_field(provider, "fixture_operations")?.as_object();
+    let payloads = json_field(provider, "fixture_payloads")?.as_object();
     let contracts = json_field(provider, "fixture_contracts")?.as_object();
-    let contracts_match_families =
-        schemas
-            .zip(operations)
-            .zip(contracts)
-            .is_some_and(|((schemas, operations), contracts)| {
-                let schema_families = schemas.keys().collect::<BTreeSet<_>>();
-                let operation_families = operations.keys().collect::<BTreeSet<_>>();
-                let contract_families = contracts.keys().collect::<BTreeSet<_>>();
-                schemas.len() == FIXTURES_PER_PROFILE
-                    && operations.len() == FIXTURES_PER_PROFILE
-                    && contracts.len() == FIXTURES_PER_PROFILE
-                    && schema_families == operation_families
-                    && schema_families == contract_families
-            });
+    let contracts_match_families = schemas
+        .zip(operations)
+        .zip(payloads)
+        .zip(contracts)
+        .is_some_and(|(((schemas, operations), payloads), contracts)| {
+            let schema_families = schemas.keys().collect::<BTreeSet<_>>();
+            let operation_families = operations.keys().collect::<BTreeSet<_>>();
+            let payload_families = payloads.keys().collect::<BTreeSet<_>>();
+            let contract_families = contracts.keys().collect::<BTreeSet<_>>();
+            schemas.len() == FIXTURES_PER_PROFILE
+                && operations.len() == FIXTURES_PER_PROFILE
+                && payloads.len() == FIXTURES_PER_PROFILE
+                && contracts.len() == FIXTURES_PER_PROFILE
+                && schema_families == operation_families
+                && schema_families == payload_families
+                && schema_families == contract_families
+        });
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
@@ -206,6 +210,68 @@ fn validate_fixture_provider(
     } else {
         Err(invalid_data(format!(
             "provider manifest does not match profile claim layer {claim_layer}"
+        )))
+    }
+}
+
+fn validate_fixture_records(
+    fixture: &Value,
+    provider: &Value,
+    paths: &FixturePaths,
+    claim_layer: &str,
+    subject_adapter: &str,
+) -> Result<(), io::Error> {
+    let case_id = json_text(fixture, "case_id")?;
+    let family = json_text(fixture, "family")?;
+    if json_text(fixture, "claim_layer")? != claim_layer {
+        return Err(invalid_data(format!(
+            "fixture {case_id} claim layer does not match its profile"
+        )));
+    }
+    let input: Value = serde_json::from_slice(&paths.input.bytes)
+        .map_err(|error| invalid_data(format!("fixture {case_id} input is invalid: {error}")))?;
+    let evidence: Value = serde_json::from_slice(&paths.expected.bytes).map_err(|error| {
+        invalid_data(format!(
+            "fixture {case_id} evidence status is invalid: {error}"
+        ))
+    })?;
+    let oracle: Value = serde_json::from_slice(&paths.oracle.bytes)
+        .map_err(|error| invalid_data(format!("fixture {case_id} oracle is invalid: {error}")))?;
+    let provider_contract = format!(
+        "{}@{}",
+        json_text(provider, "provider_id")?,
+        json_text(provider, "contract_version")?
+    );
+    let operation = json_field(provider, "fixture_operations")?
+        .get(&family)
+        .ok_or_else(|| invalid_data(format!("provider omits operation for {family}")))?;
+    let actual_operation = input.pointer("/stimulus/operation");
+    let operation_matches = match operation {
+        Value::Null => actual_operation.is_none(),
+        Value::String(expected) => actual_operation.and_then(Value::as_str) == Some(expected),
+        _ => false,
+    };
+    let input_digest = blake3::hash(&paths.input.bytes).to_hex().to_string();
+    let identity_matches = json_text(&input, "case_id")? == case_id
+        && json_text(&input, "claim_layer")? == claim_layer
+        && json_text(&input, "family")? == family
+        && json_text(&input, "provider_contract")? == provider_contract
+        && json_text(&input, "subject_adapter")? == subject_adapter
+        && json_text(&evidence, "case_id")? == case_id
+        && json_text(&evidence, "claim_layer")? == claim_layer
+        && json_text(&evidence, "family")? == family
+        && json_text(&evidence, "input_blake3_digest")? == input_digest
+        && json_text(&evidence, "status")? == "pending"
+        && evidence.get("execution_result") == Some(&Value::Null)
+        && evidence.get("executed_at") == Some(&Value::Null)
+        && json_text(&oracle, "case_id")? == case_id
+        && json_text(&oracle, "claim_layer")? == claim_layer
+        && json_text(&oracle, "family")? == family;
+    if operation_matches && identity_matches {
+        Ok(())
+    } else {
+        Err(invalid_data(format!(
+            "fixture {case_id} does not match its profile/provider identity"
         )))
     }
 }
@@ -238,6 +304,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
     let profile_value: Value = serde_json::from_slice(&profile_record)?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
     let subject_adapter = json_text(&profile_value, "subject_adapter")?;
+    let fixture_root = json_text(&profile_value, "fixture_root")?;
     let provider = relative_asset(root, &profile_value, "fixture_provider_manifest")?;
     let provider_value: Value = serde_json::from_slice(&provider.bytes)?;
     validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
@@ -265,15 +332,41 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
                     "profile fixture schema does not match family {family}"
                 )));
             }
-            Ok(FixturePaths {
+            let paths = FixturePaths {
                 schema,
                 input: relative_asset(root, fixture, "input")?,
                 expected: relative_asset(root, fixture, "expected")?,
                 oracle: relative_asset(root, fixture, "oracle")?,
-            })
+            };
+            validate_fixture_records(
+                fixture,
+                &provider_value,
+                &paths,
+                &claim_layer,
+                &subject_adapter,
+            )?;
+            Ok(paths)
         })
         .collect::<Result<Vec<_>, io::Error>>()?;
-    if fixtures.len() != FIXTURES_PER_PROFILE {
+    let expected_wire_code = match claim_layer.as_str() {
+        "artifact-integrity" => 0,
+        "replay-conformance" => 1,
+        "knowledge-non-interference" => 2,
+        "gateway-client-conformance" => 3,
+        "plugin-conformance" => 4,
+        "metric-conformance" => 5,
+        "empirical-evaluation" => 6,
+        _ => u64::MAX,
+    };
+    let bundle_modes = json_field(&profile_value, "bundle_modes")?;
+    let execution_profiles = json_field(&profile_value, "execution_profiles")?;
+    if fixtures.len() != FIXTURES_PER_PROFILE
+        || fixture_root != claim_layer
+        || wire_code != expected_wire_code
+        || bundle_modes != &serde_json::json!(["local", "air-gapped"])
+        || execution_profiles
+            != &serde_json::json!(["deterministic-local-v1", "deterministic-air-gapped-v1"])
+    {
         return Err(invalid_data(format!(
             "profile manifest {profile} must declare exactly {FIXTURES_PER_PROFILE} fixtures, found {}",
             fixtures.len()

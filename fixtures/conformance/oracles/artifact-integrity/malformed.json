@@ -1,1 +1,1 @@
-{"oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.artifact-integrity","contract_version":"1.0.0","code_id":"malformed-payload"}}
+{"case_id":"artifact-integrity-malformed","claim_layer":"artifact-integrity","family":"malformed","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.artifact-integrity","contract_version":"1.0.0","code_id":"malformed-payload"}}

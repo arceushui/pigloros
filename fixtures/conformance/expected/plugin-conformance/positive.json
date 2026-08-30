@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "517a8c35a19901bc684583a8a9ed8347729512058d2bf13993a1f16fcd9805b9",
+  "input_blake3_digest": "d32a6f5e8c431b2dcb4b8cf206b1a9d3daf197db2421476d462c60d91f7e0f65",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

@@ -1,1 +1,1 @@
-{"oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.empirical-evaluation","contract_version":"1.0.0","code_id":"incompatible-contract"}}
+{"case_id":"empirical-evaluation-downgrade","claim_layer":"empirical-evaluation","family":"downgrade","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.empirical-evaluation","contract_version":"1.0.0","code_id":"incompatible-contract"}}

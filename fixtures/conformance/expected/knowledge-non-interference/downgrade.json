@@ -2,7 +2,7 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "4c5e923cbba8436fd84db6fece196813e49f1bba3f6fbd1b8ec6143aedd87c88",
+  "input_blake3_digest": "089ea8400add99013cae73b4274967ceb472d769e8a0d23981b25cde95eeca9f",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

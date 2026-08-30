@@ -1,1 +1,1 @@
-{"oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.artifact-integrity","contract_version":"1.0.0","code_id":"resource-limit"}}
+{"case_id":"artifact-integrity-resource-exhaustion","claim_layer":"artifact-integrity","family":"resource-exhaustion","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.artifact-integrity","contract_version":"1.0.0","code_id":"resource-limit"}}

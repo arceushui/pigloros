@@ -2,7 +2,7 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-deletion-redaction",
   "family": "deletion-redaction",
-  "input_blake3_digest": "c358cc9547e40928bcab86427d482074a0b7b912746ee98dace018b17da896fb",
+  "input_blake3_digest": "395040414a6bc8ca4e1d6fa235598c52c81d968861888297dd9f4bf656510b75",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

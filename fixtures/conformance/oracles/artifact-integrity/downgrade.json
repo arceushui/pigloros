@@ -1,1 +1,1 @@
-{"oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.artifact-integrity","contract_version":"1.0.0","code_id":"incompatible-contract"}}
+{"case_id":"artifact-integrity-downgrade","claim_layer":"artifact-integrity","family":"downgrade","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.artifact-integrity","contract_version":"1.0.0","code_id":"incompatible-contract"}}

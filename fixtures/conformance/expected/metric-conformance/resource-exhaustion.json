@@ -2,7 +2,7 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "f104abbab7ce0725defaa1ef62c7f43c1607a9e49e98b860f168f76102ad8da7",
+  "input_blake3_digest": "d6888c406bf7e275f4b300624a45ff0eb6f8940a122cc1f40b542e31199c5497",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

@@ -2,7 +2,7 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "ea17a2320a728c2642719f3c76ff6a9b9257ca1643c33911b30c758b58d48e54",
+  "input_blake3_digest": "25443cc3f3d7f6067c90cd47bf12612e9bdfdfddb32ead8ab10e6f9d7ddc8a96",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

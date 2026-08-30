@@ -30,11 +30,8 @@ const NORMATIVE_SPEC_PATH: &str = "support/normative-requirements.md";
 const EXECUTION_MATRIX_PATH: &str = "authority/execution-matrix.json";
 const AUTHORITY_INVENTORY_PATH: &str = "authority/expected-authority-inventory.json";
 const TRUST_POLICY_SNAPSHOT_PATH: &str = "authority/trust-policy-snapshot.tps1";
-const DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY: [u8; 32] = [
-    0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e, 0xc5, 0xf9,
-    0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69, 0x14, 0x46, 0xd2, 0x2c,
-];
 const PROFILE_SCHEMA_PATH: &str = "support/schema-cpf1-v1.cddl";
+const FIXTURE_CONTRACT_POLICY_PATH: &str = "support/fixture-family-contract.json";
 const LIMITATIONS_PATH: &str = "support/limitations.md";
 const SOURCE_PROVENANCE_PATH: &str = "support/source-provenance.json";
 const BUILD_PROVENANCE_PATH: &str = "support/build-provenance.json";
@@ -45,6 +42,37 @@ const EXECUTION_MATRIX_BYTES_V1: &[u8] =
     include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
 const AUTHORITY_INVENTORY_BYTES_V1: &[u8] =
     include_bytes!("../../../fixtures/conformance/expected-authority/inventory.json");
+const DRAFT_AUTHORITY_DECLARATION_BYTES_V1: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/draft-execution-authority.json");
+
+fn draft_authority_public_key() -> Result<[u8; 32], BundleContractErrorV1> {
+    let declaration: serde_json::Value =
+        serde_json::from_slice(DRAFT_AUTHORITY_DECLARATION_BYTES_V1)
+            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    let hex = declaration
+        .get("fixture_authority_public_key_hex")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    if hex.len() != 64 {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let mut key = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        key[index] = u8::from_str_radix(
+            std::str::from_utf8(pair).map_err(|_| BundleContractErrorV1::ProfileInvalid)?,
+            16,
+        )
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
+    }
+    Ok(key)
+}
+
+fn draft_authority_verifying_key() -> Result<ed25519_dalek::VerifyingKey, BundleContractErrorV1> {
+    draft_authority_public_key().and_then(|key| {
+        ed25519_dalek::VerifyingKey::from_bytes(&key)
+            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum BundleContractErrorV1 {
@@ -118,6 +146,9 @@ pub enum BundleMemberRoleV1 {
     ExecutionProfile,
     TrustPolicySnapshot,
     ReleaseAdmission,
+    EvidenceStatus,
+    FixtureContractPolicy,
+    AuthorityDeclaration,
 }
 impl BundleMemberRoleV1 {
     const fn code(self) -> u64 {
@@ -139,6 +170,9 @@ impl BundleMemberRoleV1 {
             Self::ExecutionProfile => 14,
             Self::TrustPolicySnapshot => 15,
             Self::ReleaseAdmission => 16,
+            Self::EvidenceStatus => 17,
+            Self::FixtureContractPolicy => 18,
+            Self::AuthorityDeclaration => 19,
         }
     }
 }
@@ -166,6 +200,10 @@ impl BundleMemberV1 {
     #[must_use]
     pub fn expected_result(path: impl Into<String>, bytes: Vec<u8>) -> Self {
         Self::new(path, bytes, BundleMemberRoleV1::ExpectedResult)
+    }
+    #[must_use]
+    pub fn evidence_status(path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self::new(path, bytes, BundleMemberRoleV1::EvidenceStatus)
     }
     #[must_use]
     pub fn profile(bytes: Vec<u8>) -> Self {
@@ -487,8 +525,8 @@ fn validate_profile_support_members(
             profile.provenance_digest,
         ),
         (
-            PROFILE_SCHEMA_PATH,
-            BundleMemberRoleV1::Schema,
+            FIXTURE_CONTRACT_POLICY_PATH,
+            BundleMemberRoleV1::FixtureContractPolicy,
             profile.fixture_contract_policy_digest,
         ),
     ];
@@ -511,6 +549,20 @@ fn validate_profile_support_members(
                 AUTHORITY_INVENTORY_PATH,
             )
             .map(|_| ())
+        })
+        .and_then(|()| {
+            member_by_role_and_path(
+                members,
+                BundleMemberRoleV1::AuthorityDeclaration,
+                "support/draft-execution-authority.json",
+            )
+            .and_then(|member| {
+                if member.bytes == DRAFT_AUTHORITY_DECLARATION_BYTES_V1 {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
+                }
+            })
         })
 }
 
@@ -614,21 +666,32 @@ fn validate_execution_profile_fields(
             Ok(budget),
             Ok(profile_digest),
         ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
+            let declaration = draft_authority_contract()?
+                .execution_profiles
+                .into_iter()
+                .find(|candidate| candidate.profile_id == profile_id)
+                .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+            let classes = declaration
+                .reproducibility_classes
+                .iter()
+                .map(|class| match class.as_str() {
+                    "ProfileRecomputation" => Ok(Value::Integer(1_u64.into())),
+                    "CrossProfileConformance" => Ok(Value::Integer(2_u64.into())),
+                    _ => Err(BundleContractErrorV1::ProfileInvalid),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let capabilities = declaration
+                .capability_ids
+                .into_iter()
+                .map(Value::Text)
+                .collect::<Vec<_>>();
             if magic == "EPF1"
                 && version == 1
-                && matches!(
-                    profile_id,
-                    "deterministic-local-v1" | "deterministic-air-gapped-v1"
-                )
                 && path == format!("authority/execution-profiles/{profile_id}.epf1")
-                && semantic_version == "1.0.0"
-                && fields[4]
-                    == Value::Array(vec![
-                        Value::Integer(1_u64.into()),
-                        Value::Integer(2_u64.into()),
-                    ])
-                && fields[5] == Value::Bool(false)
-                && fields[6] == Value::Array(Vec::new())
+                && semantic_version == declaration.semantic_version
+                && fields[4] == Value::Array(classes)
+                && fields[5] == Value::Bool(declaration.network_allowed)
+                && fields[6] == Value::Array(capabilities)
                 && scheduler == "fixture-scheduler-v1"
                 && numeric == "fixture-numeric-v1"
                 && schema == "fixture-schema-v1"
@@ -675,8 +738,9 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
             Ok(expiry),
             Ok(signature),
         ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
-            ed25519_dalek::VerifyingKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY)
-                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+            let authority = draft_authority_contract()?;
+            let approved_key = draft_authority_public_key()?;
+            draft_authority_verifying_key()
                 .and_then(|verifying_key| {
                     verifying_key
                         .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
@@ -685,15 +749,15 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
                 .and_then(|()| {
                     if magic == "TPS1"
                         && version == 1
-                        && policy_id == "pigloros.fixture.conformance-draft"
-                        && epoch == 1
-                        && position == 0
-                        && key_id == "pigloros.fixture.conformance-authority"
-                        && key == DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY
+                        && policy_id == authority.trust_policy_id
+                        && epoch == authority.trust_policy_epoch
+                        && position == authority.effective_timeline_position
+                        && key_id == authority.fixture_authority_key_id
+                        && key == approved_key
                         && fields[7] == Value::Array(Vec::new())
                         && fields[8] == Value::Array(Vec::new())
                         && fields[9] == Value::Array(Vec::new())
-                        && expiry == "2030-01-01T00:00:00Z"
+                        && expiry == authority.offline_valid_through
                         && fields[11] == Value::Null
                     {
                         Ok(())
@@ -769,8 +833,8 @@ fn validate_release_admission_fields(
             Ok(key_id),
             Ok(signature),
         ) => encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
-            ed25519_dalek::VerifyingKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY)
-                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+            let authority = draft_authority_contract()?;
+            draft_authority_verifying_key()
                 .and_then(|key| {
                     key.verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
                         .map_err(|_| BundleContractErrorV1::SignatureInvalid)
@@ -785,7 +849,7 @@ fn validate_release_admission_fields(
                         && fields[6] == provider_key_value(&transition.from)
                         && fields[7] == provider_key_value(&transition.to)
                         && fields[8] == Value::Bool(false)
-                        && key_id == "pigloros.fixture.conformance-authority"
+                        && key_id == authority.fixture_authority_key_id
                     {
                         Ok(())
                     } else {
@@ -864,6 +928,8 @@ fn validate_member_closure(
         EXECUTION_MATRIX_PATH,
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
+        FIXTURE_CONTRACT_POLICY_PATH,
+        "support/draft-execution-authority.json",
         LIMITATIONS_PATH,
         SOURCE_PROVENANCE_PATH,
         BUILD_PROVENANCE_PATH,
@@ -902,6 +968,7 @@ fn validate_member_closure(
                     BundleMemberRoleV1::ExecutionProfile
                         | BundleMemberRoleV1::TrustPolicySnapshot
                         | BundleMemberRoleV1::ReleaseAdmission
+                        | BundleMemberRoleV1::AuthorityDeclaration
                 )
             })
             .map(|member| member.path.clone()),
@@ -1166,15 +1233,12 @@ fn validate_fixture_members(
             descriptor_member(members, &fixture.payload, BundleMemberRoleV1::FixtureInput)
                 .and_then(|_| {
                     fixture.auxiliary.iter().try_for_each(|artifact| {
-                        descriptor_member(members, artifact, BundleMemberRoleV1::FixtureInput)
-                            .or_else(|_| {
-                                descriptor_member(
-                                    members,
-                                    artifact,
-                                    BundleMemberRoleV1::ExpectedResult,
-                                )
-                            })
-                            .map(|_| ())
+                        let role = if artifact.member_path.starts_with("evidence/") {
+                            BundleMemberRoleV1::EvidenceStatus
+                        } else {
+                            BundleMemberRoleV1::ExpectedResult
+                        };
+                        descriptor_member(members, artifact, role).map(|_| ())
                     })
                 })
                 .and_then(|()| {
@@ -1408,6 +1472,9 @@ fn decode_role(value: &Value) -> Result<BundleMemberRoleV1, BundleContractErrorV
         14 => Ok(BundleMemberRoleV1::ExecutionProfile),
         15 => Ok(BundleMemberRoleV1::TrustPolicySnapshot),
         16 => Ok(BundleMemberRoleV1::ReleaseAdmission),
+        17 => Ok(BundleMemberRoleV1::EvidenceStatus),
+        18 => Ok(BundleMemberRoleV1::FixtureContractPolicy),
+        19 => Ok(BundleMemberRoleV1::AuthorityDeclaration),
         _ => Err(BundleContractErrorV1::ArchiveEncodingInvalid),
     })
 }
@@ -1560,6 +1627,9 @@ enum RawMemberRole {
     ExecutionProfile,
     TrustPolicySnapshot,
     ReleaseAdmission,
+    EvidenceStatus,
+    FixtureContractPolicy,
+    AuthorityDeclaration,
 }
 
 impl RawMemberRole {
@@ -1582,6 +1652,9 @@ impl RawMemberRole {
             14 => Ok(Self::ExecutionProfile),
             15 => Ok(Self::TrustPolicySnapshot),
             16 => Ok(Self::ReleaseAdmission),
+            17 => Ok(Self::EvidenceStatus),
+            18 => Ok(Self::FixtureContractPolicy),
+            19 => Ok(Self::AuthorityDeclaration),
             _ => Err(BundleContractErrorV1::ProfileInvalid),
         })
     }
@@ -1942,7 +2015,10 @@ fn raw_profile_support_members(
     let bindings = [
         (NORMATIVE_SPEC_PATH, RawMemberRole::NormativeSpecification),
         (EXECUTION_MATRIX_PATH, RawMemberRole::ExecutionMatrix),
-        (PROFILE_SCHEMA_PATH, RawMemberRole::Schema),
+        (
+            FIXTURE_CONTRACT_POLICY_PATH,
+            RawMemberRole::FixtureContractPolicy,
+        ),
         (LIMITATIONS_PATH, RawMemberRole::Limitations),
         (PUBLICATION_REVIEW_PATH, RawMemberRole::Provenance),
     ];
@@ -1973,6 +2049,14 @@ fn raw_profile_support_members(
                 AUTHORITY_INVENTORY_PATH,
                 RawMemberRole::AuthorityInventory,
                 AUTHORITY_INVENTORY_BYTES_V1,
+            )
+        })
+        .and_then(|()| {
+            raw_authority_member_matches(
+                members,
+                "support/draft-execution-authority.json",
+                RawMemberRole::AuthorityDeclaration,
+                DRAFT_AUTHORITY_DECLARATION_BYTES_V1,
             )
         })
 }
@@ -2080,21 +2164,32 @@ fn raw_execution_profile_fields(path: &str, fields: &[Value]) -> Result<(), Bund
             Ok(budget),
             Ok(profile_digest),
         ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
+            let declaration = draft_authority_contract()?
+                .execution_profiles
+                .into_iter()
+                .find(|candidate| candidate.profile_id == profile_id)
+                .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+            let classes = declaration
+                .reproducibility_classes
+                .iter()
+                .map(|class| match class.as_str() {
+                    "ProfileRecomputation" => Ok(Value::Integer(1_u64.into())),
+                    "CrossProfileConformance" => Ok(Value::Integer(2_u64.into())),
+                    _ => Err(BundleContractErrorV1::ProfileInvalid),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let capabilities = declaration
+                .capability_ids
+                .into_iter()
+                .map(Value::Text)
+                .collect::<Vec<_>>();
             if magic == "EPF1"
                 && version == 1
-                && matches!(
-                    profile_id,
-                    "deterministic-local-v1" | "deterministic-air-gapped-v1"
-                )
                 && path == format!("authority/execution-profiles/{profile_id}.epf1")
-                && semantic_version == "1.0.0"
-                && fields[4]
-                    == Value::Array(vec![
-                        Value::Integer(1_u64.into()),
-                        Value::Integer(2_u64.into()),
-                    ])
-                && fields[5] == Value::Bool(false)
-                && fields[6] == Value::Array(Vec::new())
+                && semantic_version == declaration.semantic_version
+                && fields[4] == Value::Array(classes)
+                && fields[5] == Value::Bool(declaration.network_allowed)
+                && fields[6] == Value::Array(capabilities)
                 && scheduler == "fixture-scheduler-v1"
                 && numeric == "fixture-numeric-v1"
                 && schema == "fixture-schema-v1"
@@ -2140,18 +2235,20 @@ fn raw_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContra
             Ok(expiry),
             Ok(signature),
         ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
+            let authority = draft_authority_contract()?;
+            let approved_key = draft_authority_public_key()?;
             raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
                 if magic == "TPS1"
                     && version == 1
-                    && policy_id == "pigloros.fixture.conformance-draft"
-                    && epoch == 1
-                    && position == 0
-                    && key_id == "pigloros.fixture.conformance-authority"
-                    && key == DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY
+                    && policy_id == authority.trust_policy_id
+                    && epoch == authority.trust_policy_epoch
+                    && position == authority.effective_timeline_position
+                    && key_id == authority.fixture_authority_key_id
+                    && key == approved_key
                     && fields[7] == Value::Array(Vec::new())
                     && fields[8] == Value::Array(Vec::new())
                     && fields[9] == Value::Array(Vec::new())
-                    && expiry == "2030-01-01T00:00:00Z"
+                    && expiry == authority.offline_valid_through
                     && fields[11] == Value::Null
                 {
                     Ok(())
@@ -2216,6 +2313,7 @@ fn raw_release_admission_fields(
             Ok(key_id),
             Ok(signature),
         ) => encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
+            let authority = draft_authority_contract()?;
             raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
                 if magic == "RAD1"
                     && version == 1
@@ -2226,7 +2324,7 @@ fn raw_release_admission_fields(
                     && from == transition.from
                     && to == transition.to
                     && fields[8] == Value::Bool(false)
-                    && key_id == "pigloros.fixture.conformance-authority"
+                    && key_id == authority.fixture_authority_key_id
                 {
                     Ok(())
                 } else {
@@ -2242,12 +2340,10 @@ fn raw_fixture_authority_signature(
     unsigned: &[u8],
     signature: &[u8; 64],
 ) -> Result<(), BundleContractErrorV1> {
-    ed25519_dalek::VerifyingKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY)
-        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-        .and_then(|key| {
-            key.verify(unsigned, &ed25519_dalek::Signature::from_bytes(signature))
-                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-        })
+    draft_authority_verifying_key().and_then(|key| {
+        key.verify(unsigned, &ed25519_dalek::Signature::from_bytes(signature))
+            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+    })
 }
 
 fn raw_authority_member_matches(
@@ -2305,6 +2401,8 @@ fn raw_member_closure(
         EXECUTION_MATRIX_PATH,
         AUTHORITY_INVENTORY_PATH,
         PROFILE_SCHEMA_PATH,
+        FIXTURE_CONTRACT_POLICY_PATH,
+        "support/draft-execution-authority.json",
         LIMITATIONS_PATH,
         SOURCE_PROVENANCE_PATH,
         BUILD_PROVENANCE_PATH,
@@ -3259,11 +3357,12 @@ fn raw_bound_raw_artifact_any(
     artifact: &RawArtifact,
     members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
-    members
-        .iter()
-        .find(|member| member.path == artifact.path)
-        .ok_or(BundleContractErrorV1::MemberMissing)
-        .and_then(|member| raw_artifact_matches_member(artifact, member))
+    let role = if artifact.path.starts_with("evidence/") {
+        RawMemberRole::EvidenceStatus
+    } else {
+        RawMemberRole::ExpectedResult
+    };
+    raw_bound_raw_artifact(artifact, members, role)
 }
 
 fn raw_bound_raw_artifact(

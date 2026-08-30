@@ -1,1 +1,1 @@
-{"oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.metric-conformance","contract_version":"1.0.0","code_id":"incompatible-contract"}}
+{"case_id":"metric-conformance-downgrade","claim_layer":"metric-conformance","family":"downgrade","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.metric-conformance","contract_version":"1.0.0","code_id":"incompatible-contract"}}

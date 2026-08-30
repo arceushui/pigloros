@@ -38,8 +38,8 @@ jq -e '
      else
        (has("code_id") | not)
      end) and
-    (.input_with_operation | type == "object") and
-    (if .operation == "optional" then (.input_without_operation | type == "object") else true end)
+    (has("input_with_operation") | not) and
+    (has("input_without_operation") | not)
   )
 ' "${family_contract}" >/dev/null || {
   echo "invalid canonical fixture-family contract" >&2
@@ -51,7 +51,7 @@ trap 'rm -rf "${generated_root}"' EXIT
 
 generated_count=0
 declare -A seen_expected_paths=()
-while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor operation; do
+while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor encoded_payload operation; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
@@ -117,6 +117,7 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
   fi
   oracle_kind="$(jq -r '.oracle.kind' <<<"${family_metadata}")"
   code_id="$(jq -r '.oracle.code_id // empty' <<<"${family_metadata}")"
+  payload_metadata="$(printf '%s' "${encoded_payload}" | base64 --decode)"
   independent_input="PiglorOS independent fixture ${claim_layer}"
   independent_digest="$(printf '%s' "${independent_input}" | b3sum | awk '{print $1}')"
   jq -cn \
@@ -132,7 +133,7 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
     --arg independent_digest "${independent_digest}" \
     --argjson abi_major "${abi_major}" \
     --argjson abi_minor "${abi_minor}" \
-    --argjson family_metadata "${family_metadata}" '
+      --argjson payload_metadata "${payload_metadata}" '
       def interpolate:
         if type == "string" then
           if . == "$abi_major" then $abi_major
@@ -148,8 +149,8 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
         elif type == "object" then with_entries(.value |= interpolate)
         else .
         end;
-      ($family_metadata |
-        if $operation == "" then .input_without_operation else .input_with_operation end |
+      ($payload_metadata |
+        if $operation == "" then .without_operation else .with_operation end |
         interpolate) as $payload |
       if ($payload | type) != "object" then error("fixture payload must be an object") else
         {
@@ -164,11 +165,11 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
 
   input_blake3_digest="$(b3sum "${generated_input}" | awk '{print $1}')"
   if [[ "${oracle_kind}" == "canonical-output" ]]; then
-    jq -c '{oracle:{kind:"canonical-output"},output:(.expected // {algorithm,expected_digest})}' \
+    jq -c '{case_id,claim_layer,family,oracle:{kind:"canonical-output"},output:(.expected // {algorithm,expected_digest})}' \
       "${generated_input}" > "${generated_oracle}"
   else
-    jq -cn --arg owner_id "${provider_id}" --arg contract_version "${contract_version}" --arg code_id "${code_id}" \
-      '{oracle:{kind:"namespaced-failure",owner_id:$owner_id,contract_version:$contract_version,code_id:$code_id}}' \
+    jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg owner_id "${provider_id}" --arg contract_version "${contract_version}" --arg code_id "${code_id}" \
+      '{case_id:$case_id,claim_layer:$claim_layer,family:$family,oracle:{kind:"namespaced-failure",owner_id:$owner_id,contract_version:$contract_version,code_id:$code_id}}' \
       > "${generated_oracle}"
   fi
   jq -n \
@@ -207,6 +208,7 @@ done < <(
         .case_id, .claim_layer, .family, .schema, .input, .expected, .oracle,
         $provider.subject_adapter, $provider.provider_id, $provider.contract_version,
         ($provider.abi_major | tostring), ($provider.abi_minor | tostring),
+        ($provider.fixture_payloads[.family] | @base64),
         ($provider.fixture_operations[.family] // "")
       ] | @tsv
     ' "${profile}"

@@ -1439,17 +1439,14 @@ impl ConformanceReportV1 {
     /// Returns [`EvidenceError::InvalidConformanceReport`] when the record is
     /// not a complete, self-consistent report.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, EvidenceError> {
-        self.validate().and_then(|()| {
-            strict_codec::encode_conformance_report(self)
-                .map_err(|_| EvidenceError::InvalidConformanceReport)
-                .and_then(|bytes| {
-                    if bytes.len() > 16 * 1024 * 1024 {
-                        Err(EvidenceError::InvalidConformanceReport)
-                    } else {
-                        Ok(bytes)
-                    }
-                })
-        })
+        self.validate()?;
+        let bytes = strict_codec::encode_conformance_report(self)
+            .map_err(|_| EvidenceError::InvalidConformanceReport)?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            Err(EvidenceError::InvalidConformanceReport)
+        } else {
+            Ok(bytes)
+        }
     }
 
     /// Decode and validate an exact canonical CNR1 array.
@@ -1680,56 +1677,34 @@ impl MoatProofEvidenceV1 {
     /// Returns a serialization error when the evidence is invalid or cannot
     /// be represented by the closed result record.
     pub fn to_verification_result(&self) -> Result<VerificationResultV1, pos_core::CoreError> {
-        verify_evidence(self)
-            .map_err(|error| {
-                pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
-            })
-            .and_then(|()| {
-                typed_digest(
-                    b"PiglorOS.AuthoritativeFixture.v1",
-                    &self.authoritative_events,
-                )
-            })
-            .and_then(|fixture_digest| {
-                typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest).and_then(
-                    |manifest_digest| {
-                        self.digest().and_then(|evidence_digest| {
-                            let mut result = VerificationResultV1 {
-                                request_digest: self.manifest.input_digest,
-                                manifest_digest,
-                                execution_profile_digest: self.manifest.execution_profile_digest,
-                                trust_policy_snapshot_digest: self
-                                    .manifest
-                                    .trust_policy_snapshot_digest,
-                                artifact_closure_digest: self.manifest.artifact_closure_digest,
-                                fixture_digest: Some(fixture_digest),
-                                evaluator_digest: self.manifest.evaluator_digest,
-                                reproducibility_class: self.manifest.reproducibility_class,
-                                verification_outcome: VerificationOutcomeV1::VerifiedExact,
-                                replay_claim: self.manifest.replay_claim,
-                                authoritative_result_digest: Some(evidence_digest),
-                                divergence_report_digest: None,
-                                first_error: None,
-                                checked_artifact_count: u64::try_from(
-                                    self.authoritative_events.len()
-                                        + self.projections.len()
-                                        + self.causal_trace.len(),
-                                )
-                                .unwrap_or(u64::MAX),
-                                provenance_digest: self
-                                    .contract
-                                    .conformance_report
-                                    .provenance_digest,
-                                result_digest: [0; 32],
-                            };
-                            result.digest().map(|result_digest| {
-                                result.result_digest = result_digest;
-                                result
-                            })
-                        })
-                    },
-                )
-            })
+        verify_evidence(self).map_err(|error| {
+            pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
+        })?;
+        let fixture_domain = b"PiglorOS.AuthoritativeFixture.v1";
+        let fixture_digest = typed_digest(fixture_domain, &self.authoritative_events)?;
+        let mut result = VerificationResultV1 {
+            request_digest: self.manifest.input_digest,
+            manifest_digest: typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest)?,
+            execution_profile_digest: self.manifest.execution_profile_digest,
+            trust_policy_snapshot_digest: self.manifest.trust_policy_snapshot_digest,
+            artifact_closure_digest: self.manifest.artifact_closure_digest,
+            fixture_digest: Some(fixture_digest),
+            evaluator_digest: self.manifest.evaluator_digest,
+            reproducibility_class: self.manifest.reproducibility_class,
+            verification_outcome: VerificationOutcomeV1::VerifiedExact,
+            replay_claim: self.manifest.replay_claim,
+            authoritative_result_digest: Some(self.digest()?),
+            divergence_report_digest: None,
+            first_error: None,
+            checked_artifact_count: u64::try_from(
+                self.authoritative_events.len() + self.projections.len() + self.causal_trace.len(),
+            )
+            .unwrap_or(u64::MAX),
+            provenance_digest: self.contract.conformance_report.provenance_digest,
+            result_digest: [0; 32],
+        };
+        result.result_digest = result.digest()?;
+        Ok(result)
     }
 
     /// Export the closed verification result as exact deterministic CBOR.
@@ -1768,7 +1743,8 @@ impl VerificationResultV1 {
     /// # Errors
     /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::verification_result_digest(self))
+        strict_codec::verification_result_digest(self)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 }
 
@@ -1798,7 +1774,8 @@ impl DivergenceReportV1 {
     /// # Errors
     /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::divergence_report_digest(self))
+        strict_codec::divergence_report_digest(self)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 }
 
@@ -1930,11 +1907,6 @@ pub mod strict_codec {
         encode_value_to_writer(value, &mut bytes).map(|()| bytes)
     }
 
-    pub(crate) fn encode_value_infallible(value: &Value) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes).map_or_else(|_| std::process::abort(), |()| bytes)
-    }
-
     fn encode_value_to_writer<W: std::io::Write>(
         value: &Value,
         writer: W,
@@ -1956,7 +1928,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
-        if result.result_digest != verification_result_digest(&result) {
+        if result.result_digest != verification_result_digest(&result)? {
             return Err(StrictCborError::InvalidField {
                 field: "verification_result_digest".to_owned(),
             });
@@ -1965,9 +1937,11 @@ pub mod strict_codec {
         Ok(result)
     }
 
-    pub(crate) fn verification_result_digest(result: &VerificationResultV1) -> [u8; 32] {
-        let bytes = encode_value_infallible(&encode_verification_result_value(result, false));
-        domain_digest(b"PiglorOS.VerificationResult.v1", &bytes)
+    pub(crate) fn verification_result_digest(
+        result: &VerificationResultV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        let bytes = encode_value(&encode_verification_result_value(result, false))?;
+        Ok(domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
     }
 
     fn encode_verification_result_value(
@@ -2168,7 +2142,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
-        if report.report_digest != divergence_report_digest(&report) {
+        if report.report_digest != divergence_report_digest(&report)? {
             return Err(StrictCborError::InvalidField {
                 field: "divergence_report_digest".to_owned(),
             });
@@ -2177,9 +2151,11 @@ pub mod strict_codec {
         Ok(report)
     }
 
-    pub(crate) fn divergence_report_digest(report: &DivergenceReportV1) -> [u8; 32] {
-        let bytes = encode_value_infallible(&encode_divergence_report_value(report, false));
-        domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes)
+    pub(crate) fn divergence_report_digest(
+        report: &DivergenceReportV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        let bytes = encode_value(&encode_divergence_report_value(report, false))?;
+        Ok(domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -5160,7 +5136,8 @@ pub mod strict_codec {
                 ..error.clone()
             });
             assert!(validate_verification_result(&invalid_semantics).is_err());
-            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics);
+            invalid_semantics.result_digest =
+                verification_result_digest(&invalid_semantics).unwrap_or([0; 32]);
             let invalid_semantics_bytes =
                 encode_value(&encode_verification_result_value(&invalid_semantics, true))
                     .unwrap_or_default();
