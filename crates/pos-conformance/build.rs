@@ -1,10 +1,14 @@
+use rustix::fs::{self as rustix_fs, Dir, FileType, Mode, OFlags, ResolveFlags, CWD};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
+use std::ffi::CString;
 use std::fmt::Write as _;
-use std::fs;
-use std::io;
+use std::fs::File;
+use std::io::{self, Read as _};
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 
 const PROFILE_COUNT: usize = 7;
@@ -12,7 +16,7 @@ const FIXTURES_PER_PROFILE: usize = 7;
 
 struct CatalogRoot {
     source: PathBuf,
-    canonical: PathBuf,
+    directory: OwnedFd,
 }
 
 struct FixturePaths {
@@ -69,38 +73,43 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
-fn non_symlink_directory(path: &Path, description: &str) -> Result<(), io::Error> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        invalid_data(format!(
-            "{description} is unavailable at {}: {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(invalid_data(format!(
-            "{description} must not be a symlink: {}",
-            path.display()
-        )));
-    }
-    if !metadata.is_dir() {
-        return Err(invalid_data(format!(
-            "{description} must be a directory: {}",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
 fn catalog_root(manifest_dir: &Path) -> Result<CatalogRoot, io::Error> {
     let source = manifest_dir.join("../../fixtures/conformance");
-    non_symlink_directory(&source, "conformance fixture root")?;
-    let canonical = fs::canonicalize(&source).map_err(|error| {
+    let source_name = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
         invalid_data(format!(
-            "conformance fixture root cannot be canonicalized at {}: {error}",
+            "conformance fixture root contains a NUL byte: {}",
             source.display()
         ))
     })?;
-    Ok(CatalogRoot { source, canonical })
+    let directory = rustix_fs::openat2(
+        CWD,
+        source_name.as_c_str(),
+        OFlags::RDONLY
+            .union(OFlags::DIRECTORY)
+            .union(OFlags::CLOEXEC)
+            .union(OFlags::NOFOLLOW),
+        Mode::empty(),
+        ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|error| {
+        invalid_data(format!(
+            "conformance fixture root cannot be opened at {}: {error}",
+            source.display()
+        ))
+    })?;
+    let metadata = rustix_fs::fstat(&directory).map_err(|error| {
+        invalid_data(format!(
+            "conformance fixture root cannot be inspected at {}: {error}",
+            source.display()
+        ))
+    })?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::Directory {
+        return Err(invalid_data(format!(
+            "conformance fixture root must be a directory: {}",
+            source.display()
+        )));
+    }
+    Ok(CatalogRoot { source, directory })
 }
 
 fn relative_components<'a>(
@@ -121,65 +130,70 @@ fn relative_components<'a>(
         .collect()
 }
 
-fn non_symlink_relative_path(
+fn open_fixture_relative(
     root: &CatalogRoot,
     relative: &str,
     description: &str,
     final_is_directory: bool,
-) -> Result<PathBuf, io::Error> {
-    let components = relative_components(relative, description)?;
-    let mut candidate = root.canonical.clone();
-    let final_index = components.len() - 1;
-    for (index, component) in components.iter().enumerate() {
-        candidate.push(component);
-        let component_description = format!("{description} path component");
-        let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
-            invalid_data(format!(
-                "{component_description} is unavailable at {}: {error}",
-                candidate.display()
-            ))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(invalid_data(format!(
-                "{component_description} must not be a symlink: {}",
-                candidate.display()
-            )));
-        }
-        let is_final_component = index == final_index;
-        if is_final_component && final_is_directory {
-            if !metadata.is_dir() {
-                return Err(invalid_data(format!(
-                    "{description} must be a directory: {}",
-                    candidate.display()
-                )));
-            }
-        } else if is_final_component {
-            if !metadata.is_file() {
-                return Err(invalid_data(format!(
-                    "{description} must be a regular file: {}",
-                    candidate.display()
-                )));
-            }
-        } else if !metadata.is_dir() {
-            return Err(invalid_data(format!(
-                "{component_description} must be a directory: {}",
-                candidate.display()
-            )));
-        }
+) -> Result<OwnedFd, io::Error> {
+    let _ = relative_components(relative, description)?;
+    let relative_name = CString::new(relative)
+        .map_err(|_| invalid_data(format!("{description} contains a NUL byte: {relative}")))?;
+    let mut flags = OFlags::RDONLY
+        .union(OFlags::CLOEXEC)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::NONBLOCK);
+    if final_is_directory {
+        flags = flags.union(OFlags::DIRECTORY);
     }
-    let canonical = fs::canonicalize(&candidate).map_err(|error| {
+    let opened = rustix_fs::openat2(
+        &root.directory,
+        relative_name.as_c_str(),
+        flags,
+        Mode::empty(),
+        ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS),
+    )
+    .map_err(|error| {
         invalid_data(format!(
-            "{description} cannot be canonicalized at {}: {error}",
-            candidate.display()
+            "{description} cannot be opened beneath the conformance fixture root at {relative}: {error}"
         ))
     })?;
-    if !canonical.starts_with(&root.canonical) {
+    let metadata = rustix_fs::fstat(&opened).map_err(|error| {
+        invalid_data(format!(
+            "{description} cannot be inspected at {relative}: {error}"
+        ))
+    })?;
+    let expected_type = if final_is_directory {
+        FileType::Directory
+    } else {
+        FileType::RegularFile
+    };
+    if FileType::from_raw_mode(metadata.st_mode) != expected_type {
         return Err(invalid_data(format!(
-            "{description} escapes the conformance fixture root: {}",
-            candidate.display()
+            "{description} must be a {}: {relative}",
+            if final_is_directory {
+                "directory"
+            } else {
+                "regular file"
+            }
         )));
     }
-    Ok(canonical)
+    Ok(opened)
+}
+
+fn read_fixture_relative(
+    root: &CatalogRoot,
+    relative: &str,
+    description: &str,
+) -> Result<Vec<u8>, io::Error> {
+    let mut file: File = open_fixture_relative(root, relative, description, false)?.into();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|error| {
+        invalid_data(format!(
+            "{description} cannot be read at {relative}: {error}"
+        ))
+    })?;
+    Ok(bytes)
 }
 
 fn json_field<'a>(value: &'a Value, field: &str) -> Result<&'a Value, io::Error> {
@@ -313,24 +327,12 @@ fn relative_asset(
 ) -> Result<FixtureAsset, io::Error> {
     let relative = json_text(value, field)?;
     let description = format!("profile catalog {field}");
-    let canonical = non_symlink_relative_path(root, &relative, &description, false)?;
-    let bytes = fs::read(&canonical).map_err(|error| {
-        invalid_data(format!(
-            "{description} cannot be read at {}: {error}",
-            canonical.display()
-        ))
-    })?;
+    let bytes = read_fixture_relative(root, &relative, &description)?;
     Ok(FixtureAsset { relative, bytes })
 }
 
 fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Box<dyn Error>> {
-    let canonical_profile = non_symlink_relative_path(root, &profile, "profile manifest", false)?;
-    let profile_record = fs::read(&canonical_profile).map_err(|error| {
-        invalid_data(format!(
-            "profile manifest cannot be read at {}: {error}",
-            canonical_profile.display()
-        ))
-    })?;
+    let profile_record = read_fixture_relative(root, &profile, "profile manifest")?;
     let profile_value: Value = serde_json::from_slice(&profile_record)?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
     let subject_adapter = json_text(&profile_value, "subject_adapter")?;
@@ -413,17 +415,21 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
 }
 
 fn discover_profiles(root: &CatalogRoot) -> Result<Vec<ProfilePaths>, Box<dyn Error>> {
-    let profiles_directory = non_symlink_relative_path(root, "profiles", "profile root", true)?;
+    let profiles_directory = open_fixture_relative(root, "profiles", "profile root", true)?;
     let mut profile_manifests = Vec::new();
-    for entry in fs::read_dir(&profiles_directory)? {
-        let entry = entry?;
-        let entry_name = entry
-            .file_name()
-            .into_string()
+    for entry in Dir::read_from(&profiles_directory)
+        .map_err(|error| invalid_data(format!("profile root cannot be read: {error}")))?
+    {
+        let entry =
+            entry.map_err(|error| invalid_data(format!("profile root cannot be read: {error}")))?;
+        let entry_name = std::str::from_utf8(entry.file_name().to_bytes())
             .map_err(|_| invalid_data("profile directory name must be UTF-8"))?;
-        let entry_path = profiles_directory.join(&entry_name);
-        non_symlink_directory(&entry_path, "profile directory")?;
-        profile_manifests.push(format!("profiles/{entry_name}/profile.json"));
+        if entry_name == "." || entry_name == ".." {
+            continue;
+        }
+        let directory = format!("profiles/{entry_name}");
+        let _opened_directory = open_fixture_relative(root, &directory, "profile directory", true)?;
+        profile_manifests.push(format!("{directory}/profile.json"));
     }
     if profile_manifests.len() != PROFILE_COUNT {
         return Err(invalid_data(format!(
@@ -497,18 +503,11 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
 
 fn draft_authority_public_key(root: &CatalogRoot) -> Result<[u8; 32], io::Error> {
     let relative = "support/draft-execution-authority.json";
-    let path = non_symlink_relative_path(root, relative, "Draft authority declaration", false)?;
-    let bytes = fs::read(&path).map_err(|error| {
-        invalid_data(format!(
-            "Draft authority declaration cannot be read at {}: {error}",
-            path.display()
-        ))
-    })?;
+    let bytes = read_fixture_relative(root, relative, "Draft authority declaration")?;
     let declaration: DraftAuthorityDeclaration =
         serde_json::from_slice(&bytes).map_err(|error| {
             invalid_data(format!(
-                "Draft authority declaration is invalid at {}: {error}",
-                path.display()
+                "Draft authority declaration is invalid at {relative}: {error}"
             ))
         })?;
     let profiles_are_valid = declaration.execution_profiles.len() == 2
@@ -591,11 +590,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let out_dir = PathBuf::from(
         env::var_os("OUT_DIR").ok_or_else(|| invalid_data("OUT_DIR is unavailable"))?,
     );
-    fs::write(
+    std::fs::write(
         out_dir.join("conformance_fixture_catalog.rs"),
         emit_catalog(&profiles)?,
     )?;
-    fs::write(
+    std::fs::write(
         out_dir.join("draft_authority.rs"),
         emit_draft_authority(draft_authority_key),
     )?;
