@@ -3,13 +3,7 @@
   "claim_layer": "replay-conformance",
   "wire_code": 1,
   "subject_adapter": "exported-artifact",
-  "fixture_provider": {
-    "provider_id": "pigloros.fixture.replay-conformance",
-    "contract_version": "1.0.0",
-    "abi_major": 1,
-    "abi_minor": 0,
-    "package_path": "authority/providers/replay-conformance.cbor"
-  },
+  "fixture_provider_manifest": "providers/replay-conformance/provider.json",
   "fixture_root": "replay-conformance",
   "fixtures": [
     {

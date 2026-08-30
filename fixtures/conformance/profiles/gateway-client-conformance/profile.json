@@ -3,13 +3,7 @@
   "claim_layer": "gateway-client-conformance",
   "wire_code": 3,
   "subject_adapter": "public-gateway-protocol",
-  "fixture_provider": {
-    "provider_id": "pigloros.fixture.gateway-client-conformance",
-    "contract_version": "1.0.0",
-    "abi_major": 1,
-    "abi_minor": 0,
-    "package_path": "authority/providers/gateway-client-conformance.cbor"
-  },
+  "fixture_provider_manifest": "providers/gateway-client-conformance/provider.json",
   "fixture_root": "gateway-client-conformance",
   "fixtures": [
     {

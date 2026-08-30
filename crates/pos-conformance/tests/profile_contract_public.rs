@@ -13,6 +13,8 @@ use pos_conformance::{
     VerificationOutcomeV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
 
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
 pub mod fixtures {
     use super::*;
 

@@ -3,13 +3,7 @@
   "claim_layer": "artifact-integrity",
   "wire_code": 0,
   "subject_adapter": "exported-artifact",
-  "fixture_provider": {
-    "provider_id": "pigloros.fixture.artifact-integrity",
-    "contract_version": "1.0.0",
-    "abi_major": 1,
-    "abi_minor": 0,
-    "package_path": "authority/providers/artifact-integrity.cbor"
-  },
+  "fixture_provider_manifest": "providers/artifact-integrity/provider.json",
   "fixture_root": "artifact-integrity",
   "fixtures": [
     {

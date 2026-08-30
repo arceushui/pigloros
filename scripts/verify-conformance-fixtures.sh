@@ -152,10 +152,7 @@ for layer in "${profile_layers[@]}"; do
         "positive", "denied", "malformed", "resource-exhaustion",
         "deletion-redaction", "downgrade", "independent-evaluation"
       ] and
-      .fixture_provider.provider_id == ("pigloros.fixture." + $layer) and
-      .fixture_provider.contract_version == "1.0.0" and
-      .fixture_provider.abi_major == 1 and .fixture_provider.abi_minor == 0 and
-      .fixture_provider.package_path == ("authority/providers/" + $layer + ".cbor") and
+      .fixture_provider_manifest == ("providers/" + $layer + "/provider.json") and
       (if $layer == "knowledge-non-interference" then
         .adr_059_execution_matrix == $matrix and
         .adr_059_execution_matrix_blake3_digest == $matrix_blake3 and
@@ -174,7 +171,22 @@ for layer in "${profile_layers[@]}"; do
     exit 1
   }
   subject_adapter="$(jq -r '.subject_adapter' "${profile}")"
-  provider_id="$(jq -r '.fixture_provider.provider_id' "${profile}")"
+  provider_manifest="${fixture_root}/$(jq -r '.fixture_provider_manifest' "${profile}")"
+  [[ -s "${provider_manifest}" ]] || {
+    echo "missing provider manifest for ${layer}" >&2
+    exit 1
+  }
+  jq -e --arg layer "${layer}" --arg subject_adapter "${subject_adapter}" \
+    '.claim_layer == $layer and .subject_adapter == $subject_adapter and
+     (.provider_id | type == "string" and length > 0) and
+     (.contract_version | type == "string" and length > 0) and
+     (.abi_major | type == "number") and (.abi_minor | type == "number") and
+     (.package_path | type == "string" and length > 0) and
+     (.schemas | length == 7)' "${provider_manifest}" >/dev/null || {
+    echo "invalid provider manifest for ${layer}" >&2
+    exit 1
+  }
+  provider_id="$(jq -r '.provider_id' "${provider_manifest}")"
   while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path; do
     for path in "${schema_path}" "${input_path}" "${expected_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
@@ -201,13 +213,20 @@ for layer in "${profile_layers[@]}"; do
       '.case_id == $case_id and .claim_layer == $fixture_layer and
        .family == $family and
        .provider_contract == $provider_contract and .subject_adapter == $subject_adapter and
-       (if $family == "positive" then .stimulus.operation == "execute-positive-case" and .expected.result == "accepted"
-        elif $family == "denied" then .stimulus.required_capability == "mutate-subject" and .expected.failure_code == "capability-denied"
-        elif $family == "malformed" then (.stimulus | type) == "string" and .expected.failure_code == "malformed-payload"
-        elif $family == "resource-exhaustion" then .limit.maximum == 10000000 and .limit.requested == 10000001 and .expected.failure_code == "resource-limit"
-        elif $family == "deletion-redaction" then .stimulus.operation == "redact-synthetic-subject" and .expected.post_state.prohibited_data_present == false
-        elif $family == "downgrade" then .stimulus.allow_fallback == false and .expected.failure_code == "incompatible-contract"
-        elif $family == "independent-evaluation" then .algorithm == "BLAKE3-256" and (.expected_digest | test("^[0-9a-f]{64}$"))
+       (if $family == "positive" then .expected.result == "accepted" and
+          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "describe" else .stimulus.operation == "execute-positive-case" end)
+        elif $family == "denied" then .stimulus.required_capability == "mutate-subject" and .expected.failure_code == "capability-denied" and
+          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "drive" else .stimulus.operation == "mutate-subject" end)
+        elif $family == "malformed" then .expected.failure_code == "malformed-payload" and
+          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "reduce" else (.stimulus | type) == "string" end)
+        elif $family == "resource-exhaustion" then .limit.maximum == 10000000 and .limit.requested == 10000001 and .expected.failure_code == "resource-limit" and
+          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "drive" else .stimulus.operation == "consume-execution-steps" end)
+        elif $family == "deletion-redaction" then .expected.post_state.prohibited_data_present == false and
+          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "migrate-state" else .stimulus.operation == "redact-synthetic-subject" end)
+        elif $family == "downgrade" then .stimulus.allow_fallback == false and .expected.failure_code == "incompatible-contract" and
+          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "migrate-state" else .stimulus.operation == "verify-release-admission" end)
+        elif $family == "independent-evaluation" then .algorithm == "BLAKE3-256" and (.expected_digest | test("^[0-9a-f]{64}$")) and
+          (if $subject_adapter == "public-plugin-protocol" then .stimulus.operation == "describe" else has("stimulus") | not end)
         else false end)' \
       "${fixture_root}/${input_path}" >/dev/null || {
       echo "invalid input fixture record for ${layer}: ${input_path}" >&2
@@ -424,9 +443,15 @@ if (( ${#profiles[@]} != 7 )); then
 fi
 
 mapfile -t support < <(find "${fixture_root}/support" -type f -print | sort)
-mapfile -t provider_schemas < <(find "${fixture_root}/providers" -type f -print | sort)
+mapfile -t provider_files < <(find "${fixture_root}/providers" -type f -print | sort)
+mapfile -t provider_schemas < <(find "${fixture_root}/providers" -type f -name '*.schema.json' -print | sort)
+mapfile -t provider_manifests < <(find "${fixture_root}/providers" -type f -name 'provider.json' -print | sort)
 if (( ${#provider_schemas[@]} != 49 )); then
   echo "expected exactly 49 provider-owned family schemas" >&2
+  exit 1
+fi
+if (( ${#provider_manifests[@]} != 7 )); then
+  echo "expected exactly seven provider-owned package manifests" >&2
   exit 1
 fi
 expected_support=(
@@ -443,11 +468,11 @@ if [[ "${support[*]}" != "${expected_support[*]}" ]]; then
   exit 1
 fi
 
-for path in "${inputs[@]}" "${expected[@]}" "${profiles[@]}" "${provider_schemas[@]}" "${support[@]}"; do
+for path in "${inputs[@]}" "${expected[@]}" "${profiles[@]}" "${provider_files[@]}" "${support[@]}"; do
   [[ -s "${path}" ]] || {
     echo "empty conformance fixture: ${path}" >&2
     exit 1
   }
 done
 
-echo "verified ${#profiles[@]} public profiles, ${#inputs[@]} public inputs, ${#expected[@]} expected-result records, ${#provider_schemas[@]} provider schemas, and ${#support[@]} support artifacts"
+echo "verified ${#profiles[@]} public profiles, ${#inputs[@]} public inputs, ${#expected[@]} expected-result records, ${#provider_manifests[@]} provider manifests, ${#provider_schemas[@]} provider schemas, and ${#support[@]} support artifacts"

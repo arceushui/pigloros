@@ -3,13 +3,7 @@
   "claim_layer": "plugin-conformance",
   "wire_code": 4,
   "subject_adapter": "public-plugin-protocol",
-  "fixture_provider": {
-    "provider_id": "pigloros.fixture.plugin-conformance",
-    "contract_version": "1.0.0",
-    "abi_major": 1,
-    "abi_minor": 0,
-    "package_path": "authority/providers/plugin-conformance.cbor"
-  },
+  "fixture_provider_manifest": "providers/plugin-conformance/provider.json",
   "fixture_root": "plugin-conformance",
   "fixtures": [
     {

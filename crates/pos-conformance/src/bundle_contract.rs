@@ -524,9 +524,7 @@ fn validate_member_closure(
     }
     declared.extend(expected.iter().map(|result| result.member_path.clone()));
     declare_provider_members(members, &mut declared)?;
-    if members.len() == declared.len()
-        && members.iter().all(|member| declared.contains(&member.path))
-    {
+    if members.iter().all(|member| declared.contains(&member.path)) {
         Ok(())
     } else {
         Err(BundleContractErrorV1::UndeclaredMember)
@@ -1294,7 +1292,7 @@ fn raw_member_closure(
         .iter()
         .map(|member| text(&array(member, 3)?[0]).map(str::to_owned))
         .collect::<Result<BTreeSet<_>, _>>()?;
-    if member_paths.len() == members.len() && member_paths == declared {
+    if member_paths.len() == members.len() && member_paths.is_subset(&declared) {
         Ok(())
     } else {
         Err(BundleContractErrorV1::UndeclaredMember)

@@ -3,13 +3,7 @@
   "claim_layer": "empirical-evaluation",
   "wire_code": 6,
   "subject_adapter": "exported-artifact",
-  "fixture_provider": {
-    "provider_id": "pigloros.fixture.empirical-evaluation",
-    "contract_version": "1.0.0",
-    "abi_major": 1,
-    "abi_minor": 0,
-    "package_path": "authority/providers/empirical-evaluation.cbor"
-  },
+  "fixture_provider_manifest": "providers/empirical-evaluation/provider.json",
   "fixture_root": "empirical-evaluation",
   "fixtures": [
     {

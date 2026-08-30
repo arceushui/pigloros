@@ -3,13 +3,7 @@
   "claim_layer": "knowledge-non-interference",
   "wire_code": 2,
   "subject_adapter": "exported-artifact",
-  "fixture_provider": {
-    "provider_id": "pigloros.fixture.knowledge-non-interference",
-    "contract_version": "1.0.0",
-    "abi_major": 1,
-    "abi_minor": 0,
-    "package_path": "authority/providers/knowledge-non-interference.cbor"
-  },
+  "fixture_provider_manifest": "providers/knowledge-non-interference/provider.json",
   "fixture_root": "knowledge-non-interference",
   "fixtures": [
     {

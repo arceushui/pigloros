@@ -79,6 +79,7 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
       result=accepted
       oracle_kind=canonical-output
       operation=execute-positive-case
+      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=describe
       jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
         '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,arguments:{seed:1}},expected:{result:"accepted",post_state:{committed:true}}}' > "${generated_input}"
       ;;
@@ -86,43 +87,61 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
       result=rejected
       oracle_kind=namespaced-failure
       code_id=capability-denied
-      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
-        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"mutate-subject",required_capability:"mutate-subject",pre_state:{revision:1}},expected:{failure_code:"capability-denied",post_state:{revision:1}}}' > "${generated_input}"
+      operation=mutate-subject
+      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=drive
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,required_capability:"mutate-subject",pre_state:{revision:1}},expected:{failure_code:"capability-denied",post_state:{revision:1}}}' > "${generated_input}"
       ;;
     malformed)
       result=namespaced-failure
       oracle_kind=namespaced-failure
       code_id=malformed-payload
-      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
-        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:"malformed-provider-payload",expected:{failure_code:"malformed-payload"}}' > "${generated_input}"
+      if [[ "${subject_adapter}" == "public-plugin-protocol" ]]; then
+        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
+          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"reduce",payload:"malformed-provider-payload"},expected:{failure_code:"malformed-payload"}}' > "${generated_input}"
+      else
+        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
+          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:"malformed-provider-payload",expected:{failure_code:"malformed-payload"}}' > "${generated_input}"
+      fi
       ;;
     resource-exhaustion)
       result=resource-limit
       oracle_kind=namespaced-failure
       code_id=resource-limit
-      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
-        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"consume-execution-steps"},limit:{kind:"execution-steps",maximum:10000000,requested:10000001},expected:{failure_code:"resource-limit"}}' > "${generated_input}"
+      operation=consume-execution-steps
+      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=drive
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation},limit:{kind:"execution-steps",maximum:10000000,requested:10000001},expected:{failure_code:"resource-limit"}}' > "${generated_input}"
       ;;
     deletion-redaction)
       result=destroyed
       oracle_kind=canonical-output
-      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
-        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,pre_state:{prohibited_data:"synthetic-secret",retained_metadata:{record_id:"synthetic-1"}},stimulus:{operation:"redact-synthetic-subject"},expected:{post_state:{prohibited_data_present:false,retained_metadata:{record_id:"synthetic-1"}}}}' > "${generated_input}"
+      operation=redact-synthetic-subject
+      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=migrate-state
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,pre_state:{prohibited_data:"synthetic-secret",retained_metadata:{record_id:"synthetic-1"}},stimulus:{operation:$operation},expected:{post_state:{prohibited_data_present:false,retained_metadata:{record_id:"synthetic-1"}}}}' > "${generated_input}"
       ;;
     downgrade)
       result=not-authorized
       oracle_kind=namespaced-failure
       code_id=incompatible-contract
-      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_id "${provider_id}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
-        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"verify-release-admission",from_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:1},to_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:0},allow_fallback:false},expected:{failure_code:"incompatible-contract"}}' > "${generated_input}"
+      operation=verify-release-admission
+      [[ "${subject_adapter}" != "public-plugin-protocol" ]] || operation=migrate-state
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_id "${provider_id}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,from_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:1},to_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:0},allow_fallback:false},expected:{failure_code:"incompatible-contract"}}' > "${generated_input}"
       ;;
     independent-evaluation)
       result=corroborated
       oracle_kind=canonical-output
       independent_input="PiglorOS independent fixture ${claim_layer}"
       expected_digest="$(printf '%s' "${independent_input}" | b3sum | awk '{print $1}')"
-      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg input "${independent_input}" --arg expected_digest "${expected_digest}" \
-        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,algorithm:"BLAKE3-256",input:$input,expected_digest:$expected_digest}' > "${generated_input}"
+      if [[ "${subject_adapter}" == "public-plugin-protocol" ]]; then
+        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg input "${independent_input}" --arg expected_digest "${expected_digest}" \
+          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"describe"},algorithm:"BLAKE3-256",input:$input,expected_digest:$expected_digest}' > "${generated_input}"
+      else
+        jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg input "${independent_input}" --arg expected_digest "${expected_digest}" \
+          '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,algorithm:"BLAKE3-256",input:$input,expected_digest:$expected_digest}' > "${generated_input}"
+      fi
       ;;
     *)
       echo "unknown public fixture family: ${family}" >&2
@@ -160,9 +179,13 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
   fi
   generated_count=$((generated_count + 1))
 done < <(
-  find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 |
-    sort -z |
-    xargs -0 -r jq -r '. as $profile | .fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, $profile.subject_adapter, $profile.fixture_provider.provider_id] | @tsv'
+  while IFS= read -r -d '' profile; do
+    provider_manifest="${fixture_root}/$(jq -r '.fixture_provider_manifest' "${profile}")"
+    provider_id="$(jq -r '.provider_id' "${provider_manifest}")"
+    subject_adapter="$(jq -r '.subject_adapter' "${profile}")"
+    jq -r --arg provider_id "${provider_id}" --arg subject_adapter "${subject_adapter}" \
+      '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, $subject_adapter, $provider_id] | @tsv' "${profile}"
+  done < <(find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 | sort -z)
 )
 
 if (( generated_count != 49 )); then

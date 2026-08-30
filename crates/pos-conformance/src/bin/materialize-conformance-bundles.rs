@@ -88,6 +88,7 @@ struct FixtureSource {
 
 struct LayerSource {
     profile_record: &'static [u8],
+    provider_record: &'static [u8],
     fixtures: &'static [FixtureSource],
 }
 
@@ -198,7 +199,6 @@ struct ProfileCatalogRecord {
     profile_id: String,
     wire_code: u8,
     subject_adapter: String,
-    fixture_provider: FixtureProviderRecord,
     fixtures: Vec<ProfileFixtureRecord>,
     execution_profiles: [CatalogExecutionProfile; 2],
 }
@@ -501,6 +501,7 @@ fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
 
 fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Error>> {
     let record: ProfileCatalogRecord = serde_json::from_slice(source.profile_record)?;
+    let fixture_provider: FixtureProviderRecord = serde_json::from_slice(source.provider_record)?;
     let claim_layer = ClaimLayerV1::from_wire_code(record.wire_code)
         .ok_or("typed layer catalog wire code is invalid")?;
     let fixtures = source
@@ -515,7 +516,7 @@ fn catalog_entry(source: &LayerSource) -> Result<LayerCatalogEntry, Box<dyn Erro
         profile_id: record.profile_id,
         subject_adapter: SubjectAdapterKindV1::from_catalog_name(&record.subject_adapter)
             .ok_or("typed layer catalog subject adapter is invalid")?,
-        fixture_provider: record.fixture_provider,
+        fixture_provider,
         profile_record: source.profile_record,
         fixtures,
         execution_profiles: record.execution_profiles,

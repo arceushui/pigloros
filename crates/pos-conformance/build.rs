@@ -30,6 +30,7 @@ struct ProfilePaths {
     wire_code: u64,
     profile: String,
     profile_record: Vec<u8>,
+    provider: FixtureAsset,
     fixtures: Vec<FixturePaths>,
 }
 
@@ -169,20 +170,26 @@ fn json_u64(value: &Value, field: &str) -> Result<u64, io::Error> {
         .ok_or_else(|| invalid_data(format!("profile catalog {field} must be unsigned")))
 }
 
-fn validate_fixture_provider(profile: &Value, claim_layer: &str) -> Result<(), io::Error> {
-    let provider = json_field(profile, "fixture_provider")?;
-    let expected_provider_id = format!("pigloros.fixture.{claim_layer}");
-    let expected_package_path = format!("authority/providers/{claim_layer}.cbor");
-    let valid = json_text(provider, "provider_id")? == expected_provider_id
-        && json_text(provider, "contract_version")? == "1.0.0"
-        && json_u64(provider, "abi_major")? == 1
-        && json_u64(provider, "abi_minor")? == 0
-        && json_text(provider, "package_path")? == expected_package_path;
+fn validate_fixture_provider(
+    provider: &Value,
+    claim_layer: &str,
+    subject_adapter: &str,
+) -> Result<(), io::Error> {
+    let valid = !json_text(provider, "provider_id")?.is_empty()
+        && !json_text(provider, "contract_version")?.is_empty()
+        && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
+        && u16::try_from(json_u64(provider, "abi_minor")?).is_ok()
+        && !json_text(provider, "package_path")?.is_empty()
+        && json_text(provider, "claim_layer")? == claim_layer
+        && json_text(provider, "subject_adapter")? == subject_adapter
+        && json_field(provider, "schemas")?
+            .as_object()
+            .is_some_and(|schemas| schemas.len() == FIXTURES_PER_PROFILE);
     if valid {
         Ok(())
     } else {
         Err(invalid_data(format!(
-            "profile catalog fixture_provider does not match claim layer {claim_layer}"
+            "provider manifest does not match profile claim layer {claim_layer}"
         )))
     }
 }
@@ -214,7 +221,13 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
     })?;
     let profile_value: Value = serde_json::from_slice(&profile_record)?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
-    validate_fixture_provider(&profile_value, &claim_layer)?;
+    let subject_adapter = json_text(&profile_value, "subject_adapter")?;
+    let provider = relative_asset(root, &profile_value, "fixture_provider_manifest")?;
+    let provider_value: Value = serde_json::from_slice(&provider.bytes)?;
+    validate_fixture_provider(&provider_value, &claim_layer, &subject_adapter)?;
+    let provider_schemas = json_field(&provider_value, "schemas")?
+        .as_object()
+        .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
     let wire_code = json_field(&profile_value, "wire_code")?
         .as_u64()
         .ok_or_else(|| invalid_data("profile catalog wire_code must be unsigned"))?;
@@ -225,7 +238,12 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
         .map(|fixture| {
             let family = json_text(fixture, "family")?;
             let schema = relative_asset(root, fixture, "schema")?;
-            let expected_schema = format!("providers/{claim_layer}/schemas/{family}.schema.json");
+            let expected_schema = provider_schemas
+                .get(&family)
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    invalid_data(format!("provider manifest is missing schema {family}"))
+                })?;
             if schema.relative != expected_schema {
                 return Err(invalid_data(format!(
                     "profile fixture schema does not match family {family}"
@@ -249,6 +267,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
         wire_code,
         profile,
         profile_record,
+        provider,
         fixtures,
     })
 }
@@ -299,6 +318,11 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
             "        profile_record: &{:?},",
             profile.profile_record
         )?;
+        writeln!(
+            generated,
+            "        provider_record: &{:?},",
+            profile.provider.bytes
+        )?;
         writeln!(generated, "        fixtures: &[")?;
         for fixture in &profile.fixtures {
             writeln!(generated, "            FixtureSource {{")?;
@@ -334,6 +358,7 @@ fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
             paths.insert(profile_directory.to_owned());
         }
         paths.insert(profile_path);
+        paths.insert(root.source.join(&profile.provider.relative));
         for fixture in &profile.fixtures {
             paths.insert(root.source.join(&fixture.schema.relative));
             paths.insert(root.source.join(&fixture.input.relative));

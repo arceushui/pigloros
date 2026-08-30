@@ -3,13 +3,7 @@
   "claim_layer": "metric-conformance",
   "wire_code": 5,
   "subject_adapter": "exported-artifact",
-  "fixture_provider": {
-    "provider_id": "pigloros.fixture.metric-conformance",
-    "contract_version": "1.0.0",
-    "abi_major": 1,
-    "abi_minor": 0,
-    "package_path": "authority/providers/metric-conformance.cbor"
-  },
+  "fixture_provider_manifest": "providers/metric-conformance/provider.json",
   "fixture_root": "metric-conformance",
   "fixtures": [
     {
