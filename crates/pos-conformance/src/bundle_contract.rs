@@ -525,13 +525,7 @@ fn validate_execution_authority_members(
     let execution_digests = execution_members
         .iter()
         .map(|member| validate_execution_profile_member(member).map(|()| member.digest))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if execution_members.len() != profile.execution_profile_digests.len()
-        || execution_digests.len() != profile.execution_profile_digests.len()
-        || execution_digests != profile.execution_profile_digests.iter().copied().collect()
-    {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
+        .collect::<Result<BTreeSet<_>, _>>();
     let snapshot_members = members
         .iter()
         .filter(|member| member.role == BundleMemberRoleV1::TrustPolicySnapshot)
@@ -539,11 +533,6 @@ fn validate_execution_authority_members(
     if snapshot_members != 1 {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    let snapshot = member_by_role_and_path(
-        members,
-        BundleMemberRoleV1::TrustPolicySnapshot,
-        TRUST_POLICY_SNAPSHOT_PATH,
-    )?;
     let downgrades = profile
         .fixtures
         .iter()
@@ -558,146 +547,253 @@ fn validate_execution_authority_members(
     {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    validate_trust_policy_snapshot(snapshot).and_then(|()| {
-        if snapshot.digest
-            != profile
-                .independence_requirements
-                .trust_policy_snapshot_digest
+    execution_digests.and_then(|execution_digests| {
+        if execution_members.len() != profile.execution_profile_digests.len()
+            || execution_digests.len() != profile.execution_profile_digests.len()
+            || execution_digests != profile.execution_profile_digests.iter().copied().collect()
         {
-            return Err(BundleContractErrorV1::MemberDigestMismatch);
+            return Err(BundleContractErrorV1::ProfileInvalid);
         }
-        downgrades
-            .into_iter()
-            .try_for_each(|fixture| validate_release_admission_member(fixture, members))
-    })
-}
-
-fn validate_execution_profile_member(member: &BundleMemberV1) -> Result<(), BundleContractErrorV1> {
-    decode(&member.bytes).and_then(|value| {
-        array(&value, 15).and_then(|fields| {
-            let profile_id = text(&fields[2])?;
-            let profile_digest = digest::<32>(&fields[14])?;
-            encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
-                if text(&fields[0])? == "EPF1"
-                    && uint(&fields[1])? == 1
-                    && matches!(
-                        profile_id,
-                        "deterministic-local-v1" | "deterministic-air-gapped-v1"
-                    )
-                    && member.path == format!("authority/execution-profiles/{profile_id}.epf1")
-                    && text(&fields[3])? == "1.0.0"
-                    && fields[4]
-                        == Value::Array(vec![
-                            Value::Integer(1_u64.into()),
-                            Value::Integer(2_u64.into()),
-                        ])
-                    && fields[5] == Value::Bool(false)
-                    && fields[6] == Value::Array(Vec::new())
-                    && text(&fields[7])? == "fixture-scheduler-v1"
-                    && text(&fields[8])? == "fixture-numeric-v1"
-                    && text(&fields[9])? == "fixture-schema-v1"
-                    && text(&fields[10])? == "fixture-artifact-v1"
-                    && text(&fields[11])? == "fixture-budget-v1"
-                    && fields[12] == Value::Array(Vec::new())
-                    && fields[13] == Value::Null
-                    && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
+        member_by_role_and_path(
+            members,
+            BundleMemberRoleV1::TrustPolicySnapshot,
+            TRUST_POLICY_SNAPSHOT_PATH,
+        )
+        .and_then(|snapshot| {
+            validate_trust_policy_snapshot(snapshot).and_then(|()| {
+                if snapshot.digest
+                    == profile
+                        .independence_requirements
+                        .trust_policy_snapshot_digest
                 {
-                    Ok(())
+                    downgrades
+                        .into_iter()
+                        .try_for_each(|fixture| validate_release_admission_member(fixture, members))
                 } else {
-                    Err(BundleContractErrorV1::ProfileInvalid)
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
                 }
             })
         })
     })
 }
 
-fn validate_trust_policy_snapshot(member: &BundleMemberV1) -> Result<(), BundleContractErrorV1> {
+fn validate_execution_profile_member(member: &BundleMemberV1) -> Result<(), BundleContractErrorV1> {
     decode(&member.bytes).and_then(|value| {
-        array(&value, 13).and_then(|fields| {
-            let key = digest::<32>(&fields[6])?;
-            let signature = digest::<64>(&fields[12])?;
-            encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
-                ed25519_dalek::VerifyingKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY)
-                    .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                    .and_then(|verifying_key| {
-                        verifying_key
-                            .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
-                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                    })
-                    .and_then(|()| {
-                        if text(&fields[0])? == "TPS1"
-                            && uint(&fields[1])? == 1
-                            && text(&fields[2])? == "pigloros.fixture.conformance-draft"
-                            && uint(&fields[3])? == 1
-                            && uint(&fields[4])? == 0
-                            && text(&fields[5])? == "pigloros.fixture.conformance-authority"
-                            && key == DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY
-                            && fields[7] == Value::Array(Vec::new())
-                            && fields[8] == Value::Array(Vec::new())
-                            && fields[9] == Value::Array(Vec::new())
-                            && text(&fields[10])? == "2030-01-01T00:00:00Z"
-                            && fields[11] == Value::Null
-                        {
-                            Ok(())
-                        } else {
-                            Err(BundleContractErrorV1::ProfileInvalid)
-                        }
-                    })
-            })
-        })
+        array(&value, 15)
+            .and_then(|fields| validate_execution_profile_fields(member.path.as_str(), fields))
     })
+}
+
+fn validate_execution_profile_fields(
+    path: &str,
+    fields: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    let decoded = (
+        text(&fields[0]),
+        uint(&fields[1]),
+        text(&fields[2]),
+        text(&fields[3]),
+        text(&fields[7]),
+        text(&fields[8]),
+        text(&fields[9]),
+        text(&fields[10]),
+        text(&fields[11]),
+        digest::<32>(&fields[14]),
+    );
+    match decoded {
+        (
+            Ok(magic),
+            Ok(version),
+            Ok(profile_id),
+            Ok(semantic_version),
+            Ok(scheduler),
+            Ok(numeric),
+            Ok(schema),
+            Ok(artifact),
+            Ok(budget),
+            Ok(profile_digest),
+        ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
+            if magic == "EPF1"
+                && version == 1
+                && matches!(
+                    profile_id,
+                    "deterministic-local-v1" | "deterministic-air-gapped-v1"
+                )
+                && path == format!("authority/execution-profiles/{profile_id}.epf1")
+                && semantic_version == "1.0.0"
+                && fields[4]
+                    == Value::Array(vec![
+                        Value::Integer(1_u64.into()),
+                        Value::Integer(2_u64.into()),
+                    ])
+                && fields[5] == Value::Bool(false)
+                && fields[6] == Value::Array(Vec::new())
+                && scheduler == "fixture-scheduler-v1"
+                && numeric == "fixture-numeric-v1"
+                && schema == "fixture-schema-v1"
+                && artifact == "fixture-artifact-v1"
+                && budget == "fixture-budget-v1"
+                && fields[12] == Value::Array(Vec::new())
+                && fields[13] == Value::Null
+                && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
+            {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        }),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
+}
+
+fn validate_trust_policy_snapshot(member: &BundleMemberV1) -> Result<(), BundleContractErrorV1> {
+    decode(&member.bytes)
+        .and_then(|value| array(&value, 13).and_then(validate_trust_policy_snapshot_fields))
+}
+
+fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    match (
+        text(&fields[0]),
+        uint(&fields[1]),
+        text(&fields[2]),
+        uint(&fields[3]),
+        uint(&fields[4]),
+        text(&fields[5]),
+        digest::<32>(&fields[6]),
+        text(&fields[10]),
+        digest::<64>(&fields[12]),
+    ) {
+        (
+            Ok(magic),
+            Ok(version),
+            Ok(policy_id),
+            Ok(epoch),
+            Ok(position),
+            Ok(key_id),
+            Ok(key),
+            Ok(expiry),
+            Ok(signature),
+        ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
+            ed25519_dalek::VerifyingKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY)
+                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                .and_then(|verifying_key| {
+                    verifying_key
+                        .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
+                        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                })
+                .and_then(|()| {
+                    if magic == "TPS1"
+                        && version == 1
+                        && policy_id == "pigloros.fixture.conformance-draft"
+                        && epoch == 1
+                        && position == 0
+                        && key_id == "pigloros.fixture.conformance-authority"
+                        && key == DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY
+                        && fields[7] == Value::Array(Vec::new())
+                        && fields[8] == Value::Array(Vec::new())
+                        && fields[9] == Value::Array(Vec::new())
+                        && expiry == "2030-01-01T00:00:00Z"
+                        && fields[11] == Value::Null
+                    {
+                        Ok(())
+                    } else {
+                        Err(BundleContractErrorV1::ProfileInvalid)
+                    }
+                })
+        }),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
 }
 
 fn validate_release_admission_member(
     fixture: &crate::FixtureDescriptorV1,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
-    let digest = fixture
+    fixture
         .release_admission_digest
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-    let member = members
-        .iter()
-        .find(|member| {
-            member.role == BundleMemberRoleV1::ReleaseAdmission && member.digest == digest
+        .ok_or(BundleContractErrorV1::ProfileInvalid)
+        .and_then(|digest| {
+            members
+                .iter()
+                .find(|member| {
+                    member.role == BundleMemberRoleV1::ReleaseAdmission && member.digest == digest
+                })
+                .ok_or(BundleContractErrorV1::MemberMissing)
         })
-        .ok_or(BundleContractErrorV1::MemberMissing)?;
-    let snapshot = fixture
-        .trust_policy_snapshot_digest
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-    let transition = fixture
-        .transition
-        .as_ref()
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-    decode(&member.bytes).and_then(|value| {
-        array(&value, 11).and_then(|fields| {
-            let signature = digest::<64>(&fields[10])?;
-            encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
-                ed25519_dalek::VerifyingKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY)
-                    .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                    .and_then(|key| {
-                        key.verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
-                            .map_err(|_| BundleContractErrorV1::SignatureInvalid)
-                    })
-                    .and_then(|()| {
-                        if text(&fields[0])? == "RAD1"
-                            && uint(&fields[1])? == 1
-                            && uint(&fields[2])? == 0
-                            && text(&fields[3])? == fixture.case_id
-                            && digest::<32>(&fields[4])? == fixture.execution_profile_digest
-                            && digest::<32>(&fields[5])? == snapshot
-                            && fields[6] == provider_key_value(&transition.from)
-                            && fields[7] == provider_key_value(&transition.to)
-                            && fields[8] == Value::Bool(false)
-                            && text(&fields[9])? == "pigloros.fixture.conformance-authority"
-                        {
-                            Ok(())
-                        } else {
-                            Err(BundleContractErrorV1::ProfileInvalid)
-                        }
-                    })
-            })
+        .and_then(|member| {
+            fixture
+                .trust_policy_snapshot_digest
+                .ok_or(BundleContractErrorV1::ProfileInvalid)
+                .and_then(|snapshot| {
+                    fixture
+                        .transition
+                        .as_ref()
+                        .ok_or(BundleContractErrorV1::ProfileInvalid)
+                        .and_then(|transition| {
+                            decode(&member.bytes).and_then(|value| {
+                                array(&value, 11).and_then(|fields| {
+                                    validate_release_admission_fields(
+                                        fields, fixture, snapshot, transition,
+                                    )
+                                })
+                            })
+                        })
+                })
         })
-    })
+}
+
+fn validate_release_admission_fields(
+    fields: &[Value],
+    fixture: &crate::FixtureDescriptorV1,
+    snapshot: [u8; 32],
+    transition: &crate::FixtureContractTransitionV1,
+) -> Result<(), BundleContractErrorV1> {
+    match (
+        text(&fields[0]),
+        uint(&fields[1]),
+        uint(&fields[2]),
+        text(&fields[3]),
+        digest::<32>(&fields[4]),
+        digest::<32>(&fields[5]),
+        text(&fields[9]),
+        digest::<64>(&fields[10]),
+    ) {
+        (
+            Ok(magic),
+            Ok(version),
+            Ok(lifecycle),
+            Ok(case_id),
+            Ok(execution),
+            Ok(policy),
+            Ok(key_id),
+            Ok(signature),
+        ) => encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
+            ed25519_dalek::VerifyingKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY)
+                .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                .and_then(|key| {
+                    key.verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
+                        .map_err(|_| BundleContractErrorV1::SignatureInvalid)
+                })
+                .and_then(|()| {
+                    if magic == "RAD1"
+                        && version == 1
+                        && lifecycle == 0
+                        && case_id == fixture.case_id
+                        && execution == fixture.execution_profile_digest
+                        && policy == snapshot
+                        && fields[6] == provider_key_value(&transition.from)
+                        && fields[7] == provider_key_value(&transition.to)
+                        && fields[8] == Value::Bool(false)
+                        && key_id == "pigloros.fixture.conformance-authority"
+                    {
+                        Ok(())
+                    } else {
+                        Err(BundleContractErrorV1::ProfileInvalid)
+                    }
+                })
+        }),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
 }
 
 fn provider_key_value(key: &crate::FixtureProviderKeyV1) -> Value {
@@ -1897,155 +1993,249 @@ fn raw_execution_authority_members(
             raw_execution_profile(member.path, member.bytes)
                 .map(|()| *blake3::hash(member.bytes).as_bytes())
         })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if execution_digests != profile.execution_digests
-        || execution_members.len() != profile.execution_digests.len()
-    {
-        return Err(BundleContractErrorV1::ProfileInvalid);
-    }
-    paths.extend(
-        execution_members
-            .iter()
-            .map(|member| member.path.to_owned()),
-    );
-
-    let snapshot = raw_member(
-        members,
-        TRUST_POLICY_SNAPSHOT_PATH,
-        RawMemberRole::TrustPolicySnapshot,
-    )?;
-    raw_trust_policy_snapshot(snapshot.bytes)?;
-    if *blake3::hash(snapshot.bytes).as_bytes() != profile.trust_policy_snapshot_digest {
-        return Err(BundleContractErrorV1::MemberDigestMismatch);
-    }
-    paths.insert(snapshot.path.to_owned());
-
-    for fixture in profile
-        .fixtures
-        .iter()
-        .filter(|fixture| fixture.family == RawFixtureFamily::Downgrade)
-        .filter(|fixture| fixture.modes.contains(&mode.fixture_mode()))
-    {
-        let digest = fixture
-            .release_admission
-            .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-        let member = members
-            .iter()
-            .find(|member| {
-                member.role == RawMemberRole::ReleaseAdmission
-                    && *blake3::hash(member.bytes).as_bytes() == digest
-            })
-            .ok_or(BundleContractErrorV1::MemberMissing)?;
-        raw_release_admission(member.bytes, fixture)?;
-        paths.insert(member.path.to_owned());
-    }
-    Ok(paths)
-}
-
-fn raw_execution_profile(path: &str, bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
-    decode(bytes).and_then(|value| {
-        array(&value, 15).and_then(|fields| {
-            let profile_id = text(&fields[2])?;
-            let profile_digest = digest::<32>(&fields[14])?;
-            encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
-                if text(&fields[0])? == "EPF1"
-                    && uint(&fields[1])? == 1
-                    && matches!(
-                        profile_id,
-                        "deterministic-local-v1" | "deterministic-air-gapped-v1"
-                    )
-                    && path == format!("authority/execution-profiles/{profile_id}.epf1")
-                    && text(&fields[3])? == "1.0.0"
-                    && fields[4]
-                        == Value::Array(vec![
-                            Value::Integer(1_u64.into()),
-                            Value::Integer(2_u64.into()),
-                        ])
-                    && fields[5] == Value::Bool(false)
-                    && fields[6] == Value::Array(Vec::new())
-                    && text(&fields[7])? == "fixture-scheduler-v1"
-                    && text(&fields[8])? == "fixture-numeric-v1"
-                    && text(&fields[9])? == "fixture-schema-v1"
-                    && text(&fields[10])? == "fixture-artifact-v1"
-                    && text(&fields[11])? == "fixture-budget-v1"
-                    && fields[12] == Value::Array(Vec::new())
-                    && fields[13] == Value::Null
-                    && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
+        .collect::<Result<BTreeSet<_>, _>>();
+    execution_digests.and_then(|execution_digests| {
+        if execution_digests != profile.execution_digests
+            || execution_members.len() != profile.execution_digests.len()
+        {
+            return Err(BundleContractErrorV1::ProfileInvalid);
+        }
+        paths.extend(
+            execution_members
+                .iter()
+                .map(|member| member.path.to_owned()),
+        );
+        raw_member(
+            members,
+            TRUST_POLICY_SNAPSHOT_PATH,
+            RawMemberRole::TrustPolicySnapshot,
+        )
+        .and_then(|snapshot| {
+            raw_trust_policy_snapshot(snapshot.bytes).and_then(|()| {
+                if *blake3::hash(snapshot.bytes).as_bytes() == profile.trust_policy_snapshot_digest
                 {
-                    Ok(())
+                    paths.insert(snapshot.path.to_owned());
+                    profile
+                        .fixtures
+                        .iter()
+                        .filter(|fixture| fixture.family == RawFixtureFamily::Downgrade)
+                        .filter(|fixture| fixture.modes.contains(&mode.fixture_mode()))
+                        .try_for_each(|fixture| {
+                            fixture
+                                .release_admission
+                                .ok_or(BundleContractErrorV1::ProfileInvalid)
+                                .and_then(|digest| {
+                                    members
+                                        .iter()
+                                        .find(|member| {
+                                            member.role == RawMemberRole::ReleaseAdmission
+                                                && *blake3::hash(member.bytes).as_bytes() == digest
+                                        })
+                                        .ok_or(BundleContractErrorV1::MemberMissing)
+                                })
+                                .and_then(|member| {
+                                    raw_release_admission(member.bytes, fixture).map(|()| {
+                                        paths.insert(member.path.to_owned());
+                                    })
+                                })
+                        })
+                        .map(|()| paths)
                 } else {
-                    Err(BundleContractErrorV1::ProfileInvalid)
+                    Err(BundleContractErrorV1::MemberDigestMismatch)
                 }
             })
         })
     })
 }
 
-fn raw_trust_policy_snapshot(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+fn raw_execution_profile(path: &str, bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
     decode(bytes).and_then(|value| {
-        array(&value, 13).and_then(|fields| {
-            let key = digest::<32>(&fields[6])?;
-            let signature = digest::<64>(&fields[12])?;
-            encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
-                raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
-                    if text(&fields[0])? == "TPS1"
-                        && uint(&fields[1])? == 1
-                        && text(&fields[2])? == "pigloros.fixture.conformance-draft"
-                        && uint(&fields[3])? == 1
-                        && uint(&fields[4])? == 0
-                        && text(&fields[5])? == "pigloros.fixture.conformance-authority"
-                        && key == DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY
-                        && fields[7] == Value::Array(Vec::new())
-                        && fields[8] == Value::Array(Vec::new())
-                        && fields[9] == Value::Array(Vec::new())
-                        && text(&fields[10])? == "2030-01-01T00:00:00Z"
-                        && fields[11] == Value::Null
-                    {
-                        Ok(())
-                    } else {
-                        Err(BundleContractErrorV1::ProfileInvalid)
-                    }
-                })
-            })
-        })
+        array(&value, 15).and_then(|fields| raw_execution_profile_fields(path, fields))
     })
+}
+
+fn raw_execution_profile_fields(path: &str, fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    let decoded = (
+        text(&fields[0]),
+        uint(&fields[1]),
+        text(&fields[2]),
+        text(&fields[3]),
+        text(&fields[7]),
+        text(&fields[8]),
+        text(&fields[9]),
+        text(&fields[10]),
+        text(&fields[11]),
+        digest::<32>(&fields[14]),
+    );
+    match decoded {
+        (
+            Ok(magic),
+            Ok(version),
+            Ok(profile_id),
+            Ok(semantic_version),
+            Ok(scheduler),
+            Ok(numeric),
+            Ok(schema),
+            Ok(artifact),
+            Ok(budget),
+            Ok(profile_digest),
+        ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
+            if magic == "EPF1"
+                && version == 1
+                && matches!(
+                    profile_id,
+                    "deterministic-local-v1" | "deterministic-air-gapped-v1"
+                )
+                && path == format!("authority/execution-profiles/{profile_id}.epf1")
+                && semantic_version == "1.0.0"
+                && fields[4]
+                    == Value::Array(vec![
+                        Value::Integer(1_u64.into()),
+                        Value::Integer(2_u64.into()),
+                    ])
+                && fields[5] == Value::Bool(false)
+                && fields[6] == Value::Array(Vec::new())
+                && scheduler == "fixture-scheduler-v1"
+                && numeric == "fixture-numeric-v1"
+                && schema == "fixture-schema-v1"
+                && artifact == "fixture-artifact-v1"
+                && budget == "fixture-budget-v1"
+                && fields[12] == Value::Array(Vec::new())
+                && fields[13] == Value::Null
+                && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
+            {
+                Ok(())
+            } else {
+                Err(BundleContractErrorV1::ProfileInvalid)
+            }
+        }),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
+}
+
+fn raw_trust_policy_snapshot(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
+    decode(bytes).and_then(|value| array(&value, 13).and_then(raw_trust_policy_snapshot_fields))
+}
+
+fn raw_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    match (
+        text(&fields[0]),
+        uint(&fields[1]),
+        text(&fields[2]),
+        uint(&fields[3]),
+        uint(&fields[4]),
+        text(&fields[5]),
+        digest::<32>(&fields[6]),
+        text(&fields[10]),
+        digest::<64>(&fields[12]),
+    ) {
+        (
+            Ok(magic),
+            Ok(version),
+            Ok(policy_id),
+            Ok(epoch),
+            Ok(position),
+            Ok(key_id),
+            Ok(key),
+            Ok(expiry),
+            Ok(signature),
+        ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
+            raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
+                if magic == "TPS1"
+                    && version == 1
+                    && policy_id == "pigloros.fixture.conformance-draft"
+                    && epoch == 1
+                    && position == 0
+                    && key_id == "pigloros.fixture.conformance-authority"
+                    && key == DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY
+                    && fields[7] == Value::Array(Vec::new())
+                    && fields[8] == Value::Array(Vec::new())
+                    && fields[9] == Value::Array(Vec::new())
+                    && expiry == "2030-01-01T00:00:00Z"
+                    && fields[11] == Value::Null
+                {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ProfileInvalid)
+                }
+            })
+        }),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
 }
 
 fn raw_release_admission(
     bytes: &[u8],
     fixture: &RawFixtureSummary,
 ) -> Result<(), BundleContractErrorV1> {
-    let snapshot = fixture
+    fixture
         .trust_snapshot
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-    let transition = fixture
-        .transition
-        .as_ref()
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-    decode(bytes).and_then(|value| {
-        array(&value, 11).and_then(|fields| {
-            let signature = digest::<64>(&fields[10])?;
-            encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
-                raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
-                    if text(&fields[0])? == "RAD1"
-                        && uint(&fields[1])? == 1
-                        && uint(&fields[2])? == 0
-                        && text(&fields[3])? == fixture.case_id
-                        && digest::<32>(&fields[4])? == fixture.execution
-                        && digest::<32>(&fields[5])? == snapshot
-                        && raw_provider_key(&fields[6])? == transition.from
-                        && raw_provider_key(&fields[7])? == transition.to
-                        && fields[8] == Value::Bool(false)
-                        && text(&fields[9])? == "pigloros.fixture.conformance-authority"
-                    {
-                        Ok(())
-                    } else {
-                        Err(BundleContractErrorV1::ProfileInvalid)
-                    }
+        .ok_or(BundleContractErrorV1::ProfileInvalid)
+        .and_then(|snapshot| {
+            fixture
+                .transition
+                .as_ref()
+                .ok_or(BundleContractErrorV1::ProfileInvalid)
+                .and_then(|transition| {
+                    decode(bytes).and_then(|value| {
+                        array(&value, 11).and_then(|fields| {
+                            raw_release_admission_fields(fields, fixture, snapshot, transition)
+                        })
+                    })
                 })
-            })
         })
-    })
+}
+
+fn raw_release_admission_fields(
+    fields: &[Value],
+    fixture: &RawFixtureSummary,
+    snapshot: [u8; 32],
+    transition: &RawFixtureTransition,
+) -> Result<(), BundleContractErrorV1> {
+    match (
+        text(&fields[0]),
+        uint(&fields[1]),
+        uint(&fields[2]),
+        text(&fields[3]),
+        digest::<32>(&fields[4]),
+        digest::<32>(&fields[5]),
+        raw_provider_key(&fields[6]),
+        raw_provider_key(&fields[7]),
+        text(&fields[9]),
+        digest::<64>(&fields[10]),
+    ) {
+        (
+            Ok(magic),
+            Ok(version),
+            Ok(lifecycle),
+            Ok(case_id),
+            Ok(execution),
+            Ok(policy),
+            Ok(from),
+            Ok(to),
+            Ok(key_id),
+            Ok(signature),
+        ) => encode(&Value::Array(fields[..10].to_vec())).and_then(|unsigned| {
+            raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
+                if magic == "RAD1"
+                    && version == 1
+                    && lifecycle == 0
+                    && case_id == fixture.case_id
+                    && execution == fixture.execution
+                    && policy == snapshot
+                    && from == transition.from
+                    && to == transition.to
+                    && fields[8] == Value::Bool(false)
+                    && key_id == "pigloros.fixture.conformance-authority"
+                {
+                    Ok(())
+                } else {
+                    Err(BundleContractErrorV1::ProfileInvalid)
+                }
+            })
+        }),
+        _ => Err(BundleContractErrorV1::ProfileInvalid),
+    }
 }
 
 fn raw_fixture_authority_signature(
