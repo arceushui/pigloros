@@ -1344,7 +1344,7 @@ fn atomic_freeze_rejects_inconsistent_closure_identity() -> Result<(), ErasureEr
     zero_closure.scope.target_closure = reference(0);
     assert_atomic_scope_invalid(zero_closure);
 
-    let mut wrong_obligation_order = base.clone();
+    let mut wrong_obligation_order = base;
     wrong_obligation_order.obligations.reverse();
     assert_atomic_scope_invalid(wrong_obligation_order);
     Ok(())
@@ -1372,7 +1372,7 @@ fn atomic_freeze_rejects_unbound_obligations() -> Result<(), ErasureErrorV1> {
         owner: first_target.replica_id,
         command_identity: reference(99),
     })?;
-    let mut wrong_command_input = base.clone();
+    let mut wrong_command_input = base;
     wrong_command_input.obligations = vec![wrong_command];
     let wrong_command_input = bind_atomic_obligations(wrong_command_input)?;
     assert_atomic_scope_invalid(wrong_command_input);
