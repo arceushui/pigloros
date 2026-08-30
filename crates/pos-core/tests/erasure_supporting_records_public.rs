@@ -335,8 +335,8 @@ fn supporting_records_require_complete_freeze_commitments() -> Result<(), Erasur
 fn supporting_records_bind_obligation_objects_and_lineage_ledgers() -> Result<(), ErasureErrorV1> {
     let request = reference(1);
     let scope = scope_commitment(request)?;
-    let obligation = obligation(request)?;
     let other_obligation = obligation(reference(9))?;
+    let obligation = obligation(request)?;
     let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
         request,
         obligations: vec![obligation.reference()],
