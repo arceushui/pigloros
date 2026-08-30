@@ -282,18 +282,6 @@ impl CatalogFixtureFamily {
         Self::IndependentEvaluation,
     ];
 
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Positive => "positive",
-            Self::Denied => "denied",
-            Self::Malformed => "malformed",
-            Self::ResourceExhaustion => "resource-exhaustion",
-            Self::DeletionRedaction => "deletion-redaction",
-            Self::Downgrade => "downgrade",
-            Self::IndependentEvaluation => "independent-evaluation",
-        }
-    }
-
     const fn provider_family(self) -> FixtureFamilyV1 {
         match self {
             Self::Positive => FixtureFamilyV1::Positive,
