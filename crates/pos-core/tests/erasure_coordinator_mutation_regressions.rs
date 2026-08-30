@@ -1874,7 +1874,11 @@ fn coordinator_trait_submits_and_retries_a_corrected_request() -> Result<(), Era
     })?;
     let corrected = request_with(reference(40), correction.reference())?;
     let corrected_reference = corrected.reference();
-    ErasureCoordinator::submit_corrected(&mut fixture.machine, corrected.clone(), correction)?;
+    ErasureCoordinator::submit_corrected(
+        &mut fixture.machine,
+        corrected.clone(),
+        correction.clone(),
+    )?;
     let retry = ErasureCoordinator::submit_corrected(&mut fixture.machine, corrected, correction)?;
     assert_eq!(retry.request(), corrected_reference);
     assert_eq!(retry.lifecycle(), ErasureLifecycleV1::Submitted);
