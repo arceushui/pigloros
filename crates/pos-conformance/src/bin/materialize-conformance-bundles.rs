@@ -118,7 +118,13 @@ fn execution_profile_bytes(
         Value::Text(declaration.semantic_version.to_owned()),
         Value::Array(reproducibility_classes),
         Value::Bool(declaration.network_allowed),
-        Value::Array(Vec::new()),
+        Value::Array(
+            declaration
+                .capability_ids
+                .iter()
+                .map(|capability| Value::Text((*capability).to_owned()))
+                .collect(),
+        ),
         Value::Text("fixture-scheduler-v1".to_owned()),
         Value::Text("fixture-numeric-v1".to_owned()),
         Value::Text("fixture-schema-v1".to_owned()),
