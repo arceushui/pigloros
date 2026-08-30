@@ -2065,29 +2065,6 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn public_materializer_reports_unsupported_atomic_publication() -> TestResult {
-    let _guard = materializer_process_guard();
-    let root = temporary_root("unsupported-atomic-publication")?;
-    let _cleanup = TemporaryOutput(root.clone());
-    fs::create_dir_all(&root)?;
-    let output = root.join(source_inventory_address());
-    let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
-        .ok_or("materializer binary path is unavailable")?;
-    let result = Command::new(materializer)
-        .env(
-            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
-            "0707070707070707070707070707070707070707070707070707070707070707",
-        )
-        .arg(&output)
-        .output()?;
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("atomic publication is unsupported"));
-    assert!(!output.exists());
-    Ok(())
-}
-
 #[cfg(unix)]
 #[test]
 fn public_binaries_reject_unsafe_filesystem_boundaries() -> TestResult {

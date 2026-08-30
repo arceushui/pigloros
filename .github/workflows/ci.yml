@@ -179,10 +179,19 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: conformance-non-linux
-      - name: Reject unsupported atomic publication through the public CLI
-        run: >
-          cargo test -p pos-conformance --test bundle_contract_public --locked
-          public_materializer_reports_unsupported_atomic_publication -- --exact
+      - name: Enforce the Linux-only secure fixture-generation boundary
+        run: |
+          set +e
+          cargo check -p pos-conformance --locked 2>&1 | tee "${RUNNER_TEMP}/conformance-non-linux.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "${status}" -eq 0 ]]; then
+            echo "non-Linux conformance build unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep --fixed-strings \
+            "secure conformance fixture snapshot generation requires Linux openat2" \
+            "${RUNNER_TEMP}/conformance-non-linux.log"
 
   clippy:
     name: clippy

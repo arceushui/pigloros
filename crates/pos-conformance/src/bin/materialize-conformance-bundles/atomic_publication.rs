@@ -40,16 +40,6 @@ struct RelativeFilePath {
 #[cfg(target_os = "linux")]
 struct VerifiedPublication(AtomicPublication);
 
-#[cfg(not(target_os = "linux"))]
-struct AtomicPublication;
-
-#[cfg(not(target_os = "linux"))]
-impl AtomicPublication {
-    const fn prepare(_destination: &Path) -> Result<Self, MaterializationError> {
-        Err(MaterializationError::AtomicPublicationUnsupported)
-    }
-}
-
 #[cfg(target_os = "linux")]
 impl AtomicPublication {
     fn prepare(destination: &Path) -> Result<Self, MaterializationError> {
@@ -216,14 +206,6 @@ fn publish_materialized_tree(
         Ok(()) => VerifiedPublication(publication).publish(),
         Err(error) => publication.abort().and(Err(error)),
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn publish_materialized_tree(
-    _publication: AtomicPublication,
-    _files: &[MaterializedFile],
-) -> Result<(), MaterializationError> {
-    Err(MaterializationError::AtomicPublicationUnsupported)
 }
 
 #[cfg(target_os = "linux")]

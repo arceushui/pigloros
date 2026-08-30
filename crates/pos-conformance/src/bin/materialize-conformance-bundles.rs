@@ -86,24 +86,6 @@ enum MaterializationError {
     SourceInventoryAddressMismatch,
 }
 
-#[cfg(not(target_os = "linux"))]
-struct AtomicPublication;
-
-#[cfg(not(target_os = "linux"))]
-impl AtomicPublication {
-    const fn prepare(_destination: &Path) -> Result<Self, MaterializationError> {
-        Err(MaterializationError::AtomicPublicationUnsupported)
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn publish_materialized_tree(
-    _publication: AtomicPublication,
-    _files: &[MaterializedFile],
-) -> Result<(), MaterializationError> {
-    Err(MaterializationError::AtomicPublicationUnsupported)
-}
-
 include!(concat!(env!("OUT_DIR"), "/materialization_assets.rs"));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
