@@ -473,14 +473,18 @@ fn decode_value(bytes: Vec<u8>) -> ciborium::Value {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn fixture_ok<T, E: std::fmt::Debug>(context: &str, value: Result<T, E>) -> T {
-    value.unwrap_or_else(|error| panic!("{context}: {error:?}"))
+    value.unwrap_or_else(|error| {
+        std::panic::resume_unwind(Box::new(format!("{context}: {error:?}")))
+    })
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn array_fields(value: ciborium::Value, context: &str) -> Vec<ciborium::Value> {
     match value {
         ciborium::Value::Array(fields) => fields,
-        other => panic!("{context}: expected CBOR array, found {other:?}"),
+        other => std::panic::resume_unwind(Box::new(format!(
+            "{context}: expected CBOR array, found {other:?}"
+        ))),
     }
 }
 
@@ -488,7 +492,11 @@ fn array_fields(value: ciborium::Value, context: &str) -> Vec<ciborium::Value> {
 fn cloned_array_fields(value: &ciborium::Value, context: &str) -> Vec<ciborium::Value> {
     value
         .as_array()
-        .unwrap_or_else(|| panic!("{context}: expected CBOR array, found {value:?}"))
+        .unwrap_or_else(|| {
+            std::panic::resume_unwind(Box::new(format!(
+                "{context}: expected CBOR array, found {value:?}"
+            )))
+        })
         .clone()
 }
 
@@ -705,7 +713,7 @@ fn evidence_with_optional_record_variants() -> MoatProofEvidenceV1 {
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn safe_error_codes() -> [SafeErrorCodeV1; 14] {
+const fn safe_error_codes() -> [SafeErrorCodeV1; 14] {
     [
         SafeErrorCodeV1::InvalidEncoding,
         SafeErrorCodeV1::UnsupportedVersion,
@@ -882,7 +890,10 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
             ciborium::Value::Text("wrong".to_owned()),
         ),
     )));
+}
 
+#[test]
+fn malformed_verification_results_reach_closed_decoder_boundaries() {
     let result = ok(public_evidence_fixture().to_verification_result());
     let result_value = decode_value(ok(result.to_canonical_cbor()));
     assert!(
@@ -899,7 +910,10 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
             ciborium::Value::Bytes(vec![0; 32]),
         ),
     )));
+}
 
+#[test]
+fn malformed_divergence_reports_reach_closed_decoder_boundaries() {
     let mut report = DivergenceReportV1 {
         request_digest: [1; 32],
         manifest_digest: [2; 32],

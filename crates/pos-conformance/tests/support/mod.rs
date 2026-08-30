@@ -27,6 +27,8 @@ pub enum ArchiveField {
 }
 
 impl ArchiveField {
+    /// Returns this field's position in an archive record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Manifest => 0,
@@ -44,6 +46,8 @@ pub enum ManifestField {
 }
 
 impl ManifestField {
+    /// Returns this field's position in a manifest record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::ProfileDigest => 3,
@@ -60,6 +64,8 @@ pub enum MemberField {
 }
 
 impl MemberField {
+    /// Returns this field's position in an archive-member record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Path => 0,
@@ -86,6 +92,8 @@ pub enum ArtifactDescriptorField {
 }
 
 impl ArtifactDescriptorField {
+    /// Returns this field's position in an artifact-descriptor record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Path => 0,
@@ -97,6 +105,8 @@ impl ArtifactDescriptorField {
 }
 
 impl DescriptorField {
+    /// Returns this field's position in a member-descriptor record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Path => 0,
@@ -118,6 +128,8 @@ pub enum ProfileField {
 }
 
 impl ProfileField {
+    /// Returns this field's position in a conformance-profile record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::ExecutionMatrixDigest => 6,
@@ -137,6 +149,8 @@ pub enum ProviderBindingField {
 }
 
 impl ProviderBindingField {
+    /// Returns this field's position in a provider-binding record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::RegistryDescriptor => 0,
@@ -151,6 +165,8 @@ pub enum ProviderKeyField {
 }
 
 impl ProviderKeyField {
+    /// Returns this field's position in a provider-key record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::ProviderId => 0,
@@ -164,6 +180,8 @@ pub enum IndependenceRequirementField {
 }
 
 impl IndependenceRequirementField {
+    /// Returns this field's position in an independence-requirement record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::TrustPolicySnapshotDigest => 3,
@@ -183,6 +201,8 @@ pub enum RecordField {
 }
 
 impl RecordField {
+    /// Returns this field's position in a canonical record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Magic => 0,
@@ -191,6 +211,8 @@ impl RecordField {
 }
 
 impl ReleaseAdmissionField {
+    /// Returns this field's position in a release-admission record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::Magic => 0,
@@ -210,6 +232,8 @@ pub enum FixtureField {
 }
 
 impl FixtureField {
+    /// Returns this field's position in a fixture record.
+    #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Self::ProviderKey => 4,
@@ -236,6 +260,11 @@ impl Drop for TemporaryOutput {
     }
 }
 
+/// Returns a unique temporary-root path for a test label.
+///
+/// # Errors
+///
+/// Returns an error when the system clock precedes the Unix epoch.
 pub fn temporary_root(label: &str) -> TestResult<PathBuf> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -243,6 +272,8 @@ pub fn temporary_root(label: &str) -> TestResult<PathBuf> {
     Ok(std::env::temp_dir().join(format!("pigloros-{label}-{}-{nonce}", std::process::id())))
 }
 
+/// Returns the content address of the checked-in fixture inventory.
+#[must_use]
 pub fn source_inventory_address() -> String {
     let digest: [u8; 32] = Sha256::digest(include_bytes!(
         "../../../../fixtures/conformance/SHA256SUMS"
@@ -251,6 +282,11 @@ pub fn source_inventory_address() -> String {
     pos_conformance::hex_digest(&digest)
 }
 
+/// Lists all files below a published release directory.
+///
+/// # Errors
+///
+/// Returns an error when a directory cannot be read.
 pub fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     let mut pending = vec![root.to_path_buf()];
     let mut files = Vec::new();
@@ -268,6 +304,11 @@ pub fn release_files(root: &Path) -> TestResult<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Materializes and returns the current public conformance archive.
+///
+/// # Errors
+///
+/// Returns an error when setup, materialization, publication discovery, or archive reading fails.
 pub fn current_archive(label: &str) -> TestResult<Vec<u8>> {
     let root = temporary_root(label)?;
     let _cleanup = TemporaryOutput(root.clone());
@@ -296,12 +337,22 @@ pub fn current_archive(label: &str) -> TestResult<Vec<u8>> {
     Ok(fs::read(archive)?)
 }
 
+/// Encodes a CBOR value for a public-boundary mutation.
+///
+/// # Errors
+///
+/// Returns an error when CBOR serialization fails.
 pub fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
     Ok(bytes)
 }
 
+/// Computes the domain-separated digest for canonical contract fields.
+///
+/// # Errors
+///
+/// Returns an error when field encoding or length conversion fails.
 pub fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> {
     let bytes = encode_value(&Value::Array(fields.to_vec()))?;
     let mut preimage = Vec::with_capacity(domain.len() + bytes.len() + 9);
@@ -312,6 +363,11 @@ pub fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> 
     Ok(*blake3::hash(&preimage).as_bytes())
 }
 
+/// Returns a mutable CBOR array, identifying it by name in any error.
+///
+/// # Errors
+///
+/// Returns an error when the value is not a CBOR array.
 pub fn array_mut<'a>(value: &'a mut Value, name: &str) -> TestResult<&'a mut Vec<Value>> {
     match value {
         Value::Array(values) => Ok(values),
@@ -319,6 +375,11 @@ pub fn array_mut<'a>(value: &'a mut Value, name: &str) -> TestResult<&'a mut Vec
     }
 }
 
+/// Returns a mutable array field, identifying it by name in any error.
+///
+/// # Errors
+///
+/// Returns an error when the indexed field is absent or not a CBOR array.
 pub fn array_field<'a>(
     fields: &'a mut [Value],
     index: usize,
@@ -330,6 +391,11 @@ pub fn array_field<'a>(
     }
 }
 
+/// Replaces a named field with a CBOR value.
+///
+/// # Errors
+///
+/// Returns an error when the indexed field is absent.
 pub fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &str) -> TestResult {
     let slot = fields
         .get_mut(index)
@@ -338,6 +404,11 @@ pub fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &st
     Ok(())
 }
 
+/// Returns the bytes of an archive member at a path.
+///
+/// # Errors
+///
+/// Returns an error when the archive structure or member bytes are invalid or absent.
 pub fn member_bytes(archive: &Value, path: &str) -> TestResult<Vec<u8>> {
     let Value::Array(archive_fields) = archive else {
         return Err("archive is not an array".into());
@@ -360,6 +431,11 @@ pub fn member_bytes(archive: &Value, path: &str) -> TestResult<Vec<u8>> {
     }
 }
 
+/// Returns the path of an archive member with a wire role.
+///
+/// # Errors
+///
+/// Returns an error when the archive structure, member role, or member path is invalid or absent.
 pub fn member_path_by_role(archive: &Value, role: u64) -> TestResult<String> {
     let Value::Array(archive_fields) = archive else {
         return Err("archive is not an array".into());
@@ -382,6 +458,11 @@ pub fn member_path_by_role(archive: &Value, role: u64) -> TestResult<String> {
     }
 }
 
+/// Returns the mutable fields of an archive member at a path.
+///
+/// # Errors
+///
+/// Returns an error when the archive structure or member is invalid or absent.
 pub fn archive_member_fields<'a>(
     archive: &'a mut [Value],
     path: &str,
@@ -396,6 +477,11 @@ pub fn archive_member_fields<'a>(
     array_mut(member, "archive member")
 }
 
+/// Returns the mutable descriptor fields for an archive member path.
+///
+/// # Errors
+///
+/// Returns an error when the archive structure or descriptor is invalid or absent.
 pub fn archive_descriptor_fields<'a>(
     archive: &'a mut [Value],
     path: &str,
@@ -415,6 +501,11 @@ pub fn archive_descriptor_fields<'a>(
     array_mut(descriptor, "archive descriptor")
 }
 
+/// Replaces an archive member and refreshes its descriptor metadata.
+///
+/// # Errors
+///
+/// Returns an error when the member or descriptor is absent, malformed, or cannot encode the length.
 pub fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[u8]) -> TestResult {
     replace_value(
         archive_member_fields(archive, path)?,
@@ -437,6 +528,11 @@ pub fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[
     )
 }
 
+/// Re-signs an archive after a public-boundary mutation.
+///
+/// # Errors
+///
+/// Returns an error when the archive structure or manifest encoding is invalid.
 pub fn resign_archive(archive: &mut Value) -> TestResult {
     let manifest = {
         let fields = array_mut(archive, "archive")?;
@@ -450,6 +546,11 @@ pub fn resign_archive(archive: &mut Value) -> TestResult {
     Ok(())
 }
 
+/// Recomputes digest fields for every fixture in a profile.
+///
+/// # Errors
+///
+/// Returns an error when the profile or fixture structure is invalid or a digest cannot be encoded.
 pub fn refresh_fixture_digests(profile: &mut [Value]) -> TestResult {
     let fixtures = array_field(profile, ProfileField::Fixtures.index(), "profile fixtures")?;
     for fixture in fixtures {
@@ -468,6 +569,11 @@ pub fn refresh_fixture_digests(profile: &mut [Value]) -> TestResult {
     Ok(())
 }
 
+/// Mutates, re-signs, and encodes an archive through its public representation.
+///
+/// # Errors
+///
+/// Returns an error when archive decoding, mutation, signing, or encoding fails.
 pub fn mutate_archive(
     original: &[u8],
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
@@ -478,6 +584,11 @@ pub fn mutate_archive(
     encode_value(&archive)
 }
 
+/// Mutates, re-hashes, and re-signs one decoded archive member.
+///
+/// # Errors
+///
+/// Returns an error when archive or member decoding, mutation, metadata refresh, signing, or encoding fails.
 pub fn mutate_member(
     original: &[u8],
     path: &str,
@@ -493,6 +604,11 @@ pub fn mutate_member(
     encode_value(&archive)
 }
 
+/// Mutates a release-admission member and refreshes every bound profile digest.
+///
+/// # Errors
+///
+/// Returns an error when the archive or profile is malformed, the admission is unbound, or re-signing fails.
 pub fn mutate_release_admission(
     original: &[u8],
     path: &str,
@@ -555,6 +671,11 @@ pub fn mutate_release_admission(
     encode_value(&archive)
 }
 
+/// Mutates draft evidence and refreshes the bound archive and profile digests.
+///
+/// # Errors
+///
+/// Returns an error when evidence, archive, or profile data is malformed or cannot be re-signed.
 pub fn mutate_draft_evidence(
     original: &[u8],
     mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> TestResult,
@@ -654,6 +775,11 @@ pub fn mutate_draft_evidence(
     encode_value(&archive)
 }
 
+/// Mutates a profile and refreshes its bound archive metadata.
+///
+/// # Errors
+///
+/// Returns an error when the archive or profile is malformed or cannot be re-signed.
 pub fn mutate_profile(
     original: &[u8],
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
@@ -693,6 +819,11 @@ pub fn mutate_profile(
     encode_value(&archive)
 }
 
+/// Asserts that the independent verifier rejects an archive scenario.
+///
+/// # Errors
+///
+/// Returns an error when the independent verifier accepts the archive.
 pub fn assert_independent_rejects(archive: &[u8], scenario: &str) -> TestResult {
     if verify_archive_independently(archive).is_ok() {
         return Err(format!("independent verifier accepted {scenario}").into());
@@ -700,6 +831,11 @@ pub fn assert_independent_rejects(archive: &[u8], scenario: &str) -> TestResult 
     Ok(())
 }
 
+/// Replaces typed bundle-member bytes and refreshes their manifest descriptor.
+///
+/// # Errors
+///
+/// Returns an error when the member or descriptor is absent or its length cannot be represented.
 pub fn update_typed_member(
     bundle: &mut ConformanceBundleV1,
     role: BundleMemberRoleV1,

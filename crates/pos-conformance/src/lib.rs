@@ -7001,7 +7001,7 @@ pub mod tests {
             ),
             (
                 |_, events| {
-                    events[2].event_type = "other".to_owned();
+                    events[2].event_type = "private.note".to_owned();
                     events.push(AuthoritativeEventV1 {
                         seq: 4,
                         tick: 3,
