@@ -1325,7 +1325,7 @@ fn emit_fixture(
 ) -> Result<(), std::fmt::Error> {
     writeln!(
         generated,
-        "fn catalog_fixture_{fixture_index}() -> CatalogFixture {{"
+        "const fn catalog_fixture_{fixture_index}() -> CatalogFixture {{"
     )?;
     writeln!(generated, "                    CatalogFixture {{")?;
     writeln!(
