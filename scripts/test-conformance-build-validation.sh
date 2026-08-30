@@ -27,9 +27,9 @@ jq '.undeclared_evidence = true' "${fixture}" >"${replacement}"
 mv -- "${replacement}" "${fixture}"
 bash scripts/generate-conformance-fixture-records.sh fixtures/conformance --write >/dev/null
 # The materialization step builds this crate immediately before this negative
-# control. Force Cargo to rerun the build script so the mutated fixture is
-# validated instead of accepting the cached generated catalog.
-touch crates/pos-conformance/build.rs
+# control. Remove only this package's hosted build products so Cargo must rerun
+# the build script against the mutated fixture instead of accepting its cache.
+cargo clean -p pos-conformance >/dev/null
 
 if cargo check -p pos-conformance --locked >"${log}" 2>&1; then
   echo "pos-conformance build accepted a schema-invalid fixture input" >&2
