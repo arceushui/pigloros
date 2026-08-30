@@ -96,7 +96,7 @@ fn administrative_resolution_action_code_is_bound_to_public_wire_roundtrip(
     Ok(())
 }
 
-fn scope_input(
+const fn scope_input(
     request: ErasureReferenceV1,
     affected_scope: Vec<ErasureReferenceV1>,
     target_closure: ErasureReferenceV1,
@@ -133,7 +133,7 @@ fn scope_commitment_binds_scope_extension_encoding_and_content_address(
         reference(4),
         None,
     );
-    let record = ErasureScopeCommitmentV1::new(input.clone())?;
+    let record = ErasureScopeCommitmentV1::new(input)?;
     assert_eq!(record.affected_scope(), &[reference(2), reference(3)]);
     assert_eq!(record.extension_head(), None);
     assert_ne!(record.reference(), reference(0));
@@ -167,7 +167,7 @@ fn scope_commitment_binds_scope_extension_encoding_and_content_address(
     Ok(())
 }
 
-fn freeze_input(
+const fn freeze_input(
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,
     evidence: ErasureReferenceV1,
@@ -215,7 +215,7 @@ fn freeze_provenance_binds_optional_extension_encoding_and_content_address(
     Ok(())
 }
 
-fn freeze_failure_input(
+const fn freeze_failure_input(
     request: ErasureReferenceV1,
     error: ErasureErrorV1,
     evidence: ErasureReferenceV1,

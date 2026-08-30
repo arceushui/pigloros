@@ -3,21 +3,20 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pos_core::erasure::target_closure_digest;
+use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     destruction_command_reference, inventory_obligation_reference, ErasureAcknowledgementOutcomeV1,
     ErasureAcknowledgementProvenanceInputV1, ErasureAcknowledgementProvenanceV1,
     ErasureAcknowledgementV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureAuthorizationDecisionV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1,
-    ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
-    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureFreezeAdmissionV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
+    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeAdmissionV1,
+    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasurePersistencePortV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
     ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
 };
 
@@ -71,7 +70,7 @@ const fn freeze_transition() -> ErasureStateTransitionV1 {
     }
 }
 
-fn inventory_for(
+const fn inventory_for(
     target: ErasureRequiredTargetV1,
     owner: ErasureReferenceV1,
 ) -> ErasureInventoryResultV1 {
@@ -190,7 +189,7 @@ fn receipt_input(
     }
 }
 
-fn deadline_receipt_input(issue_position: u64) -> ErasureReceiptInputV1 {
+const fn deadline_receipt_input(issue_position: u64) -> ErasureReceiptInputV1 {
     ErasureReceiptInputV1 {
         request: reference(1),
         terminal_state: reference(0),
@@ -725,7 +724,7 @@ fn supporting_lifecycle_rejects_evidence_at_the_wrong_boundary() -> Result<(), E
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let mut evidence_authorized = authorized_fixture(vec![target(10)])?;
+    let evidence_authorized = authorized_fixture(vec![target(10)])?;
     let evidence_admission =
         retry_admission(evidence_authorized.request, target(10), 0, None, u64::MAX)?;
     let evidence_record = latest_record(&evidence_authorized.state, evidence_authorized.request)?;
@@ -815,19 +814,26 @@ fn dispatch_attempt_requires_the_current_request_ordinal_and_receipt() -> Result
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let wrong_ordinal = retry_admission(fixture.request, target, 1, None, u64::MAX)?;
+    let mut partial = partial_failure_fixture()?;
+    let current = latest_record(&partial.state, partial.request)?;
+    let source_receipt = current
+        .receipt()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .receipt_digest();
+    let wrong_ordinal =
+        retry_admission(partial.request, target, 2, Some(source_receipt), u64::MAX)?;
     assert_eq!(
-        fixture
+        partial
             .machine
-            .dispatch_attempt(fixture.request, &wrong_ordinal),
+            .dispatch_attempt(partial.request, &wrong_ordinal),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let wrong_source = retry_admission(fixture.request, target, 0, Some(reference(98)), u64::MAX)?;
+    let wrong_source = retry_admission(partial.request, target, 1, Some(reference(98)), u64::MAX)?;
     assert_eq!(
-        fixture
+        partial
             .machine
-            .dispatch_attempt(fixture.request, &wrong_source),
+            .dispatch_attempt(partial.request, &wrong_source),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
