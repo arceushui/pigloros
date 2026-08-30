@@ -152,13 +152,13 @@ fn mutate_live_staging(
     };
     let resume_result = signal_process(&child, "CONT");
     if let Err(error) = mutation_result {
-        let _ = child.kill();
-        let _ = child.wait();
+        child.kill()?;
+        child.wait()?;
         return Err(error.into());
     }
     if let Err(error) = resume_result {
-        let _ = child.kill();
-        let _ = child.wait();
+        child.kill()?;
+        child.wait()?;
         return Err(error);
     }
 

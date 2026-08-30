@@ -642,7 +642,7 @@ fn map_cleanup_error(error: Errno) -> MaterializationError {
 }
 
 #[cfg(target_os = "linux")]
-fn atomic_publication_is_unsupported(error: Errno) -> bool {
+const fn atomic_publication_is_unsupported(error: Errno) -> bool {
     matches!(
         error,
         Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV
