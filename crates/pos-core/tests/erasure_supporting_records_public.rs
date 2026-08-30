@@ -741,7 +741,7 @@ fn portable_reference_decoders_reject_duplicate_entries() -> Result<(), ErasureE
 fn portable_decoders_reject_unknown_closed_enum_codes() -> Result<(), ErasureErrorV1> {
     let input = complete_supporting_input(reference(1))?;
     let outcome = changed_array(&input.attempt_outcomes[0].to_canonical_cbor()?, |fields| {
-        fields[5] = Value::Integer(99.into())
+        fields[5] = Value::Integer(99.into());
     });
     assert_eq!(
         ErasureAttemptOutcomeV1::from_canonical_cbor(&outcome),
@@ -749,7 +749,9 @@ fn portable_decoders_reject_unknown_closed_enum_codes() -> Result<(), ErasureErr
     );
     let resolution = changed_array(
         &input.administrative_resolutions[0].to_canonical_cbor()?,
-        |fields| fields[4] = Value::Integer(99.into()),
+        |fields| {
+            fields[4] = Value::Integer(99.into());
+        },
     );
     assert_eq!(
         ErasureAdministrativeResolutionV1::from_canonical_cbor(&resolution),
