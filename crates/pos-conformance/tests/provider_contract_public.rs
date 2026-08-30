@@ -750,6 +750,45 @@ fn decoders_reject_trailing_noncanonical_malformed_and_wrong_shape_cbor() -> Tes
     Ok(())
 }
 
+#[test]
+fn public_decoders_preserve_structural_and_record_error_classification() -> TestResult {
+    let truncated_record = vec![0x82, 0x64, b'F', b'P', b'P', b'1'];
+    assert_eq!(
+        FixtureProviderPackageV1::from_canonical_cbor(&truncated_record),
+        Err(ProviderContractErrorV1::InvalidEncoding)
+    );
+
+    let mut over_nested = vec![0x81; 33];
+    over_nested.push(0);
+    assert_eq!(
+        FixtureProviderPackageV1::from_canonical_cbor(&over_nested),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
+
+    let package_bytes = package()?.to_canonical_cbor()?;
+    let unsupported_version = mutate_record(&package_bytes, |fields| {
+        fields[1] = Value::Integer(2.into());
+        Ok(())
+    })?;
+    assert_eq!(
+        FixtureProviderPackageV1::from_canonical_cbor(&unsupported_version),
+        Err(ProviderContractErrorV1::UnsupportedVersion)
+    );
+
+    let oversized_abi = mutate_record(&package_bytes, |fields| {
+        let Value::Array(provider_key) = &mut fields[2] else {
+            return Err("provider key must be an array".into());
+        };
+        provider_key[2] = Value::Integer(65_536_u64.into());
+        Ok(())
+    })?;
+    assert_eq!(
+        FixtureProviderPackageV1::from_canonical_cbor(&oversized_abi),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
 fn assert_package_shape_rejections(package_bytes: &[u8]) -> TestResult {
     let malformed_package_fields = [
         (0, Value::Null, ProviderContractErrorV1::InvalidEncoding),

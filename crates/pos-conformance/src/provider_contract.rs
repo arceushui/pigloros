@@ -685,84 +685,156 @@ fn decode_registry_binding(
 }
 
 fn decode_package(value: &Value) -> Result<FixtureProviderPackageV1, ProviderContractErrorV1> {
-    let fields = array(value, 12)?;
-    if text_value(&fields[0])? != FIXTURE_PROVIDER_PACKAGE_MAGIC_V1 || uint_value(&fields[1])? != 1
-    {
-        return Err(ProviderContractErrorV1::UnsupportedVersion);
+    array(value, 12).and_then(decode_package_fields)
+}
+
+/// Compose ordered provider-field decoders without propagation branches or
+/// deeply nested hand-written control flow.
+macro_rules! decode_provider_fields {
+    ($decoder:expr => $binding:ident, $($remaining:tt)*) => {
+        $decoder.and_then(|$binding| decode_provider_fields!($($remaining)*))
+    };
+    ($result:expr $(,)?) => {
+        $result
+    };
+}
+
+struct DecodedPackageIdentity {
+    provider_key: FixtureProviderKeyV1,
+    claim_layer: ClaimLayerV1,
+    subject_adapter: SubjectAdapterKindV1,
+    family_schemas: Vec<ProviderFamilySchemaV1>,
+}
+
+struct DecodedPackageArtifacts {
+    licence_descriptor: ArtifactDescriptorV1,
+    notices_descriptor: ArtifactDescriptorV1,
+    sbom_descriptor: ArtifactDescriptorV1,
+    source_provenance_descriptor: ArtifactDescriptorV1,
+    limitations_descriptor: ArtifactDescriptorV1,
+}
+
+fn decode_package_fields(
+    fields: &[Value],
+) -> Result<FixtureProviderPackageV1, ProviderContractErrorV1> {
+    decode_provider_fields! {
+        decode_package_header(&fields[0], &fields[1]) => _header,
+        decode_package_identity(fields) => identity,
+        decode_package_artifacts(fields) => artifacts,
+        digest_value(&fields[11]) => package_digest,
+        Ok(FixtureProviderPackageV1 {
+            provider_key: identity.provider_key,
+            claim_layer: identity.claim_layer,
+            subject_adapter: identity.subject_adapter,
+            family_schemas: identity.family_schemas,
+            licence_descriptor: artifacts.licence_descriptor,
+            notices_descriptor: artifacts.notices_descriptor,
+            sbom_descriptor: artifacts.sbom_descriptor,
+            source_provenance_descriptor: artifacts.source_provenance_descriptor,
+            limitations_descriptor: artifacts.limitations_descriptor,
+            package_digest,
+        })
     }
-    let provider_key = decode_provider_key(&fields[2])?;
-    let claim_layer = decode_claim_layer(&fields[3])?;
-    let subject_adapter = decode_subject_adapter(&fields[4])?;
-    let family_schemas = array(&fields[5], 7)?
-        .iter()
-        .map(decode_family_schema)
-        .collect::<Result<Vec<_>, _>>()?;
-    let licence_descriptor = decode_artifact_descriptor(&fields[6])?;
-    let notices_descriptor = decode_artifact_descriptor(&fields[7])?;
-    let sbom_descriptor = decode_artifact_descriptor(&fields[8])?;
-    let source_provenance_descriptor = decode_artifact_descriptor(&fields[9])?;
-    let limitations_descriptor = decode_artifact_descriptor(&fields[10])?;
-    digest_value(&fields[11]).map(|package_digest| FixtureProviderPackageV1 {
-        provider_key,
-        claim_layer,
-        subject_adapter,
-        family_schemas,
-        licence_descriptor,
-        notices_descriptor,
-        sbom_descriptor,
-        source_provenance_descriptor,
-        limitations_descriptor,
-        package_digest,
-    })
+}
+
+fn decode_package_header(magic: &Value, version: &Value) -> Result<(), ProviderContractErrorV1> {
+    decode_provider_fields! {
+        text_value(magic) => magic,
+        uint_value(version) => version,
+        if magic == FIXTURE_PROVIDER_PACKAGE_MAGIC_V1 && version == 1 {
+            Ok(())
+        } else {
+            Err(ProviderContractErrorV1::UnsupportedVersion)
+        }
+    }
+}
+
+fn decode_package_identity(
+    fields: &[Value],
+) -> Result<DecodedPackageIdentity, ProviderContractErrorV1> {
+    decode_provider_fields! {
+        decode_provider_key(&fields[2]) => provider_key,
+        decode_claim_layer(&fields[3]) => claim_layer,
+        decode_subject_adapter(&fields[4]) => subject_adapter,
+        array(&fields[5], 7).and_then(|family_schemas| {
+            family_schemas.iter().map(decode_family_schema).collect()
+        }) => family_schemas,
+        Ok(DecodedPackageIdentity {
+            provider_key,
+            claim_layer,
+            subject_adapter,
+            family_schemas,
+        })
+    }
+}
+
+fn decode_package_artifacts(
+    fields: &[Value],
+) -> Result<DecodedPackageArtifacts, ProviderContractErrorV1> {
+    decode_provider_fields! {
+        decode_artifact_descriptor(&fields[6]) => licence_descriptor,
+        decode_artifact_descriptor(&fields[7]) => notices_descriptor,
+        decode_artifact_descriptor(&fields[8]) => sbom_descriptor,
+        decode_artifact_descriptor(&fields[9]) => source_provenance_descriptor,
+        decode_artifact_descriptor(&fields[10]) => limitations_descriptor,
+        Ok(DecodedPackageArtifacts {
+            licence_descriptor,
+            notices_descriptor,
+            sbom_descriptor,
+            source_provenance_descriptor,
+            limitations_descriptor,
+        })
+    }
 }
 
 fn decode_provider_entry(value: &Value) -> Result<FixtureProviderEntryV1, ProviderContractErrorV1> {
-    let fields = array(value, 7)?;
-    decode_provider_key(&Value::Array(fields[..4].to_vec())).and_then(|provider_key| {
-        decode_claim_layer(&fields[4]).and_then(|claim_layer| {
-            decode_subject_adapter(&fields[5]).and_then(|subject_adapter| {
-                decode_artifact_descriptor(&fields[6]).map(|provider_package_descriptor| {
-                    FixtureProviderEntryV1 {
-                        provider_key,
-                        claim_layer,
-                        subject_adapter,
-                        provider_package_descriptor,
-                    }
-                })
+    array(value, 7).and_then(|fields| {
+        decode_provider_fields! {
+            decode_provider_key(&Value::Array(fields[..4].to_vec())) => provider_key,
+            decode_claim_layer(&fields[4]) => claim_layer,
+            decode_subject_adapter(&fields[5]) => subject_adapter,
+            decode_artifact_descriptor(&fields[6]) => provider_package_descriptor,
+            Ok(FixtureProviderEntryV1 {
+                provider_key,
+                claim_layer,
+                subject_adapter,
+                provider_package_descriptor,
             })
-        })
+        }
     })
 }
 
 fn decode_provider_key(value: &Value) -> Result<FixtureProviderKeyV1, ProviderContractErrorV1> {
-    let fields = array(value, 4)?;
-    text_value(&fields[0]).and_then(|provider_id| {
-        text_value(&fields[1]).and_then(|contract_version| {
-            u16_value(&fields[2]).and_then(|abi_major| {
-                u16_value(&fields[3]).map(|abi_minor| FixtureProviderKeyV1 {
-                    provider_id,
-                    contract_version,
-                    abi_major,
-                    abi_minor,
-                })
+    array(value, 4).and_then(|fields| {
+        decode_provider_fields! {
+            text_value(&fields[0]) => provider_id,
+            text_value(&fields[1]) => contract_version,
+            u16_value(&fields[2]) => abi_major,
+            u16_value(&fields[3]) => abi_minor,
+            Ok(FixtureProviderKeyV1 {
+                provider_id,
+                contract_version,
+                abi_major,
+                abi_minor,
             })
-        })
+        }
     })
 }
 
 fn decode_family_schema(value: &Value) -> Result<ProviderFamilySchemaV1, ProviderContractErrorV1> {
-    let fields = array(value, 2)?;
-    uint_value(&fields[0]).and_then(|code| {
-        FixtureFamilyV1::from_wire_code(code)
-            .ok_or(ProviderContractErrorV1::FamilyInventoryInvalid)
-            .and_then(|family| {
-                decode_artifact_descriptor(&fields[1]).map(|schema_descriptor| {
-                    ProviderFamilySchemaV1 {
-                        family,
-                        schema_descriptor,
-                    }
+    array(value, 2).and_then(|fields| {
+        uint_value(&fields[0]).and_then(|code| {
+            FixtureFamilyV1::from_wire_code(code)
+                .ok_or(ProviderContractErrorV1::FamilyInventoryInvalid)
+                .and_then(|family| {
+                    decode_artifact_descriptor(&fields[1]).map(|schema_descriptor| {
+                        ProviderFamilySchemaV1 {
+                            family,
+                            schema_descriptor,
+                        }
+                    })
                 })
-            })
+        })
     })
 }
 
@@ -883,18 +955,11 @@ fn decode_claim_layer(value: &Value) -> Result<ClaimLayerV1, ProviderContractErr
 }
 
 fn subject_adapter(value: SubjectAdapterKindV1) -> Value {
-    uint(match value {
-        SubjectAdapterKindV1::ExportedArtifact => 0,
-        SubjectAdapterKindV1::PublicGatewayProtocol => 1,
-        SubjectAdapterKindV1::PublicPluginProtocol => 2,
-    })
+    uint(value.wire_code())
 }
 
 fn decode_subject_adapter(value: &Value) -> Result<SubjectAdapterKindV1, ProviderContractErrorV1> {
-    uint_value(value).and_then(|code| match code {
-        0 => Ok(SubjectAdapterKindV1::ExportedArtifact),
-        1 => Ok(SubjectAdapterKindV1::PublicGatewayProtocol),
-        2 => Ok(SubjectAdapterKindV1::PublicPluginProtocol),
-        _ => Err(ProviderContractErrorV1::FieldOutOfBounds),
+    uint_value(value).and_then(|code| {
+        SubjectAdapterKindV1::from_wire_code(code).ok_or(ProviderContractErrorV1::FieldOutOfBounds)
     })
 }

@@ -143,6 +143,23 @@ pub enum SubjectAdapterKindV1 {
 }
 
 impl SubjectAdapterKindV1 {
+    pub(crate) const fn wire_code(self) -> u64 {
+        match self {
+            Self::ExportedArtifact => 0,
+            Self::PublicGatewayProtocol => 1,
+            Self::PublicPluginProtocol => 2,
+        }
+    }
+
+    pub(crate) const fn from_wire_code(code: u64) -> Option<Self> {
+        match code {
+            0 => Some(Self::ExportedArtifact),
+            1 => Some(Self::PublicGatewayProtocol),
+            2 => Some(Self::PublicPluginProtocol),
+            _ => None,
+        }
+    }
+
     /// Decode the canonical public catalog name for an evaluator adapter.
     #[must_use]
     pub fn from_catalog_name(name: &str) -> Option<Self> {
@@ -1672,77 +1689,125 @@ fn encode_output_capability(value: &EvaluatorOutputCapabilityV1) -> Value {
     ])
 }
 
+/// Compose ordered field decoders without introducing propagation branches in
+/// the public CPF1 decoding path.
+macro_rules! decode_fields {
+    ($decoder:expr => $binding:ident, $($remaining:tt)*) => {
+        $decoder.and_then(|$binding| decode_fields!($($remaining)*))
+    };
+    ($result:expr $(,)?) => {
+        $result
+    };
+}
+
 fn decode_profile(value: &Value) -> Result<ConformanceProfileV1, ConformanceContractError> {
-    let fields = array_values(value)?;
-    let Some(magic) = fields.first() else {
-        return Err(ConformanceContractError::InvalidEncoding);
-    };
-    let Some(version) = fields.get(1) else {
-        return Err(ConformanceContractError::InvalidEncoding);
-    };
-    if text_value(magic)? != CONFORMANCE_PROFILE_MAGIC_V1 || uint_value(version)? != 1 {
-        return Err(ConformanceContractError::UnsupportedVersion);
-    }
-    let fields = array(value, 18)?;
-    Ok(ConformanceProfileV1 {
-        profile_id: text_value(&fields[2])?,
-        semantic_version: text_value(&fields[3])?,
-        lifecycle: decode_lifecycle(&fields[4])?,
-        normative_spec_digest: digest_value(&fields[5])?,
-        execution_matrix_digest: digest_value(&fields[6])?,
-        execution_profile_digests: digest_list_value(&fields[7])?,
-        fixture_provider_registry: decode_provider_registry_binding(&fields[8])?,
-        fixtures: array_values(&fields[9])?
-            .iter()
-            .map(decode_fixture)
-            .collect::<Result<Vec<_>, _>>()?,
-        allowed_divergences: array_values(&fields[10])?
-            .iter()
-            .map(decode_divergence)
-            .collect::<Result<Vec<_>, _>>()?,
-        evaluator_protocol: decode_protocol(&fields[11])?,
-        independence_requirements: decode_requirements(&fields[12])?,
-        fixture_contract_policy_digest: digest_value(&fields[13])?,
-        limitations_digest: digest_value(&fields[14])?,
-        provenance_digest: digest_value(&fields[15])?,
-        previous_profile_digest: optional_digest(&fields[16])?,
-        profile_digest: digest_value(&fields[17])?,
-    })
+    array_values(value)
+        .and_then(|fields| match (fields.first(), fields.get(1)) {
+            (Some(magic), Some(version)) => text_value(magic)
+                .and_then(|magic| uint_value(version).map(|version| (magic, version))),
+            _ => Err(ConformanceContractError::InvalidEncoding),
+        })
+        .and_then(|(magic, version)| {
+            if magic == CONFORMANCE_PROFILE_MAGIC_V1 && version == 1 {
+                array(value, 18)
+            } else {
+                Err(ConformanceContractError::UnsupportedVersion)
+            }
+        })
+        .and_then(|fields| {
+            decode_fields! {
+                text_value(&fields[2]) => profile_id,
+                text_value(&fields[3]) => semantic_version,
+                decode_lifecycle(&fields[4]) => lifecycle,
+                digest_value(&fields[5]) => normative_spec_digest,
+                digest_value(&fields[6]) => execution_matrix_digest,
+                digest_list_value(&fields[7]) => execution_profile_digests,
+                decode_provider_registry_binding(&fields[8]) => fixture_provider_registry,
+                array_values(&fields[9]).and_then(|fixtures| fixtures.iter().map(decode_fixture).collect()) => fixtures,
+                array_values(&fields[10]).and_then(|divergences| divergences.iter().map(decode_divergence).collect()) => allowed_divergences,
+                decode_protocol(&fields[11]) => evaluator_protocol,
+                decode_requirements(&fields[12]) => independence_requirements,
+                digest_value(&fields[13]) => fixture_contract_policy_digest,
+                digest_value(&fields[14]) => limitations_digest,
+                digest_value(&fields[15]) => provenance_digest,
+                optional_digest(&fields[16]) => previous_profile_digest,
+                digest_value(&fields[17]) => profile_digest,
+                Ok(ConformanceProfileV1 {
+                    profile_id,
+                    semantic_version,
+                    lifecycle,
+                    normative_spec_digest,
+                    execution_matrix_digest,
+                    execution_profile_digests,
+                    fixture_provider_registry,
+                    fixtures,
+                    allowed_divergences,
+                    evaluator_protocol,
+                    independence_requirements,
+                    fixture_contract_policy_digest,
+                    limitations_digest,
+                    provenance_digest,
+                    previous_profile_digest,
+                    profile_digest,
+                })
+            }
+        })
 }
 
 fn decode_fixture(value: &Value) -> Result<FixtureDescriptorV1, ConformanceContractError> {
-    let fields = array(value, 24)?;
-    Ok(FixtureDescriptorV1 {
-        case_id: text_value(&fields[0])?,
-        mandatory: bool_value(&fields[1])?,
-        claim_layer: decode_claim_layer(&fields[2])?,
-        family: decode_family(&fields[3])?,
-        provider_key: decode_provider_key(&fields[4])?,
-        subject_adapter: decode_adapter(&fields[5])?,
-        execution_profile_digest: digest_value(&fields[6])?,
-        modes: array_values(&fields[7])?
-            .iter()
-            .map(decode_mode)
-            .collect::<Result<Vec<_>, _>>()?,
-        schema: decode_artifact_descriptor(&fields[8])?,
-        payload: decode_artifact_descriptor(&fields[9])?,
-        auxiliary: array_values(&fields[10])?
-            .iter()
-            .map(decode_artifact_descriptor)
-            .collect::<Result<Vec<_>, _>>()?,
-        strict_oracle: decode_strict_oracle(&fields[11])?,
-        expected_verification_outcome: decode_verification_outcome(&fields[12])?,
-        expected_verification_error: optional_namespaced_failure(&fields[13])?,
-        replay_claim: decode_replay_claim(&fields[14])?,
-        redaction_state: decode_redaction(&fields[15])?,
-        deterministic_budget: decode_deterministic_budget(&fields[16])?,
-        operational_safety: decode_operational_safety(&fields[17])?,
-        capability_policy: decode_capability_policy(&fields[18])?,
-        trust_policy_snapshot_digest: optional_digest(&fields[19])?,
-        release_admission_digest: optional_digest(&fields[20])?,
-        provenance: decode_fixture_provenance(&fields[21])?,
-        transition: optional_transition(&fields[22])?,
-        fixture_digest: digest_value(&fields[23])?,
+    array(value, 24).and_then(|fields| {
+        decode_fields! {
+            text_value(&fields[0]) => case_id,
+            bool_value(&fields[1]) => mandatory,
+            decode_claim_layer(&fields[2]) => claim_layer,
+            decode_family(&fields[3]) => family,
+            decode_provider_key(&fields[4]) => provider_key,
+            decode_adapter(&fields[5]) => subject_adapter,
+            digest_value(&fields[6]) => execution_profile_digest,
+            array_values(&fields[7]).and_then(|modes| modes.iter().map(decode_mode).collect()) => modes,
+            decode_artifact_descriptor(&fields[8]) => schema,
+            decode_artifact_descriptor(&fields[9]) => payload,
+            array_values(&fields[10]).and_then(|auxiliary| auxiliary.iter().map(decode_artifact_descriptor).collect()) => auxiliary,
+            decode_strict_oracle(&fields[11]) => strict_oracle,
+            decode_verification_outcome(&fields[12]) => expected_verification_outcome,
+            optional_namespaced_failure(&fields[13]) => expected_verification_error,
+            decode_replay_claim(&fields[14]) => replay_claim,
+            decode_redaction(&fields[15]) => redaction_state,
+            decode_deterministic_budget(&fields[16]) => deterministic_budget,
+            decode_operational_safety(&fields[17]) => operational_safety,
+            decode_capability_policy(&fields[18]) => capability_policy,
+            optional_digest(&fields[19]) => trust_policy_snapshot_digest,
+            optional_digest(&fields[20]) => release_admission_digest,
+            decode_fixture_provenance(&fields[21]) => provenance,
+            optional_transition(&fields[22]) => transition,
+            digest_value(&fields[23]) => fixture_digest,
+            Ok(FixtureDescriptorV1 {
+                case_id,
+                mandatory,
+                claim_layer,
+                family,
+                provider_key,
+                subject_adapter,
+                execution_profile_digest,
+                modes,
+                schema,
+                payload,
+                auxiliary,
+                strict_oracle,
+                expected_verification_outcome,
+                expected_verification_error,
+                replay_claim,
+                redaction_state,
+                deterministic_budget,
+                operational_safety,
+                capability_policy,
+                trust_policy_snapshot_digest,
+                release_admission_digest,
+                provenance,
+                transition,
+                fixture_digest,
+            })
+        }
     })
 }
 
@@ -1753,12 +1818,19 @@ fn decode_artifact_descriptor(
 }
 
 fn decode_provider_key(value: &Value) -> Result<FixtureProviderKeyV1, ConformanceContractError> {
-    let fields = array(value, 4)?;
-    Ok(FixtureProviderKeyV1 {
-        provider_id: text_value(&fields[0])?,
-        contract_version: text_value(&fields[1])?,
-        abi_major: u16_value(&fields[2])?,
-        abi_minor: u16_value(&fields[3])?,
+    array(value, 4).and_then(|fields| {
+        decode_fields! {
+            text_value(&fields[0]) => provider_id,
+            text_value(&fields[1]) => contract_version,
+            u16_value(&fields[2]) => abi_major,
+            u16_value(&fields[3]) => abi_minor,
+            Ok(FixtureProviderKeyV1 {
+                provider_id,
+                contract_version,
+                abi_major,
+                abi_minor,
+            })
+        }
     })
 }
 
@@ -1782,46 +1854,67 @@ fn decode_provider_registry_binding(
 }
 
 fn decode_strict_oracle(value: &Value) -> Result<StrictOracleV1, ConformanceContractError> {
-    let fields = array(value, 4)?;
-    Ok(StrictOracleV1 {
-        kind: StrictOracleKindV1::from_wire_code(uint_value(&fields[0])?)
-            .ok_or(ConformanceContractError::InvalidEncoding)?,
-        output: optional_artifact_descriptor(&fields[1])?,
-        failure: optional_namespaced_failure(&fields[2])?,
-        divergence: optional_divergence(&fields[3])?,
+    array(value, 4).and_then(|fields| {
+        decode_fields! {
+            uint_value(&fields[0]).and_then(|code| StrictOracleKindV1::from_wire_code(code).ok_or(ConformanceContractError::InvalidEncoding)) => kind,
+            optional_artifact_descriptor(&fields[1]) => output,
+            optional_namespaced_failure(&fields[2]) => failure,
+            optional_divergence(&fields[3]) => divergence,
+            Ok(StrictOracleV1 {
+                kind,
+                output,
+                failure,
+                divergence,
+            })
+        }
     })
 }
 
 fn decode_divergence(value: &Value) -> Result<AllowedDivergenceV1, ConformanceContractError> {
-    let fields = array(value, 2)?;
-    Ok(AllowedDivergenceV1 {
-        classification: decode_divergence_mismatch(&fields[0])?,
-        first_coordinate: bytes_value(&fields[1])?,
+    array(value, 2).and_then(|fields| {
+        decode_fields! {
+            decode_divergence_mismatch(&fields[0]) => classification,
+            bytes_value(&fields[1]) => first_coordinate,
+            Ok(AllowedDivergenceV1 {
+                classification,
+                first_coordinate,
+            })
+        }
     })
 }
 
 fn decode_deterministic_budget(
     value: &Value,
 ) -> Result<DeterministicBudgetV1, ConformanceContractError> {
-    let fields = array(value, 8)?;
-    Ok(DeterministicBudgetV1 {
-        memory_bytes: uint_value(&fields[0])?,
-        cpu_fuel: uint_value(&fields[1])?,
-        host_calls: uint_value(&fields[2])?,
-        event_count: uint_value(&fields[3])?,
-        output_bytes: uint_value(&fields[4])?,
-        storage_bytes: uint_value(&fields[5])?,
-        execution_steps: uint_value(&fields[6])?,
-        simulation_time_ns: uint_value(&fields[7])?,
+    array(value, 8).and_then(|fields| {
+        decode_fields! {
+            uint_value(&fields[0]) => memory_bytes,
+            uint_value(&fields[1]) => cpu_fuel,
+            uint_value(&fields[2]) => host_calls,
+            uint_value(&fields[3]) => event_count,
+            uint_value(&fields[4]) => output_bytes,
+            uint_value(&fields[5]) => storage_bytes,
+            uint_value(&fields[6]) => execution_steps,
+            uint_value(&fields[7]) => simulation_time_ns,
+            Ok(DeterministicBudgetV1 {
+                memory_bytes,
+                cpu_fuel,
+                host_calls,
+                event_count,
+                output_bytes,
+                storage_bytes,
+                execution_steps,
+                simulation_time_ns,
+            })
+        }
     })
 }
 
 fn decode_operational_safety(
     value: &Value,
 ) -> Result<OperationalSafetyV1, ConformanceContractError> {
-    let fields = array(value, 1)?;
-    Ok(OperationalSafetyV1 {
-        watchdog_ms: uint_value(&fields[0])?,
+    array(value, 1).and_then(|fields| {
+        uint_value(&fields[0]).map(|watchdog_ms| OperationalSafetyV1 { watchdog_ms })
     })
 }
 
@@ -1885,105 +1978,187 @@ fn optional_transition(
 }
 
 fn decode_capability_policy(value: &Value) -> Result<CapabilityPolicyV1, ConformanceContractError> {
-    let fields = array(value, 2)?;
-    Ok(CapabilityPolicyV1 {
-        network_allowed: bool_value(&fields[0])?,
-        capability_ids: strings_value(&fields[1])?,
+    array(value, 2).and_then(|fields| {
+        decode_fields! {
+            bool_value(&fields[0]) => network_allowed,
+            strings_value(&fields[1]) => capability_ids,
+            Ok(CapabilityPolicyV1 {
+                network_allowed,
+                capability_ids,
+            })
+        }
     })
 }
 
 fn decode_fixture_provenance(
     value: &Value,
 ) -> Result<FixtureProvenanceV1, ConformanceContractError> {
-    let fields = array(value, 7)?;
-    Ok(FixtureProvenanceV1 {
-        licence_id: text_value(&fields[0])?,
-        notices_digest: digest_value(&fields[1])?,
-        sbom_digest: digest_value(&fields[2])?,
-        source_digest: digest_value(&fields[3])?,
-        build_digest: digest_value(&fields[4])?,
-        publication_review_digest: digest_value(&fields[5])?,
-        limitations_digest: digest_value(&fields[6])?,
+    array(value, 7).and_then(|fields| {
+        decode_fields! {
+            text_value(&fields[0]) => licence_id,
+            digest_value(&fields[1]) => notices_digest,
+            digest_value(&fields[2]) => sbom_digest,
+            digest_value(&fields[3]) => source_digest,
+            digest_value(&fields[4]) => build_digest,
+            digest_value(&fields[5]) => publication_review_digest,
+            digest_value(&fields[6]) => limitations_digest,
+            Ok(FixtureProvenanceV1 {
+                licence_id,
+                notices_digest,
+                sbom_digest,
+                source_digest,
+                build_digest,
+                publication_review_digest,
+                limitations_digest,
+            })
+        }
     })
 }
 
 fn decode_protocol(value: &Value) -> Result<EvaluatorProtocolV1, ConformanceContractError> {
-    let fields = array(value, 5)?;
-    Ok(EvaluatorProtocolV1 {
-        protocol_id: text_value(&fields[0])?,
-        protocol_digest: digest_value(&fields[1])?,
-        request_schema_digest: digest_value(&fields[2])?,
-        report_schema_digest: digest_value(&fields[3])?,
-        hard_caps: decode_hard_caps(&fields[4])?,
+    array(value, 5).and_then(|fields| {
+        decode_fields! {
+            text_value(&fields[0]) => protocol_id,
+            digest_value(&fields[1]) => protocol_digest,
+            digest_value(&fields[2]) => request_schema_digest,
+            digest_value(&fields[3]) => report_schema_digest,
+            decode_hard_caps(&fields[4]) => hard_caps,
+            Ok(EvaluatorProtocolV1 {
+                protocol_id,
+                protocol_digest,
+                request_schema_digest,
+                report_schema_digest,
+                hard_caps,
+            })
+        }
     })
 }
 
 fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCapsV1, ConformanceContractError> {
-    let fields = array(value, 18)?;
-    Ok(EvaluatorHardCapsV1 {
-        max_profile_bytes: uint_value(&fields[0])?,
-        max_cases: u32_value(&fields[1])?,
-        max_bundle_members: u32_value(&fields[2])?,
-        max_member_path_bytes: u16_value(&fields[3])?,
-        max_member_bytes: uint_value(&fields[4])?,
-        max_total_bundle_bytes: uint_value(&fields[5])?,
-        max_compression_expansion: u32_value(&fields[6])?,
-        max_structural_nesting: u8_value(&fields[7])?,
-        max_coordinate_bytes: u16_value(&fields[8])?,
-        max_diagnostic_bytes: uint_value(&fields[9])?,
-        max_deterministic_memory_bytes: uint_value(&fields[10])?,
-        max_deterministic_cpu_fuel: uint_value(&fields[11])?,
-        max_deterministic_host_calls: uint_value(&fields[12])?,
-        max_deterministic_event_count: uint_value(&fields[13])?,
-        max_deterministic_output_bytes: uint_value(&fields[14])?,
-        max_deterministic_storage_bytes: uint_value(&fields[15])?,
-        max_deterministic_execution_steps: uint_value(&fields[16])?,
-        max_deterministic_simulation_time_ns: uint_value(&fields[17])?,
+    array(value, 18).and_then(|fields| {
+        decode_fields! {
+            uint_value(&fields[0]) => max_profile_bytes,
+            u32_value(&fields[1]) => max_cases,
+            u32_value(&fields[2]) => max_bundle_members,
+            u16_value(&fields[3]) => max_member_path_bytes,
+            uint_value(&fields[4]) => max_member_bytes,
+            uint_value(&fields[5]) => max_total_bundle_bytes,
+            u32_value(&fields[6]) => max_compression_expansion,
+            u8_value(&fields[7]) => max_structural_nesting,
+            u16_value(&fields[8]) => max_coordinate_bytes,
+            uint_value(&fields[9]) => max_diagnostic_bytes,
+            uint_value(&fields[10]) => max_deterministic_memory_bytes,
+            uint_value(&fields[11]) => max_deterministic_cpu_fuel,
+            uint_value(&fields[12]) => max_deterministic_host_calls,
+            uint_value(&fields[13]) => max_deterministic_event_count,
+            uint_value(&fields[14]) => max_deterministic_output_bytes,
+            uint_value(&fields[15]) => max_deterministic_storage_bytes,
+            uint_value(&fields[16]) => max_deterministic_execution_steps,
+            uint_value(&fields[17]) => max_deterministic_simulation_time_ns,
+            Ok(EvaluatorHardCapsV1 {
+                max_profile_bytes,
+                max_cases,
+                max_bundle_members,
+                max_member_path_bytes,
+                max_member_bytes,
+                max_total_bundle_bytes,
+                max_compression_expansion,
+                max_structural_nesting,
+                max_coordinate_bytes,
+                max_diagnostic_bytes,
+                max_deterministic_memory_bytes,
+                max_deterministic_cpu_fuel,
+                max_deterministic_host_calls,
+                max_deterministic_event_count,
+                max_deterministic_output_bytes,
+                max_deterministic_storage_bytes,
+                max_deterministic_execution_steps,
+                max_deterministic_simulation_time_ns,
+            })
+        }
     })
 }
 
 fn decode_requirements(
     value: &Value,
 ) -> Result<IndependenceRequirementsV1, ConformanceContractError> {
-    let fields = array(value, 5)?;
-    Ok(IndependenceRequirementsV1 {
-        technical_independence_required: bool_value(&fields[0])?,
-        authorship_independence_required: bool_value(&fields[1])?,
-        organizational_independence_required: bool_value(&fields[2])?,
-        trust_policy_snapshot_digest: digest_value(&fields[3])?,
-        requirements_digest: digest_value(&fields[4])?,
+    array(value, 5).and_then(|fields| {
+        decode_fields! {
+            bool_value(&fields[0]) => technical_independence_required,
+            bool_value(&fields[1]) => authorship_independence_required,
+            bool_value(&fields[2]) => organizational_independence_required,
+            digest_value(&fields[3]) => trust_policy_snapshot_digest,
+            digest_value(&fields[4]) => requirements_digest,
+            Ok(IndependenceRequirementsV1 {
+                technical_independence_required,
+                authorship_independence_required,
+                organizational_independence_required,
+                trust_policy_snapshot_digest,
+                requirements_digest,
+            })
+        }
     })
 }
 
 fn decode_request(value: &Value) -> Result<EvaluatorRequestV1, ConformanceContractError> {
-    let fields = array(value, 14)?;
-    if text_value(&fields[0])? != EVALUATOR_REQUEST_MAGIC_V1 || uint_value(&fields[1])? != 1 {
-        return Err(ConformanceContractError::UnsupportedVersion);
-    }
-    Ok(EvaluatorRequestV1 {
-        request_id: digest16_value(&fields[2])?,
-        conformance_profile_digest: digest_value(&fields[3])?,
-        fixture_bundle_digest: digest_value(&fields[4])?,
-        subject_adapter: decode_adapter(&fields[5])?,
-        subject_artifact_digest: digest_value(&fields[6])?,
-        implementation: decode_identity(&fields[7])?,
-        execution_profile_digest: digest_value(&fields[8])?,
-        trust_policy_snapshot_digest: digest_value(&fields[9])?,
-        output_capability: decode_output_capability(&fields[10])?,
-        evaluator_protocol_digest: digest_value(&fields[11])?,
-        evaluator_hard_caps_digest: digest_value(&fields[12])?,
-        request_digest: digest_value(&fields[13])?,
-    })
+    array(value, 14)
+        .and_then(|fields| {
+            text_value(&fields[0]).and_then(|magic| {
+                uint_value(&fields[1]).and_then(|version| {
+                    if magic == EVALUATOR_REQUEST_MAGIC_V1 && version == 1 {
+                        Ok(fields)
+                    } else {
+                        Err(ConformanceContractError::UnsupportedVersion)
+                    }
+                })
+            })
+        })
+        .and_then(|fields| {
+            decode_fields! {
+                digest16_value(&fields[2]) => request_id,
+                digest_value(&fields[3]) => conformance_profile_digest,
+                digest_value(&fields[4]) => fixture_bundle_digest,
+                decode_adapter(&fields[5]) => subject_adapter,
+                digest_value(&fields[6]) => subject_artifact_digest,
+                decode_identity(&fields[7]) => implementation,
+                digest_value(&fields[8]) => execution_profile_digest,
+                digest_value(&fields[9]) => trust_policy_snapshot_digest,
+                decode_output_capability(&fields[10]) => output_capability,
+                digest_value(&fields[11]) => evaluator_protocol_digest,
+                digest_value(&fields[12]) => evaluator_hard_caps_digest,
+                digest_value(&fields[13]) => request_digest,
+                Ok(EvaluatorRequestV1 {
+                    request_id,
+                    conformance_profile_digest,
+                    fixture_bundle_digest,
+                    subject_adapter,
+                    subject_artifact_digest,
+                    implementation,
+                    execution_profile_digest,
+                    trust_policy_snapshot_digest,
+                    output_capability,
+                    evaluator_protocol_digest,
+                    evaluator_hard_caps_digest,
+                    request_digest,
+                })
+            }
+        })
 }
 
 fn decode_output_capability(
     value: &Value,
 ) -> Result<EvaluatorOutputCapabilityV1, ConformanceContractError> {
-    let fields = array(value, 3)?;
-    Ok(EvaluatorOutputCapabilityV1 {
-        capability_digest: digest_value(&fields[0])?,
-        report_bytes_limit: uint_value(&fields[1])?,
-        diagnostic_bytes_limit: uint_value(&fields[2])?,
+    array(value, 3).and_then(|fields| {
+        decode_fields! {
+            digest_value(&fields[0]) => capability_digest,
+            uint_value(&fields[1]) => report_bytes_limit,
+            uint_value(&fields[2]) => diagnostic_bytes_limit,
+            Ok(EvaluatorOutputCapabilityV1 {
+                capability_digest,
+                report_bytes_limit,
+                diagnostic_bytes_limit,
+            })
+        }
     })
 }
 
@@ -1999,14 +2174,23 @@ fn encode_identity(value: &ImplementationIdentityV1) -> Value {
 }
 
 fn decode_identity(value: &Value) -> Result<ImplementationIdentityV1, ConformanceContractError> {
-    let fields = array(value, 6)?;
-    Ok(ImplementationIdentityV1 {
-        implementation_id: text_value(&fields[0])?,
-        source_digest: digest_value(&fields[1])?,
-        build_digest: digest_value(&fields[2])?,
-        binary_digest: digest_value(&fields[3])?,
-        public_contract_digest: digest_value(&fields[4])?,
-        organization_id: optional_text(&fields[5])?,
+    array(value, 6).and_then(|fields| {
+        decode_fields! {
+            text_value(&fields[0]) => implementation_id,
+            digest_value(&fields[1]) => source_digest,
+            digest_value(&fields[2]) => build_digest,
+            digest_value(&fields[3]) => binary_digest,
+            digest_value(&fields[4]) => public_contract_digest,
+            optional_text(&fields[5]) => organization_id,
+            Ok(ImplementationIdentityV1 {
+                implementation_id,
+                source_digest,
+                build_digest,
+                binary_digest,
+                public_contract_digest,
+                organization_id,
+            })
+        }
     })
 }
 
@@ -2023,15 +2207,18 @@ fn encode_value_to_writer<W: std::io::Write>(
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
-    preflight_cbor(bytes)?;
-    let value = ciborium::from_reader(Cursor::new(bytes))
-        .map_err(|_| ConformanceContractError::InvalidEncoding)?;
-    encode_value(&value).and_then(|canonical| {
-        if canonical == bytes {
-            Ok(value)
-        } else {
-            Err(ConformanceContractError::InvalidEncoding)
-        }
+    preflight_cbor(bytes).and_then(|()| {
+        ciborium::from_reader(Cursor::new(bytes))
+            .map_err(|_| ConformanceContractError::InvalidEncoding)
+            .and_then(|value| {
+                encode_value(&value).and_then(|canonical| {
+                    if canonical == bytes {
+                        Ok(value)
+                    } else {
+                        Err(ConformanceContractError::InvalidEncoding)
+                    }
+                })
+            })
     })
 }
 
@@ -2094,13 +2281,19 @@ fn uint_value(value: &Value) -> Result<u64, ConformanceContractError> {
     }
 }
 fn u8_value(value: &Value) -> Result<u8, ConformanceContractError> {
-    u8::try_from(uint_value(value)?).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+    uint_value(value).and_then(|value| {
+        u8::try_from(value).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+    })
 }
 fn u16_value(value: &Value) -> Result<u16, ConformanceContractError> {
-    u16::try_from(uint_value(value)?).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+    uint_value(value).and_then(|value| {
+        u16::try_from(value).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+    })
 }
 fn u32_value(value: &Value) -> Result<u32, ConformanceContractError> {
-    u32::try_from(uint_value(value)?).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+    uint_value(value).and_then(|value| {
+        u32::try_from(value).map_err(|_| ConformanceContractError::FieldOutOfBounds)
+    })
 }
 fn digest_value(value: &Value) -> Result<[u8; 32], ConformanceContractError> {
     bytes_value(value).and_then(|value| {
@@ -2158,23 +2351,17 @@ fn lifecycle(value: ProfileLifecycleV1) -> Value {
     uint(value.wire_code())
 }
 fn decode_lifecycle(value: &Value) -> Result<ProfileLifecycleV1, ConformanceContractError> {
-    ProfileLifecycleV1::from_wire_code(uint_value(value)?)
-        .ok_or(ConformanceContractError::UnsupportedVersion)
-}
-fn adapter(value: SubjectAdapterKindV1) -> Value {
-    uint(match value {
-        SubjectAdapterKindV1::ExportedArtifact => 0,
-        SubjectAdapterKindV1::PublicGatewayProtocol => 1,
-        SubjectAdapterKindV1::PublicPluginProtocol => 2,
+    uint_value(value).and_then(|code| {
+        ProfileLifecycleV1::from_wire_code(code).ok_or(ConformanceContractError::UnsupportedVersion)
     })
 }
+fn adapter(value: SubjectAdapterKindV1) -> Value {
+    uint(value.wire_code())
+}
 fn decode_adapter(value: &Value) -> Result<SubjectAdapterKindV1, ConformanceContractError> {
-    match uint_value(value)? {
-        0 => Ok(SubjectAdapterKindV1::ExportedArtifact),
-        1 => Ok(SubjectAdapterKindV1::PublicGatewayProtocol),
-        2 => Ok(SubjectAdapterKindV1::PublicPluginProtocol),
-        _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    uint_value(value).and_then(|code| {
+        SubjectAdapterKindV1::from_wire_code(code).ok_or(ConformanceContractError::InvalidEncoding)
+    })
 }
 fn mode(value: ExecutionModeV1) -> Value {
     uint(match value {
@@ -2185,45 +2372,29 @@ fn mode(value: ExecutionModeV1) -> Value {
     })
 }
 fn decode_mode(value: &Value) -> Result<ExecutionModeV1, ConformanceContractError> {
-    match uint_value(value)? {
+    uint_value(value).and_then(|code| match code {
         0 => Ok(ExecutionModeV1::Local),
         1 => Ok(ExecutionModeV1::AirGapped),
         2 => Ok(ExecutionModeV1::Replay),
         3 => Ok(ExecutionModeV1::Fork),
         _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    })
 }
 fn claim_layer(value: ClaimLayerV1) -> Value {
     uint(u64::from(value.wire_code()))
 }
 fn decode_claim_layer(value: &Value) -> Result<ClaimLayerV1, ConformanceContractError> {
-    u8::try_from(uint_value(value)?)
-        .ok()
-        .and_then(ClaimLayerV1::from_wire_code)
-        .ok_or(ConformanceContractError::InvalidEncoding)
-}
-fn family(value: FixtureFamilyV1) -> Value {
-    uint(match value {
-        FixtureFamilyV1::Positive => 0,
-        FixtureFamilyV1::Denied => 1,
-        FixtureFamilyV1::Malformed => 2,
-        FixtureFamilyV1::ResourceExhaustion => 3,
-        FixtureFamilyV1::DeletionRedaction => 4,
-        FixtureFamilyV1::Downgrade => 5,
-        FixtureFamilyV1::IndependentEvaluation => 6,
+    u8_value(value).and_then(|code| {
+        ClaimLayerV1::from_wire_code(code).ok_or(ConformanceContractError::InvalidEncoding)
     })
 }
+fn family(value: FixtureFamilyV1) -> Value {
+    uint(value.wire_code())
+}
 fn decode_family(value: &Value) -> Result<FixtureFamilyV1, ConformanceContractError> {
-    match uint_value(value)? {
-        0 => Ok(FixtureFamilyV1::Positive),
-        1 => Ok(FixtureFamilyV1::Denied),
-        2 => Ok(FixtureFamilyV1::Malformed),
-        3 => Ok(FixtureFamilyV1::ResourceExhaustion),
-        4 => Ok(FixtureFamilyV1::DeletionRedaction),
-        5 => Ok(FixtureFamilyV1::Downgrade),
-        6 => Ok(FixtureFamilyV1::IndependentEvaluation),
-        _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    uint_value(value).and_then(|code| {
+        FixtureFamilyV1::from_wire_code(code).ok_or(ConformanceContractError::InvalidEncoding)
+    })
 }
 fn verification_outcome(value: VerificationOutcomeV1) -> Value {
     uint(match value {
@@ -2238,7 +2409,7 @@ fn verification_outcome(value: VerificationOutcomeV1) -> Value {
 fn decode_verification_outcome(
     value: &Value,
 ) -> Result<VerificationOutcomeV1, ConformanceContractError> {
-    match uint_value(value)? {
+    uint_value(value).and_then(|code| match code {
         0 => Ok(VerificationOutcomeV1::VerifiedExact),
         1 => Ok(VerificationOutcomeV1::Diverged),
         2 => Ok(VerificationOutcomeV1::InvalidManifest),
@@ -2246,7 +2417,7 @@ fn decode_verification_outcome(
         4 => Ok(VerificationOutcomeV1::IncompatibleProfile),
         5 => Ok(VerificationOutcomeV1::ResourceLimitExceeded),
         _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    })
 }
 fn divergence_mismatch(value: DivergenceMismatchKindV1) -> Value {
     uint(match value {
@@ -2264,7 +2435,7 @@ fn divergence_mismatch(value: DivergenceMismatchKindV1) -> Value {
 fn decode_divergence_mismatch(
     value: &Value,
 ) -> Result<DivergenceMismatchKindV1, ConformanceContractError> {
-    match uint_value(value)? {
+    uint_value(value).and_then(|code| match code {
         0 => Ok(DivergenceMismatchKindV1::EventIdentity),
         1 => Ok(DivergenceMismatchKindV1::EventOrder),
         2 => Ok(DivergenceMismatchKindV1::CanonicalBytes),
@@ -2275,7 +2446,7 @@ fn decode_divergence_mismatch(
         7 => Ok(DivergenceMismatchKindV1::NumericProfile),
         8 => Ok(DivergenceMismatchKindV1::ProhibitedOperationalInput),
         _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    })
 }
 fn replay_claim(value: ReplayClaimV1) -> Value {
     uint(match value {
@@ -2287,14 +2458,14 @@ fn replay_claim(value: ReplayClaimV1) -> Value {
     })
 }
 fn decode_replay_claim(value: &Value) -> Result<ReplayClaimV1, ConformanceContractError> {
-    match uint_value(value)? {
+    uint_value(value).and_then(|code| match code {
         0 => Ok(ReplayClaimV1::Exact),
         1 => Ok(ReplayClaimV1::ExactAuthoritativeWithRedactedViews),
         2 => Ok(ReplayClaimV1::StructuralOnly),
         3 => Ok(ReplayClaimV1::UnverifiableArtifactsMissing),
         4 => Ok(ReplayClaimV1::IncompatibleProfile),
         _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    })
 }
 fn redaction(value: RedactionStateV1) -> Value {
     uint(match value {
@@ -2305,11 +2476,11 @@ fn redaction(value: RedactionStateV1) -> Value {
     })
 }
 fn decode_redaction(value: &Value) -> Result<RedactionStateV1, ConformanceContractError> {
-    match uint_value(value)? {
+    uint_value(value).and_then(|code| match code {
         0 => Ok(RedactionStateV1::None),
         1 => Ok(RedactionStateV1::RedactedViews),
         2 => Ok(RedactionStateV1::StructuralOnly),
         3 => Ok(RedactionStateV1::EvidenceMissing),
         _ => Err(ConformanceContractError::InvalidEncoding),
-    }
+    })
 }

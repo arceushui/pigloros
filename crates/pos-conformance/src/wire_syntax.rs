@@ -24,13 +24,15 @@ pub(crate) fn preflight_array_cbor(
             _ => return Err(CborPreflightError::InvalidEncoding),
         };
         let end = index.saturating_add(width);
-        let encoded = bytes
+        bytes
             .get(*index..end)
-            .ok_or(CborPreflightError::InvalidEncoding)?;
-        *index = end;
-        let mut value = [0_u8; 8];
-        value[8 - width..].copy_from_slice(encoded);
-        Ok(u64::from_be_bytes(value))
+            .ok_or(CborPreflightError::InvalidEncoding)
+            .map(|encoded| {
+                *index = end;
+                let mut value = [0_u8; 8];
+                value[8 - width..].copy_from_slice(encoded);
+                u64::from_be_bytes(value)
+            })
     }
 
     fn item(
@@ -44,43 +46,41 @@ pub(crate) fn preflight_array_cbor(
         if depth > maximum_depth {
             return Err(CborPreflightError::FieldOutOfBounds);
         }
-        let initial = *bytes
+        bytes
             .get(*index)
-            .ok_or(CborPreflightError::InvalidEncoding)?;
-        *index = index.saturating_add(1);
-        let length = read_length(bytes, index, initial & 0x1f)?;
-        match initial >> 5 {
-            0 | 1 => Ok(()),
-            2 | 3 => {
-                let count = usize::try_from(length).unwrap_or(usize::MAX);
-                let end = index
-                    .checked_add(count)
-                    .ok_or(CborPreflightError::FieldOutOfBounds)?;
-                bytes
-                    .get(*index..end)
-                    .ok_or(CborPreflightError::InvalidEncoding)?;
-                *index = end;
-                Ok(())
-            }
-            4 => {
-                if length > maximum_items {
-                    return Err(CborPreflightError::FieldOutOfBounds);
-                }
-                for _ in 0..length {
-                    item(
-                        bytes,
-                        index,
-                        depth.saturating_add(1),
-                        maximum_depth,
-                        maximum_items,
-                        allow_simple_values,
-                    )?;
-                }
-                Ok(())
-            }
-            7 if allow_simple_values && matches!(initial & 0x1f, 20..=22) => Ok(()),
-            _ => Err(CborPreflightError::InvalidEncoding),
-        }
+            .copied()
+            .ok_or(CborPreflightError::InvalidEncoding)
+            .and_then(|initial| {
+                *index = index.saturating_add(1);
+                read_length(bytes, index, initial & 0x1f).and_then(|length| match initial >> 5 {
+                    0 | 1 => Ok(()),
+                    2 | 3 => {
+                        let count = usize::try_from(length).unwrap_or(usize::MAX);
+                        index
+                            .checked_add(count)
+                            .ok_or(CborPreflightError::FieldOutOfBounds)
+                            .and_then(|end| {
+                                bytes
+                                    .get(*index..end)
+                                    .ok_or(CborPreflightError::InvalidEncoding)
+                                    .map(|_| *index = end)
+                            })
+                    }
+                    4 if length > maximum_items => Err(CborPreflightError::FieldOutOfBounds),
+                    4 => (0..length).try_for_each(|_| {
+                        item(
+                            bytes,
+                            index,
+                            depth.saturating_add(1),
+                            maximum_depth,
+                            maximum_items,
+                            allow_simple_values,
+                        )
+                    }),
+                    7 if allow_simple_values && matches!(initial & 0x1f, 20..=22) => Ok(()),
+                    _ => Err(CborPreflightError::InvalidEncoding),
+                })
+            })
     }
 
     let mut index = 0;
@@ -91,12 +91,14 @@ pub(crate) fn preflight_array_cbor(
         maximum_depth,
         maximum_items,
         allow_simple_values,
-    )?;
-    if index == bytes.len() {
-        Ok(())
-    } else {
-        Err(CborPreflightError::InvalidEncoding)
-    }
+    )
+    .and_then(|()| {
+        if index == bytes.len() {
+            Ok(())
+        } else {
+            Err(CborPreflightError::InvalidEncoding)
+        }
+    })
 }
 
 pub(crate) fn identifier(value: &str, maximum_bytes: usize) -> bool {
