@@ -35,6 +35,36 @@ struct ProfilePaths {
     fixtures: Vec<FixturePaths>,
 }
 
+#[derive(serde::Deserialize)]
+struct DraftAuthorityDeclaration {
+    magic: String,
+    version: u64,
+    lifecycle: String,
+    authority_kind: String,
+    trust_policy_id: String,
+    trust_policy_epoch: u64,
+    effective_timeline_position: u64,
+    offline_valid_through: String,
+    fixture_authority_key_id: String,
+    fixture_authority_public_key_hex: String,
+    execution_profiles: Vec<DraftExecutionProfile>,
+}
+
+#[derive(serde::Deserialize)]
+struct DraftExecutionProfile {
+    profile_id: String,
+    semantic_version: String,
+    network_allowed: bool,
+    capability_ids: Vec<String>,
+    reproducibility_classes: Vec<DraftReproducibilityClass>,
+}
+
+#[derive(serde::Deserialize)]
+enum DraftReproducibilityClass {
+    ProfileRecomputation,
+    CrossProfileConformance,
+}
+
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -465,6 +495,63 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
     Ok(generated)
 }
 
+fn draft_authority_public_key(root: &CatalogRoot) -> Result<[u8; 32], io::Error> {
+    let relative = "support/draft-execution-authority.json";
+    let path = non_symlink_relative_path(root, relative, "Draft authority declaration", false)?;
+    let bytes = fs::read(&path).map_err(|error| {
+        invalid_data(format!(
+            "Draft authority declaration cannot be read at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let declaration: DraftAuthorityDeclaration =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            invalid_data(format!(
+                "Draft authority declaration is invalid at {}: {error}",
+                path.display()
+            ))
+        })?;
+    let profiles_are_valid = declaration.execution_profiles.len() == 2
+        && declaration.execution_profiles.iter().all(|profile| {
+            !profile.profile_id.is_empty()
+                && !profile.semantic_version.is_empty()
+                && !profile.network_allowed
+                && profile.capability_ids.is_empty()
+                && !profile.reproducibility_classes.is_empty()
+        });
+    if declaration.magic != "DFA1"
+        || declaration.version != 1
+        || declaration.lifecycle != "Draft"
+        || declaration.authority_kind != "repository-test-fixture-only"
+        || declaration.trust_policy_id.is_empty()
+        || declaration.trust_policy_epoch == 0
+        || declaration.effective_timeline_position != 0
+        || declaration.offline_valid_through.is_empty()
+        || declaration.fixture_authority_key_id.is_empty()
+        || !profiles_are_valid
+    {
+        return Err(invalid_data("Draft authority declaration is inconsistent"));
+    }
+    let hex = declaration.fixture_authority_public_key_hex;
+    if hex.len() != 64 || !hex.is_ascii() {
+        return Err(invalid_data(
+            "Draft authority public key must contain 64 ASCII hex digits",
+        ));
+    }
+    let mut key = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let pair = std::str::from_utf8(pair)
+            .map_err(|_| invalid_data("Draft authority public key is not UTF-8"))?;
+        key[index] = u8::from_str_radix(pair, 16)
+            .map_err(|_| invalid_data("Draft authority public key contains a non-hex digit"))?;
+    }
+    Ok(key)
+}
+
+fn emit_draft_authority(key: [u8; 32]) -> String {
+    format!("const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n")
+}
+
 fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
     let mut paths = BTreeSet::from([root.source.join("profiles")]);
     for profile in profiles {
@@ -493,13 +580,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let root = catalog_root(&manifest_dir)?;
     let profiles = discover_profiles(&root)?;
+    let draft_authority_key = draft_authority_public_key(&root)?;
     emit_rerun_directives(&root, &profiles);
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.source
+            .join("support/draft-execution-authority.json")
+            .display()
+    );
     let out_dir = PathBuf::from(
         env::var_os("OUT_DIR").ok_or_else(|| invalid_data("OUT_DIR is unavailable"))?,
     );
     fs::write(
         out_dir.join("conformance_fixture_catalog.rs"),
         emit_catalog(&profiles)?,
+    )?;
+    fs::write(
+        out_dir.join("draft_authority.rs"),
+        emit_draft_authority(draft_authority_key),
     )?;
     Ok(())
 }
