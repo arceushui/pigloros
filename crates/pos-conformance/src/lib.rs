@@ -246,7 +246,15 @@ mod coverage_entrypoints {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn scalar_replacements(value: &ciborium::Value) -> Vec<ciborium::Value> {
-        match value {
+        let mut replacements = vec![
+            ciborium::Value::Null,
+            ciborium::Value::Bool(false),
+            ciborium::Value::Integer(0_u64.into()),
+            ciborium::Value::Bytes(Vec::new()),
+            ciborium::Value::Text(String::new()),
+            ciborium::Value::Array(Vec::new()),
+        ];
+        replacements.extend(match value {
             ciborium::Value::Integer(_) => (0_u64..=13)
                 .chain([u64::from(u16::MAX), u64::from(u32::MAX), u64::MAX])
                 .map(|value| ciborium::Value::Integer(value.into()))
@@ -281,7 +289,8 @@ mod coverage_entrypoints {
                 replacements
             }
             _ => Vec::new(),
-        }
+        });
+        replacements
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

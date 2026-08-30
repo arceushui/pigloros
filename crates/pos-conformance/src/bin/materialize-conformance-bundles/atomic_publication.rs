@@ -40,6 +40,13 @@ struct RelativeFilePath {
 #[cfg(target_os = "linux")]
 struct VerifiedPublication(AtomicPublication);
 
+#[cfg(all(test, target_os = "linux"))]
+std::thread_local! {
+    static FORCED_STAGING_NAME: std::cell::RefCell<Option<CString>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 #[cfg(target_os = "linux")]
 impl AtomicPublication {
     fn prepare(destination: &Path) -> Result<Self, MaterializationError> {
@@ -316,6 +323,10 @@ fn remove_empty_staging(parent: &OwnedFd, staging_name: &CStr) -> Result<(), Mat
 
 #[cfg(target_os = "linux")]
 fn random_staging_name() -> Result<CString, MaterializationError> {
+    #[cfg(test)]
+    if let Some(name) = FORCED_STAGING_NAME.with(|forced| forced.borrow().clone()) {
+        return Ok(name);
+    }
     let mut random = [0_u8; 16];
     File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut random))
@@ -1121,5 +1132,44 @@ mod tests {
             ),
             "untrusted output directory",
         );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn private_staging_name_collisions_and_creation_errors_are_bounded() {
+        let root = TestDirectory::create("staging-name-errors");
+        let destination = root.0.join("published");
+        let publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
+        let collision_name = c"forced-collision".to_owned();
+        ok(
+            fs::mkdirat(&publication.parent, collision_name.as_c_str(), Mode::RWXU),
+            "create colliding directory",
+        );
+
+        FORCED_STAGING_NAME.with(|forced| {
+            *forced.borrow_mut() = Some(collision_name.clone());
+        });
+        let exhausted = create_private_staging(
+            &publication.parent,
+            publication.parent_identity,
+            effective_uid(),
+        );
+        FORCED_STAGING_NAME.with(|forced| {
+            *forced.borrow_mut() = None;
+        });
+        assert_error(exhausted, "untrusted output directory");
+
+        FORCED_STAGING_NAME.with(|forced| {
+            *forced.borrow_mut() = Some(c"missing/child".to_owned());
+        });
+        let creation_error = create_private_staging(
+            &publication.parent,
+            publication.parent_identity,
+            effective_uid(),
+        );
+        FORCED_STAGING_NAME.with(|forced| {
+            *forced.borrow_mut() = None;
+        });
+        assert_error(creation_error, "untrusted output directory");
     }
 }
