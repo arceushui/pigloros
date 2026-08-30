@@ -7,18 +7,121 @@ use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{BundleContractErrorV1, BundleMemberRoleV1, ConformanceBundleV1};
 use support::{
     array_field, array_mut, assert_independent_rejects, current_archive as materialized_archive,
-    encode_value as encode, member_bytes, member_path_by_role, mutate_archive, mutate_member,
-    mutate_profile, mutate_release_admission, replace_archive_member_bytes as replace_member_bytes,
-    update_typed_member,
+    encode_value as encode, member_bytes, member_path_by_role, mutate_archive,
+    mutate_draft_evidence, mutate_member, mutate_profile, mutate_release_admission,
+    replace_archive_member_bytes as replace_member_bytes, update_typed_member,
 };
 use support::{
-    ArchiveField, DescriptorField, FixtureField, IndependenceRequirementField, ManifestField,
-    MemberField, ProfileField, ProviderBindingField, ProviderKeyField, RecordField,
-    ReleaseAdmissionField, TestResult, ARCHIVE_SIGNING_KEY,
+    ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField,
+    IndependenceRequirementField, ManifestField, MemberField, ProfileField, ProviderBindingField,
+    ProviderKeyField, RecordField, ReleaseAdmissionField, TestResult, ARCHIVE_SIGNING_KEY,
 };
 
 fn current_archive() -> TestResult<Vec<u8>> {
     materialized_archive("bundle-contract-coverage")
+}
+
+#[derive(Clone, Copy)]
+enum DraftEvidenceMutation {
+    WrongCase,
+    WrongLayer,
+    WrongFamily,
+    WrongInputDigest,
+    ExecutedResult,
+    UndeclaredField,
+    MissingField,
+}
+
+#[test]
+fn public_verifiers_reject_non_pending_or_unbound_draft_evidence() -> TestResult {
+    let archive = current_archive()?;
+    for mutation in [
+        DraftEvidenceMutation::WrongCase,
+        DraftEvidenceMutation::WrongLayer,
+        DraftEvidenceMutation::WrongFamily,
+        DraftEvidenceMutation::WrongInputDigest,
+        DraftEvidenceMutation::ExecutedResult,
+        DraftEvidenceMutation::UndeclaredField,
+        DraftEvidenceMutation::MissingField,
+    ] {
+        let malformed = mutate_draft_evidence(&archive, |evidence| {
+            match mutation {
+                DraftEvidenceMutation::WrongCase => {
+                    evidence.insert("case_id".to_owned(), serde_json::json!("wrong-case"));
+                }
+                DraftEvidenceMutation::WrongLayer => {
+                    evidence.insert("claim_layer".to_owned(), serde_json::json!("wrong-layer"));
+                }
+                DraftEvidenceMutation::WrongFamily => {
+                    evidence.insert("family".to_owned(), serde_json::json!("wrong-family"));
+                }
+                DraftEvidenceMutation::WrongInputDigest => {
+                    evidence.insert("input_blake3_digest".to_owned(), serde_json::json!("00"));
+                }
+                DraftEvidenceMutation::ExecutedResult => {
+                    evidence.insert("status".to_owned(), serde_json::json!("executed"));
+                    evidence.insert("execution_result".to_owned(), serde_json::json!({}));
+                    evidence.insert("executed_at".to_owned(), serde_json::json!("now"));
+                }
+                DraftEvidenceMutation::UndeclaredField => {
+                    evidence.insert("result".to_owned(), serde_json::Value::Null);
+                }
+                DraftEvidenceMutation::MissingField => {
+                    evidence.remove("executed_at");
+                }
+            }
+            Ok(())
+        })?;
+        assert_eq!(
+            ConformanceBundleV1::from_canonical_cbor(&malformed),
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        );
+        assert_independent_rejects(&malformed, "invalid Draft evidence")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn public_verifiers_require_one_draft_evidence_record_per_fixture() -> TestResult {
+    let archive = current_archive()?;
+    let evidence_path = {
+        let archive_value: Value = ciborium::from_reader(archive.as_slice())?;
+        member_path_by_role(&archive_value, 17)?
+    };
+    let without_profile_declaration = mutate_profile(&archive, |profile| {
+        let fixtures = array_field(profile, ProfileField::Fixtures.index(), "profile fixtures")?;
+        let fixture = fixtures.first_mut().ok_or("profile fixture is absent")?;
+        let fields = array_mut(fixture, "fixture")?;
+        array_field(
+            fields,
+            FixtureField::Auxiliary.index(),
+            "fixture auxiliary artifacts",
+        )?
+        .retain(|descriptor| {
+            !matches!(descriptor, Value::Array(fields) if fields.get(ArtifactDescriptorField::Path.index()) == Some(&Value::Text(evidence_path.clone())))
+        });
+        Ok(())
+    })?;
+    let without_evidence = mutate_archive(&without_profile_declaration, |archive| {
+        array_field(archive, ArchiveField::Members.index(), "archive members")?.retain(|member| {
+            !matches!(member, Value::Array(fields) if fields.get(MemberField::Path.index()) == Some(&Value::Text(evidence_path.clone())))
+        });
+        let manifest = array_field(archive, ArchiveField::Manifest.index(), "manifest")?;
+        array_field(
+            manifest,
+            ManifestField::MemberDescriptors.index(),
+            "manifest descriptors",
+        )?
+        .retain(|descriptor| {
+            !matches!(descriptor, Value::Array(fields) if fields.get(DescriptorField::Path.index()) == Some(&Value::Text(evidence_path.clone())))
+        });
+        Ok(())
+    })?;
+    assert_eq!(
+        ConformanceBundleV1::from_canonical_cbor(&without_evidence),
+        Err(BundleContractErrorV1::ExpectedResultMismatch)
+    );
+    assert_independent_rejects(&without_evidence, "missing Draft evidence")
 }
 
 #[test]
@@ -198,12 +301,9 @@ fn public_independent_verifier_rejects_malformed_authority() -> TestResult {
     let archive_value: Value = ciborium::from_reader(archive.as_slice())?;
     let release_admission_path = member_path_by_role(&archive_value, 16)?;
 
-    for (path, field) in [
-        (
-            "authority/execution-profiles/deterministic-local-v1.epf1",
-            0,
-        ),
-        ("authority/trust-policy-snapshot.tps1", 0),
+    for path in [
+        "authority/execution-profiles/deterministic-local-v1.epf1",
+        "authority/trust-policy-snapshot.tps1",
     ] {
         let malformed = mutate_member(&archive, path, |fields| {
             fields[RecordField::Magic.index()] = Value::Integer(0_u64.into());

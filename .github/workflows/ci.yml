@@ -127,25 +127,24 @@ jobs:
           shared-key: conformance-materialization
       - name: Install fixture verification tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
-      - name: Reject non-main manual materialization
+      - name: Reject non-main manual artifact publication
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |
           set -euo pipefail
-          echo 'trusted conformance materialization is only permitted from main' >&2
+          echo 'repository Draft artifact publication is only permitted from main' >&2
           exit 1
-      - name: Materialize trusted Draft CPF1 bundles
+      - name: Materialize repository-only Draft CPF1 verification bundles
         if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
         env:
-          # Repository signing material is available only to a push or manual
-          # run explicitly targeting protected main. It is never present in a
-          # pull-request runner environment.
-          PIGLOROS_CONFORMANCE_SIGNING_KEY: ${{ secrets.CONFORMANCE_BUNDLE_SIGNING_KEY }}
+          # Public deterministic fixture key. The declared Draft authority is
+          # repository-test-fixture-only and is never a deployment trust root.
+          PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
         run: bash scripts/materialize-conformance-bundles.sh
-      - name: Materialize non-trusted Draft bundles for pull-request verification
+      - name: Materialize repository-only Draft bundles for pull-request verification
         if: ${{ github.event_name == 'pull_request' }}
         env:
-          # Public, non-trusted key used only to exercise deterministic Draft
-          # materialization. This job never receives the repository signing key.
+          # Same public deterministic fixture key used for main verification;
+          # these signatures prove fixture consistency, not publisher identity.
           PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
         run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
       - name: Exercise build-time fixture rejection boundary

@@ -1244,7 +1244,8 @@ fn validate_fixture_members(
         .filter(|f| f.modes.contains(&mode.execution()))
         .try_for_each(|fixture| {
             descriptor_member(members, &fixture.payload, BundleMemberRoleV1::FixtureInput)
-                .and_then(|_| {
+                .and_then(|payload| validate_draft_evidence(fixture, payload, members))
+                .and_then(|()| {
                     fixture.auxiliary.iter().try_for_each(|artifact| {
                         let role = if artifact.member_path.starts_with("evidence/") {
                             BundleMemberRoleV1::EvidenceStatus
@@ -1306,6 +1307,98 @@ fn validate_fixture_members(
             Err(BundleContractErrorV1::ExpectedResultMismatch)
         }
     })
+}
+
+fn validate_draft_evidence(
+    fixture: &crate::FixtureDescriptorV1,
+    payload: &BundleMemberV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    let evidence = fixture
+        .auxiliary
+        .iter()
+        .filter(|artifact| artifact.member_path.starts_with("evidence/"))
+        .collect::<Vec<_>>();
+    if evidence.len() != 1 {
+        return Err(BundleContractErrorV1::ExpectedResultMismatch);
+    }
+    let expected_path = format!(
+        "evidence/{}/{}.json",
+        fixture.case_id,
+        crate::hex_digest(&fixture.execution_profile_digest)
+    );
+    if evidence[0].member_path != expected_path {
+        return Err(BundleContractErrorV1::ExpectedResultMismatch);
+    }
+    descriptor_member(members, evidence[0], BundleMemberRoleV1::EvidenceStatus).and_then(|member| {
+        validate_draft_evidence_json(
+            &member.bytes,
+            &fixture.case_id,
+            fixture.claim_layer.catalog_name(),
+            fixture_family_name(fixture.family),
+            *blake3::hash(&payload.bytes).as_bytes(),
+        )
+    })
+}
+
+fn validate_draft_evidence_json(
+    bytes: &[u8],
+    case_id: &str,
+    claim_layer: &str,
+    family: &str,
+    input_digest: [u8; 32],
+) -> Result<(), BundleContractErrorV1> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| BundleContractErrorV1::ExpectedResultMismatch)?;
+    let object = value
+        .as_object()
+        .ok_or(BundleContractErrorV1::ExpectedResultMismatch)?;
+    let required = [
+        "case_id",
+        "claim_layer",
+        "executed_at",
+        "execution_result",
+        "family",
+        "input_blake3_digest",
+        "status",
+    ];
+    let input_digest = crate::hex_digest(&input_digest);
+    let valid = object.len() == required.len()
+        && required.iter().all(|key| object.contains_key(*key))
+        && object.get("case_id").and_then(serde_json::Value::as_str) == Some(case_id)
+        && object
+            .get("claim_layer")
+            .and_then(serde_json::Value::as_str)
+            == Some(claim_layer)
+        && object.get("family").and_then(serde_json::Value::as_str) == Some(family)
+        && object
+            .get("input_blake3_digest")
+            .and_then(serde_json::Value::as_str)
+            == Some(input_digest.as_str())
+        && object.get("status").and_then(serde_json::Value::as_str) == Some("pending")
+        && object
+            .get("execution_result")
+            .is_some_and(serde_json::Value::is_null)
+        && object
+            .get("executed_at")
+            .is_some_and(serde_json::Value::is_null);
+    if valid {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::ExpectedResultMismatch)
+    }
+}
+
+const fn fixture_family_name(family: crate::FixtureFamilyV1) -> &'static str {
+    match family {
+        crate::FixtureFamilyV1::Positive => "positive",
+        crate::FixtureFamilyV1::Denied => "denied",
+        crate::FixtureFamilyV1::Malformed => "malformed",
+        crate::FixtureFamilyV1::ResourceExhaustion => "resource-exhaustion",
+        crate::FixtureFamilyV1::DeletionRedaction => "deletion-redaction",
+        crate::FixtureFamilyV1::Downgrade => "downgrade",
+        crate::FixtureFamilyV1::IndependentEvaluation => "independent-evaluation",
+    }
 }
 fn member_by_role_and_path<'a>(
     members: &'a [BundleMemberV1],

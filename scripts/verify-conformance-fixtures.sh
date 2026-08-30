@@ -26,7 +26,9 @@ jq -e '
     ($names | all(type == "string" and length > 0)) and
     ($names | unique | length == ($names | length))) and
   all(.families[];
-    (keys | sort) == (["name", "operation", "oracle"] | sort) and
+    (keys | sort) == ([
+      "failure_outcome", "name", "operation", "oracle", "redaction_state", "replay_claim"
+    ] | sort) and
     (.operation == "required" or .operation == "optional") and
     (.oracle.kind == "canonical-output" or .oracle.kind == "namespaced-failure") and
     (if .oracle.kind == "namespaced-failure" then
@@ -35,6 +37,13 @@ jq -e '
      else
        (.oracle | keys) == ["kind"]
      end) and
+    (.failure_outcome == "invalid-manifest" or
+     .failure_outcome == "incompatible-profile" or
+     .failure_outcome == "resource-limit-exceeded") and
+    (.replay_claim == "exact" or
+     .replay_claim == "exact-authoritative-with-redacted-views" or
+     .replay_claim == "incompatible-profile") and
+    (.redaction_state == "none" or .redaction_state == "redacted-views") and
     (has("input_with_operation") | not) and
     (has("input_without_operation") | not)
   )
@@ -281,7 +290,7 @@ for layer in "${profile_layers[@]}"; do
          "memory_bytes", "cpu_fuel", "host_calls", "event_count",
          "output_bytes", "storage_bytes", "execution_steps", "simulation_time_ns"
        ] | sort) and
-       all(.deterministic_budget[]; type == "number" and . >= 0 and floor == .) and
+       all(.deterministic_budget[]; type == "number" and . > 0 and floor == .) and
        (.watchdog_ms | type == "number" and . > 0 and floor == .) and
        (.network_allowed | type == "boolean") and
        (.minimum_capability_ids | type == "array") and

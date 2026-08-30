@@ -1225,302 +1225,482 @@ fn refresh_profile_matrix_binding(archive: &mut [Value], matrix_bytes: &[u8]) ->
     )
 }
 
-struct MutationCase {
-    label: &'static str,
-    selector: usize,
+const CURRENT_PROVIDER_INDEX: usize = 0;
+const CURRENT_PROVIDER_SCHEMA_INDEX: usize = 0;
+
+#[derive(Clone, Copy)]
+enum ProviderRegistryField {
+    Magic,
+    Version,
+    Providers,
+    Digest,
 }
 
-const PROVIDER_REGISTRY_MUTATIONS: [MutationCase; 18] = [
-    MutationCase {
-        label: "invalid registry magic",
-        selector: 0,
-    },
-    MutationCase {
-        label: "invalid registry version",
-        selector: 1,
-    },
-    MutationCase {
-        label: "empty registry providers",
-        selector: 2,
-    },
-    MutationCase {
-        label: "invalid registry digest",
-        selector: 3,
-    },
-    MutationCase {
-        label: "invalid provider entry shape",
-        selector: 4,
-    },
-    MutationCase {
-        label: "invalid provider claim layer",
-        selector: 5,
-    },
-    MutationCase {
-        label: "invalid provider subject adapter",
-        selector: 6,
-    },
-    MutationCase {
-        label: "missing provider package path",
-        selector: 7,
-    },
-    MutationCase {
-        label: "invalid provider identifier",
-        selector: 8,
-    },
-    MutationCase {
-        label: "noncanonical provider version",
-        selector: 9,
-    },
-    MutationCase {
-        label: "invalid provider ABI major",
-        selector: 10,
-    },
-    MutationCase {
-        label: "invalid provider ABI minor",
-        selector: 11,
-    },
-    MutationCase {
-        label: "absolute provider package path",
-        selector: 12,
-    },
-    MutationCase {
-        label: "invalid provider package media type",
-        selector: 13,
-    },
-    MutationCase {
-        label: "invalid provider package length",
-        selector: 14,
-    },
-    MutationCase {
-        label: "invalid provider package digest",
-        selector: 15,
-    },
-    MutationCase {
-        label: "duplicate provider entry",
-        selector: 16,
-    },
-    MutationCase {
-        label: "invalid provider package role",
-        selector: 17,
-    },
+impl ProviderRegistryField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Magic => 0,
+            Self::Version => 1,
+            Self::Providers => 2,
+            Self::Digest => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderEntryField {
+    Key,
+    ClaimLayer,
+    SubjectAdapter,
+    PackageDescriptor,
+}
+
+impl ProviderEntryField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Key => 0,
+            Self::ClaimLayer => 4,
+            Self::SubjectAdapter => 5,
+            Self::PackageDescriptor => 6,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderKeyCborField {
+    Identifier,
+    Version,
+    AbiMajor,
+    AbiMinor,
+}
+
+impl ProviderKeyCborField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Identifier => 0,
+            Self::Version => 1,
+            Self::AbiMajor => 2,
+            Self::AbiMinor => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderPackageField {
+    Magic,
+    Version,
+    ProviderKey,
+    ClaimLayer,
+    SubjectAdapter,
+    FamilySchemas,
+    LicenceDescriptor,
+    NoticesDescriptor,
+    Digest,
+}
+
+impl ProviderPackageField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Magic => 0,
+            Self::Version => 1,
+            Self::ProviderKey => 2,
+            Self::ClaimLayer => 3,
+            Self::SubjectAdapter => 4,
+            Self::FamilySchemas => 5,
+            Self::LicenceDescriptor => 6,
+            Self::NoticesDescriptor => 7,
+            Self::Digest => 11,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderFamilySchemaField {
+    Family,
+    Descriptor,
+}
+
+impl ProviderFamilySchemaField {
+    const fn index(self) -> usize {
+        match self {
+            Self::Family => 0,
+            Self::Descriptor => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderRegistryMutation {
+    InvalidMagic,
+    InvalidVersion,
+    EmptyProviders,
+    InvalidDigest,
+    InvalidProviderEntryShape,
+    InvalidProviderClaimLayer,
+    InvalidProviderSubjectAdapter,
+    MissingProviderPackagePath,
+    InvalidProviderIdentifier,
+    NoncanonicalProviderVersion,
+    InvalidProviderAbiMajor,
+    InvalidProviderAbiMinor,
+    AbsoluteProviderPackagePath,
+    InvalidProviderPackageMediaType,
+    InvalidProviderPackageLength,
+    InvalidProviderPackageDigest,
+    DuplicateProviderEntry,
+    InvalidProviderPackageRole,
+}
+
+impl ProviderRegistryMutation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::InvalidMagic => "invalid registry magic",
+            Self::InvalidVersion => "invalid registry version",
+            Self::EmptyProviders => "empty registry providers",
+            Self::InvalidDigest => "invalid registry digest",
+            Self::InvalidProviderEntryShape => "invalid provider entry shape",
+            Self::InvalidProviderClaimLayer => "invalid provider claim layer",
+            Self::InvalidProviderSubjectAdapter => "invalid provider subject adapter",
+            Self::MissingProviderPackagePath => "missing provider package path",
+            Self::InvalidProviderIdentifier => "invalid provider identifier",
+            Self::NoncanonicalProviderVersion => "noncanonical provider version",
+            Self::InvalidProviderAbiMajor => "invalid provider ABI major",
+            Self::InvalidProviderAbiMinor => "invalid provider ABI minor",
+            Self::AbsoluteProviderPackagePath => "absolute provider package path",
+            Self::InvalidProviderPackageMediaType => "invalid provider package media type",
+            Self::InvalidProviderPackageLength => "invalid provider package length",
+            Self::InvalidProviderPackageDigest => "invalid provider package digest",
+            Self::DuplicateProviderEntry => "duplicate provider entry",
+            Self::InvalidProviderPackageRole => "invalid provider package role",
+        }
+    }
+}
+
+const PROVIDER_REGISTRY_MUTATIONS: [ProviderRegistryMutation; 18] = [
+    ProviderRegistryMutation::InvalidMagic,
+    ProviderRegistryMutation::InvalidVersion,
+    ProviderRegistryMutation::EmptyProviders,
+    ProviderRegistryMutation::InvalidDigest,
+    ProviderRegistryMutation::InvalidProviderEntryShape,
+    ProviderRegistryMutation::InvalidProviderClaimLayer,
+    ProviderRegistryMutation::InvalidProviderSubjectAdapter,
+    ProviderRegistryMutation::MissingProviderPackagePath,
+    ProviderRegistryMutation::InvalidProviderIdentifier,
+    ProviderRegistryMutation::NoncanonicalProviderVersion,
+    ProviderRegistryMutation::InvalidProviderAbiMajor,
+    ProviderRegistryMutation::InvalidProviderAbiMinor,
+    ProviderRegistryMutation::AbsoluteProviderPackagePath,
+    ProviderRegistryMutation::InvalidProviderPackageMediaType,
+    ProviderRegistryMutation::InvalidProviderPackageLength,
+    ProviderRegistryMutation::InvalidProviderPackageDigest,
+    ProviderRegistryMutation::DuplicateProviderEntry,
+    ProviderRegistryMutation::InvalidProviderPackageRole,
 ];
 
-const PROVIDER_PACKAGE_MUTATIONS: [MutationCase; 22] = [
-    MutationCase {
-        label: "invalid package magic",
-        selector: 0,
-    },
-    MutationCase {
-        label: "invalid package version",
-        selector: 1,
-    },
-    MutationCase {
-        label: "empty package provider key",
-        selector: 2,
-    },
-    MutationCase {
-        label: "empty package schemas",
-        selector: 3,
-    },
-    MutationCase {
-        label: "invalid package schema family",
-        selector: 4,
-    },
-    MutationCase {
-        label: "invalid package schema descriptor",
-        selector: 5,
-    },
-    MutationCase {
-        label: "invalid package licence digest",
-        selector: 6,
-    },
-    MutationCase {
-        label: "invalid package digest",
-        selector: 7,
-    },
-    MutationCase {
-        label: "invalid package provider identifier",
-        selector: 8,
-    },
-    MutationCase {
-        label: "noncanonical package provider version",
-        selector: 9,
-    },
-    MutationCase {
-        label: "invalid package provider ABI major",
-        selector: 10,
-    },
-    MutationCase {
-        label: "invalid package provider ABI minor",
-        selector: 11,
-    },
-    MutationCase {
-        label: "invalid package claim layer",
-        selector: 12,
-    },
-    MutationCase {
-        label: "invalid package subject adapter",
-        selector: 13,
-    },
-    MutationCase {
-        label: "missing package family schema",
-        selector: 14,
-    },
-    MutationCase {
-        label: "invalid package schema shape",
-        selector: 15,
-    },
-    MutationCase {
-        label: "absolute package schema path",
-        selector: 16,
-    },
-    MutationCase {
-        label: "invalid package schema media type",
-        selector: 17,
-    },
-    MutationCase {
-        label: "invalid package schema length",
-        selector: 18,
-    },
-    MutationCase {
-        label: "invalid package schema digest",
-        selector: 19,
-    },
-    MutationCase {
-        label: "missing package notices",
-        selector: 20,
-    },
-    MutationCase {
-        label: "colliding package support path",
-        selector: 21,
-    },
+#[derive(Clone, Copy)]
+enum ProviderPackageMutation {
+    InvalidMagic,
+    InvalidVersion,
+    EmptyProviderKey,
+    EmptySchemas,
+    InvalidSchemaFamily,
+    InvalidSchemaDescriptor,
+    InvalidLicenceDigest,
+    InvalidDigest,
+    InvalidProviderIdentifier,
+    NoncanonicalProviderVersion,
+    InvalidProviderAbiMajor,
+    InvalidProviderAbiMinor,
+    InvalidClaimLayer,
+    InvalidSubjectAdapter,
+    MissingFamilySchema,
+    InvalidSchemaShape,
+    AbsoluteSchemaPath,
+    InvalidSchemaMediaType,
+    InvalidSchemaLength,
+    InvalidSchemaDigest,
+    MissingNotices,
+    CollidingSupportPath,
+}
+
+impl ProviderPackageMutation {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::InvalidMagic => "invalid package magic",
+            Self::InvalidVersion => "invalid package version",
+            Self::EmptyProviderKey => "empty package provider key",
+            Self::EmptySchemas => "empty package schemas",
+            Self::InvalidSchemaFamily => "invalid package schema family",
+            Self::InvalidSchemaDescriptor => "invalid package schema descriptor",
+            Self::InvalidLicenceDigest => "invalid package licence digest",
+            Self::InvalidDigest => "invalid package digest",
+            Self::InvalidProviderIdentifier => "invalid package provider identifier",
+            Self::NoncanonicalProviderVersion => "noncanonical package provider version",
+            Self::InvalidProviderAbiMajor => "invalid package provider ABI major",
+            Self::InvalidProviderAbiMinor => "invalid package provider ABI minor",
+            Self::InvalidClaimLayer => "invalid package claim layer",
+            Self::InvalidSubjectAdapter => "invalid package subject adapter",
+            Self::MissingFamilySchema => "missing package family schema",
+            Self::InvalidSchemaShape => "invalid package schema shape",
+            Self::AbsoluteSchemaPath => "absolute package schema path",
+            Self::InvalidSchemaMediaType => "invalid package schema media type",
+            Self::InvalidSchemaLength => "invalid package schema length",
+            Self::InvalidSchemaDigest => "invalid package schema digest",
+            Self::MissingNotices => "missing package notices",
+            Self::CollidingSupportPath => "colliding package support path",
+        }
+    }
+}
+
+const PROVIDER_PACKAGE_MUTATIONS: [ProviderPackageMutation; 22] = [
+    ProviderPackageMutation::InvalidMagic,
+    ProviderPackageMutation::InvalidVersion,
+    ProviderPackageMutation::EmptyProviderKey,
+    ProviderPackageMutation::EmptySchemas,
+    ProviderPackageMutation::InvalidSchemaFamily,
+    ProviderPackageMutation::InvalidSchemaDescriptor,
+    ProviderPackageMutation::InvalidLicenceDigest,
+    ProviderPackageMutation::InvalidDigest,
+    ProviderPackageMutation::InvalidProviderIdentifier,
+    ProviderPackageMutation::NoncanonicalProviderVersion,
+    ProviderPackageMutation::InvalidProviderAbiMajor,
+    ProviderPackageMutation::InvalidProviderAbiMinor,
+    ProviderPackageMutation::InvalidClaimLayer,
+    ProviderPackageMutation::InvalidSubjectAdapter,
+    ProviderPackageMutation::MissingFamilySchema,
+    ProviderPackageMutation::InvalidSchemaShape,
+    ProviderPackageMutation::AbsoluteSchemaPath,
+    ProviderPackageMutation::InvalidSchemaMediaType,
+    ProviderPackageMutation::InvalidSchemaLength,
+    ProviderPackageMutation::InvalidSchemaDigest,
+    ProviderPackageMutation::MissingNotices,
+    ProviderPackageMutation::CollidingSupportPath,
 ];
 
-fn mutate_provider_registry_fields(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
+fn provider_registry_entry(fields: &mut [Value]) -> TestResult<&mut Vec<Value>> {
+    array_field(
+        array_field(
+            fields,
+            ProviderRegistryField::Providers.index(),
+            "registry providers",
+        )?,
+        CURRENT_PROVIDER_INDEX,
+        "provider entry",
+    )
+}
+
+fn provider_package_descriptor(entry: &mut [Value]) -> TestResult<&mut Vec<Value>> {
+    array_field(
+        entry,
+        ProviderEntryField::PackageDescriptor.index(),
+        "provider package descriptor",
+    )
+}
+
+fn provider_package_schema(fields: &mut [Value]) -> TestResult<&mut Vec<Value>> {
+    array_field(
+        array_field(
+            fields,
+            ProviderPackageField::FamilySchemas.index(),
+            "package schemas",
+        )?,
+        CURRENT_PROVIDER_SCHEMA_INDEX,
+        "package schema",
+    )
+}
+
+fn mutate_provider_registry_fields(
+    fields: &mut [Value],
+    mutation: ProviderRegistryMutation,
+) -> TestResult<bool> {
     match mutation {
-        0 => {
-            replace_value(fields, 0, Value::Text("FPR0".to_owned()), "registry magic")?;
+        ProviderRegistryMutation::InvalidMagic => {
+            replace_value(
+                fields,
+                ProviderRegistryField::Magic.index(),
+                Value::Text("FPR0".to_owned()),
+                "registry magic",
+            )?;
             Ok(false)
         }
-        1 => {
-            replace_value(fields, 1, Value::Integer(2_u64.into()), "registry version")?;
+        ProviderRegistryMutation::InvalidVersion => {
+            replace_value(
+                fields,
+                ProviderRegistryField::Version.index(),
+                Value::Integer(2_u64.into()),
+                "registry version",
+            )?;
             Ok(false)
         }
-        2 => {
-            replace_value(fields, 2, Value::Array(Vec::new()), "registry providers")?;
+        ProviderRegistryMutation::EmptyProviders => {
+            replace_value(
+                fields,
+                ProviderRegistryField::Providers.index(),
+                Value::Array(Vec::new()),
+                "registry providers",
+            )?;
             Ok(true)
         }
-        3 => {
-            replace_value(fields, 3, Value::Bytes(vec![0; 32]), "registry digest")?;
+        ProviderRegistryMutation::InvalidDigest => {
+            replace_value(
+                fields,
+                ProviderRegistryField::Digest.index(),
+                Value::Bytes(vec![0; 32]),
+                "registry digest",
+            )?;
             Ok(false)
         }
-        4 => {
+        ProviderRegistryMutation::InvalidProviderEntryShape => {
             replace_value(
-                array_field(fields, 2, "registry providers")?,
-                0,
+                array_field(
+                    fields,
+                    ProviderRegistryField::Providers.index(),
+                    "registry providers",
+                )?,
+                CURRENT_PROVIDER_INDEX,
                 Value::Array(Vec::new()),
                 "registry provider entry",
             )?;
             Ok(true)
         }
-        5 => {
+        ProviderRegistryMutation::InvalidProviderClaimLayer => {
             replace_value(
-                array_field(
-                    array_field(fields, 2, "registry providers")?,
-                    0,
-                    "provider entry",
-                )?,
-                4,
+                provider_registry_entry(fields)?,
+                ProviderEntryField::ClaimLayer.index(),
                 Value::Integer(7_u64.into()),
                 "provider claim layer",
             )?;
             Ok(true)
         }
-        6 => {
+        ProviderRegistryMutation::InvalidProviderSubjectAdapter => {
             replace_value(
-                array_field(
-                    array_field(fields, 2, "registry providers")?,
-                    0,
-                    "provider entry",
-                )?,
-                5,
+                provider_registry_entry(fields)?,
+                ProviderEntryField::SubjectAdapter.index(),
                 Value::Integer(3_u64.into()),
                 "provider subject adapter",
             )?;
             Ok(true)
         }
-        7 => {
+        ProviderRegistryMutation::MissingProviderPackagePath => {
             replace_value(
-                array_field(
-                    array_field(
-                        array_field(fields, 2, "registry providers")?,
-                        0,
-                        "provider entry",
-                    )?,
-                    6,
-                    "provider package descriptor",
-                )?,
-                0,
+                provider_package_descriptor(provider_registry_entry(fields)?)?,
+                ArtifactDescriptorField::Path.index(),
                 Value::Text("authority/providers/missing.cbor".to_owned()),
                 "provider package path",
             )?;
             Ok(true)
         }
-        8..=17 => mutate_provider_registry_extended(fields, mutation),
-        _ => Err(format!("unsupported registry mutation {mutation}").into()),
-    }
-}
-
-fn mutate_provider_registry_extended(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
-    let providers = array_field(fields, 2, "registry providers")?;
-    if mutation == 16 {
-        let duplicate = providers.first().ok_or("provider entry is absent")?.clone();
-        providers.push(duplicate);
-        return Ok(true);
-    }
-    let entry = array_field(providers, 0, "provider entry")?;
-    match mutation {
-        8 => replace_value(
-            entry,
-            0,
-            Value::Text("INVALID".to_owned()),
-            "provider identifier",
-        )?,
-        9 => replace_value(
-            entry,
-            1,
-            Value::Text("01.0.0".to_owned()),
-            "provider version",
-        )?,
-        10..=11 => replace_value(
-            entry,
-            mutation - 8,
-            Value::Integer(65_536_u64.into()),
-            "provider ABI",
-        )?,
-        12..=15 | 17 => {
-            let descriptor = array_field(entry, 6, "provider package descriptor")?;
-            let replacement = match mutation {
-                12 => Value::Text("/invalid.cbor".to_owned()),
-                13 => Value::Text("INVALID".to_owned()),
-                14 => Value::Integer(0_u64.into()),
-                15 => Value::Bytes(vec![0; 32]),
-                17 => Value::Integer(999_u64.into()),
-                _ => return Err(format!("unsupported registry descriptor {mutation}").into()),
-            };
+        ProviderRegistryMutation::InvalidProviderIdentifier => {
             replace_value(
-                descriptor,
-                if mutation == 17 { 2 } else { mutation - 12 },
-                replacement,
+                array_field(
+                    provider_registry_entry(fields)?,
+                    ProviderEntryField::Key.index(),
+                    "provider key",
+                )?,
+                ProviderKeyCborField::Identifier.index(),
+                Value::Text("INVALID".to_owned()),
+                "provider identifier",
+            )?;
+            Ok(true)
+        }
+        ProviderRegistryMutation::NoncanonicalProviderVersion => {
+            replace_value(
+                array_field(
+                    provider_registry_entry(fields)?,
+                    ProviderEntryField::Key.index(),
+                    "provider key",
+                )?,
+                ProviderKeyCborField::Version.index(),
+                Value::Text("01.0.0".to_owned()),
+                "provider version",
+            )?;
+            Ok(true)
+        }
+        ProviderRegistryMutation::InvalidProviderAbiMajor => {
+            replace_value(
+                array_field(
+                    provider_registry_entry(fields)?,
+                    ProviderEntryField::Key.index(),
+                    "provider key",
+                )?,
+                ProviderKeyCborField::AbiMajor.index(),
+                Value::Integer(65_536_u64.into()),
+                "provider ABI",
+            )?;
+            Ok(true)
+        }
+        ProviderRegistryMutation::InvalidProviderAbiMinor => {
+            replace_value(
+                array_field(
+                    provider_registry_entry(fields)?,
+                    ProviderEntryField::Key.index(),
+                    "provider key",
+                )?,
+                ProviderKeyCborField::AbiMinor.index(),
+                Value::Integer(65_536_u64.into()),
+                "provider ABI",
+            )?;
+            Ok(true)
+        }
+        ProviderRegistryMutation::AbsoluteProviderPackagePath => {
+            replace_value(
+                provider_package_descriptor(provider_registry_entry(fields)?)?,
+                ArtifactDescriptorField::Path.index(),
+                Value::Text("/invalid.cbor".to_owned()),
                 "provider package descriptor field",
             )?;
+            Ok(true)
         }
-        _ => return Err(format!("unsupported registry extension {mutation}").into()),
+        ProviderRegistryMutation::InvalidProviderPackageMediaType => {
+            replace_value(
+                provider_package_descriptor(provider_registry_entry(fields)?)?,
+                ArtifactDescriptorField::MediaType.index(),
+                Value::Text("INVALID".to_owned()),
+                "provider package descriptor field",
+            )?;
+            Ok(true)
+        }
+        ProviderRegistryMutation::InvalidProviderPackageLength => {
+            replace_value(
+                provider_package_descriptor(provider_registry_entry(fields)?)?,
+                ArtifactDescriptorField::Length.index(),
+                Value::Integer(0_u64.into()),
+                "provider package descriptor field",
+            )?;
+            Ok(true)
+        }
+        ProviderRegistryMutation::InvalidProviderPackageDigest => {
+            replace_value(
+                provider_package_descriptor(provider_registry_entry(fields)?)?,
+                ArtifactDescriptorField::Digest.index(),
+                Value::Bytes(vec![0; 32]),
+                "provider package descriptor field",
+            )?;
+            Ok(true)
+        }
+        ProviderRegistryMutation::DuplicateProviderEntry => {
+            let providers = array_field(
+                fields,
+                ProviderRegistryField::Providers.index(),
+                "registry providers",
+            )?;
+            let duplicate = providers.first().ok_or("provider entry is absent")?.clone();
+            providers.push(duplicate);
+            Ok(true)
+        }
+        ProviderRegistryMutation::InvalidProviderPackageRole => {
+            replace_value(
+                provider_package_descriptor(provider_registry_entry(fields)?)?,
+                ArtifactDescriptorField::Role.index(),
+                Value::Integer(999_u64.into()),
+                "provider package descriptor field",
+            )?;
+            Ok(true)
+        }
     }
-    Ok(true)
 }
 
-fn mutate_provider_registry_archive(mutation: usize) -> TestResult<Vec<u8>> {
+fn mutate_provider_registry_archive(mutation: ProviderRegistryMutation) -> TestResult<Vec<u8>> {
     mutate_provider_registry_archive_with(|fields| {
         mutate_provider_registry_fields(fields, mutation)
     })
@@ -1536,7 +1716,7 @@ fn mutate_provider_registry_archive_with(
     };
     let registry_bytes =
         match archive_member_fields(archive_fields, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1)?
-            .get(1)
+            .get(MemberField::Bytes.index())
         {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err("provider registry is not bytes".into()),
@@ -1546,11 +1726,13 @@ fn mutate_provider_registry_archive_with(
         return Err("provider registry is not an array".into());
     };
     if mutate(fields)? {
-        let registry_digest =
-            contract_digest(b"PiglorOS.Conformance.ProviderRegistry.v1", &fields[..3])?;
+        let registry_digest = contract_digest(
+            b"PiglorOS.Conformance.ProviderRegistry.v1",
+            &fields[..ProviderRegistryField::Digest.index()],
+        )?;
         replace_value(
             fields,
-            3,
+            ProviderRegistryField::Digest.index(),
             Value::Bytes(registry_digest.to_vec()),
             "registry digest",
         )?;
@@ -1566,158 +1748,265 @@ fn mutate_provider_registry_archive_with(
     encode_value(&archive)
 }
 
-fn mutate_provider_package_fields(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
+fn mutate_provider_package_fields(
+    fields: &mut [Value],
+    mutation: ProviderPackageMutation,
+) -> TestResult<bool> {
     match mutation {
-        0 => {
-            replace_value(fields, 0, Value::Text("FPP0".to_owned()), "package magic")?;
+        ProviderPackageMutation::InvalidMagic => {
+            replace_value(
+                fields,
+                ProviderPackageField::Magic.index(),
+                Value::Text("FPP0".to_owned()),
+                "package magic",
+            )?;
             Ok(false)
         }
-        1 => {
-            replace_value(fields, 1, Value::Integer(2_u64.into()), "package version")?;
+        ProviderPackageMutation::InvalidVersion => {
+            replace_value(
+                fields,
+                ProviderPackageField::Version.index(),
+                Value::Integer(2_u64.into()),
+                "package version",
+            )?;
             Ok(false)
         }
-        2 => {
-            replace_value(fields, 2, Value::Array(Vec::new()), "package provider key")?;
+        ProviderPackageMutation::EmptyProviderKey => {
+            replace_value(
+                fields,
+                ProviderPackageField::ProviderKey.index(),
+                Value::Array(Vec::new()),
+                "package provider key",
+            )?;
             Ok(false)
         }
-        3 => {
-            replace_value(fields, 5, Value::Array(Vec::new()), "package schemas")?;
+        ProviderPackageMutation::EmptySchemas => {
+            replace_value(
+                fields,
+                ProviderPackageField::FamilySchemas.index(),
+                Value::Array(Vec::new()),
+                "package schemas",
+            )?;
             Ok(true)
         }
-        4 => {
+        ProviderPackageMutation::InvalidSchemaFamily => {
             replace_value(
-                array_field(
-                    array_field(fields, 5, "package schemas")?,
-                    0,
-                    "package schema",
-                )?,
-                0,
+                provider_package_schema(fields)?,
+                ProviderFamilySchemaField::Family.index(),
                 Value::Integer(1_u64.into()),
                 "package schema family",
             )?;
             Ok(true)
         }
-        5 => {
+        ProviderPackageMutation::InvalidSchemaDescriptor => {
             replace_value(
-                array_field(
-                    array_field(fields, 5, "package schemas")?,
-                    0,
-                    "package schema",
-                )?,
-                1,
+                provider_package_schema(fields)?,
+                ProviderFamilySchemaField::Descriptor.index(),
                 Value::Array(Vec::new()),
                 "package schema descriptor",
             )?;
             Ok(true)
         }
-        6 => {
+        ProviderPackageMutation::InvalidLicenceDigest => {
             replace_value(
-                array_field(fields, 6, "package licence descriptor")?,
-                3,
+                array_field(
+                    fields,
+                    ProviderPackageField::LicenceDescriptor.index(),
+                    "package licence descriptor",
+                )?,
+                ArtifactDescriptorField::Digest.index(),
                 Value::Bytes(vec![0; 32]),
                 "package licence digest",
             )?;
             Ok(true)
         }
-        7 => {
-            replace_value(fields, 11, Value::Bytes(vec![0; 32]), "package digest")?;
+        ProviderPackageMutation::InvalidDigest => {
+            replace_value(
+                fields,
+                ProviderPackageField::Digest.index(),
+                Value::Bytes(vec![0; 32]),
+                "package digest",
+            )?;
             Ok(false)
         }
-        8..=21 => mutate_provider_package_extended(fields, mutation),
-        _ => Err(format!("unsupported package mutation {mutation}").into()),
-    }
-}
-
-fn mutate_provider_package_extended(fields: &mut [Value], mutation: usize) -> TestResult<bool> {
-    match mutation {
-        8..=9 => replace_value(
-            array_field(fields, 2, "package provider key")?,
-            mutation - 8,
-            if mutation == 8 {
-                Value::Text("INVALID".to_owned())
-            } else {
-                Value::Text("01.0.0".to_owned())
-            },
-            "package provider identity",
-        )?,
-        10..=11 => replace_value(
-            array_field(fields, 2, "package provider key")?,
-            mutation - 8,
-            Value::Integer(65_536_u64.into()),
-            "package provider ABI",
-        )?,
-        12 => replace_value(
-            fields,
-            3,
-            Value::Integer(7_u64.into()),
-            "package claim layer",
-        )?,
-        13 => replace_value(
-            fields,
-            4,
-            Value::Integer(3_u64.into()),
-            "package subject adapter",
-        )?,
-        14 => {
-            array_field(fields, 5, "package schemas")?.pop();
-        }
-        15 => replace_value(
-            array_field(fields, 5, "package schemas")?,
-            0,
-            Value::Array(Vec::new()),
-            "package schema",
-        )?,
-        16..=19 => {
-            let descriptor = array_field(
-                array_field(
-                    array_field(fields, 5, "package schemas")?,
-                    0,
-                    "package schema",
-                )?,
-                1,
-                "package schema descriptor",
-            )?;
-            let replacement = match mutation {
-                16 => Value::Text("/invalid.json".to_owned()),
-                17 => Value::Text("INVALID".to_owned()),
-                18 => Value::Integer(0_u64.into()),
-                19 => Value::Bytes(vec![0; 32]),
-                _ => return Err(format!("unsupported schema descriptor {mutation}").into()),
-            };
+        ProviderPackageMutation::InvalidProviderIdentifier => {
             replace_value(
-                descriptor,
-                mutation - 16,
-                replacement,
+                array_field(
+                    fields,
+                    ProviderPackageField::ProviderKey.index(),
+                    "package provider key",
+                )?,
+                ProviderKeyCborField::Identifier.index(),
+                Value::Text("INVALID".to_owned()),
+                "package provider identity",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::NoncanonicalProviderVersion => {
+            replace_value(
+                array_field(
+                    fields,
+                    ProviderPackageField::ProviderKey.index(),
+                    "package provider key",
+                )?,
+                ProviderKeyCborField::Version.index(),
+                Value::Text("01.0.0".to_owned()),
+                "package provider identity",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::InvalidProviderAbiMajor => {
+            replace_value(
+                array_field(
+                    fields,
+                    ProviderPackageField::ProviderKey.index(),
+                    "package provider key",
+                )?,
+                ProviderKeyCborField::AbiMajor.index(),
+                Value::Integer(65_536_u64.into()),
+                "package provider ABI",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::InvalidProviderAbiMinor => {
+            replace_value(
+                array_field(
+                    fields,
+                    ProviderPackageField::ProviderKey.index(),
+                    "package provider key",
+                )?,
+                ProviderKeyCborField::AbiMinor.index(),
+                Value::Integer(65_536_u64.into()),
+                "package provider ABI",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::InvalidClaimLayer => {
+            replace_value(
+                fields,
+                ProviderPackageField::ClaimLayer.index(),
+                Value::Integer(7_u64.into()),
+                "package claim layer",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::InvalidSubjectAdapter => {
+            replace_value(
+                fields,
+                ProviderPackageField::SubjectAdapter.index(),
+                Value::Integer(3_u64.into()),
+                "package subject adapter",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::MissingFamilySchema => {
+            array_field(
+                fields,
+                ProviderPackageField::FamilySchemas.index(),
+                "package schemas",
+            )?
+            .pop();
+            Ok(true)
+        }
+        ProviderPackageMutation::InvalidSchemaShape => {
+            replace_value(
+                array_field(
+                    fields,
+                    ProviderPackageField::FamilySchemas.index(),
+                    "package schemas",
+                )?,
+                CURRENT_PROVIDER_SCHEMA_INDEX,
+                Value::Array(Vec::new()),
+                "package schema",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::AbsoluteSchemaPath => {
+            replace_value(
+                array_field(
+                    provider_package_schema(fields)?,
+                    ProviderFamilySchemaField::Descriptor.index(),
+                    "package schema descriptor",
+                )?,
+                ArtifactDescriptorField::Path.index(),
+                Value::Text("/invalid.json".to_owned()),
                 "package schema descriptor field",
             )?;
+            Ok(true)
         }
-        20 => replace_value(fields, 7, Value::Null, "package notice descriptor")?,
-        21 => {
-            let schema_path = array_field(
+        ProviderPackageMutation::InvalidSchemaMediaType => {
+            replace_value(
                 array_field(
-                    array_field(fields, 5, "package schemas")?,
-                    0,
-                    "package schema",
+                    provider_package_schema(fields)?,
+                    ProviderFamilySchemaField::Descriptor.index(),
+                    "package schema descriptor",
                 )?,
-                1,
+                ArtifactDescriptorField::MediaType.index(),
+                Value::Text("INVALID".to_owned()),
+                "package schema descriptor field",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::InvalidSchemaLength => {
+            replace_value(
+                array_field(
+                    provider_package_schema(fields)?,
+                    ProviderFamilySchemaField::Descriptor.index(),
+                    "package schema descriptor",
+                )?,
+                ArtifactDescriptorField::Length.index(),
+                Value::Integer(0_u64.into()),
+                "package schema descriptor field",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::InvalidSchemaDigest => {
+            replace_value(
+                array_field(
+                    provider_package_schema(fields)?,
+                    ProviderFamilySchemaField::Descriptor.index(),
+                    "package schema descriptor",
+                )?,
+                ArtifactDescriptorField::Digest.index(),
+                Value::Bytes(vec![0; 32]),
+                "package schema descriptor field",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::MissingNotices => {
+            replace_value(
+                fields,
+                ProviderPackageField::NoticesDescriptor.index(),
+                Value::Null,
+                "package notice descriptor",
+            )?;
+            Ok(true)
+        }
+        ProviderPackageMutation::CollidingSupportPath => {
+            let schema_path = array_field(
+                provider_package_schema(fields)?,
+                ProviderFamilySchemaField::Descriptor.index(),
                 "package schema descriptor",
             )?
             .first()
             .ok_or("package schema descriptor has no path")?
             .clone();
             replace_value(
-                array_field(fields, 6, "package licence descriptor")?,
-                0,
+                array_field(
+                    fields,
+                    ProviderPackageField::LicenceDescriptor.index(),
+                    "package licence descriptor",
+                )?,
+                ArtifactDescriptorField::Path.index(),
                 schema_path,
                 "colliding package licence path",
             )?;
+            Ok(true)
         }
-        _ => return Err(format!("unsupported package extension {mutation}").into()),
     }
-    Ok(true)
 }
 
-fn mutate_provider_package_archive(mutation: usize) -> TestResult<Vec<u8>> {
+fn mutate_provider_package_archive(mutation: ProviderPackageMutation) -> TestResult<Vec<u8>> {
     mutate_provider_package_archive_with(|fields| mutate_provider_package_fields(fields, mutation))
 }
 
@@ -1731,7 +2020,7 @@ fn mutate_provider_package_archive_with(
     };
     let registry_bytes =
         match archive_member_fields(archive_fields, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1)?
-            .get(1)
+            .get(MemberField::Bytes.index())
         {
             Some(Value::Bytes(bytes)) => bytes.clone(),
             _ => return Err("provider registry is not bytes".into()),
@@ -1740,21 +2029,15 @@ fn mutate_provider_package_archive_with(
     let Value::Array(registry_fields) = &mut registry else {
         return Err("provider registry is not an array".into());
     };
-    let package_path = match array_field(
-        array_field(
-            array_field(registry_fields, 2, "registry providers")?,
-            0,
-            "provider entry",
-        )?,
-        6,
-        "package descriptor",
-    )?
-    .first()
+    let package_path = match provider_package_descriptor(provider_registry_entry(registry_fields)?)?
+        .get(ArtifactDescriptorField::Path.index())
     {
         Some(Value::Text(path)) => path.clone(),
         _ => return Err("provider package path is not text".into()),
     };
-    let package_bytes = match archive_member_fields(archive_fields, &package_path)?.get(1) {
+    let package_bytes = match archive_member_fields(archive_fields, &package_path)?
+        .get(MemberField::Bytes.index())
+    {
         Some(Value::Bytes(bytes)) => bytes.clone(),
         _ => return Err("provider package is not bytes".into()),
     };
@@ -1765,45 +2048,38 @@ fn mutate_provider_package_archive_with(
     if mutate(package_fields)? {
         let package_digest = contract_digest(
             b"PiglorOS.Conformance.ProviderPackage.v1",
-            &package_fields[..11],
+            &package_fields[..ProviderPackageField::Digest.index()],
         )?;
         replace_value(
             package_fields,
-            11,
+            ProviderPackageField::Digest.index(),
             Value::Bytes(package_digest.to_vec()),
             "package digest",
         )?;
     }
     let package_bytes = encode_value(&package)?;
     replace_archive_member_bytes(archive_fields, &package_path, &package_bytes)?;
-    let package_descriptor = array_field(
-        array_field(
-            array_field(registry_fields, 2, "registry providers")?,
-            0,
-            "provider entry",
-        )?,
-        6,
-        "package descriptor",
-    )?;
+    let package_descriptor =
+        provider_package_descriptor(provider_registry_entry(registry_fields)?)?;
     replace_value(
         package_descriptor,
-        2,
+        ArtifactDescriptorField::Length.index(),
         Value::Integer(u64::try_from(package_bytes.len())?.into()),
         "package length",
     )?;
     replace_value(
         package_descriptor,
-        3,
+        ArtifactDescriptorField::Digest.index(),
         Value::Bytes(blake3::hash(&package_bytes).as_bytes().to_vec()),
         "package digest",
     )?;
     let registry_digest = contract_digest(
         b"PiglorOS.Conformance.ProviderRegistry.v1",
-        &registry_fields[..3],
+        &registry_fields[..ProviderRegistryField::Digest.index()],
     )?;
     replace_value(
         registry_fields,
-        3,
+        ProviderRegistryField::Digest.index(),
         Value::Bytes(registry_digest.to_vec()),
         "registry digest",
     )?;
@@ -4360,18 +4636,18 @@ fn independent_verifier_rejects_network_for_air_gapped_fixture() -> TestResult {
 
 #[test]
 fn independent_verifier_rejects_each_current_provider_registry_mutation() -> TestResult {
-    for case in PROVIDER_REGISTRY_MUTATIONS {
-        let archive = mutate_provider_registry_archive(case.selector)?;
-        assert_archive_rejected_by_both(&archive, case.label);
+    for mutation in PROVIDER_REGISTRY_MUTATIONS {
+        let archive = mutate_provider_registry_archive(mutation)?;
+        assert_archive_rejected_by_both(&archive, mutation.label());
     }
     Ok(())
 }
 
 #[test]
 fn independent_verifier_rejects_each_current_provider_package_mutation() -> TestResult {
-    for case in PROVIDER_PACKAGE_MUTATIONS {
-        let archive = mutate_provider_package_archive(case.selector)?;
-        assert_archive_rejected_by_both(&archive, case.label);
+    for mutation in PROVIDER_PACKAGE_MUTATIONS {
+        let archive = mutate_provider_package_archive(mutation)?;
+        assert_archive_rejected_by_both(&archive, mutation.label());
     }
     Ok(())
 }
