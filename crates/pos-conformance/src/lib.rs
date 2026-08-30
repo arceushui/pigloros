@@ -854,7 +854,7 @@ impl PluginBoundaryV1 {
         {
             return Err(PluginBoundaryError::InvalidDescriptor);
         }
-        if self.manifest_digest != self.digest_without_identity() {
+        if self.manifest_digest != self.digest_without_identity()? {
             return Err(PluginBoundaryError::ManifestDigestMismatch);
         }
         if self.release_digest != self.release_digest_value() {
@@ -863,11 +863,12 @@ impl PluginBoundaryV1 {
         Ok(())
     }
 
-    fn digest_without_identity(&self) -> [u8; 32] {
+    fn digest_without_identity(&self) -> Result<[u8; 32], PluginBoundaryError> {
         let mut value = self.clone();
         value.manifest_digest = [0; 32];
         value.release_digest = [0; 32];
         typed_digest(b"PiglorOS.Plugin.Manifest.Wave8.v1", &value)
+            .map_err(|_| PluginBoundaryError::DigestEncoding)
     }
 
     fn release_digest_value(&self) -> [u8; 32] {
@@ -895,6 +896,8 @@ pub enum PluginBoundaryError {
     ManifestDigestMismatch,
     #[error("plugin boundary release digest does not match its closure")]
     ReleaseDigestMismatch,
+    #[error("plugin boundary descriptor cannot be canonically encoded")]
+    DigestEncoding,
 }
 
 /// Exact Component world admitted by the Wave 8 seam.
@@ -933,7 +936,7 @@ pub fn wave8_plugin_boundary() -> PluginBoundaryV1 {
         manifest_digest: [0; 32],
         release_digest: [0; 32],
     };
-    boundary.manifest_digest = boundary.digest_without_identity();
+    boundary.manifest_digest = boundary.digest_without_identity().unwrap_or([0; 32]);
     boundary.release_digest = boundary.release_digest_value();
     boundary
 }
@@ -1467,7 +1470,8 @@ impl ConformanceReportV1 {
     /// Returns [`EvidenceError::InvalidConformanceReport`] when the fields
     /// cannot be represented by the strict canonical codec.
     pub fn digest(&self) -> Result<[u8; 32], EvidenceError> {
-        Ok(strict_codec::conformance_report_digest(self))
+        strict_codec::conformance_report_digest(self)
+            .map_err(|_| EvidenceError::InvalidConformanceReport)
     }
 }
 
@@ -1678,10 +1682,10 @@ impl MoatProofEvidenceV1 {
             pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
         })?;
         let fixture_domain = b"PiglorOS.AuthoritativeFixture.v1";
-        let fixture_digest = typed_digest(fixture_domain, &self.authoritative_events);
+        let fixture_digest = typed_digest(fixture_domain, &self.authoritative_events)?;
         let mut result = VerificationResultV1 {
             request_digest: self.manifest.input_digest,
-            manifest_digest: typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest),
+            manifest_digest: typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest)?,
             execution_profile_digest: self.manifest.execution_profile_digest,
             trust_policy_snapshot_digest: self.manifest.trust_policy_snapshot_digest,
             artifact_closure_digest: self.manifest.artifact_closure_digest,
@@ -1700,7 +1704,7 @@ impl MoatProofEvidenceV1 {
             provenance_digest: self.contract.conformance_report.provenance_digest,
             result_digest: [0; 32],
         };
-        result.result_digest = strict_codec::verification_result_digest(&result);
+        result.result_digest = result.digest()?;
         Ok(result)
     }
 
@@ -1740,7 +1744,8 @@ impl VerificationResultV1 {
     /// # Errors
     /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::verification_result_digest(self))
+        strict_codec::verification_result_digest(self)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 }
 
@@ -1770,20 +1775,18 @@ impl DivergenceReportV1 {
     /// # Errors
     /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        Ok(strict_codec::divergence_report_digest(self))
+        strict_codec::divergence_report_digest(self)
+            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
     }
 }
 
-fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> [u8; 32] {
-    // Every caller supplies a closed PiglorOS record to a Vec-backed encoder.
-    // Abort on an impossible encoder failure so no fallback bytes can acquire
-    // a valid protocol digest.
-    let bytes = pos_crypto::canonical::encode(value).unwrap_or_else(|_| std::process::abort());
+fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<[u8; 32], pos_core::CoreError> {
+    let bytes = pos_crypto::canonical::encode(value)?;
     let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());
     input.extend_from_slice(domain);
     input.push(0);
     input.extend_from_slice(bytes.as_slice());
-    *blake3::hash(&input).as_bytes()
+    Ok(*blake3::hash(&input).as_bytes())
 }
 
 /// Strict portable wire codec for the Wave 8 records.
@@ -1901,20 +1904,9 @@ pub mod strict_codec {
     fn encode_value(value: &Value) -> Result<Vec<u8>, StrictCborError> {
         validate_value(value)?;
         let mut bytes = Vec::new();
-        encode_value_to_writer(value, &mut bytes).map(|()| bytes)
-    }
-
-    pub(crate) fn encode_value_infallible(value: &Value) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes).map_or_else(|_| std::process::abort(), |()| bytes)
-    }
-
-    fn encode_value_to_writer<W: std::io::Write>(
-        value: &Value,
-        writer: W,
-    ) -> Result<(), StrictCborError> {
-        ciborium::into_writer(value, writer)
-            .map_err(|error| StrictCborError::Serialization(error.to_string()))
+        ciborium::into_writer(value, &mut bytes)
+            .map_err(|error| StrictCborError::Serialization(error.to_string()))?;
+        Ok(bytes)
     }
 
     pub(crate) fn encode_verification_result(
@@ -1930,7 +1922,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
-        if result.result_digest != verification_result_digest(&result) {
+        if result.result_digest != verification_result_digest(&result)? {
             return Err(StrictCborError::InvalidField {
                 field: "verification_result_digest".to_owned(),
             });
@@ -1939,9 +1931,11 @@ pub mod strict_codec {
         Ok(result)
     }
 
-    pub(crate) fn verification_result_digest(result: &VerificationResultV1) -> [u8; 32] {
-        let bytes = encode_value_infallible(&encode_verification_result_value(result, false));
-        domain_digest(b"PiglorOS.VerificationResult.v1", &bytes)
+    pub(crate) fn verification_result_digest(
+        result: &VerificationResultV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        let bytes = encode_value(&encode_verification_result_value(result, false))?;
+        Ok(domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
     }
 
     fn encode_verification_result_value(
@@ -2142,7 +2136,7 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
-        if report.report_digest != divergence_report_digest(&report) {
+        if report.report_digest != divergence_report_digest(&report)? {
             return Err(StrictCborError::InvalidField {
                 field: "divergence_report_digest".to_owned(),
             });
@@ -2151,9 +2145,11 @@ pub mod strict_codec {
         Ok(report)
     }
 
-    pub(crate) fn divergence_report_digest(report: &DivergenceReportV1) -> [u8; 32] {
-        let bytes = encode_value_infallible(&encode_divergence_report_value(report, false));
-        domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes)
+    pub(crate) fn divergence_report_digest(
+        report: &DivergenceReportV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        let bytes = encode_value(&encode_divergence_report_value(report, false))?;
+        Ok(domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -3858,9 +3854,11 @@ pub mod strict_codec {
         decode_report(&value)
     }
 
-    pub(crate) fn conformance_report_digest(report: &ConformanceReportV1) -> [u8; 32] {
-        let bytes = encode_value_infallible(&encode_report_value(report, false));
-        domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes)
+    pub(crate) fn conformance_report_digest(
+        report: &ConformanceReportV1,
+    ) -> Result<[u8; 32], StrictCborError> {
+        let bytes = encode_value(&encode_report_value(report, false))?;
+        Ok(domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes))
     }
 
     pub(crate) fn encode_report_value(report: &ConformanceReportV1, include_digest: bool) -> Value {
@@ -4092,18 +4090,6 @@ pub mod strict_codec {
                     drop(std::hint::black_box(value));
                 }
 
-                struct RejectWriter;
-
-                impl std::io::Write for RejectWriter {
-                    fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
-                        Err(std::io::Error::other("intentional coverage writer failure"))
-                    }
-
-                    fn flush(&mut self) -> std::io::Result<()> {
-                        Ok(())
-                    }
-                }
-
                 fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
                     let mut fields = value.as_array().map_or_else(Vec::new, Clone::clone);
                     fields[index] = replacement;
@@ -4135,7 +4121,6 @@ pub mod strict_codec {
                     }
                 }
 
-                consume(encode_value_to_writer(&Value::Null, RejectWriter));
                 let evidence = $input;
                 let contract = &evidence.contract;
                 let Ok(encoded_evidence) = encode_evidence(evidence) else {
@@ -5132,7 +5117,8 @@ pub mod strict_codec {
                 ..error.clone()
             });
             assert!(validate_verification_result(&invalid_semantics).is_err());
-            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics);
+            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics)
+                .map_err(|error| error.to_string())?;
             let invalid_semantics_bytes =
                 encode_value(&encode_verification_result_value(&invalid_semantics, true))
                     .unwrap_or_default();
@@ -5378,8 +5364,8 @@ pub fn compare_authoritative_outputs(
     Ok(ComparisonV1 {
         equal: divergence == DivergenceClassV1::None,
         divergence,
-        left_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &left_output),
-        right_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &right_output),
+        left_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &left_output)?,
+        right_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &right_output)?,
     })
 }
 
@@ -6042,7 +6028,7 @@ fn validate_conformance_report_shape(report: &ConformanceReportV1) -> Result<(),
                 report.unavailable,
                 report.not_applicable,
             )
-        || report.report_digest != strict_codec::conformance_report_digest(report)
+        || report.report_digest != report.digest()?
     {
         return Err(EvidenceError::InvalidConformanceReport);
     }
