@@ -1619,13 +1619,12 @@ fn emit_materialization_assets(
         support.artifacts.len()
     )?;
     for artifact in support.artifacts {
-        let bytes = snapshots.bytes(&artifact.path, "support package artifact")?;
+        let bytes_constant = support_constant_name(&artifact.path);
         writeln!(
             generated,
-            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: &{:?}, role: {}, provider_package: {} }},",
+            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: {bytes_constant}, role: {}, provider_package: {} }},",
             artifact.path,
             artifact.media_type,
-            bytes,
             artifact.role.rust_variant(),
             artifact.provider_package,
         )?;

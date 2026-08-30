@@ -2652,9 +2652,11 @@ pub mod strict_codec {
                 .is_some_and(|value| value.is_empty() || value.len() > 128)
             || report.report_digest == [0; 32]
             || report.follow_on_counts.len() > 32
-            || report.follow_on_counts.windows(2).any(|pair| {
-                pair[0].kind >= pair[1].kind || pair[0].count == 0 || pair[1].count == 0
-            })
+            || report.follow_on_counts.iter().any(|entry| entry.count == 0)
+            || report
+                .follow_on_counts
+                .windows(2)
+                .any(|pair| pair[0].kind >= pair[1].kind)
         {
             return Err(StrictCborError::InvalidField {
                 field: "divergence_report_semantics".to_owned(),
@@ -2690,7 +2692,9 @@ pub mod strict_codec {
                 )?,
             });
         }
-        if result.windows(2).any(|pair| pair[0].kind >= pair[1].kind) {
+        if result.iter().any(|entry| entry.count == 0)
+            || result.windows(2).any(|pair| pair[0].kind >= pair[1].kind)
+        {
             return Err(StrictCborError::InvalidField {
                 field: "follow_on_counts_order".to_owned(),
             });
