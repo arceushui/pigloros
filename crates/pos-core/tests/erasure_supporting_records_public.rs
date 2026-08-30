@@ -504,11 +504,14 @@ fn retry_admission_rejects_invalid_ordinals_deadlines_and_obligation_sets() {
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
-    let mut duplicate_commands = retry_input();
-    duplicate_commands.command_identities[1] = reference(15);
+    let mut shared_commands = retry_input();
+    shared_commands.command_identities[1] = reference(15);
+    let Ok(shared_commands) = ErasureRetryAdmissionV1::new(shared_commands) else {
+        panic!("obligations may share one destruction command");
+    };
     assert_eq!(
-        ErasureRetryAdmissionV1::new(duplicate_commands),
-        Err(ErasureErrorV1::ScopeInvalid)
+        shared_commands.command_identities(),
+        &[reference(15), reference(15)]
     );
 }
 
@@ -1040,7 +1043,7 @@ fn supporting_attempt_chain_rejects_gaps_and_identity_mismatches() -> Result<(),
         })?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(wrong_ordinal),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let mut wrong_outcome = input.clone();
