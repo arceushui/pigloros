@@ -411,7 +411,7 @@ fn supporting_records_bound_and_bind_obligation_evidence() -> Result<(), Erasure
     let oversized = ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope.clone()),
         obligations: vec![obligation; ERASURE_MAX_OBLIGATIONS + 1],
-        obligation_set: Some(obligation_set.clone()),
+        obligation_set: Some(obligation_set),
         ..ErasureSupportingRecordsInputV1::default()
     };
     assert_eq!(
