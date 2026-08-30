@@ -86,6 +86,27 @@ fn await_staging_directory(parent: &Path, child: &mut std::process::Child) -> Te
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn await_stopped_process(child: &mut std::process::Child) -> TestResult {
+    let status_path = format!("/proc/{}/status", child.id());
+    for _ in 0..200_000 {
+        if let Some(status) = child.try_wait()? {
+            return Err(format!("materializer exited before SIGSTOP: {status}").into());
+        }
+        if fs::read_to_string(&status_path)?.lines().any(|line| {
+            line.strip_prefix("State:")
+                .is_some_and(|state| state.trim_start().starts_with('T'))
+        }) {
+            return Ok(());
+        }
+        std::thread::yield_now();
+    }
+    child.kill()?;
+    child.wait()?;
+    Err("materializer did not enter the stopped state".into())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn mutate_live_staging(
     materializer: &std::ffi::OsStr,
     key: &str,
@@ -106,6 +127,7 @@ fn mutate_live_staging(
         .spawn()?;
     let staging = await_staging_directory(&root, &mut child)?;
     signal_process(&child, "STOP")?;
+    await_stopped_process(&mut child)?;
 
     let mutation_result = match mutation {
         StagingMutation::ReplaceIdentity => {
