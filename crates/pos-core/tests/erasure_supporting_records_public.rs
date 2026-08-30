@@ -15,7 +15,8 @@ use pos_core::{
     ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeV1,
     ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
     ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
-    ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RETRY_ADMISSION_MAX_BYTES,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ERASURE_RETRY_ADMISSION_MAX_BYTES,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
