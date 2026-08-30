@@ -26,8 +26,36 @@ cp -- "${blake_inventory}" "${backup_root}/BLAKE3SUMS"
 cp -- "${sha_inventory}" "${backup_root}/SHA256SUMS"
 jq '.undeclared_evidence = true' "${fixture}" >"${replacement}"
 mv -- "${replacement}" "${fixture}"
-bash scripts/generate-conformance-fixture-records.sh fixtures/conformance --write >/dev/null
 jq -e '.undeclared_evidence == true' "${fixture}" >/dev/null
+
+input_blake3="$(b3sum "${fixture}" | awk '{print $1}')"
+jq --arg digest "${input_blake3}" '.input_blake3_digest = $digest' \
+  "${expected}" >"${replacement}"
+mv -- "${replacement}" "${expected}"
+
+replace_inventory_digest() {
+  local inventory="$1"
+  local digest="$2"
+  local relative="$3"
+  awk -v digest="${digest}" -v relative="${relative}" \
+    '$2 == relative { print digest "  " relative; next } { print }' \
+    "${inventory}" >"${replacement}"
+  mv -- "${replacement}" "${inventory}"
+}
+
+replace_inventory_digest "${blake_inventory}" "${input_blake3}" \
+  "inputs/artifact-integrity/positive.json"
+replace_inventory_digest "${blake_inventory}" \
+  "$(b3sum "${expected}" | awk '{print $1}')" \
+  "expected/artifact-integrity/positive.json"
+replace_inventory_digest "${sha_inventory}" \
+  "$(sha256sum "${fixture}" | awk '{print $1}')" \
+  "inputs/artifact-integrity/positive.json"
+replace_inventory_digest "${sha_inventory}" \
+  "$(sha256sum "${expected}" | awk '{print $1}')" \
+  "expected/artifact-integrity/positive.json"
+replace_inventory_digest "${sha_inventory}" \
+  "$(sha256sum "${blake_inventory}" | awk '{print $1}')" BLAKE3SUMS
 
 # The materialization step builds this crate immediately before this negative
 # control. A fresh hosted target directory proves the build script evaluates
