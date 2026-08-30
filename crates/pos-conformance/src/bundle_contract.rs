@@ -65,7 +65,7 @@ struct DraftExecutionProfileContract {
     reproducibility_classes: Vec<DraftReproducibilityClass>,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, serde::Deserialize)]
 enum DraftReproducibilityClass {
     ProfileRecomputation,
     CrossProfileConformance,
