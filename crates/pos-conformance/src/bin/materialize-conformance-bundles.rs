@@ -1085,7 +1085,14 @@ fn signing_key_from_encoded(
             pos_conformance::decode_hex_digest(&encoded)
                 .ok_or_else(|| "invalid conformance signing key".into())
         })
-        .map(|bytes| SigningKey::from_bytes(&bytes))
+        .and_then(|bytes| {
+            let key = SigningKey::from_bytes(&bytes);
+            if key.verifying_key().to_bytes() == DRAFT_AUTHORITY_PUBLIC_KEY_BYTES {
+                Ok(key)
+            } else {
+                Err("conformance signing key is not declared by the Draft authority".into())
+            }
+        })
 }
 
 fn materialize_profile(

@@ -397,6 +397,9 @@ impl ConformanceBundleV1 {
     /// Returns a closed bundle error for the first rejected invariant.
     pub fn validate(&self) -> Result<(), BundleContractErrorV1> {
         self.validate_unsigned().and_then(|()| {
+            if self.signer_public_key.as_bytes() != &crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES {
+                return Err(BundleContractErrorV1::SignatureInvalid);
+            }
             signing::verifying_key_from_public_key(&self.signer_public_key)
                 .map_err(|_| BundleContractErrorV1::SignatureInvalid)
                 .and_then(|key| {
@@ -2459,6 +2462,9 @@ fn raw_profile_digest(
 fn raw_archive_signature(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
     digest::<32>(&fields[2]).and_then(|key| {
         digest::<64>(&fields[3]).and_then(|signature| {
+            if key != crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES {
+                return Err(BundleContractErrorV1::SignatureInvalid);
+            }
             ed25519_dalek::VerifyingKey::from_bytes(&key)
                 .map_err(|_| BundleContractErrorV1::SignatureInvalid)
                 .and_then(|verifying_key| {

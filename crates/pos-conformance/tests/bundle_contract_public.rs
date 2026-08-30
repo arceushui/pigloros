@@ -2099,6 +2099,18 @@ fn public_bundle_entry_points_propagate_invalid_profile_and_bundle_state() -> Te
         invalid_key.validate(),
         Err(BundleContractErrorV1::SignatureInvalid)
     );
+
+    let unsigned = current_bundle_inputs(BundleModeV1::Local)?;
+    let self_signed = ConformanceBundleV1::materialize(
+        &unsigned.profile,
+        BundleModeV1::Local,
+        unsigned.members,
+        unsigned.expected,
+    )?;
+    assert_eq!(
+        self_signed.sign(&SigningKey::from_bytes(&[8; 32])),
+        Err(BundleContractErrorV1::SignatureInvalid)
+    );
     Ok(())
 }
 
