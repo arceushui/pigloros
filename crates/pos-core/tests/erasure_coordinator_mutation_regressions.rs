@@ -25,6 +25,18 @@ const COORDINATOR: ErasureReferenceV1 = reference(200);
 type SharedState = Rc<RefCell<PortState>>;
 type Machine = ErasureCoordinatorStateMachineV1<SharedPort>;
 
+enum ReceiptMismatch {
+    TerminalState,
+    Coordinator,
+    Request,
+}
+
+enum FreezePortFailure {
+    RequiredTargets,
+    AffectedScope,
+    Admission,
+}
+
 const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
@@ -649,17 +661,20 @@ fn terminal_record_rejects_missing_and_mismatched_receipt_fields() -> Result<(),
         .signature = reference(103);
     assert_invalid_parts(mismatched_pair, ErasureErrorV1::PolicyConflict);
 
-    for field in [0_u8, 1, 2] {
+    for field in [
+        ReceiptMismatch::TerminalState,
+        ReceiptMismatch::Coordinator,
+        ReceiptMismatch::Request,
+    ] {
         let mut parts = record_parts(&record);
         let mut input = parts
             .receipt_input
             .clone()
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         match field {
-            0 => input.terminal_state = reference(104),
-            1 => input.coordinator = reference(105),
-            2 => input.request = reference(106),
-            _ => unreachable!(),
+            ReceiptMismatch::TerminalState => input.terminal_state = reference(104),
+            ReceiptMismatch::Coordinator => input.coordinator = reference(105),
+            ReceiptMismatch::Request => input.request = reference(106),
         }
         parts.receipt = Some(pos_core::ErasureReceiptV1::new(input.clone())?);
         parts.receipt_input = Some(input);
@@ -1027,20 +1042,40 @@ fn freeze_rejects_duplicate_and_oversized_target_closures() -> Result<(), Erasur
 fn freeze_preserves_closed_port_errors_and_rejects_closed_scope_failures(
 ) -> Result<(), ErasureErrorV1> {
     for (field, error) in [
-        (0_u8, ErasureErrorV1::ScopeInvalid),
-        (0, ErasureErrorV1::Unauthorized),
-        (1, ErasureErrorV1::ScopeInvalid),
-        (1, ErasureErrorV1::Unauthorized),
-        (2, ErasureErrorV1::ScopeInvalid),
-        (2, ErasureErrorV1::AccessFreezeFailed),
-        (2, ErasureErrorV1::Unauthorized),
+        (
+            FreezePortFailure::RequiredTargets,
+            ErasureErrorV1::ScopeInvalid,
+        ),
+        (
+            FreezePortFailure::RequiredTargets,
+            ErasureErrorV1::Unauthorized,
+        ),
+        (
+            FreezePortFailure::AffectedScope,
+            ErasureErrorV1::ScopeInvalid,
+        ),
+        (
+            FreezePortFailure::AffectedScope,
+            ErasureErrorV1::Unauthorized,
+        ),
+        (FreezePortFailure::Admission, ErasureErrorV1::ScopeInvalid),
+        (
+            FreezePortFailure::Admission,
+            ErasureErrorV1::AccessFreezeFailed,
+        ),
+        (FreezePortFailure::Admission, ErasureErrorV1::Unauthorized),
     ] {
         let mut fixture = authorized_fixture(vec![target(10)])?;
         match field {
-            0 => fixture.state.borrow_mut().required_targets_error = Some(error),
-            1 => fixture.state.borrow_mut().affected_scope_error = Some(error),
-            2 => fixture.state.borrow_mut().freeze_error = Some(error),
-            _ => unreachable!(),
+            FreezePortFailure::RequiredTargets => {
+                fixture.state.borrow_mut().required_targets_error = Some(error);
+            }
+            FreezePortFailure::AffectedScope => {
+                fixture.state.borrow_mut().affected_scope_error = Some(error);
+            }
+            FreezePortFailure::Admission => {
+                fixture.state.borrow_mut().freeze_error = Some(error);
+            }
         }
         assert_eq!(
             fixture
