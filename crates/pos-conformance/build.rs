@@ -1212,48 +1212,48 @@ fn emit_fixture_contract(
     writeln!(
         generated,
         "                                memory_bytes: {},",
-        budget.memory_bytes
+        rust_u64_literal(budget.memory_bytes)
     )?;
     writeln!(
         generated,
         "                                cpu_fuel: {},",
-        budget.cpu_fuel
+        rust_u64_literal(budget.cpu_fuel)
     )?;
     writeln!(
         generated,
         "                                host_calls: {},",
-        budget.host_calls
+        rust_u64_literal(budget.host_calls)
     )?;
     writeln!(
         generated,
         "                                event_count: {},",
-        budget.event_count
+        rust_u64_literal(budget.event_count)
     )?;
     writeln!(
         generated,
         "                                output_bytes: {},",
-        budget.output_bytes
+        rust_u64_literal(budget.output_bytes)
     )?;
     writeln!(
         generated,
         "                                storage_bytes: {},",
-        budget.storage_bytes
+        rust_u64_literal(budget.storage_bytes)
     )?;
     writeln!(
         generated,
         "                                execution_steps: {},",
-        budget.execution_steps
+        rust_u64_literal(budget.execution_steps)
     )?;
     writeln!(
         generated,
         "                                simulation_time_ns: {},",
-        budget.simulation_time_ns
+        rust_u64_literal(budget.simulation_time_ns)
     )?;
     writeln!(generated, "                            }},")?;
     writeln!(
         generated,
         "                            watchdog_ms: {},",
-        fixture.contract.watchdog_ms
+        rust_u64_literal(fixture.contract.watchdog_ms)
     )?;
     writeln!(
         generated,
@@ -1269,6 +1269,18 @@ fn emit_fixture_contract(
     }
     writeln!(generated, "],")?;
     writeln!(generated, "                        }},")
+}
+
+fn rust_u64_literal(value: u64) -> String {
+    let digits = value.to_string();
+    let mut literal = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index != 0 && (digits.len() - index).is_multiple_of(3) {
+            literal.push('_');
+        }
+        literal.push(digit);
+    }
+    literal
 }
 
 fn emit_strict_oracle(
@@ -1306,7 +1318,15 @@ fn emit_strict_oracle(
     }
 }
 
-fn emit_fixture(generated: &mut String, fixture: &FixturePaths) -> Result<(), std::fmt::Error> {
+fn emit_fixture(
+    generated: &mut String,
+    fixture: &FixturePaths,
+    fixture_index: usize,
+) -> Result<(), std::fmt::Error> {
+    writeln!(
+        generated,
+        "fn catalog_fixture_{fixture_index}() -> CatalogFixture {{"
+    )?;
     writeln!(generated, "                    CatalogFixture {{")?;
     writeln!(
         generated,
@@ -1345,10 +1365,19 @@ fn emit_fixture(generated: &mut String, fixture: &FixturePaths) -> Result<(), st
         fixture.oracle.bytes
     )?;
     emit_strict_oracle(generated, &fixture.strict_oracle)?;
-    writeln!(generated, "                    }},")
+    writeln!(generated, "                    }}\n}}")
 }
 
-fn emit_profile(generated: &mut String, profile: &ProfilePaths) -> Result<(), std::fmt::Error> {
+fn emit_profile(
+    generated: &mut String,
+    profile: &ProfilePaths,
+    profile_index: usize,
+    first_fixture_index: usize,
+) -> Result<(), std::fmt::Error> {
+    writeln!(
+        generated,
+        "fn catalog_profile_{profile_index}() -> LayerCatalogEntry {{"
+    )?;
     writeln!(generated, "            LayerCatalogEntry {{")?;
     writeln!(
         generated,
@@ -1401,19 +1430,35 @@ fn emit_profile(generated: &mut String, profile: &ProfilePaths) -> Result<(), st
         profile.profile_record
     )?;
     writeln!(generated, "                fixtures: vec![")?;
-    for fixture in &profile.fixtures {
-        emit_fixture(generated, fixture)?;
+    for fixture_index in first_fixture_index..first_fixture_index + profile.fixtures.len() {
+        writeln!(
+            generated,
+            "                    catalog_fixture_{fixture_index}(),"
+        )?;
     }
     writeln!(generated, "                ],")?;
-    writeln!(generated, "            }},")
+    writeln!(generated, "            }}\n}}")
 }
 
 fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
-    let mut generated = String::from(
+    let mut generated = String::new();
+    let mut fixture_index = 0;
+    for profile in profiles {
+        for fixture in &profile.fixtures {
+            emit_fixture(&mut generated, fixture, fixture_index)?;
+            fixture_index += 1;
+        }
+    }
+    let mut first_fixture_index = 0;
+    for (profile_index, profile) in profiles.iter().enumerate() {
+        emit_profile(&mut generated, profile, profile_index, first_fixture_index)?;
+        first_fixture_index += profile.fixtures.len();
+    }
+    generated.push_str(
         "fn layer_catalog() -> LayerCatalog {\n    LayerCatalog {\n        entries: vec![\n",
     );
-    for profile in profiles {
-        emit_profile(&mut generated, profile)?;
+    for profile_index in 0..profiles.len() {
+        writeln!(generated, "            catalog_profile_{profile_index}(),")?;
     }
     generated.push_str("        ],\n    }\n}\n");
     Ok(generated)

@@ -1482,8 +1482,8 @@ fn public_report_validation_and_encoding_cover_empty_and_large_boundaries(
 }
 
 #[test]
-fn public_closed_canonical_records_reject_trailing_cbor_items(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn public_conformance_report_rejects_trailing_cbor_items() -> Result<(), Box<dyn std::error::Error>>
+{
     let report = report_with_cases(1)?;
     assert_eq!(report.validate(), Ok(()));
     assert_eq!(
@@ -1501,7 +1501,12 @@ fn public_closed_canonical_records_reject_trailing_cbor_items(
         ConformanceReportV1::from_canonical_cbor(&report_bytes),
         Err(pos_conformance::EvidenceError::InvalidConformanceReport)
     );
+    Ok(())
+}
 
+#[test]
+fn public_verification_result_rejects_invalid_canonical_records(
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut result = VerificationResultV1 {
         request_digest: [1; 32],
         manifest_digest: [2; 32],
@@ -1526,23 +1531,30 @@ fn public_closed_canonical_records_reject_trailing_cbor_items(
         VerificationResultV1::from_canonical_cbor(&result_bytes)?,
         result
     );
-    let mut invalid_result = result.clone();
+    let mut invalid_result = result;
     invalid_result.authoritative_result_digest = None;
     invalid_result.result_digest = invalid_result.digest()?;
     let invalid_result_rejection = invalid_result
         .to_canonical_cbor()
-        .expect_err("VRR1 must reject an incomplete verified result");
+        .err()
+        .ok_or("VRR1 accepted an incomplete verified result")?;
     assert!(invalid_result_rejection
         .to_string()
         .starts_with("serialization error:"));
     let mut result_bytes = result_bytes;
     result_bytes.push(0);
     let result_rejection = VerificationResultV1::from_canonical_cbor(&result_bytes)
-        .expect_err("VRR1 must reject a trailing CBOR item");
+        .err()
+        .ok_or("VRR1 accepted a trailing CBOR item")?;
     assert!(result_rejection
         .to_string()
         .starts_with("serialization error:"));
+    Ok(())
+}
 
+#[test]
+fn public_divergence_report_rejects_trailing_cbor_items() -> Result<(), Box<dyn std::error::Error>>
+{
     let mut divergence = DivergenceReportV1 {
         request_digest: [1; 32],
         manifest_digest: [2; 32],
@@ -1583,7 +1595,8 @@ fn public_closed_canonical_records_reject_trailing_cbor_items(
     let mut divergence_bytes = divergence_bytes;
     divergence_bytes.push(0);
     let divergence_rejection = DivergenceReportV1::from_canonical_cbor(&divergence_bytes)
-        .expect_err("DVR1 must reject a trailing CBOR item");
+        .err()
+        .ok_or("DVR1 accepted a trailing CBOR item")?;
     assert!(divergence_rejection
         .to_string()
         .starts_with("serialization error:"));
