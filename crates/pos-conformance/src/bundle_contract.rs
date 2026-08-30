@@ -1187,25 +1187,32 @@ fn raw_archive_body(
     manifest: &[Value],
     mode: u64,
 ) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
-    let members = array_values(&fields[1])?;
+    let member_values = array_values(&fields[1])?;
     let descriptors = array_values(&manifest[4])?;
-    if members.len() != descriptors.len()
-        || !raw_member_paths_ordered(members)?
-        || !raw_descriptor_paths_ordered(descriptors)?
-    {
+    if member_values.len() != descriptors.len() {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     }
-    members
+    let members = member_values
         .iter()
         .zip(descriptors)
-        .try_for_each(|(member, descriptor)| raw_member_descriptor_pair(member, descriptor))?;
-    raw_archive_profile(manifest, members, mode)
+        .map(|(member, descriptor)| raw_member_descriptor_pair(member, descriptor))
+        .collect::<Result<Vec<_>, _>>()?;
+    if members.windows(2).any(|pair| pair[0].path >= pair[1].path) {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    }
+    raw_archive_profile(manifest, &members, mode)
 }
 
-fn raw_member_descriptor_pair(
-    member: &Value,
+struct RawArchiveMember<'a> {
+    path: &'a str,
+    bytes: &'a [u8],
+    role: u64,
+}
+
+fn raw_member_descriptor_pair<'a>(
+    member: &'a Value,
     descriptor: &Value,
-) -> Result<(), BundleContractErrorV1> {
+) -> Result<RawArchiveMember<'a>, BundleContractErrorV1> {
     let (Ok(member_fields), Ok(descriptor_fields)) = (array(member, 3), array(descriptor, 4))
     else {
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
@@ -1236,7 +1243,11 @@ fn raw_member_descriptor_pair(
         && raw_size == descriptor_size
         && *blake3::hash(raw).as_bytes() == descriptor_digest
     {
-        Ok(())
+        Ok(RawArchiveMember {
+            path: member_path,
+            bytes: raw,
+            role: member_role,
+        })
     } else {
         Err(BundleContractErrorV1::MemberDigestMismatch)
     }
@@ -1244,12 +1255,11 @@ fn raw_member_descriptor_pair(
 
 fn raw_archive_profile(
     manifest: &[Value],
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     mode: u64,
 ) -> Result<RawReleaseArchiveSummary, BundleContractErrorV1> {
     let profile_member = raw_member(members, PROFILE_PATH, 2)?;
-    let profile_bytes = bytes(&profile_member[1])?;
-    let profile = decode(profile_bytes)?;
+    let profile = decode(profile_member.bytes)?;
     let profile_fields = array(&profile, 18)?;
     let raw_profile = raw_cpf1_value(profile_fields)?;
     if profile_fields[4] != manifest[1] {
@@ -1259,7 +1269,12 @@ fn raw_archive_profile(
     raw_profile_support_members(&raw_profile, members)?;
     let registry = raw_registry_and_packages(&raw_profile, members, mode)?;
     let expected_results = raw_expected_results(&manifest[5], &raw_profile, members, mode)?;
-    raw_member_closure(&raw_profile.declared_paths, &manifest[5], members)?;
+    raw_member_closure(
+        &raw_profile.declared_paths,
+        &expected_results.member_paths,
+        &registry.declared_paths,
+        members,
+    )?;
     Ok(RawReleaseArchiveSummary {
         profile_digest,
         claim_layer: raw_profile.claim_layer,
@@ -1267,13 +1282,13 @@ fn raw_archive_profile(
         registry_bytes: registry.bytes,
         registry_providers: registry.providers,
         required_providers: registry.required_providers,
-        expected_results,
+        expected_results: expected_results.results,
     })
 }
 
 fn raw_profile_support_members(
     profile: &RawCpf1Summary,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
     let bindings = [
         (NORMATIVE_SPEC_PATH, 3),
@@ -1284,7 +1299,7 @@ fn raw_profile_support_members(
     ];
     for ((path, role), expected_digest) in bindings.into_iter().zip(profile.support_digests) {
         let member = raw_member(members, path, role)?;
-        let member_digest = *blake3::hash(bytes(&member[1])?).as_bytes();
+        let member_digest = *blake3::hash(member.bytes).as_bytes();
         if member_digest != expected_digest {
             return Err(BundleContractErrorV1::MemberDigestMismatch);
         }
@@ -1295,7 +1310,7 @@ fn raw_profile_support_members(
 
 fn raw_fixture_provenance_members(
     fixtures: &[RawFixtureSummary],
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
     for fixture in fixtures {
         let bindings = [
@@ -1308,7 +1323,7 @@ fn raw_fixture_provenance_members(
         ];
         for ((path, role), expected_digest) in bindings.into_iter().zip(fixture.provenance) {
             let member = raw_member(members, path, role)?;
-            if *blake3::hash(bytes(&member[1])?).as_bytes() != expected_digest {
+            if *blake3::hash(member.bytes).as_bytes() != expected_digest {
                 return Err(BundleContractErrorV1::MemberDigestMismatch);
             }
         }
@@ -1318,8 +1333,9 @@ fn raw_fixture_provenance_members(
 
 fn raw_member_closure(
     profile_paths: &BTreeSet<String>,
-    expected: &Value,
-    members: &[Value],
+    expected_paths: &BTreeSet<String>,
+    provider_paths: &BTreeSet<String>,
+    members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
     let mut declared = [
         PROFILE_PATH,
@@ -1336,47 +1352,17 @@ fn raw_member_closure(
     .map(str::to_owned)
     .collect::<BTreeSet<_>>();
     declared.extend(profile_paths.iter().cloned());
-    for record in array_values(expected)? {
-        declared.insert(text(&array(record, 6)?[4])?.to_owned());
-    }
-    raw_declare_provider_members(members, &mut declared)?;
+    declared.extend(expected_paths.iter().cloned());
+    declared.extend(provider_paths.iter().cloned());
     let member_paths = members
         .iter()
-        .map(|member| text(&array(member, 3)?[0]).map(str::to_owned))
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .map(|member| member.path.to_owned())
+        .collect::<BTreeSet<_>>();
     if member_paths.len() == members.len() && member_paths.is_subset(&declared) {
         Ok(())
     } else {
         Err(BundleContractErrorV1::UndeclaredMember)
     }
-}
-
-fn raw_declare_provider_members(
-    members: &[Value],
-    declared: &mut BTreeSet<String>,
-) -> Result<(), BundleContractErrorV1> {
-    let registry_member = raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12)?;
-    let registry = decode(bytes(&registry_member[1])?)?;
-    let registry_fields = array(&registry, 4)?;
-    for provider in array_values(&registry_fields[2])? {
-        let provider_fields = array(provider, 7)?;
-        let package_path = raw_descriptor_path(&provider_fields[6])?;
-        declared.insert(package_path.to_owned());
-        let package_member = raw_member(members, package_path, 13)?;
-        let package = decode(bytes(&package_member[1])?)?;
-        let package_fields = array(&package, 12)?;
-        for schema in array_values(&package_fields[5])? {
-            declared.insert(raw_descriptor_path(&array(schema, 2)?[1])?.to_owned());
-        }
-        for descriptor in &package_fields[6..=10] {
-            declared.insert(raw_descriptor_path(descriptor)?.to_owned());
-        }
-    }
-    Ok(())
-}
-
-fn raw_descriptor_path(value: &Value) -> Result<&str, BundleContractErrorV1> {
-    text(&array(value, 4)?[0])
 }
 
 fn raw_profile_digest(
@@ -1981,18 +1967,14 @@ fn raw_independence(value: &Value) -> Result<(), BundleContractErrorV1> {
     })
 }
 
-fn raw_member<'a>(
-    members: &'a [Value],
+fn raw_member<'a, 'member>(
+    members: &'a [RawArchiveMember<'member>],
     path: &str,
     role: u64,
-) -> Result<&'a [Value], BundleContractErrorV1> {
+) -> Result<&'a RawArchiveMember<'member>, BundleContractErrorV1> {
     members
         .iter()
-        .find_map(|member| {
-            array(member, 3).ok().filter(|fields| {
-                text(&fields[0]).ok() == Some(path) && uint(&fields[2]).ok() == Some(role)
-            })
-        })
+        .find(|member| member.path == path && member.role == role)
         .ok_or(BundleContractErrorV1::MemberMissing)
 }
 
@@ -2000,6 +1982,7 @@ struct RawRegistrySummary {
     bytes: Vec<u8>,
     providers: BTreeSet<RawProviderKey>,
     required_providers: BTreeSet<RawProviderKey>,
+    declared_paths: BTreeSet<String>,
 }
 
 struct RawProviderSummary {
@@ -2008,11 +1991,17 @@ struct RawProviderSummary {
     adapter: u64,
     package: RawArtifact,
     schemas: Vec<RawArtifact>,
+    declared_paths: BTreeSet<String>,
+}
+
+struct RawPackageSummary {
+    schemas: Vec<RawArtifact>,
+    declared_paths: BTreeSet<String>,
 }
 
 fn raw_registry_and_packages(
     profile: &RawCpf1Summary,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     mode: u64,
 ) -> Result<RawRegistrySummary, BundleContractErrorV1> {
     if profile.registry.path != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
@@ -2020,17 +2009,16 @@ fn raw_registry_and_packages(
     }
     let registry_member = raw_member(members, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, 12)?;
     raw_artifact_matches_member(&profile.registry, registry_member)?;
-    let registry_bytes = bytes(&registry_member[1])?;
-    let registry = decode(registry_bytes)?;
+    let registry = decode(registry_member.bytes)?;
     let fields = array(&registry, 4)?;
-    raw_registry_fields(fields, registry_bytes, profile, members, mode)
+    raw_registry_fields(fields, registry_member.bytes, profile, members, mode)
 }
 
 fn raw_registry_fields(
     fields: &[Value],
     registry_bytes: &[u8],
     profile: &RawCpf1Summary,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     mode: u64,
 ) -> Result<RawRegistrySummary, BundleContractErrorV1> {
     if text(&fields[0])? != "FPR1" || uint(&fields[1])? != 1 {
@@ -2054,17 +2042,22 @@ fn raw_registry_fields(
     }
     raw_declared_packages(members, &provider_summaries)?;
     raw_fixture_provider_bindings(&profile.fixtures, &provider_summaries, members, mode)?;
+    let declared_paths = provider_summaries
+        .iter()
+        .flat_map(|provider| provider.declared_paths.iter().cloned())
+        .collect();
     Ok(RawRegistrySummary {
         bytes: registry_bytes.to_vec(),
         providers: provider_keys,
         required_providers: profile.required_providers.clone(),
+        declared_paths,
     })
 }
 
 fn raw_fixture_provider_bindings(
     fixtures: &[RawFixtureSummary],
     providers: &[RawProviderSummary],
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     mode: u64,
 ) -> Result<(), BundleContractErrorV1> {
     fixtures
@@ -2115,22 +2108,18 @@ fn raw_fixture_schema_binding(
 
 fn raw_bound_raw_artifact_any(
     artifact: &RawArtifact,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
     let member = members
         .iter()
-        .find_map(|member| {
-            array(member, 3)
-                .ok()
-                .filter(|fields| text(&fields[0]).ok() == Some(artifact.path.as_str()))
-        })
+        .find(|member| member.path == artifact.path)
         .ok_or(BundleContractErrorV1::MemberMissing)?;
     raw_artifact_matches_member(artifact, member)
 }
 
 fn raw_bound_raw_artifact(
     artifact: &RawArtifact,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     role: u64,
 ) -> Result<(), BundleContractErrorV1> {
     raw_member(members, &artifact.path, role)
@@ -2139,11 +2128,10 @@ fn raw_bound_raw_artifact(
 
 fn raw_artifact_matches_member(
     artifact: &RawArtifact,
-    member: &[Value],
+    member: &RawArchiveMember<'_>,
 ) -> Result<(), BundleContractErrorV1> {
-    let raw = bytes(&member[1])?;
-    if u64::try_from(raw.len()).unwrap_or(u64::MAX) == artifact.size
-        && *blake3::hash(raw).as_bytes() == artifact.digest
+    if u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) == artifact.size
+        && *blake3::hash(member.bytes).as_bytes() == artifact.digest
     {
         Ok(())
     } else {
@@ -2165,29 +2153,24 @@ fn raw_registry_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
 }
 
 fn raw_declared_packages(
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     providers: &[RawProviderSummary],
 ) -> Result<(), BundleContractErrorV1> {
-    members.iter().try_for_each(|member| {
-        array(member, 3).and_then(|member_fields| {
-            uint(&member_fields[2]).and_then(|role| {
-                if role != 13
-                    || providers.iter().any(|provider| {
-                        text(&member_fields[0]).ok() == Some(provider.package.path.as_str())
-                    })
-                {
-                    Ok(())
-                } else {
-                    Err(BundleContractErrorV1::UndeclaredMember)
-                }
-            })
-        })
-    })
+    if members.iter().all(|member| {
+        member.role != 13
+            || providers
+                .iter()
+                .any(|provider| member.path == provider.package.path)
+    }) {
+        Ok(())
+    } else {
+        Err(BundleContractErrorV1::UndeclaredMember)
+    }
 }
 
 fn raw_provider_package(
     provider: &Value,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
 ) -> Result<RawProviderSummary, BundleContractErrorV1> {
     array(provider, 7).and_then(|entry| {
         raw_provider_key(&Value::Array(entry[..4].to_vec())).and_then(|key| {
@@ -2199,17 +2182,20 @@ fn raw_provider_package(
                     raw_artifact(&entry[6]).and_then(|package| {
                         raw_member(members, &package.path, 13).and_then(|package_member| {
                             raw_artifact_matches_member(&package, package_member).and_then(|()| {
-                                bytes(&package_member[1]).and_then(|package_bytes| {
-                                    raw_fpp1(package_bytes, entry, members).map(|schemas| {
+                                raw_fpp1(package_member.bytes, entry, members).map(
+                                    |package_summary| {
+                                        let mut declared_paths = package_summary.declared_paths;
+                                        declared_paths.insert(package.path.clone());
                                         RawProviderSummary {
                                             key,
                                             claim_layer,
                                             adapter,
                                             package,
-                                            schemas,
+                                            schemas: package_summary.schemas,
+                                            declared_paths,
                                         }
-                                    })
-                                })
+                                    },
+                                )
                             })
                         })
                     })
@@ -2222,20 +2208,24 @@ fn raw_provider_package(
 fn raw_fpp1(
     bytes_value: &[u8],
     entry: &[Value],
-    members: &[Value],
-) -> Result<Vec<RawArtifact>, BundleContractErrorV1> {
+    members: &[RawArchiveMember<'_>],
+) -> Result<RawPackageSummary, BundleContractErrorV1> {
     decode(bytes_value).and_then(|value| {
         array(&value, 12).and_then(|fields| {
-            raw_fpp1_header(fields, entry)
-                .and_then(|()| raw_fpp1_paths(fields))
-                .and_then(|()| raw_fpp1_schemas(&fields[5], members))
-                .and_then(|schemas| raw_fpp1_support(&fields[6..11], members).map(|()| schemas))
-                .and_then(|schemas| raw_fpp1_digest(fields).map(|()| schemas))
+            raw_fpp1_header(fields, entry)?;
+            let declared_paths = raw_fpp1_paths(fields)?;
+            let schemas = raw_fpp1_schemas(&fields[5], members)?;
+            raw_fpp1_support(&fields[6..11], members)?;
+            raw_fpp1_digest(fields)?;
+            Ok(RawPackageSummary {
+                schemas,
+                declared_paths,
+            })
         })
     })
 }
 
-fn raw_fpp1_paths(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+fn raw_fpp1_paths(fields: &[Value]) -> Result<BTreeSet<String>, BundleContractErrorV1> {
     let schemas = array_values(&fields[5])?;
     let schema_paths = schemas.iter().map(|schema| {
         let record = array(schema, 2)?;
@@ -2247,11 +2237,11 @@ fn raw_fpp1_paths(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
         .map(|descriptor| array(descriptor, 4).and_then(|record| text(&record[0])));
     let mut paths = BTreeSet::new();
     for path in schema_paths.chain(support_paths) {
-        if !paths.insert(path?) {
+        if !paths.insert(path?.to_owned()) {
             return Err(BundleContractErrorV1::NonCanonicalOrder);
         }
     }
-    Ok(())
+    Ok(paths)
 }
 
 fn raw_fpp1_header(fields: &[Value], entry: &[Value]) -> Result<(), BundleContractErrorV1> {
@@ -2273,7 +2263,7 @@ fn raw_fpp1_header(fields: &[Value], entry: &[Value]) -> Result<(), BundleContra
 
 fn raw_fpp1_schemas(
     value: &Value,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
 ) -> Result<Vec<RawArtifact>, BundleContractErrorV1> {
     array_values(value).and_then(|schemas| {
         if schemas.len() != 7 {
@@ -2298,7 +2288,10 @@ fn raw_fpp1_schemas(
     })
 }
 
-fn raw_fpp1_support(values: &[Value], members: &[Value]) -> Result<(), BundleContractErrorV1> {
+fn raw_fpp1_support(
+    values: &[Value],
+    members: &[RawArchiveMember<'_>],
+) -> Result<(), BundleContractErrorV1> {
     values
         .iter()
         .enumerate()
@@ -2310,17 +2303,10 @@ fn raw_fpp1_support(values: &[Value], members: &[Value]) -> Result<(), BundleCon
 
 fn raw_bound_artifact(
     value: &Value,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     role: u64,
 ) -> Result<(), BundleContractErrorV1> {
-    raw_artifact(value).and_then(|_| {
-        array(value, 4).and_then(|descriptor| {
-            text(&descriptor[0]).and_then(|path| {
-                raw_member(members, path, role)
-                    .and_then(|member| raw_descriptor_matches_member(descriptor, member))
-            })
-        })
-    })
+    raw_artifact(value).and_then(|artifact| raw_bound_raw_artifact(&artifact, members, role))
 }
 
 fn raw_fpp1_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
@@ -2336,47 +2322,39 @@ fn raw_fpp1_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
     })
 }
 
-fn raw_descriptor_matches_member(
-    descriptor: &[Value],
-    member: &[Value],
-) -> Result<(), BundleContractErrorV1> {
-    bytes(&member[1]).and_then(|raw| {
-        uint(&descriptor[2]).and_then(|expected_size| {
-            digest::<32>(&descriptor[3]).and_then(|expected_digest| {
-                if u64::try_from(raw.len()).unwrap_or(u64::MAX) == expected_size
-                    && *blake3::hash(raw).as_bytes() == expected_digest
-                {
-                    Ok(())
-                } else {
-                    Err(BundleContractErrorV1::MemberDigestMismatch)
-                }
-            })
-        })
-    })
+struct RawExpectedResults {
+    results: BTreeMap<(String, u64), Vec<u8>>,
+    member_paths: BTreeSet<String>,
 }
 
 fn raw_expected_results(
     value: &Value,
     profile: &RawCpf1Summary,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     mode: u64,
-) -> Result<BTreeMap<(String, u64), Vec<u8>>, BundleContractErrorV1> {
+) -> Result<RawExpectedResults, BundleContractErrorV1> {
     array_values(value).and_then(|expected| {
         raw_expected_ordered(expected).and_then(|ordered| {
             if !ordered {
                 return Err(BundleContractErrorV1::NonCanonicalOrder);
             }
-            let results = expected
-                .iter()
-                .map(|record| raw_expected_result(record, profile, members, mode))
-                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            let mut results = BTreeMap::new();
+            let mut member_paths = BTreeSet::new();
+            for record in expected {
+                let (key, bytes, path) = raw_expected_result(record, profile, members, mode)?;
+                results.insert(key, bytes);
+                member_paths.insert(path);
+            }
             let selected = profile
                 .fixtures
                 .iter()
                 .filter(|fixture| fixture.modes.contains(&mode))
                 .count();
             if expected.len() == selected && results.len() == expected.len() {
-                Ok(results)
+                Ok(RawExpectedResults {
+                    results,
+                    member_paths,
+                })
             } else {
                 Err(BundleContractErrorV1::ExpectedResultMismatch)
             }
@@ -2387,9 +2365,9 @@ fn raw_expected_results(
 fn raw_expected_result(
     value: &Value,
     profile: &RawCpf1Summary,
-    members: &[Value],
+    members: &[RawArchiveMember<'_>],
     mode: u64,
-) -> Result<((String, u64), Vec<u8>), BundleContractErrorV1> {
+) -> Result<((String, u64), Vec<u8>, String), BundleContractErrorV1> {
     let fields = array(value, 6)?;
     let case_id = text(&fields[0])?;
     let claim_layer = uint(&fields[1])?;
@@ -2400,7 +2378,7 @@ fn raw_expected_result(
     let path = text(&fields[4])?;
     let recorded_digest = digest::<32>(&fields[5])?;
     let member = raw_member(members, path, 1)?;
-    let member_bytes = bytes(&member[1])?;
+    let member_bytes = member.bytes;
     if *blake3::hash(member_bytes).as_bytes() != recorded_digest
         || !raw_expected_fixture_bound(
             &profile.fixtures,
@@ -2414,7 +2392,11 @@ fn raw_expected_result(
     {
         Err(BundleContractErrorV1::ExpectedResultMismatch)
     } else {
-        Ok(((case_id.to_owned(), claim_layer), member_bytes.to_vec()))
+        Ok((
+            (case_id.to_owned(), claim_layer),
+            member_bytes.to_vec(),
+            path.to_owned(),
+        ))
     }
 }
 
@@ -2453,9 +2435,6 @@ fn raw_expected_artifact_bound(
     artifact.path == path && artifact.digest == digest && artifact.size == size
 }
 
-fn raw_member_paths_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
-    raw_paths_ordered(values, 3)
-}
 fn raw_descriptor_paths_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
     raw_paths_ordered(values, 4)
 }
