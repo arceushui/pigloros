@@ -1161,20 +1161,12 @@ fn validate_provider_fixtures(
         .iter()
         .filter(|fixture| fixture.provider_key == entry.provider_key)
         .try_for_each(|fixture| {
-            let family = match fixture.family {
-                FixtureFamilyV1::Positive => 0,
-                FixtureFamilyV1::Denied => 1,
-                FixtureFamilyV1::Malformed => 2,
-                FixtureFamilyV1::ResourceExhaustion => 3,
-                FixtureFamilyV1::DeletionRedaction => 4,
-                FixtureFamilyV1::Downgrade => 5,
-                FixtureFamilyV1::IndependentEvaluation => 6,
-            };
             if fixture.claim_layer == entry.claim_layer
                 && fixture.subject_adapter == entry.subject_adapter
                 && package
                     .family_schemas
-                    .get(family)
+                    .iter()
+                    .find(|schema| schema.family == fixture.family)
                     .is_some_and(|schema| schema.schema_descriptor == fixture.schema)
             {
                 Ok(())

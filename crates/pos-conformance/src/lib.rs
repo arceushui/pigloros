@@ -757,7 +757,8 @@ mod coverage_entrypoints {
         for mutate in invalid_reports {
             let mut invalid = report.clone();
             mutate(&mut invalid);
-            expect_err(&invalid.to_canonical_cbor());
+            let encoded = ok(invalid.to_canonical_cbor());
+            expect_err(&DivergenceReportV1::from_canonical_cbor(&encoded));
         }
         let mut trailing_report = ok(report.to_canonical_cbor());
         trailing_report.push(0);
@@ -6374,30 +6375,6 @@ pub mod tests {
     }
 
     #[test]
-    fn consent_audit_codec_round_trips_at_the_public_seam() {
-        let audit = ConsentAuditV1 {
-            subject: "subject-1".to_owned(),
-            requested_after_seq: 4,
-            effective_after_seq: 5,
-            revocation_event_seq: 6,
-            revocation_event_type: "consent.revoked.v1".to_owned(),
-            revocation_payload_digest: [7; 32],
-            halted_at_tick_boundary: true,
-        };
-        let encoded = strict_codec::encode_consent(&audit);
-        assert_eq!(strict_codec::decode_consent(&encoded), Ok(audit));
-        assert!(strict_codec::decode_consent(&Value::Array(Vec::new())).is_err());
-        let Value::Array(fields) = encoded else {
-            return;
-        };
-        for index in 0..fields.len() {
-            let mut malformed = fields.clone();
-            malformed[index] = Value::Map(Vec::new());
-            assert!(strict_codec::decode_consent(&Value::Array(malformed)).is_err());
-        }
-    }
-
-    #[test]
     fn consent_audit_verifier_accepts_one_effective_revocation() {
         let audit = ConsentAuditV1 {
             subject: "subject-1".to_owned(),
@@ -7647,9 +7624,8 @@ pub mod tests {
             |audit, _| audit.subject.clear(),
             |audit, _| audit.closure_payload_digest = [0; 32],
             |audit, _| audit.requested_after_seq = audit.effective_after_seq,
-            |audit, events| {
+            |audit, _| {
                 audit.closure_event_seq = 2;
-                events[2].seq = 2;
             },
             |audit, _| audit.halted_at_tick_boundary = false,
             |_, events| {

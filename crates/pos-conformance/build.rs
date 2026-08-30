@@ -22,22 +22,10 @@ use std::path::{Component, Path, PathBuf};
 
 const PROFILE_COUNT: usize = 7;
 const FIXTURES_PER_PROFILE: usize = 7;
-const STATIC_SOURCE_PATHS: [&str; 15] = [
+const CORE_SOURCE_PATHS: [&str; 3] = [
     "BLAKE3SUMS",
     "expected-authority/inventory.json",
     "matrix/execution-matrix.json",
-    "support/LICENSE",
-    "support/NOTICE",
-    "support/build-provenance.json",
-    "support/draft-execution-authority.json",
-    "support/fixture-family-contract.json",
-    "support/limitations.md",
-    "support/normative-requirements.md",
-    "support/package-manifest.json",
-    "support/publication-review.json",
-    "support/sbom.json",
-    "support/schema-cpf1-v1.cddl",
-    "support/source-provenance.json",
 ];
 
 struct CatalogRoot {
@@ -583,8 +571,17 @@ fn checksum_manifest(
         })
 }
 
-fn expected_source_paths(profiles: &[ProfilePaths]) -> BTreeSet<String> {
-    let mut paths: BTreeSet<String> = STATIC_SOURCE_PATHS.map(str::to_owned).into_iter().collect();
+fn expected_source_paths(
+    profiles: &[ProfilePaths],
+    support: &SupportPackageManifest,
+) -> BTreeSet<String> {
+    let mut paths: BTreeSet<String> = CORE_SOURCE_PATHS.map(str::to_owned).into_iter().collect();
+    paths.extend(
+        support
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone()),
+    );
     for profile in profiles {
         paths.insert(profile.profile.clone());
         paths.insert(profile.provider_manifest.relative.clone());
@@ -629,7 +626,8 @@ fn verify_source_inventory(
     snapshots: &SourceSnapshots,
     profiles: &[ProfilePaths],
 ) -> Result<[u8; 32], io::Error> {
-    let expected_paths = expected_source_paths(profiles);
+    let support = support_package_manifest(snapshots)?;
+    let expected_paths = expected_source_paths(profiles, &support);
     let declared_paths = snapshots
         .sha256_entries
         .keys()
@@ -1547,21 +1545,27 @@ fn support_package_manifest(
         .iter()
         .map(|artifact| artifact.path.as_str())
         .collect::<BTreeSet<_>>();
-    let expected = STATIC_SOURCE_PATHS
-        .iter()
-        .copied()
+    let inventoried_support = snapshots
+        .sha256_entries
+        .keys()
         .filter(|path| path.starts_with("support/"))
+        .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let records_are_valid = manifest.artifacts.iter().all(|artifact| {
         valid_media_type(&artifact.media_type)
             && artifact.path.starts_with("support/")
             && !artifact.path.contains("..")
     });
+    let records_are_ordered = manifest
+        .artifacts
+        .windows(2)
+        .all(|pair| pair[0].path < pair[1].path);
     if manifest.magic == "SPM1"
         && manifest.version == 1
         && declared.len() == manifest.artifacts.len()
-        && declared == expected
+        && declared == inventoried_support
         && records_are_valid
+        && records_are_ordered
     {
         Ok(manifest)
     } else {

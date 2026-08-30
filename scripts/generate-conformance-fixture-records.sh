@@ -130,8 +130,6 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
   oracle_kind="$(jq -r '.oracle.kind' <<<"${family_metadata}")"
   code_id="$(jq -r '.oracle.code_id // empty' <<<"${family_metadata}")"
   payload_metadata="$(printf '%s' "${encoded_payload}" | base64 --decode)"
-  independent_input="PiglorOS independent fixture ${claim_layer}"
-  independent_digest="$(printf '%s' "${independent_input}" | b3sum | awk '{print $1}')"
   jq -cn \
     --arg case_id "${case_id}" \
     --arg claim_layer "${claim_layer}" \
@@ -141,8 +139,6 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
     --arg provider_contract "${provider_id}@${contract_version}" \
     --arg subject_adapter "${subject_adapter}" \
     --arg operation "${operation}" \
-    --arg independent_input "${independent_input}" \
-    --arg independent_digest "${independent_digest}" \
     --argjson abi_major "${abi_major}" \
     --argjson abi_minor "${abi_minor}" \
       --argjson payload_metadata "${payload_metadata}" '
@@ -154,8 +150,6 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
           else gsub("\\$operation"; $operation)
             | gsub("\\$provider_id"; $provider_id)
             | gsub("\\$contract_version"; $contract_version)
-            | gsub("\\$independent_input"; $independent_input)
-            | gsub("\\$independent_digest"; $independent_digest)
           end
         elif type == "array" then map(interpolate)
         elif type == "object" then with_entries(.value |= interpolate)
