@@ -389,25 +389,27 @@ impl ConformanceBundleV1 {
         {
             return Err(BundleContractErrorV1::NonCanonicalOrder);
         }
-        one(&self.members, BundleMemberRoleV1::Profile, PROFILE_PATH).and_then(|profile_member| {
-            ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
-                .map_err(|_| BundleContractErrorV1::ProfileInvalid)
-                .and_then(|profile| {
-                    if profile.profile_digest != self.manifest.profile_digest {
-                        return Err(BundleContractErrorV1::ProfileInvalid);
-                    }
-                    validate_member_descriptors(&self.members, &self.manifest.members)
-                        .and_then(|()| validate_provider_members(&profile, &self.members))
-                        .and_then(|()| {
-                            validate_fixture_members(
-                                &profile,
-                                self.manifest.mode,
-                                &self.members,
-                                &self.manifest.expected_results,
-                            )
-                        })
-                })
-        })
+        member_by_role_and_path(&self.members, BundleMemberRoleV1::Profile, PROFILE_PATH).and_then(
+            |profile_member| {
+                ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
+                    .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+                    .and_then(|profile| {
+                        if profile.profile_digest != self.manifest.profile_digest {
+                            return Err(BundleContractErrorV1::ProfileInvalid);
+                        }
+                        validate_member_descriptors(&self.members, &self.manifest.members)
+                            .and_then(|()| validate_provider_members(&profile, &self.members))
+                            .and_then(|()| {
+                                validate_fixture_members(
+                                    &profile,
+                                    self.manifest.mode,
+                                    &self.members,
+                                    &self.manifest.expected_results,
+                                )
+                            })
+                    })
+            },
+        )
     }
 }
 
@@ -647,7 +649,7 @@ fn validate_fixture_members(
                         .ok_or(BundleContractErrorV1::ExpectedResultMismatch)
                 })
                 .and_then(|result| {
-                    one(
+                    member_by_role_and_path(
                         members,
                         BundleMemberRoleV1::ExpectedResult,
                         &result.member_path,
@@ -686,7 +688,7 @@ fn validate_fixture_members(
         }
     })
 }
-fn one<'a>(
+fn member_by_role_and_path<'a>(
     members: &'a [BundleMemberV1],
     role: BundleMemberRoleV1,
     path: &str,
@@ -706,7 +708,7 @@ fn descriptor_member<'a>(
     d: &ArtifactDescriptorV1,
     r: BundleMemberRoleV1,
 ) -> Result<&'a BundleMemberV1, BundleContractErrorV1> {
-    one(members, r, &d.member_path).and_then(|member| {
+    member_by_role_and_path(members, r, &d.member_path).and_then(|member| {
         if member.digest == d.blake3_digest
             && u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) == d.byte_length
         {
@@ -1090,10 +1092,10 @@ fn raw_cpf1_value(profile_fields: &[Value]) -> Result<u64, BundleContractErrorV1
     raw_cpf1_header(profile_fields)?;
     raw_execution_digests(&profile_fields[7])?;
     raw_provider_binding(&profile_fields[8])?;
-    raw_fixtures(&profile_fields[9])?;
+    let deterministic_caps = raw_protocol(&profile_fields[11])?;
+    raw_fixtures(&profile_fields[9], &deterministic_caps)?;
     raw_allowed_divergences(&profile_fields[10])?;
     let claim_layer = raw_profile_fixture_relationships(profile_fields)?;
-    raw_protocol(&profile_fields[11])?;
     raw_independence(&profile_fields[12])?;
     raw_nullable_digest(&profile_fields[16])?;
     Ok(claim_layer)
@@ -1122,21 +1124,7 @@ fn raw_profile_fixture_relationships(profile: &[Value]) -> Result<u64, BundleCon
     let fixtures = array_values(&profile[9])?;
     let allowed = array_values(&profile[10])?;
 
-    for provider_key in required {
-        let families = fixtures
-            .iter()
-            .filter_map(|fixture| {
-                array(fixture, 24).ok().and_then(|fields| {
-                    (fields[4] == *provider_key)
-                        .then(|| uint(&fields[3]).ok())
-                        .flatten()
-                })
-            })
-            .collect::<BTreeSet<_>>();
-        if families != (0_u64..=6).collect() {
-            return Err(BundleContractErrorV1::ProfileInvalid);
-        }
-    }
+    raw_fixture_inventory(required, executions, fixtures)?;
 
     fixtures.iter().try_for_each(|fixture| {
         let fields = array(fixture, 24)?;
@@ -1148,6 +1136,48 @@ fn raw_profile_fixture_relationships(profile: &[Value]) -> Result<u64, BundleCon
             .and_then(|()| raw_fixture_downgrade_relationship(fields))
     })?;
     raw_profile_claim_layer(fixtures)
+}
+
+fn raw_fixture_inventory(
+    required: &[Value],
+    executions: &[Value],
+    fixtures: &[Value],
+) -> Result<(), BundleContractErrorV1> {
+    let mut inventory = BTreeMap::<(RawProviderKey, [u8; 32], u64), BTreeSet<u64>>::new();
+    let mut required_modes = BTreeMap::<[u8; 32], BTreeSet<u64>>::new();
+    for fixture in fixtures {
+        let fields = array(fixture, 24)?;
+        let provider = raw_provider_order_key(&fields[4])?;
+        let execution = digest::<32>(&fields[6])?;
+        let family = uint(&fields[3])?;
+        for mode in array_values(&fields[7])? {
+            let mode = uint(mode)?;
+            required_modes.entry(execution).or_default().insert(mode);
+            let coordinate = (provider.clone(), execution, mode);
+            if !inventory.entry(coordinate).or_default().insert(family) {
+                return Err(BundleContractErrorV1::NonCanonicalOrder);
+            }
+        }
+    }
+    let required_families = (0_u64..=6).collect::<BTreeSet<_>>();
+    for provider in required {
+        let provider = raw_provider_order_key(provider)?;
+        for execution in executions {
+            let execution = digest::<32>(execution)?;
+            let Some(modes) = required_modes.get(&execution) else {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            };
+            for mode in modes {
+                if inventory
+                    .get(&(provider.clone(), execution, *mode))
+                    .is_none_or(|families| families != &required_families)
+                {
+                    return Err(BundleContractErrorV1::ProfileInvalid);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn raw_fixture_oracle_relationships(
@@ -1285,18 +1315,20 @@ fn raw_provider_binding(value: &Value) -> Result<(), BundleContractErrorV1> {
     })
 }
 
-fn raw_fixtures(value: &Value) -> Result<(), BundleContractErrorV1> {
+fn raw_fixtures(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), BundleContractErrorV1> {
     array_values(value).and_then(|fixtures| {
         raw_fixture_ordered(fixtures).and_then(|ordered| {
             if fixtures.is_empty() || fixtures.len() > 65_536 || !ordered {
                 return Err(BundleContractErrorV1::ProfileInvalid);
             }
-            fixtures.iter().try_for_each(raw_fixture)
+            fixtures
+                .iter()
+                .try_for_each(|fixture| raw_fixture(fixture, deterministic_caps))
         })
     })
 }
 
-fn raw_fixture(value: &Value) -> Result<(), BundleContractErrorV1> {
+fn raw_fixture(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), BundleContractErrorV1> {
     array(value, 24).and_then(|fields| {
         raw_capabilities(&fields[18]).and_then(|network_allowed| {
             text(&fields[0]).and_then(|case_id| {
@@ -1312,7 +1344,7 @@ fn raw_fixture(value: &Value) -> Result<(), BundleContractErrorV1> {
                                 || raw_artifact(&fields[8]).is_err()
                                 || raw_artifact(&fields[9]).is_err()
                                 || raw_oracle(&fields[11]).is_err()
-                                || raw_budget(&fields[16]).is_err()
+                                || raw_budget(&fields[16], deterministic_caps).is_err()
                                 || raw_watchdog(&fields[17]).is_err()
                             {
                                 return Err(BundleContractErrorV1::ProfileInvalid);
@@ -1467,7 +1499,7 @@ fn raw_transition(value: &Value) -> Result<(), BundleContractErrorV1> {
     array(value, 2)
         .and_then(|fields| raw_provider_key(&fields[0]).and_then(|()| raw_provider_key(&fields[1])))
 }
-fn raw_protocol(value: &Value) -> Result<(), BundleContractErrorV1> {
+fn raw_protocol(value: &Value) -> Result<[u64; 8], BundleContractErrorV1> {
     array(value, 5).and_then(|fields| {
         text(&fields[0]).and_then(|version| {
             if version.is_empty() {
@@ -1485,7 +1517,7 @@ fn raw_protocol(value: &Value) -> Result<(), BundleContractErrorV1> {
                     })
                 })
                 .and_then(|()| {
-                    array(&fields[4], 10).and_then(|caps| {
+                    array(&fields[4], 18).and_then(|caps| {
                         let maxima = [
                             16 * 1024 * 1024,
                             65_536,
@@ -1497,6 +1529,14 @@ fn raw_protocol(value: &Value) -> Result<(), BundleContractErrorV1> {
                             32,
                             128,
                             1024 * 1024,
+                            1024 * 1024 * 1024,
+                            1_000_000_000,
+                            1_000_000,
+                            1_000_000,
+                            64 * 1024 * 1024,
+                            1024 * 1024 * 1024,
+                            1_000_000_000,
+                            86_400_000_000_000,
                         ];
                         let valid =
                             caps.iter()
@@ -1506,11 +1546,41 @@ fn raw_protocol(value: &Value) -> Result<(), BundleContractErrorV1> {
                                     uint(value)
                                         .is_ok_and(|cap| cap <= maximum && (index == 9 || cap > 0))
                                 });
-                        if valid {
-                            Ok(())
-                        } else {
-                            Err(BundleContractErrorV1::ProfileInvalid)
+                        if !valid {
+                            return Err(BundleContractErrorV1::ProfileInvalid);
                         }
+                        let (
+                            Ok(memory),
+                            Ok(cpu),
+                            Ok(host_calls),
+                            Ok(events),
+                            Ok(output),
+                            Ok(storage),
+                            Ok(steps),
+                            Ok(simulation_time),
+                        ) = (
+                            uint(&caps[10]),
+                            uint(&caps[11]),
+                            uint(&caps[12]),
+                            uint(&caps[13]),
+                            uint(&caps[14]),
+                            uint(&caps[15]),
+                            uint(&caps[16]),
+                            uint(&caps[17]),
+                        )
+                        else {
+                            return Err(BundleContractErrorV1::ProfileInvalid);
+                        };
+                        Ok([
+                            memory,
+                            cpu,
+                            host_calls,
+                            events,
+                            output,
+                            storage,
+                            steps,
+                            simulation_time,
+                        ])
                     })
                 })
         })
@@ -1787,11 +1857,31 @@ fn raw_fpp1(
     decode(bytes_value).and_then(|value| {
         array(&value, 12).and_then(|fields| {
             raw_fpp1_header(fields, entry)
+                .and_then(|()| raw_fpp1_paths(fields))
                 .and_then(|()| raw_fpp1_schemas(&fields[5], members))
                 .and_then(|()| raw_fpp1_support(&fields[6..11], members))
                 .and_then(|()| raw_fpp1_digest(fields))
         })
     })
+}
+
+fn raw_fpp1_paths(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
+    let schemas = array_values(&fields[5])?;
+    let schema_paths = schemas.iter().map(|schema| {
+        let record = array(schema, 2)?;
+        let descriptor = array(&record[1], 4)?;
+        text(&descriptor[0])
+    });
+    let support_paths = fields[6..11]
+        .iter()
+        .map(|descriptor| array(descriptor, 4).and_then(|record| text(&record[0])));
+    let mut paths = BTreeSet::new();
+    for path in schema_paths.chain(support_paths) {
+        if !paths.insert(path?) {
+            return Err(BundleContractErrorV1::NonCanonicalOrder);
+        }
+    }
+    Ok(())
 }
 
 fn raw_fpp1_header(fields: &[Value], entry: &[Value]) -> Result<(), BundleContractErrorV1> {
@@ -2306,11 +2396,12 @@ fn raw_divergence(value: &Value) -> Result<(), BundleContractErrorV1> {
     })
 }
 
-fn raw_budget(value: &Value) -> Result<(), BundleContractErrorV1> {
+fn raw_budget(value: &Value, deterministic_caps: &[u64; 8]) -> Result<(), BundleContractErrorV1> {
     array(value, 8).and_then(|fields| {
         if fields
             .iter()
-            .all(|field| uint(field).is_ok_and(|limit| limit > 0))
+            .zip(deterministic_caps)
+            .all(|(field, ceiling)| uint(field).is_ok_and(|limit| limit > 0 && limit <= *ceiling))
         {
             Ok(())
         } else {

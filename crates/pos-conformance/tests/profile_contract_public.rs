@@ -10,7 +10,7 @@ use pos_conformance::{
     FixtureProviderKeyV1, FixtureProviderRegistryBindingV1, ImplementationIdentityV1,
     IndependenceEvidenceV1, IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1,
     RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1,
+    VerificationOutcomeV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
 };
 
 pub mod fixtures {
@@ -59,7 +59,7 @@ pub mod fixtures {
             bytes(1),
             Value::Array(vec![uint(0), uint(1)]),
             Value::Array(vec![
-                text("support/schemas/positive.schema.json"),
+                text("providers/example/schemas/positive.schema.json"),
                 text("application/schema+json"),
                 uint(1),
                 bytes(2),
@@ -317,7 +317,7 @@ fn knowledge_non_interference_profile() -> ConformanceProfileV1 {
         execution_profile_digest: [1; 32],
         modes: vec![ExecutionModeV1::Local],
         schema: ArtifactDescriptorV1 {
-            member_path: "support/schemas/positive.schema.json".to_owned(),
+            member_path: "providers/artifact-integrity/schemas/positive.schema.json".to_owned(),
             media_type: "application/schema+json".to_owned(),
             byte_length: 1,
             blake3_digest: [2; 32],
@@ -446,6 +446,16 @@ fn knowledge_profile(
                 max_structural_nesting: 32,
                 max_coordinate_bytes: 128,
                 max_diagnostic_bytes: 1_048_576,
+                max_deterministic_memory_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.memory_bytes,
+                max_deterministic_cpu_fuel: DETERMINISTIC_BUDGET_HARD_CAPS_V1.cpu_fuel,
+                max_deterministic_host_calls: DETERMINISTIC_BUDGET_HARD_CAPS_V1.host_calls,
+                max_deterministic_event_count: DETERMINISTIC_BUDGET_HARD_CAPS_V1.event_count,
+                max_deterministic_output_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.output_bytes,
+                max_deterministic_storage_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.storage_bytes,
+                max_deterministic_execution_steps: DETERMINISTIC_BUDGET_HARD_CAPS_V1
+                    .execution_steps,
+                max_deterministic_simulation_time_ns: DETERMINISTIC_BUDGET_HARD_CAPS_V1
+                    .simulation_time_ns,
             },
         },
         independence_requirements: IndependenceRequirementsV1 {
@@ -498,6 +508,20 @@ fn request_for_caps(caps: &EvaluatorHardCapsV1) -> EvaluatorRequestV1 {
     request.output_capability.capability_digest = request.expected_output_capability_digest();
     request.request_digest = request.digest();
     request
+}
+
+fn set_deterministic_cap(caps: &mut EvaluatorHardCapsV1, field: usize, value: u64) {
+    match field {
+        0 => caps.max_deterministic_memory_bytes = value,
+        1 => caps.max_deterministic_cpu_fuel = value,
+        2 => caps.max_deterministic_host_calls = value,
+        3 => caps.max_deterministic_event_count = value,
+        4 => caps.max_deterministic_output_bytes = value,
+        5 => caps.max_deterministic_storage_bytes = value,
+        6 => caps.max_deterministic_execution_steps = value,
+        7 => caps.max_deterministic_simulation_time_ns = value,
+        _ => unreachable!("the contract has exactly eight deterministic budget fields"),
+    }
 }
 
 fn canonical_value(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -558,6 +582,105 @@ fn refresh(profile: &mut ConformanceProfileV1) {
         fixture.fixture_digest = fixture.digest();
     }
     profile.profile_digest = profile.digest();
+}
+
+fn with_second_execution_coordinate(mut profile: ConformanceProfileV1) -> ConformanceProfileV1 {
+    let execution_profile_digest = [2; 32];
+    let additional = profile
+        .fixtures
+        .iter()
+        .cloned()
+        .map(|mut fixture| {
+            fixture.execution_profile_digest = execution_profile_digest;
+            fixture.modes = vec![ExecutionModeV1::AirGapped];
+            fixture.fixture_digest = fixture.digest();
+            fixture
+        })
+        .collect::<Vec<_>>();
+    profile
+        .execution_profile_digests
+        .push(execution_profile_digest);
+    profile.fixtures.extend(additional);
+    profile.fixtures.sort_by(|left, right| {
+        (
+            &left.provider_key,
+            left.family,
+            &left.case_id,
+            left.execution_profile_digest,
+            &left.modes,
+        )
+            .cmp(&(
+                &right.provider_key,
+                right.family,
+                &right.case_id,
+                right.execution_profile_digest,
+                &right.modes,
+            ))
+    });
+    refresh(&mut profile);
+    profile
+}
+
+fn with_second_provider(mut profile: ConformanceProfileV1) -> ConformanceProfileV1 {
+    let first = profile.fixture_provider_registry.required_provider_keys[0].clone();
+    let mut second = first.clone();
+    second.provider_id = "pigloros.fixture.zzz".to_owned();
+    let additional = profile
+        .fixtures
+        .iter()
+        .cloned()
+        .map(|mut fixture| {
+            fixture.provider_key = second.clone();
+            if let Some(failure) = fixture.strict_oracle.failure.as_mut()
+                && failure.owner_id == first.provider_id
+                && failure.contract_version == first.contract_version
+            {
+                failure.owner_id.clone_from(&second.provider_id);
+                failure
+                    .contract_version
+                    .clone_from(&second.contract_version);
+            }
+            if let Some(failure) = fixture.expected_verification_error.as_mut()
+                && failure.owner_id == first.provider_id
+                && failure.contract_version == first.contract_version
+            {
+                failure.owner_id.clone_from(&second.provider_id);
+                failure
+                    .contract_version
+                    .clone_from(&second.contract_version);
+            }
+            if let Some(transition) = fixture.transition.as_mut() {
+                transition.from = second.clone();
+                transition.to = second.clone();
+                transition.to.abi_minor = transition.to.abi_minor.saturating_add(1);
+            }
+            fixture.fixture_digest = fixture.digest();
+            fixture
+        })
+        .collect::<Vec<_>>();
+    profile
+        .fixture_provider_registry
+        .required_provider_keys
+        .push(second);
+    profile.fixtures.extend(additional);
+    profile.fixtures.sort_by(|left, right| {
+        (
+            &left.provider_key,
+            left.family,
+            &left.case_id,
+            left.execution_profile_digest,
+            &left.modes,
+        )
+            .cmp(&(
+                &right.provider_key,
+                right.family,
+                &right.case_id,
+                right.execution_profile_digest,
+                &right.modes,
+            ))
+    });
+    refresh(&mut profile);
+    profile
 }
 
 type ProfileMutation = Box<dyn Fn(&mut ConformanceProfileV1)>;
@@ -716,6 +839,36 @@ fn public_profile_validation_rejects_required_fixture_contract_violations() {
         );
     }
 
+    let ceilings = [
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.memory_bytes,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.cpu_fuel,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.host_calls,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.event_count,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.output_bytes,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.storage_bytes,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.execution_steps,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.simulation_time_ns,
+    ];
+    for (field, ceiling) in ceilings.into_iter().enumerate() {
+        let mut invalid = profile.clone();
+        let excessive = ceiling.saturating_add(1);
+        match field {
+            0 => invalid.fixtures[0].deterministic_budget.memory_bytes = excessive,
+            1 => invalid.fixtures[0].deterministic_budget.cpu_fuel = excessive,
+            2 => invalid.fixtures[0].deterministic_budget.host_calls = excessive,
+            3 => invalid.fixtures[0].deterministic_budget.event_count = excessive,
+            4 => invalid.fixtures[0].deterministic_budget.output_bytes = excessive,
+            5 => invalid.fixtures[0].deterministic_budget.storage_bytes = excessive,
+            6 => invalid.fixtures[0].deterministic_budget.execution_steps = excessive,
+            _ => invalid.fixtures[0].deterministic_budget.simulation_time_ns = excessive,
+        }
+        refresh(&mut invalid);
+        assert_eq!(
+            invalid.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+
     let mut too_many_auxiliary = profile.clone();
     too_many_auxiliary.fixtures[0].auxiliary = (0..65)
         .map(|index| ArtifactDescriptorV1 {
@@ -741,6 +894,140 @@ fn public_profile_validation_rejects_required_fixture_contract_violations() {
     assert_eq!(
         too_many_capabilities.validate(),
         Err(ConformanceContractError::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn public_profile_binds_each_selected_deterministic_budget_ceiling() {
+    let profile = profile_for_digest();
+    let budget = &profile.fixtures[0].deterministic_budget;
+    let selected = [
+        budget.memory_bytes,
+        budget.cpu_fuel,
+        budget.host_calls,
+        budget.event_count,
+        budget.output_bytes,
+        budget.storage_bytes,
+        budget.execution_steps,
+        budget.simulation_time_ns,
+    ];
+
+    for (field, ceiling) in selected.into_iter().enumerate() {
+        let mut exact = profile.clone();
+        set_deterministic_cap(&mut exact.evaluator_protocol.hard_caps, field, ceiling);
+        refresh(&mut exact);
+        assert_eq!(exact.validate(), Ok(()));
+        assert_ne!(
+            exact.evaluator_protocol.hard_caps.digest(),
+            profile.evaluator_protocol.hard_caps.digest()
+        );
+
+        let mut insufficient = exact;
+        set_deterministic_cap(
+            &mut insufficient.evaluator_protocol.hard_caps,
+            field,
+            ceiling.saturating_sub(1),
+        );
+        refresh(&mut insufficient);
+        assert_eq!(
+            insufficient.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+
+    let compiled_maxima = [
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.memory_bytes,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.cpu_fuel,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.host_calls,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.event_count,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.output_bytes,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.storage_bytes,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.execution_steps,
+        DETERMINISTIC_BUDGET_HARD_CAPS_V1.simulation_time_ns,
+    ];
+    for (field, maximum) in compiled_maxima.into_iter().enumerate() {
+        let mut invalid = profile.clone();
+        set_deterministic_cap(
+            &mut invalid.evaluator_protocol.hard_caps,
+            field,
+            maximum.saturating_add(1),
+        );
+        refresh(&mut invalid);
+        assert_eq!(
+            invalid.validate(),
+            Err(ConformanceContractError::FieldOutOfBounds)
+        );
+    }
+}
+
+#[test]
+fn public_profile_requires_every_mode_coordinate_from_every_provider() {
+    let mut complete = with_second_provider(profile_for_digest());
+    for fixture in &mut complete.fixtures {
+        fixture.modes = vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped];
+    }
+    refresh(&mut complete);
+    assert_eq!(complete.validate(), Ok(()));
+
+    let omitted_provider = complete.fixtures[0].provider_key.clone();
+    for fixture in &mut complete.fixtures {
+        if fixture.provider_key == omitted_provider {
+            fixture.modes = vec![ExecutionModeV1::Local];
+        }
+    }
+    refresh(&mut complete);
+    assert_eq!(
+        complete.validate(),
+        Err(ConformanceContractError::ExpectedResultMissing)
+    );
+}
+
+#[test]
+fn every_provider_execution_mode_coordinate_requires_exactly_seven_families() {
+    let complete = with_second_execution_coordinate(profile_for_digest());
+    assert_eq!(complete.validate(), Ok(()));
+
+    let mut missing = complete.clone();
+    let remove_at = missing
+        .fixtures
+        .iter()
+        .position(|fixture| {
+            fixture.execution_profile_digest == [2; 32]
+                && fixture.family == FixtureFamilyV1::IndependentEvaluation
+        })
+        .expect("second execution coordinate must contain every family");
+    missing.fixtures.remove(remove_at);
+    refresh(&mut missing);
+    assert_eq!(
+        missing.validate(),
+        Err(ConformanceContractError::ExpectedResultMissing)
+    );
+
+    let mut duplicate = complete;
+    let mut extra = duplicate.fixtures[0].clone();
+    extra.case_id.push_str("-duplicate");
+    extra.fixture_digest = extra.digest();
+    duplicate.fixtures.push(extra);
+    duplicate.fixtures.sort_by(|left, right| {
+        (
+            &left.provider_key,
+            left.family,
+            &left.case_id,
+            left.execution_profile_digest,
+            &left.modes,
+        )
+            .cmp(&(
+                &right.provider_key,
+                right.family,
+                &right.case_id,
+                right.execution_profile_digest,
+                &right.modes,
+            ))
+    });
+    refresh(&mut duplicate);
+    assert_eq!(
+        duplicate.validate(),
+        Err(ConformanceContractError::NonCanonicalOrder)
     );
 }
 
@@ -1265,6 +1552,14 @@ fn public_request_output_limits_accept_exact_caps_and_reject_each_overflow() {
         max_structural_nesting: 1,
         max_coordinate_bytes: 1,
         max_diagnostic_bytes: 2048,
+        max_deterministic_memory_bytes: 1,
+        max_deterministic_cpu_fuel: 1,
+        max_deterministic_host_calls: 1,
+        max_deterministic_event_count: 1,
+        max_deterministic_output_bytes: 1,
+        max_deterministic_storage_bytes: 1,
+        max_deterministic_execution_steps: 1,
+        max_deterministic_simulation_time_ns: 1,
     };
     let exact = request_for_caps(&caps);
     assert_eq!(exact.validate_with_hard_caps(&caps), Ok(()));
@@ -1764,7 +2059,7 @@ fn public_profile_decoder_rejects_each_nested_record_field(
     paths.extend((0..2).map(|index| vec![9, 0, 18, index]));
     paths.extend((0..7).map(|index| vec![9, 0, 21, index]));
     paths.extend((0..5).map(|index| vec![11, index]));
-    paths.extend((0..10).map(|index| vec![11, 4, index]));
+    paths.extend((0..18).map(|index| vec![11, 4, index]));
     paths.extend((0..5).map(|index| vec![12, index]));
     assert_public_profile_paths_rejected(paths)?;
 

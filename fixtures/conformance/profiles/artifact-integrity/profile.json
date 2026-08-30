@@ -16,7 +16,7 @@
       "claim_layer": "artifact-integrity",
       "case_id": "artifact-integrity-positive",
       "family": "positive",
-      "schema": "support/schemas/positive.schema.json",
+      "schema": "providers/artifact-integrity/schemas/positive.schema.json",
       "input": "inputs/artifact-integrity/positive.json",
       "expected": "expected/artifact-integrity/positive.json"
     },
@@ -24,7 +24,7 @@
       "claim_layer": "artifact-integrity",
       "case_id": "artifact-integrity-denied",
       "family": "denied",
-      "schema": "support/schemas/denied.schema.json",
+      "schema": "providers/artifact-integrity/schemas/denied.schema.json",
       "input": "inputs/artifact-integrity/denied.json",
       "expected": "expected/artifact-integrity/denied.json"
     },
@@ -32,7 +32,7 @@
       "claim_layer": "artifact-integrity",
       "case_id": "artifact-integrity-malformed",
       "family": "malformed",
-      "schema": "support/schemas/malformed.schema.json",
+      "schema": "providers/artifact-integrity/schemas/malformed.schema.json",
       "input": "inputs/artifact-integrity/malformed.json",
       "expected": "expected/artifact-integrity/malformed.json"
     },
@@ -40,7 +40,7 @@
       "claim_layer": "artifact-integrity",
       "case_id": "artifact-integrity-resource-exhaustion",
       "family": "resource-exhaustion",
-      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "schema": "providers/artifact-integrity/schemas/resource-exhaustion.schema.json",
       "input": "inputs/artifact-integrity/resource-exhaustion.json",
       "expected": "expected/artifact-integrity/resource-exhaustion.json"
     },
@@ -48,7 +48,7 @@
       "claim_layer": "artifact-integrity",
       "case_id": "artifact-integrity-deletion-redaction",
       "family": "deletion-redaction",
-      "schema": "support/schemas/deletion-redaction.schema.json",
+      "schema": "providers/artifact-integrity/schemas/deletion-redaction.schema.json",
       "input": "inputs/artifact-integrity/deletion-redaction.json",
       "expected": "expected/artifact-integrity/deletion-redaction.json"
     },
@@ -56,7 +56,7 @@
       "claim_layer": "artifact-integrity",
       "case_id": "artifact-integrity-downgrade",
       "family": "downgrade",
-      "schema": "support/schemas/downgrade.schema.json",
+      "schema": "providers/artifact-integrity/schemas/downgrade.schema.json",
       "input": "inputs/artifact-integrity/downgrade.json",
       "expected": "expected/artifact-integrity/downgrade.json"
     },
@@ -64,7 +64,7 @@
       "claim_layer": "artifact-integrity",
       "case_id": "artifact-integrity-independent-evaluation",
       "family": "independent-evaluation",
-      "schema": "support/schemas/independent-evaluation.schema.json",
+      "schema": "providers/artifact-integrity/schemas/independent-evaluation.schema.json",
       "input": "inputs/artifact-integrity/independent-evaluation.json",
       "expected": "expected/artifact-integrity/independent-evaluation.json"
     }

@@ -16,7 +16,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-positive",
       "family": "positive",
-      "schema": "support/schemas/positive.schema.json",
+      "schema": "providers/empirical-evaluation/schemas/positive.schema.json",
       "input": "inputs/empirical-evaluation/positive.json",
       "expected": "expected/empirical-evaluation/positive.json"
     },
@@ -24,7 +24,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-denied",
       "family": "denied",
-      "schema": "support/schemas/denied.schema.json",
+      "schema": "providers/empirical-evaluation/schemas/denied.schema.json",
       "input": "inputs/empirical-evaluation/denied.json",
       "expected": "expected/empirical-evaluation/denied.json"
     },
@@ -32,7 +32,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-malformed",
       "family": "malformed",
-      "schema": "support/schemas/malformed.schema.json",
+      "schema": "providers/empirical-evaluation/schemas/malformed.schema.json",
       "input": "inputs/empirical-evaluation/malformed.json",
       "expected": "expected/empirical-evaluation/malformed.json"
     },
@@ -40,7 +40,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-resource-exhaustion",
       "family": "resource-exhaustion",
-      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "schema": "providers/empirical-evaluation/schemas/resource-exhaustion.schema.json",
       "input": "inputs/empirical-evaluation/resource-exhaustion.json",
       "expected": "expected/empirical-evaluation/resource-exhaustion.json"
     },
@@ -48,7 +48,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-deletion-redaction",
       "family": "deletion-redaction",
-      "schema": "support/schemas/deletion-redaction.schema.json",
+      "schema": "providers/empirical-evaluation/schemas/deletion-redaction.schema.json",
       "input": "inputs/empirical-evaluation/deletion-redaction.json",
       "expected": "expected/empirical-evaluation/deletion-redaction.json"
     },
@@ -56,7 +56,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-downgrade",
       "family": "downgrade",
-      "schema": "support/schemas/downgrade.schema.json",
+      "schema": "providers/empirical-evaluation/schemas/downgrade.schema.json",
       "input": "inputs/empirical-evaluation/downgrade.json",
       "expected": "expected/empirical-evaluation/downgrade.json"
     },
@@ -64,7 +64,7 @@
       "claim_layer": "empirical-evaluation",
       "case_id": "empirical-evaluation-independent-evaluation",
       "family": "independent-evaluation",
-      "schema": "support/schemas/independent-evaluation.schema.json",
+      "schema": "providers/empirical-evaluation/schemas/independent-evaluation.schema.json",
       "input": "inputs/empirical-evaluation/independent-evaluation.json",
       "expected": "expected/empirical-evaluation/independent-evaluation.json"
     }

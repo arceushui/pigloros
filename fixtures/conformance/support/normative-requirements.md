@@ -34,6 +34,30 @@ default-deny capability policy, licence, notices, SBOM, source/build/publication
 provenance, and limitations. Missing bounds or provenance are invalid, not
 unlimited. Only downgrade fixtures carry trust-policy, release-admission, and
 provider-transition bindings; no implementation digest authorizes a downgrade.
+The evaluator hard-cap record digest-binds both the ten structural limits and
+the following eight deterministic ceilings, in budget-field order: 1 GiB
+memory, 1,000,000,000 CPU fuel, 1,000,000 host calls, 1,000,000 Events, 64 MiB
+output, 1 GiB storage, 1,000,000,000 execution steps, and 86,400,000,000,000 ns
+Simulation Time. Every selected ceiling is positive and no greater than that
+compiled maximum; every fixture budget is positive and no greater than its
+selected ceiling. Changing a selected ceiling therefore changes CPF1 identity.
+The hard-cap identity is
+`BLAKE3("PiglorOS.EvaluatorHardCaps.v1\0" || u64be(canonical_cbor_length)
+|| canonical_cbor(exact_18_field_array))`. The #190 Draft selected array has
+golden digest
+`cbbd07013323492cb748e9f74b956c58c03b3f0161e176b463dd62a2dd7fa509`.
+Each fixture attempt resets all deterministic counters to zero. Limits are
+inclusive. The first operation that would exceed a fixture budget is rejected
+before any Event, state, output, storage, or other externally visible effect is
+committed; simultaneous checks use budget-field order. Host calls, attempted
+Event emissions, canonical output bytes, requested canonical storage bytes,
+and execution steps are counted before their operation. Memory is peak live
+fixture-owned metered memory. CPU fuel and execution-step units are fixed by
+the selected ExecutionProfile. Simulation Time is the monotonic host-supplied
+advance from the fixture's initial value, never an absolute timestamp or
+wall-clock duration. Replay resets the same counters and must reproduce the
+same first-over-limit outcome. The watchdog and operational sandbox limits do
+not contribute deterministic counters and their expiry remains non-executed.
 Each profile binds the full FPR1 provider-registry artifact and the exact
 provider key required by its claim layer. Every FPP1 provider package is data
 only and supplies exactly one schema for each of the seven families. Each

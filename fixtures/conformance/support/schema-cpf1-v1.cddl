@@ -101,7 +101,20 @@ namespaced-failure = [owner-id: identifier,
 divergence = [classification: 0..6, first-coordinate: bstr .size (1..128)]
 protocol = [protocol-id: identifier, protocol-digest: digest,
             request-schema-digest: digest, report-schema-digest: digest,
-            hard-caps: [10*10 uint]]
+            hard-caps: hard-caps]
+hard-caps = [max-profile-bytes: uint, max-cases: uint,
+             max-bundle-members: uint, max-member-path-bytes: uint,
+             max-member-bytes: uint, max-total-bundle-bytes: uint,
+             max-compression-expansion: uint, max-structural-nesting: uint,
+             max-coordinate-bytes: uint, max-diagnostic-bytes: uint,
+             max-deterministic-memory-bytes: uint,
+             max-deterministic-cpu-fuel: uint,
+             max-deterministic-host-calls: uint,
+             max-deterministic-event-count: uint,
+             max-deterministic-output-bytes: uint,
+             max-deterministic-storage-bytes: uint,
+             max-deterministic-execution-steps: uint,
+             max-deterministic-simulation-time-ns: uint]
 requirements = [technical: bool, authorship: bool, organizational: bool,
                 trust-policy-snapshot-digest: digest, requirements-digest: digest]
 identifier = tstr .size (1..128)

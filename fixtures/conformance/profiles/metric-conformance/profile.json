@@ -16,7 +16,7 @@
       "claim_layer": "metric-conformance",
       "case_id": "metric-conformance-positive",
       "family": "positive",
-      "schema": "support/schemas/positive.schema.json",
+      "schema": "providers/metric-conformance/schemas/positive.schema.json",
       "input": "inputs/metric-conformance/positive.json",
       "expected": "expected/metric-conformance/positive.json"
     },
@@ -24,7 +24,7 @@
       "claim_layer": "metric-conformance",
       "case_id": "metric-conformance-denied",
       "family": "denied",
-      "schema": "support/schemas/denied.schema.json",
+      "schema": "providers/metric-conformance/schemas/denied.schema.json",
       "input": "inputs/metric-conformance/denied.json",
       "expected": "expected/metric-conformance/denied.json"
     },
@@ -32,7 +32,7 @@
       "claim_layer": "metric-conformance",
       "case_id": "metric-conformance-malformed",
       "family": "malformed",
-      "schema": "support/schemas/malformed.schema.json",
+      "schema": "providers/metric-conformance/schemas/malformed.schema.json",
       "input": "inputs/metric-conformance/malformed.json",
       "expected": "expected/metric-conformance/malformed.json"
     },
@@ -40,7 +40,7 @@
       "claim_layer": "metric-conformance",
       "case_id": "metric-conformance-resource-exhaustion",
       "family": "resource-exhaustion",
-      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "schema": "providers/metric-conformance/schemas/resource-exhaustion.schema.json",
       "input": "inputs/metric-conformance/resource-exhaustion.json",
       "expected": "expected/metric-conformance/resource-exhaustion.json"
     },
@@ -48,7 +48,7 @@
       "claim_layer": "metric-conformance",
       "case_id": "metric-conformance-deletion-redaction",
       "family": "deletion-redaction",
-      "schema": "support/schemas/deletion-redaction.schema.json",
+      "schema": "providers/metric-conformance/schemas/deletion-redaction.schema.json",
       "input": "inputs/metric-conformance/deletion-redaction.json",
       "expected": "expected/metric-conformance/deletion-redaction.json"
     },
@@ -56,7 +56,7 @@
       "claim_layer": "metric-conformance",
       "case_id": "metric-conformance-downgrade",
       "family": "downgrade",
-      "schema": "support/schemas/downgrade.schema.json",
+      "schema": "providers/metric-conformance/schemas/downgrade.schema.json",
       "input": "inputs/metric-conformance/downgrade.json",
       "expected": "expected/metric-conformance/downgrade.json"
     },
@@ -64,7 +64,7 @@
       "claim_layer": "metric-conformance",
       "case_id": "metric-conformance-independent-evaluation",
       "family": "independent-evaluation",
-      "schema": "support/schemas/independent-evaluation.schema.json",
+      "schema": "providers/metric-conformance/schemas/independent-evaluation.schema.json",
       "input": "inputs/metric-conformance/independent-evaluation.json",
       "expected": "expected/metric-conformance/independent-evaluation.json"
     }

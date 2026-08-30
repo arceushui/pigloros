@@ -16,7 +16,7 @@
       "claim_layer": "gateway-client-conformance",
       "case_id": "gateway-client-conformance-positive",
       "family": "positive",
-      "schema": "support/schemas/positive.schema.json",
+      "schema": "providers/gateway-client-conformance/schemas/positive.schema.json",
       "input": "inputs/gateway-client-conformance/positive.json",
       "expected": "expected/gateway-client-conformance/positive.json"
     },
@@ -24,7 +24,7 @@
       "claim_layer": "gateway-client-conformance",
       "case_id": "gateway-client-conformance-denied",
       "family": "denied",
-      "schema": "support/schemas/denied.schema.json",
+      "schema": "providers/gateway-client-conformance/schemas/denied.schema.json",
       "input": "inputs/gateway-client-conformance/denied.json",
       "expected": "expected/gateway-client-conformance/denied.json"
     },
@@ -32,7 +32,7 @@
       "claim_layer": "gateway-client-conformance",
       "case_id": "gateway-client-conformance-malformed",
       "family": "malformed",
-      "schema": "support/schemas/malformed.schema.json",
+      "schema": "providers/gateway-client-conformance/schemas/malformed.schema.json",
       "input": "inputs/gateway-client-conformance/malformed.json",
       "expected": "expected/gateway-client-conformance/malformed.json"
     },
@@ -40,7 +40,7 @@
       "claim_layer": "gateway-client-conformance",
       "case_id": "gateway-client-conformance-resource-exhaustion",
       "family": "resource-exhaustion",
-      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "schema": "providers/gateway-client-conformance/schemas/resource-exhaustion.schema.json",
       "input": "inputs/gateway-client-conformance/resource-exhaustion.json",
       "expected": "expected/gateway-client-conformance/resource-exhaustion.json"
     },
@@ -48,7 +48,7 @@
       "claim_layer": "gateway-client-conformance",
       "case_id": "gateway-client-conformance-deletion-redaction",
       "family": "deletion-redaction",
-      "schema": "support/schemas/deletion-redaction.schema.json",
+      "schema": "providers/gateway-client-conformance/schemas/deletion-redaction.schema.json",
       "input": "inputs/gateway-client-conformance/deletion-redaction.json",
       "expected": "expected/gateway-client-conformance/deletion-redaction.json"
     },
@@ -56,7 +56,7 @@
       "claim_layer": "gateway-client-conformance",
       "case_id": "gateway-client-conformance-downgrade",
       "family": "downgrade",
-      "schema": "support/schemas/downgrade.schema.json",
+      "schema": "providers/gateway-client-conformance/schemas/downgrade.schema.json",
       "input": "inputs/gateway-client-conformance/downgrade.json",
       "expected": "expected/gateway-client-conformance/downgrade.json"
     },
@@ -64,7 +64,7 @@
       "claim_layer": "gateway-client-conformance",
       "case_id": "gateway-client-conformance-independent-evaluation",
       "family": "independent-evaluation",
-      "schema": "support/schemas/independent-evaluation.schema.json",
+      "schema": "providers/gateway-client-conformance/schemas/independent-evaluation.schema.json",
       "input": "inputs/gateway-client-conformance/independent-evaluation.json",
       "expected": "expected/gateway-client-conformance/independent-evaluation.json"
     }

@@ -225,7 +225,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
         .map(|fixture| {
             let family = json_text(fixture, "family")?;
             let schema = relative_asset(root, fixture, "schema")?;
-            let expected_schema = format!("support/schemas/{family}.schema.json");
+            let expected_schema = format!("providers/{claim_layer}/schemas/{family}.schema.json");
             if schema.relative != expected_schema {
                 return Err(invalid_data(format!(
                     "profile fixture schema does not match family {family}"

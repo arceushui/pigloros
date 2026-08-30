@@ -10,7 +10,7 @@ use crate::{
     RedactionStateV1, ReplayClaimV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{decode_artifact_descriptor_value, encode_artifact_descriptor_value};
 use std::io::Cursor;
@@ -219,6 +219,21 @@ pub struct DeterministicBudgetV1 {
     pub simulation_time_ns: u64,
 }
 
+/// Compiled evaluator ceilings for every deterministic fixture budget.
+///
+/// Profiles may select lower limits, but no current CPF1 fixture may exceed
+/// these values. The watchdog remains a separate operational limit.
+pub const DETERMINISTIC_BUDGET_HARD_CAPS_V1: DeterministicBudgetV1 = DeterministicBudgetV1 {
+    memory_bytes: 1024 * 1024 * 1024,
+    cpu_fuel: 1_000_000_000,
+    host_calls: 1_000_000,
+    event_count: 1_000_000,
+    output_bytes: 64 * 1024 * 1024,
+    storage_bytes: 1024 * 1024 * 1024,
+    execution_steps: 1_000_000_000,
+    simulation_time_ns: 86_400_000_000_000,
+};
+
 /// Operational watchdog information. It is deliberately distinct from the
 /// deterministic budget: expiry produces a non-executed result, not evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -311,13 +326,21 @@ pub struct EvaluatorHardCapsV1 {
     pub max_structural_nesting: u8,
     pub max_coordinate_bytes: u16,
     pub max_diagnostic_bytes: u64,
+    pub max_deterministic_memory_bytes: u64,
+    pub max_deterministic_cpu_fuel: u64,
+    pub max_deterministic_host_calls: u64,
+    pub max_deterministic_event_count: u64,
+    pub max_deterministic_output_bytes: u64,
+    pub max_deterministic_storage_bytes: u64,
+    pub max_deterministic_execution_steps: u64,
+    pub max_deterministic_simulation_time_ns: u64,
 }
 
 impl EvaluatorHardCapsV1 {
     /// Return the canonical identity of this exact hard-cap record.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
-        digest_bytes(b"PiglorOS.EvaluatorHardCaps.v1", &encode_hard_caps(self))
+        contract_digest(b"PiglorOS.EvaluatorHardCaps.v1", &encode_hard_caps(self))
     }
 
     /// Validate a report or fixture case count against the selected cap.
@@ -731,17 +754,7 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
-    for provider_key in &profile.fixture_provider_registry.required_provider_keys {
-        let provider_families = profile
-            .fixtures
-            .iter()
-            .filter(|fixture| fixture.provider_key == *provider_key)
-            .map(|fixture| fixture.family)
-            .collect::<BTreeSet<_>>();
-        if provider_families != FIXTURE_FAMILIES.into_iter().collect() {
-            return Err(ConformanceContractError::ExpectedResultMissing);
-        }
-    }
+    validate_fixture_inventory(profile)?;
     profile.fixtures.iter().try_for_each(|fixture| {
         validate_fixture(fixture, profile)
             .and_then(|()| {
@@ -750,6 +763,49 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
             .and_then(|()| validate_fixture_verification_outcome(fixture))
             .and_then(|()| validate_fixture_claim(fixture))
     })
+}
+
+fn validate_fixture_inventory(
+    profile: &ConformanceProfileV1,
+) -> Result<(), ConformanceContractError> {
+    let required_families = FIXTURE_FAMILIES.into_iter().collect::<BTreeSet<_>>();
+    let mut inventory = BTreeMap::<
+        (&FixtureProviderKeyV1, [u8; 32], ExecutionModeV1),
+        BTreeSet<FixtureFamilyV1>,
+    >::new();
+    let mut required_modes = BTreeMap::<[u8; 32], BTreeSet<ExecutionModeV1>>::new();
+    for fixture in &profile.fixtures {
+        for mode in &fixture.modes {
+            required_modes
+                .entry(fixture.execution_profile_digest)
+                .or_default()
+                .insert(*mode);
+            let families = inventory.entry((
+                &fixture.provider_key,
+                fixture.execution_profile_digest,
+                *mode,
+            ));
+            if !families.or_default().insert(fixture.family) {
+                return Err(ConformanceContractError::NonCanonicalOrder);
+            }
+        }
+    }
+    for provider_key in &profile.fixture_provider_registry.required_provider_keys {
+        for execution_profile in &profile.execution_profile_digests {
+            let Some(modes) = required_modes.get(execution_profile) else {
+                return Err(ConformanceContractError::ExpectedResultMissing);
+            };
+            for mode in modes {
+                if inventory
+                    .get(&(provider_key, *execution_profile, *mode))
+                    .is_none_or(|families| families != &required_families)
+                {
+                    return Err(ConformanceContractError::ExpectedResultMissing);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_fixture_claim(fixture: &FixtureDescriptorV1) -> Result<(), ConformanceContractError> {
@@ -904,7 +960,12 @@ fn validate_fixture(
                 Ok(())
             }
         })
-        .and_then(|()| validate_deterministic_budget(&fixture.deterministic_budget))
+        .and_then(|()| {
+            validate_deterministic_budget(
+                &fixture.deterministic_budget,
+                &profile.evaluator_protocol.hard_caps,
+            )
+        })
         .and_then(|()| validate_operational_safety(&fixture.operational_safety))
         .and_then(|()| validate_capability_policy(&fixture.capability_policy))
         .and_then(|()| validate_fixture_provenance(&fixture.provenance))
@@ -987,6 +1048,24 @@ const fn validate_hard_caps(caps: &EvaluatorHardCapsV1) -> Result<(), Conformanc
         || caps.max_coordinate_bytes == 0
         || caps.max_coordinate_bytes as usize > MAX_COORDINATE_BYTES
         || caps.max_diagnostic_bytes > MAX_DIAGNOSTIC_BYTES
+        || caps.max_deterministic_memory_bytes == 0
+        || caps.max_deterministic_memory_bytes > DETERMINISTIC_BUDGET_HARD_CAPS_V1.memory_bytes
+        || caps.max_deterministic_cpu_fuel == 0
+        || caps.max_deterministic_cpu_fuel > DETERMINISTIC_BUDGET_HARD_CAPS_V1.cpu_fuel
+        || caps.max_deterministic_host_calls == 0
+        || caps.max_deterministic_host_calls > DETERMINISTIC_BUDGET_HARD_CAPS_V1.host_calls
+        || caps.max_deterministic_event_count == 0
+        || caps.max_deterministic_event_count > DETERMINISTIC_BUDGET_HARD_CAPS_V1.event_count
+        || caps.max_deterministic_output_bytes == 0
+        || caps.max_deterministic_output_bytes > DETERMINISTIC_BUDGET_HARD_CAPS_V1.output_bytes
+        || caps.max_deterministic_storage_bytes == 0
+        || caps.max_deterministic_storage_bytes > DETERMINISTIC_BUDGET_HARD_CAPS_V1.storage_bytes
+        || caps.max_deterministic_execution_steps == 0
+        || caps.max_deterministic_execution_steps
+            > DETERMINISTIC_BUDGET_HARD_CAPS_V1.execution_steps
+        || caps.max_deterministic_simulation_time_ns == 0
+        || caps.max_deterministic_simulation_time_ns
+            > DETERMINISTIC_BUDGET_HARD_CAPS_V1.simulation_time_ns
     {
         Err(ConformanceContractError::FieldOutOfBounds)
     } else {
@@ -1024,8 +1103,9 @@ fn validate_artifact_descriptor(
 
 fn validate_deterministic_budget(
     budget: &DeterministicBudgetV1,
+    caps: &EvaluatorHardCapsV1,
 ) -> Result<(), ConformanceContractError> {
-    if [
+    let values = [
         budget.memory_bytes,
         budget.cpu_fuel,
         budget.host_calls,
@@ -1034,8 +1114,21 @@ fn validate_deterministic_budget(
         budget.storage_bytes,
         budget.execution_steps,
         budget.simulation_time_ns,
-    ]
-    .contains(&0)
+    ];
+    let ceilings = [
+        caps.max_deterministic_memory_bytes,
+        caps.max_deterministic_cpu_fuel,
+        caps.max_deterministic_host_calls,
+        caps.max_deterministic_event_count,
+        caps.max_deterministic_output_bytes,
+        caps.max_deterministic_storage_bytes,
+        caps.max_deterministic_execution_steps,
+        caps.max_deterministic_simulation_time_ns,
+    ];
+    if values
+        .into_iter()
+        .zip(ceilings)
+        .any(|(value, ceiling)| value == 0 || value > ceiling)
     {
         Err(ConformanceContractError::FieldOutOfBounds)
     } else {
@@ -1255,105 +1348,28 @@ const fn bounded_text(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum
 }
 
-const fn bounded_ascii(value: &str, maximum: usize) -> bool {
-    bounded_text(value, maximum) && value.is_ascii()
-}
-
 fn bounded_fixture_id(value: &str) -> bool {
     valid_identifier(value)
 }
 
 fn valid_identifier(value: &str) -> bool {
-    bounded_ascii(value, 128)
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
+    crate::wire_syntax::identifier(value, 128)
 }
 
 fn valid_member_path(value: &str) -> bool {
-    let components = value.split('/').collect::<Vec<_>>();
-    bounded_ascii(value, 512)
-        && !value.starts_with('/')
-        && !value.contains('\\')
-        && !value.contains('\0')
-        && (1..=16).contains(&components.len())
-        && components.iter().all(|component| {
-            !component.is_empty()
-                && *component != "."
-                && *component != ".."
-                && component.len() <= 128
-        })
+    crate::wire_syntax::member_path(value, 512, 16, 128)
 }
 
 fn valid_media_type(value: &str) -> bool {
-    let Some((type_name, subtype)) = value.split_once('/') else {
-        return false;
-    };
-    (3..=127).contains(&value.len())
-        && !type_name.is_empty()
-        && !subtype.is_empty()
-        && value.bytes().filter(|byte| *byte == b'/').count() == 1
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(
-                    byte,
-                    b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-' | b'/'
-                )
-        })
+    crate::wire_syntax::media_type(value, 127)
 }
 
 fn semantic_version(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_STRING_BYTES {
-        return false;
-    }
-    let (core_and_prerelease, build) = match value.split_once('+') {
-        Some((core, build)) if !build.is_empty() => (core, build),
-        Some(_) => return false,
-        None => (value, ""),
-    };
-    let (core, prerelease) = match core_and_prerelease.split_once('-') {
-        Some((core, prerelease)) if !prerelease.is_empty() => (core, prerelease),
-        Some(_) => return false,
-        None => (core_and_prerelease, ""),
-    };
-    let core_parts = core.split('.').collect::<Vec<_>>();
-    core_parts.len() == 3
-        && core_parts.iter().all(|part| numeric_identifier(part))
-        && valid_identifiers(prerelease, true)
-        && valid_identifiers(build, false)
+    crate::wire_syntax::semantic_version(value, MAX_STRING_BYTES, Some(MAX_SEMVER_COMPONENT_BYTES))
 }
 
 fn contract_version(value: &str) -> bool {
     value.len() <= 64 && semantic_version(value)
-}
-
-fn numeric_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_SEMVER_COMPONENT_BYTES
-        && (value == "0" || !value.starts_with('0'))
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn valid_identifiers(value: &str, numeric_leading_zero_forbidden: bool) -> bool {
-    if value.is_empty() {
-        return true;
-    }
-    value.split('.').all(|identifier| {
-        !identifier.is_empty()
-            && identifier
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            && (!numeric_leading_zero_forbidden
-                || !identifier.bytes().all(|byte| byte.is_ascii_digit())
-                || numeric_identifier(identifier))
-    })
 }
 
 fn zero_digest(value: &[u8; 32]) -> bool {
@@ -1604,6 +1620,14 @@ fn encode_hard_caps(value: &EvaluatorHardCapsV1) -> Value {
         uint(u64::from(value.max_structural_nesting)),
         uint(u64::from(value.max_coordinate_bytes)),
         uint(value.max_diagnostic_bytes),
+        uint(value.max_deterministic_memory_bytes),
+        uint(value.max_deterministic_cpu_fuel),
+        uint(value.max_deterministic_host_calls),
+        uint(value.max_deterministic_event_count),
+        uint(value.max_deterministic_output_bytes),
+        uint(value.max_deterministic_storage_bytes),
+        uint(value.max_deterministic_execution_steps),
+        uint(value.max_deterministic_simulation_time_ns),
     ])
 }
 
@@ -1895,7 +1919,7 @@ fn decode_protocol(value: &Value) -> Result<EvaluatorProtocolV1, ConformanceCont
 }
 
 fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCapsV1, ConformanceContractError> {
-    let fields = array(value, 10)?;
+    let fields = array(value, 18)?;
     Ok(EvaluatorHardCapsV1 {
         max_profile_bytes: uint_value(&fields[0])?,
         max_cases: u32_value(&fields[1])?,
@@ -1907,6 +1931,14 @@ fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCapsV1, ConformanceCon
         max_structural_nesting: u8_value(&fields[7])?,
         max_coordinate_bytes: u16_value(&fields[8])?,
         max_diagnostic_bytes: uint_value(&fields[9])?,
+        max_deterministic_memory_bytes: uint_value(&fields[10])?,
+        max_deterministic_cpu_fuel: uint_value(&fields[11])?,
+        max_deterministic_host_calls: uint_value(&fields[12])?,
+        max_deterministic_event_count: uint_value(&fields[13])?,
+        max_deterministic_output_bytes: uint_value(&fields[14])?,
+        max_deterministic_storage_bytes: uint_value(&fields[15])?,
+        max_deterministic_execution_steps: uint_value(&fields[16])?,
+        max_deterministic_simulation_time_ns: uint_value(&fields[17])?,
     })
 }
 
@@ -2004,74 +2036,20 @@ fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
 }
 
 fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
-    fn read_length(
-        bytes: &[u8],
-        index: &mut usize,
-        additional: u8,
-    ) -> Result<u64, ConformanceContractError> {
-        let width = match additional {
-            value @ 0..=23 => return Ok(u64::from(value)),
-            24 => 1,
-            25 => 2,
-            26 => 4,
-            27 => 8,
-            _ => return Err(ConformanceContractError::InvalidEncoding),
-        };
-        let end = index.saturating_add(width);
-        let value = bytes
-            .get(*index..end)
-            .ok_or(ConformanceContractError::InvalidEncoding)?;
-        *index = end;
-        let mut encoded = [0_u8; 8];
-        encoded[8 - width..].copy_from_slice(value);
-        Ok(u64::from_be_bytes(encoded))
-    }
-    fn item(bytes: &[u8], index: &mut usize, depth: u8) -> Result<(), ConformanceContractError> {
-        if depth > MAX_STRUCTURAL_NESTING {
-            return Err(ConformanceContractError::FieldOutOfBounds);
+    crate::wire_syntax::preflight_array_cbor(
+        bytes,
+        MAX_STRUCTURAL_NESTING,
+        MAX_FIXTURES as u64,
+        true,
+    )
+    .map_err(|error| match error {
+        crate::wire_syntax::CborPreflightError::InvalidEncoding => {
+            ConformanceContractError::InvalidEncoding
         }
-        let initial = *bytes
-            .get(*index)
-            .ok_or(ConformanceContractError::InvalidEncoding)?;
-        *index += 1;
-        let major = initial >> 5;
-        let length = read_length(bytes, index, initial & 0x1f)?;
-        match major {
-            0 | 1 => Ok(()),
-            7 => match initial & 0x1f {
-                20..=22 => Ok(()),
-                _ => Err(ConformanceContractError::InvalidEncoding),
-            },
-            2 | 3 => {
-                let count = usize::try_from(length).unwrap_or(usize::MAX);
-                let end = index
-                    .checked_add(count)
-                    .ok_or(ConformanceContractError::FieldOutOfBounds)?;
-                bytes
-                    .get(*index..end)
-                    .ok_or(ConformanceContractError::InvalidEncoding)?;
-                *index = end;
-                Ok(())
-            }
-            4 => {
-                if length > MAX_FIXTURES as u64 {
-                    return Err(ConformanceContractError::FieldOutOfBounds);
-                }
-                for _ in 0..length {
-                    item(bytes, index, depth.saturating_add(1))?;
-                }
-                Ok(())
-            }
-            _ => Err(ConformanceContractError::InvalidEncoding),
+        crate::wire_syntax::CborPreflightError::FieldOutOfBounds => {
+            ConformanceContractError::FieldOutOfBounds
         }
-    }
-    let mut index = 0;
-    item(bytes, &mut index, 0)?;
-    if index == bytes.len() {
-        Ok(())
-    } else {
-        Err(ConformanceContractError::InvalidEncoding)
-    }
+    })
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], ConformanceContractError> {
@@ -2494,6 +2472,17 @@ mod current_wire_contract_tests {
                     max_structural_nesting: MAX_STRUCTURAL_NESTING,
                     max_coordinate_bytes: 128,
                     max_diagnostic_bytes: MAX_DIAGNOSTIC_BYTES,
+                    max_deterministic_memory_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.memory_bytes,
+                    max_deterministic_cpu_fuel: DETERMINISTIC_BUDGET_HARD_CAPS_V1.cpu_fuel,
+                    max_deterministic_host_calls: DETERMINISTIC_BUDGET_HARD_CAPS_V1.host_calls,
+                    max_deterministic_event_count: DETERMINISTIC_BUDGET_HARD_CAPS_V1.event_count,
+                    max_deterministic_output_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.output_bytes,
+                    max_deterministic_storage_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1
+                        .storage_bytes,
+                    max_deterministic_execution_steps: DETERMINISTIC_BUDGET_HARD_CAPS_V1
+                        .execution_steps,
+                    max_deterministic_simulation_time_ns: DETERMINISTIC_BUDGET_HARD_CAPS_V1
+                        .simulation_time_ns,
                 },
             },
             independence_requirements: IndependenceRequirementsV1 {

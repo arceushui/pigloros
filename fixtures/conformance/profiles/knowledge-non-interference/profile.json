@@ -16,7 +16,7 @@
       "claim_layer": "knowledge-non-interference",
       "case_id": "knowledge-non-interference-positive",
       "family": "positive",
-      "schema": "support/schemas/positive.schema.json",
+      "schema": "providers/knowledge-non-interference/schemas/positive.schema.json",
       "input": "inputs/knowledge-non-interference/positive.json",
       "expected": "expected/knowledge-non-interference/positive.json"
     },
@@ -24,7 +24,7 @@
       "claim_layer": "knowledge-non-interference",
       "case_id": "knowledge-non-interference-denied",
       "family": "denied",
-      "schema": "support/schemas/denied.schema.json",
+      "schema": "providers/knowledge-non-interference/schemas/denied.schema.json",
       "input": "inputs/knowledge-non-interference/denied.json",
       "expected": "expected/knowledge-non-interference/denied.json"
     },
@@ -32,7 +32,7 @@
       "claim_layer": "knowledge-non-interference",
       "case_id": "knowledge-non-interference-malformed",
       "family": "malformed",
-      "schema": "support/schemas/malformed.schema.json",
+      "schema": "providers/knowledge-non-interference/schemas/malformed.schema.json",
       "input": "inputs/knowledge-non-interference/malformed.json",
       "expected": "expected/knowledge-non-interference/malformed.json"
     },
@@ -40,7 +40,7 @@
       "claim_layer": "knowledge-non-interference",
       "case_id": "knowledge-non-interference-resource-exhaustion",
       "family": "resource-exhaustion",
-      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "schema": "providers/knowledge-non-interference/schemas/resource-exhaustion.schema.json",
       "input": "inputs/knowledge-non-interference/resource-exhaustion.json",
       "expected": "expected/knowledge-non-interference/resource-exhaustion.json"
     },
@@ -48,7 +48,7 @@
       "claim_layer": "knowledge-non-interference",
       "case_id": "knowledge-non-interference-deletion-redaction",
       "family": "deletion-redaction",
-      "schema": "support/schemas/deletion-redaction.schema.json",
+      "schema": "providers/knowledge-non-interference/schemas/deletion-redaction.schema.json",
       "input": "inputs/knowledge-non-interference/deletion-redaction.json",
       "expected": "expected/knowledge-non-interference/deletion-redaction.json"
     },
@@ -56,7 +56,7 @@
       "claim_layer": "knowledge-non-interference",
       "case_id": "knowledge-non-interference-downgrade",
       "family": "downgrade",
-      "schema": "support/schemas/downgrade.schema.json",
+      "schema": "providers/knowledge-non-interference/schemas/downgrade.schema.json",
       "input": "inputs/knowledge-non-interference/downgrade.json",
       "expected": "expected/knowledge-non-interference/downgrade.json"
     },
@@ -64,7 +64,7 @@
       "claim_layer": "knowledge-non-interference",
       "case_id": "knowledge-non-interference-independent-evaluation",
       "family": "independent-evaluation",
-      "schema": "support/schemas/independent-evaluation.schema.json",
+      "schema": "providers/knowledge-non-interference/schemas/independent-evaluation.schema.json",
       "input": "inputs/knowledge-non-interference/independent-evaluation.json",
       "expected": "expected/knowledge-non-interference/independent-evaluation.json"
     }

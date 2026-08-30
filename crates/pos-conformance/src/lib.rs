@@ -19,6 +19,7 @@ use std::io::Cursor;
 mod bundle_contract;
 mod profile_contract;
 mod provider_contract;
+mod wire_syntax;
 
 pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
@@ -37,7 +38,7 @@ pub use profile_contract::{
     EvaluatorRequestV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureProvenanceV1,
     IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
     StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, CONFORMANCE_PROFILE_MAGIC_V1,
-    EVALUATOR_REQUEST_MAGIC_V1,
+    DETERMINISTIC_BUDGET_HARD_CAPS_V1, EVALUATOR_REQUEST_MAGIC_V1,
 };
 pub use provider_contract::{
     ArtifactDescriptorV1, FixtureFamilyV1, FixtureProviderEntryV1, FixtureProviderKeyV1,

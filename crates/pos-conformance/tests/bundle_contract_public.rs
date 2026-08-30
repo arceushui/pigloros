@@ -13,7 +13,8 @@ use pos_conformance::{
     FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1, IndependenceRequirementsV1,
     NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1,
     RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    VerificationOutcomeV1, DETERMINISTIC_BUDGET_HARD_CAPS_V1,
+    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::fs;
@@ -103,7 +104,7 @@ fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
             Ok(ProviderFamilySchemaV1 {
                 family,
                 schema_descriptor: artifact(
-                    &format!("support/schemas/{index}.schema.json"),
+                    &format!("providers/example/schemas/{index}.schema.json"),
                     "application/schema+json",
                     bytes,
                 )?,
@@ -293,6 +294,16 @@ fn current_profile(
                 max_structural_nesting: 32,
                 max_coordinate_bytes: 128,
                 max_diagnostic_bytes: 1024 * 1024,
+                max_deterministic_memory_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.memory_bytes,
+                max_deterministic_cpu_fuel: DETERMINISTIC_BUDGET_HARD_CAPS_V1.cpu_fuel,
+                max_deterministic_host_calls: DETERMINISTIC_BUDGET_HARD_CAPS_V1.host_calls,
+                max_deterministic_event_count: DETERMINISTIC_BUDGET_HARD_CAPS_V1.event_count,
+                max_deterministic_output_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.output_bytes,
+                max_deterministic_storage_bytes: DETERMINISTIC_BUDGET_HARD_CAPS_V1.storage_bytes,
+                max_deterministic_execution_steps: DETERMINISTIC_BUDGET_HARD_CAPS_V1
+                    .execution_steps,
+                max_deterministic_simulation_time_ns: DETERMINISTIC_BUDGET_HARD_CAPS_V1
+                    .simulation_time_ns,
             },
         },
         independence_requirements: IndependenceRequirementsV1 {
@@ -459,18 +470,25 @@ fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &str) -
 }
 
 fn mutate_profile_archive(mutate: impl FnOnce(&mut [Value]) -> TestResult) -> TestResult<Vec<u8>> {
-    mutate_profile_archive_staged(mutate, |_| Ok(()))
+    mutate_profile_archive_staged(mutate, |_| Ok(()), |_| Ok(()))
 }
 
 fn mutate_profile_archive_after_fixture_digest(
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
 ) -> TestResult<Vec<u8>> {
-    mutate_profile_archive_staged(|_| Ok(()), mutate)
+    mutate_profile_archive_staged(|_| Ok(()), mutate, |_| Ok(()))
+}
+
+fn mutate_profile_archive_after_profile_digest(
+    mutate: impl FnOnce(&mut [Value]) -> TestResult,
+) -> TestResult<Vec<u8>> {
+    mutate_profile_archive_staged(|_| Ok(()), |_| Ok(()), mutate)
 }
 
 fn mutate_profile_archive_staged(
     mutate: impl FnOnce(&mut [Value]) -> TestResult,
     mutate_after_fixture_digest: impl FnOnce(&mut [Value]) -> TestResult,
+    mutate_after_profile_digest: impl FnOnce(&mut [Value]) -> TestResult,
 ) -> TestResult<Vec<u8>> {
     let bundle = signed_current_bundle(BundleModeV1::Local)?;
     let mut archive: Value = ciborium::from_reader(bundle.to_canonical_cbor()?.as_slice())?;
@@ -515,6 +533,7 @@ fn mutate_profile_archive_staged(
             contract_digest(b"PiglorOS.ConformanceProfile.v1", &profile_fields[..17])?.to_vec(),
         );
     }
+    mutate_after_profile_digest(profile_fields)?;
     let profile_digest = match &profile_fields[17] {
         Value::Bytes(bytes) => bytes.clone(),
         _ => return Err("profile digest is not bytes".into()),
@@ -892,7 +911,7 @@ fn mutate_provider_package_fields(fields: &mut [Value], mutation: usize) -> Test
             replace_value(fields, 11, Value::Bytes(vec![0; 32]), "package digest")?;
             Ok(false)
         }
-        8..=20 => mutate_provider_package_extended(fields, mutation),
+        8..=21 => mutate_provider_package_extended(fields, mutation),
         _ => Err(format!("unsupported package mutation {mutation}").into()),
     }
 }
@@ -961,6 +980,26 @@ fn mutate_provider_package_extended(fields: &mut [Value], mutation: usize) -> Te
             )?;
         }
         20 => replace_value(fields, 7, Value::Null, "package notice descriptor")?,
+        21 => {
+            let schema_path = array_field(
+                array_field(
+                    array_field(fields, 5, "package schemas")?,
+                    0,
+                    "package schema",
+                )?,
+                1,
+                "package schema descriptor",
+            )?
+            .first()
+            .ok_or("package schema descriptor has no path")?
+            .clone();
+            replace_value(
+                array_field(fields, 6, "package licence descriptor")?,
+                0,
+                schema_path,
+                "colliding package licence path",
+            )?;
+        }
         _ => return Err(format!("unsupported package extension {mutation}").into()),
     }
     Ok(true)
@@ -1135,12 +1174,15 @@ fn current_bundle_pair_requires_profile_parity() -> TestResult {
 
     let mut mismatched = pair;
     mismatched.air_gapped.manifest.profile_digest[0] ^= 1;
-    assert!(matches!(
-        mismatched.validate(),
-        Err(BundleContractErrorV1::ProfileInvalid
-            | BundleContractErrorV1::SignatureInvalid
-            | BundleContractErrorV1::ModeParityMismatch)
-    ));
+    let error = mismatched
+        .validate()
+        .expect_err("mismatched profile identity must reject the bundle pair");
+    assert!([
+        BundleContractErrorV1::ProfileInvalid,
+        BundleContractErrorV1::SignatureInvalid,
+        BundleContractErrorV1::ModeParityMismatch,
+    ]
+    .contains(&error));
     Ok(())
 }
 
@@ -1164,6 +1206,25 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
     assert!(status.success());
 
     let files = release_files(&publication)?;
+    let relative_files = files
+        .iter()
+        .map(|path| path.strip_prefix(&publication))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        relative_files
+            .iter()
+            .filter(|path| {
+                path.starts_with("providers")
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension == "json")
+            })
+            .count(),
+        49
+    );
+    assert!(relative_files
+        .iter()
+        .all(|path| !path.starts_with("support/schemas")));
     let archives = files
         .iter()
         .filter(|path| {
@@ -1253,12 +1314,19 @@ fn independent_release_tree_requires_each_claim_layer() -> TestResult {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn root_materializer_test_drops_groups_gid_and_uid_before_publication() -> TestResult {
+fn privileged_materializer_test_drops_identity_and_rejects_foreign_parent() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
 
     let current_uid = Command::new("id").arg("-u").output()?;
-    if current_uid.stdout != b"0\n" {
-        return Ok(());
+    let running_as_root = current_uid.stdout == b"0\n";
+    if !running_as_root {
+        assert!(
+            Command::new("sudo")
+                .args(["-n", "true"])
+                .status()?
+                .success(),
+            "public privilege-drop regression requires passwordless sudo"
+        );
     }
     let user_identity = Command::new("id").args(["-u", "nobody"]).output()?;
     let group_identity = Command::new("id").args(["-g", "nobody"]).output()?;
@@ -1277,19 +1345,29 @@ fn root_materializer_test_drops_groups_gid_and_uid_before_publication() -> TestR
     let executable = root.join("materializer-under-test");
     fs::copy(source, &executable)?;
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
-    let ownership = format!("{uid}:{gid}");
-    assert!(
+    let foreign_parent = root.join("foreign-parent");
+    fs::create_dir(&foreign_parent)?;
+    fs::set_permissions(&foreign_parent, fs::Permissions::from_mode(0o777))?;
+    let mut chown = if running_as_root {
         Command::new("chown")
-            .args([ownership.as_str()])
-            .arg(&root)
-            .status()?
-            .success(),
-        "root privilege-drop test must transfer the output directory"
+    } else {
+        let mut command = Command::new("sudo");
+        command.arg("-n").arg("chown");
+        command
+    };
+    assert!(
+        chown.arg("0:0").arg(&foreign_parent).status()?.success(),
+        "privilege-drop test must create a foreign-owned parent"
     );
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
-    let publication = root.join(source_inventory_address());
-
-    let status = Command::new("setpriv")
+    let publication = foreign_parent.join(source_inventory_address());
+    let mut materialize = if running_as_root {
+        Command::new("setpriv")
+    } else {
+        let mut command = Command::new("sudo");
+        command.arg("-n").arg("setpriv");
+        command
+    };
+    let output = materialize
         .current_dir(&root)
         .args(["--clear-groups", "--regid", gid, "--reuid", uid, "--"])
         .arg(&executable)
@@ -1298,19 +1376,23 @@ fn root_materializer_test_drops_groups_gid_and_uid_before_publication() -> TestR
             "PIGLOROS_CONFORMANCE_SIGNING_KEY",
             "0707070707070707070707070707070707070707070707070707070707070707",
         )
-        .status()?;
+        .output()?;
     assert!(
-        status.success(),
-        "unprivileged materialization must succeed"
+        !output.status.success(),
+        "foreign-owned publication parent must be denied"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("untrusted output directory"),
+        "public CLI must expose the typed untrusted-parent denial"
+    );
+    assert!(
+        !publication.exists(),
+        "denial must not publish a final tree"
     );
     assert_eq!(
-        release_files(&publication)?
-            .iter()
-            .filter(|path| path
-                .extension()
-                .is_some_and(|extension| extension == "cfb1"))
-            .count(),
-        14
+        fs::read_dir(&foreign_parent)?.count(),
+        0,
+        "denial must not leave staging residue"
     );
     Ok(())
 }
@@ -1677,7 +1759,7 @@ fn materialize_requires_draft_profile_and_complete_expected_binding() -> TestRes
 fn materialize_rejects_each_missing_provider_support_member() -> TestResult {
     let paths = [
         FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
-        "support/schemas/6.schema.json",
+        "providers/example/schemas/6.schema.json",
         "support/LICENSE",
         "support/NOTICE",
         "support/sbom.json",
@@ -1729,8 +1811,8 @@ fn remove_archive_member_and_descriptor(archive: &mut [Value], path: &str) -> Te
 #[test]
 fn independent_verifier_rejects_provider_packages_with_missing_support_members() -> TestResult {
     for path in [
-        "support/schemas/0.schema.json",
-        "support/schemas/6.schema.json",
+        "providers/example/schemas/0.schema.json",
+        "providers/example/schemas/6.schema.json",
         "support/LICENSE",
         "support/NOTICE",
         "support/sbom.json",
@@ -1812,7 +1894,7 @@ fn materialize_rejects_unknown_provider_and_family_schema_mismatch() -> TestResu
 
     let mut wrong_schema = current_bundle_inputs(BundleModeV1::Local)?;
     wrong_schema.profile.fixtures[0].schema = artifact(
-        "support/schemas/1.schema.json",
+        "providers/example/schemas/1.schema.json",
         "application/schema+json",
         CURRENT_SCHEMA_BYTES[1],
     )?;
@@ -2540,7 +2622,7 @@ fn raw_profile_type_paths() -> Vec<Vec<usize>> {
     paths.extend((0..2).map(|field| vec![9, 0, 18, field]));
     paths.extend((0..7).map(|field| vec![9, 0, 21, field]));
     paths.extend((0..5).map(|field| vec![11, field]));
-    paths.extend((0..10).map(|field| vec![11, 4, field]));
+    paths.extend((0..18).map(|field| vec![11, 4, field]));
     paths.extend((0..5).map(|field| vec![12, field]));
     paths
 }
@@ -2684,7 +2766,7 @@ fn set_raw_downgrade_fixture(profile: &mut [Value]) -> TestResult {
         fixture,
         8,
         Value::Array(vec![
-            Value::Text("support/schemas/5.schema.json".to_owned()),
+            Value::Text("providers/example/schemas/5.schema.json".to_owned()),
             Value::Text("application/schema+json".to_owned()),
             Value::Integer(u64::try_from(schema_bytes.len())?.into()),
             Value::Bytes(blake3::hash(schema_bytes).as_bytes().to_vec()),
@@ -2724,6 +2806,68 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
         Ok(())
     })?;
     assert_archive_rejected_by_both(&missing_family, "missing required fixture family");
+
+    let complete_second_coordinate = mutate_profile_archive(|profile| {
+        array_field(profile, 7, "profile executions")?.push(Value::Bytes(vec![2; 32]));
+        let originals = array_field(profile, 9, "fixtures")?.clone();
+        let mut expanded = Vec::with_capacity(originals.len() * 2);
+        for original in originals {
+            let mut additional = original.clone();
+            let Value::Array(fields) = &mut additional else {
+                return Err("fixture must be an array".into());
+            };
+            fields[6] = Value::Bytes(vec![2; 32]);
+            fields[7] = Value::Array(vec![Value::Integer(1_u64.into())]);
+            expanded.push(original);
+            expanded.push(additional);
+        }
+        *array_field(profile, 9, "fixtures")? = expanded;
+        Ok(())
+    })?;
+    verify_archive_independently(&complete_second_coordinate)?;
+    ConformanceBundleV1::from_canonical_cbor(&complete_second_coordinate)?;
+
+    let incomplete_second_coordinate = mutate_profile_archive(|profile| {
+        array_field(profile, 7, "profile executions")?.push(Value::Bytes(vec![2; 32]));
+        let originals = array_field(profile, 9, "fixtures")?.clone();
+        let mut expanded = Vec::with_capacity(originals.len() * 2 - 1);
+        for (index, original) in originals.into_iter().enumerate() {
+            let mut additional = original.clone();
+            let Value::Array(fields) = &mut additional else {
+                return Err("fixture must be an array".into());
+            };
+            fields[6] = Value::Bytes(vec![2; 32]);
+            fields[7] = Value::Array(vec![Value::Integer(1_u64.into())]);
+            expanded.push(original);
+            if index != 6 {
+                expanded.push(additional);
+            }
+        }
+        *array_field(profile, 9, "fixtures")? = expanded;
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(
+        &incomplete_second_coordinate,
+        "incomplete provider execution mode coordinate",
+    );
+
+    let duplicate_coordinate_family = mutate_profile_archive(|profile| {
+        let fixtures = array_field(profile, 9, "fixtures")?;
+        let mut duplicate = fixtures.first().ok_or("fixture is absent")?.clone();
+        let Value::Array(fields) = &mut duplicate else {
+            return Err("fixture must be an array".into());
+        };
+        let Value::Text(case_id) = &mut fields[0] else {
+            return Err("fixture case ID must be text".into());
+        };
+        case_id.push_str("-duplicate");
+        fixtures.insert(1, duplicate);
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(
+        &duplicate_coordinate_family,
+        "duplicate family in one provider execution mode coordinate",
+    );
 
     let unknown_provider = mutate_profile_archive(|profile| {
         replace_value(
@@ -2808,6 +2952,158 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
         replace_value(profile, 10, Value::Array(Vec::new()), "allowed divergences")
     })?;
     assert_archive_rejected_by_both(&unallowed_divergence, "unallowed fixture divergence");
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_enforces_every_deterministic_budget_ceiling() -> TestResult {
+    let ceilings = [
+        1024 * 1024 * 1024_u64,
+        1_000_000_000,
+        1_000_000,
+        1_000_000,
+        64 * 1024 * 1024,
+        1024 * 1024 * 1024,
+        1_000_000_000,
+        86_400_000_000_000,
+    ];
+    for (field, ceiling) in ceilings.into_iter().enumerate() {
+        let archive = mutate_profile_archive(|profile| {
+            replace_value(
+                array_field(
+                    array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                    16,
+                    "deterministic budget",
+                )?,
+                field,
+                Value::Integer(ceiling.saturating_add(1).into()),
+                "deterministic budget field",
+            )
+        })?;
+        assert_archive_rejected_by_both(&archive, &format!("deterministic budget ceiling {field}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn both_verifiers_bind_each_selected_deterministic_budget_ceiling() -> TestResult {
+    for field in 0..8 {
+        let exact = mutate_profile_archive(|profile| {
+            let selected = {
+                let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+                let budget = array_field(fixture, 16, "deterministic budget")?;
+                budget
+                    .get(field)
+                    .cloned()
+                    .ok_or_else(|| format!("deterministic budget field {field} is absent"))?
+            };
+            let protocol = array_field(profile, 11, "evaluator protocol")?;
+            let hard_caps = array_field(protocol, 4, "evaluator hard caps")?;
+            replace_value(
+                hard_caps,
+                10 + field,
+                selected,
+                "selected deterministic ceiling",
+            )
+        })?;
+        verify_archive_independently(&exact)?;
+        ConformanceBundleV1::from_canonical_cbor(&exact)?;
+
+        let insufficient = mutate_profile_archive(|profile| {
+            let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+            let budget = array_field(fixture, 16, "deterministic budget")?;
+            let Value::Integer(selected) = budget
+                .get(field)
+                .ok_or_else(|| format!("deterministic budget field {field} is absent"))?
+            else {
+                return Err("deterministic budget field is not an integer".into());
+            };
+            let below = u64::try_from(*selected)?.saturating_sub(1);
+            let protocol = array_field(profile, 11, "evaluator protocol")?;
+            let hard_caps = array_field(protocol, 4, "evaluator hard caps")?;
+            replace_value(
+                hard_caps,
+                10 + field,
+                Value::Integer(below.into()),
+                "selected deterministic ceiling",
+            )
+        })?;
+        assert_archive_rejected_by_both(
+            &insufficient,
+            &format!("selected deterministic ceiling {field}"),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_hard_cap_digest_matches_the_independent_golden_vector() {
+    let caps = EvaluatorHardCapsV1 {
+        max_profile_bytes: 16 * 1024 * 1024,
+        max_cases: 65_536,
+        max_bundle_members: 65_536,
+        max_member_path_bytes: 256,
+        max_member_bytes: 64 * 1024 * 1024,
+        max_total_bundle_bytes: 1024 * 1024 * 1024,
+        max_compression_expansion: 100,
+        max_structural_nesting: 32,
+        max_coordinate_bytes: 128,
+        max_diagnostic_bytes: 1024 * 1024,
+        max_deterministic_memory_bytes: 1024 * 1024 * 1024,
+        max_deterministic_cpu_fuel: 1_000_000_000,
+        max_deterministic_host_calls: 1_000_000,
+        max_deterministic_event_count: 1_000_000,
+        max_deterministic_output_bytes: 64 * 1024 * 1024,
+        max_deterministic_storage_bytes: 1024 * 1024 * 1024,
+        max_deterministic_execution_steps: 1_000_000_000,
+        max_deterministic_simulation_time_ns: 86_400_000_000_000,
+    };
+    assert_eq!(
+        caps.digest(),
+        [
+            0xcb, 0xbd, 0x07, 0x01, 0x33, 0x23, 0x49, 0x2c, 0xb7, 0x48, 0xe9, 0xf7, 0x4b, 0x95,
+            0x6c, 0x58, 0xc0, 0x3b, 0x3f, 0x01, 0x61, 0xe1, 0x76, 0xb4, 0x63, 0xdd, 0x62, 0xa2,
+            0xdd, 0x7f, 0xa5, 0x09,
+        ]
+    );
+}
+
+#[test]
+fn both_verifiers_reject_the_replaced_ten_field_hard_cap_shape() -> TestResult {
+    let archive = mutate_profile_archive(|profile| {
+        let protocol = array_field(profile, 11, "evaluator protocol")?;
+        let hard_caps = array_field(protocol, 4, "evaluator hard caps")?;
+        hard_caps.truncate(10);
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&archive, "ten-field evaluator hard caps");
+    Ok(())
+}
+
+#[test]
+fn both_verifiers_reject_stale_profile_identity_for_each_selected_ceiling() -> TestResult {
+    for field in 0..8 {
+        let archive = mutate_profile_archive_after_profile_digest(|profile| {
+            let protocol = array_field(profile, 11, "evaluator protocol")?;
+            let hard_caps = array_field(protocol, 4, "evaluator hard caps")?;
+            let Value::Integer(selected) = hard_caps
+                .get(10 + field)
+                .ok_or_else(|| format!("selected ceiling {field} is absent"))?
+            else {
+                return Err("selected deterministic ceiling is not an integer".into());
+            };
+            replace_value(
+                hard_caps,
+                10 + field,
+                Value::Integer(u64::try_from(*selected)?.saturating_sub(1).into()),
+                "selected deterministic ceiling",
+            )
+        })?;
+        assert_archive_rejected_by_both(
+            &archive,
+            &format!("stale profile identity after selected ceiling {field}"),
+        );
+    }
     Ok(())
 }
 
@@ -2959,7 +3255,7 @@ fn independent_verifier_rejects_each_current_provider_registry_mutation() -> Tes
 
 #[test]
 fn independent_verifier_rejects_each_current_provider_package_mutation() -> TestResult {
-    for mutation in 0..21 {
+    for mutation in 0..22 {
         let archive = mutate_provider_package_archive(mutation)?;
         assert_archive_rejected_by_both(&archive, &format!("provider package mutation {mutation}"));
     }
@@ -3345,12 +3641,14 @@ fn independent_verifier_preflights_resource_bounds_before_decoding() {
 #[test]
 fn independent_verifier_rejects_noncanonical_or_incomplete_archives() {
     let malformed = [0x84, 0x80, 0x80, 0x40, 0x40];
-    assert!(matches!(
-        verify_archive_independently(&malformed),
-        Err(BundleContractErrorV1::ArchiveEncodingInvalid
-            | BundleContractErrorV1::LifecycleInvalid
-            | BundleContractErrorV1::MemberMissing)
-    ));
+    let error = verify_archive_independently(&malformed)
+        .expect_err("noncanonical archive must be rejected");
+    assert!([
+        BundleContractErrorV1::ArchiveEncodingInvalid,
+        BundleContractErrorV1::LifecycleInvalid,
+        BundleContractErrorV1::MemberMissing,
+    ]
+    .contains(&error));
 }
 
 #[test]

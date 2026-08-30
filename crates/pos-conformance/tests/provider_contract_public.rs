@@ -563,7 +563,7 @@ fn package_requires_the_exact_family_schema_set_and_order() -> TestResult {
 }
 
 #[test]
-fn every_support_descriptor_is_validated_and_support_paths_are_unique() -> TestResult {
+fn every_package_artifact_path_is_validated_and_unique() -> TestResult {
     for index in 0..5 {
         let mut invalid = package()?;
         support_descriptor_mut(&mut invalid, index)
@@ -579,6 +579,19 @@ fn every_support_descriptor_is_validated_and_support_paths_are_unique() -> TestR
     duplicate.notices_descriptor.member_path = duplicate.licence_descriptor.member_path.clone();
     assert_eq!(
         duplicate.validate(),
+        Err(ProviderContractErrorV1::NonCanonicalOrder)
+    );
+
+    let mut schema_support_collision = package()?;
+    schema_support_collision.licence_descriptor.member_path = schema_support_collision
+        .family_schemas
+        .first()
+        .ok_or("provider package must contain a family schema")?
+        .schema_descriptor
+        .member_path
+        .clone();
+    assert_eq!(
+        schema_support_collision.validate(),
         Err(ProviderContractErrorV1::NonCanonicalOrder)
     );
     Ok(())
@@ -1049,10 +1062,12 @@ fn public_decoders_enforce_raw_cbor_size_depth_and_collection_caps() {
         vec![0x9a, 0, 0, 0x10, 0x01],
         vec![0x9a, 0, 1, 0, 1],
     ] {
-        assert!(matches!(
-            FixtureProviderPackageV1::from_canonical_cbor(&malformed),
-            Err(ProviderContractErrorV1::InvalidEncoding
-                | ProviderContractErrorV1::FieldOutOfBounds)
-        ));
+        let error = FixtureProviderPackageV1::from_canonical_cbor(&malformed)
+            .expect_err("malformed provider package must be rejected");
+        assert!([
+            ProviderContractErrorV1::InvalidEncoding,
+            ProviderContractErrorV1::FieldOutOfBounds,
+        ]
+        .contains(&error));
     }
 }

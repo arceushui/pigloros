@@ -64,9 +64,10 @@ adding a workflow job does not change GitHub branch-protection rules. The
 mutation workflow has its own `diff mutation testing` fan-in check, which must
 also remain required for changes that run that workflow.
 
-The support directory contains the normative specification, schema, licence,
-notice, SBOM, provenance, and limitations members that every immutable bundle
-manifest must declare.
+Each directory below `providers/` contains the seven public schemas owned by
+that exact fixture provider. The `support/` directory contains the shared
+normative specification, CPF1 CDDL, licence, notice, SBOM, provenance, and
+limitations members that every immutable bundle manifest must declare.
 
 The Draft `matrix/execution-matrix.json` records all twelve accepted
 non-interference rows and their 192 required Local/Air-Gapped/Replay/Fork

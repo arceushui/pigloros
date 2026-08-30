@@ -12,7 +12,7 @@ command -v jq >/dev/null || {
   exit 1
 }
 
-if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/support" ]]; then
+if [[ ! -d "${fixture_root}/inputs" || ! -d "${fixture_root}/expected" || ! -d "${fixture_root}/providers" || ! -d "${fixture_root}/support" ]]; then
   echo "missing conformance fixture directories under ${fixture_root}" >&2
   exit 1
 fi
@@ -147,7 +147,7 @@ for layer in "${profile_layers[@]}"; do
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
       (.fixtures | length == 7) and
       all(.fixtures[]; .claim_layer == $layer) and
-      all(.fixtures[]; (.schema | startswith("support/schemas/")) and (.schema | endswith(".schema.json"))) and
+      all(.fixtures[]; .schema == ("providers/" + $layer + "/schemas/" + .family + ".schema.json")) and
       [.fixtures[].family] == [
         "positive", "denied", "malformed", "resource-exhaustion",
         "deletion-redaction", "downgrade", "independent-evaluation"
@@ -317,7 +317,7 @@ mapfile -t blake3_paths < <(
 )
 mapfile -t expected_blake3_paths < <(
   cd "${fixture_root}" &&
-    find expected-authority expected inputs matrix profiles support \
+    find expected-authority expected inputs matrix profiles providers support \
       -type f -printf '%p\n' | sort
 )
 if ! diff -u \
@@ -342,6 +342,7 @@ publishable_roots=(
   "${fixture_root}/profiles"
   "${fixture_root}/matrix"
   "${fixture_root}/expected-authority"
+  "${fixture_root}/providers"
   "${fixture_root}/support"
 )
 if [[ -d "${fixture_root}/published" ]]; then
@@ -423,6 +424,11 @@ if (( ${#profiles[@]} != 7 )); then
 fi
 
 mapfile -t support < <(find "${fixture_root}/support" -type f -print | sort)
+mapfile -t provider_schemas < <(find "${fixture_root}/providers" -type f -print | sort)
+if (( ${#provider_schemas[@]} != 49 )); then
+  echo "expected exactly 49 provider-owned family schemas" >&2
+  exit 1
+fi
 expected_support=(
   "${fixture_root}/support/LICENSE"
   "${fixture_root}/support/NOTICE"
@@ -431,24 +437,17 @@ expected_support=(
   "${fixture_root}/support/provenance.json"
   "${fixture_root}/support/sbom.json"
   "${fixture_root}/support/schema-cpf1-v1.cddl"
-  "${fixture_root}/support/schemas/deletion-redaction.schema.json"
-  "${fixture_root}/support/schemas/denied.schema.json"
-  "${fixture_root}/support/schemas/downgrade.schema.json"
-  "${fixture_root}/support/schemas/independent-evaluation.schema.json"
-  "${fixture_root}/support/schemas/malformed.schema.json"
-  "${fixture_root}/support/schemas/positive.schema.json"
-  "${fixture_root}/support/schemas/resource-exhaustion.schema.json"
 )
 if [[ "${support[*]}" != "${expected_support[*]}" ]]; then
   echo "public support artifact inventory does not match the current CPF1 contract" >&2
   exit 1
 fi
 
-for path in "${inputs[@]}" "${expected[@]}" "${profiles[@]}" "${support[@]}"; do
+for path in "${inputs[@]}" "${expected[@]}" "${profiles[@]}" "${provider_schemas[@]}" "${support[@]}"; do
   [[ -s "${path}" ]] || {
     echo "empty conformance fixture: ${path}" >&2
     exit 1
   }
 done
 
-echo "verified ${#profiles[@]} public profiles, ${#inputs[@]} public inputs, ${#expected[@]} expected-result records, and ${#support[@]} support artifacts"
+echo "verified ${#profiles[@]} public profiles, ${#inputs[@]} public inputs, ${#expected[@]} expected-result records, ${#provider_schemas[@]} provider schemas, and ${#support[@]} support artifacts"

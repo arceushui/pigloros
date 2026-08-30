@@ -18,7 +18,7 @@ command -v b3sum >/dev/null || {
   exit 1
 }
 
-[[ -d "${profile_root}" && -d "${fixture_root}/inputs" && -d "${fixture_root}/expected" ]] || {
+[[ -d "${profile_root}" && -d "${fixture_root}/providers" && -d "${fixture_root}/inputs" && -d "${fixture_root}/expected" ]] || {
   echo "missing conformance fixture directories under ${fixture_root}" >&2
   exit 1
 }
@@ -37,8 +37,9 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
     echo "fixture paths must remain under inputs/ and expected/: ${case_id}" >&2
     exit 1
   }
-  [[ "${schema_path}" == support/schemas/*.schema.json && "${schema_path}" != *".."* ]] || {
-    echo "fixture schema path must remain under support/schemas/: ${case_id}" >&2
+  expected_schema_prefix="providers/${claim_layer}/schemas/"
+  [[ "${schema_path}" == "${expected_schema_prefix}${family}.schema.json" && "${schema_path}" != *".."* ]] || {
+    echo "fixture schema path must remain provider-owned: ${case_id}" >&2
     exit 1
   }
   [[ "${input_path}" != *".."* && "${expected_path}" != *".."* ]] || {
@@ -210,13 +211,13 @@ generated_sha256="${generated_root}/SHA256SUMS"
 generated_blake3="${generated_root}/BLAKE3SUMS"
 (
   cd "${fixture_root}"
-  find expected-authority expected inputs matrix profiles support -type f -print0 |
+  find expected-authority expected inputs matrix profiles providers support -type f -print0 |
     sort -z |
     xargs -0 b3sum
 ) > "${generated_blake3}"
 (
   cd "${fixture_root}"
-  { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix profiles support -type f -print0; } |
+  { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix profiles providers support -type f -print0; } |
     sort -z |
     xargs -0 sha256sum
 ) > "${generated_sha256}"
@@ -224,7 +225,7 @@ if [[ "${mode}" == "--write" ]]; then
   install -m 0644 -- "${generated_blake3}" "${fixture_root}/BLAKE3SUMS"
   (
     cd "${fixture_root}"
-    { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix profiles support -type f -print0; } |
+    { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix profiles providers support -type f -print0; } |
       sort -z |
       xargs -0 sha256sum
   ) > "${generated_sha256}"

@@ -16,7 +16,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-positive",
       "family": "positive",
-      "schema": "support/schemas/positive.schema.json",
+      "schema": "providers/replay-conformance/schemas/positive.schema.json",
       "input": "inputs/replay-conformance/positive.json",
       "expected": "expected/replay-conformance/positive.json"
     },
@@ -24,7 +24,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-denied",
       "family": "denied",
-      "schema": "support/schemas/denied.schema.json",
+      "schema": "providers/replay-conformance/schemas/denied.schema.json",
       "input": "inputs/replay-conformance/denied.json",
       "expected": "expected/replay-conformance/denied.json"
     },
@@ -32,7 +32,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-malformed",
       "family": "malformed",
-      "schema": "support/schemas/malformed.schema.json",
+      "schema": "providers/replay-conformance/schemas/malformed.schema.json",
       "input": "inputs/replay-conformance/malformed.json",
       "expected": "expected/replay-conformance/malformed.json"
     },
@@ -40,7 +40,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-resource-exhaustion",
       "family": "resource-exhaustion",
-      "schema": "support/schemas/resource-exhaustion.schema.json",
+      "schema": "providers/replay-conformance/schemas/resource-exhaustion.schema.json",
       "input": "inputs/replay-conformance/resource-exhaustion.json",
       "expected": "expected/replay-conformance/resource-exhaustion.json"
     },
@@ -48,7 +48,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-deletion-redaction",
       "family": "deletion-redaction",
-      "schema": "support/schemas/deletion-redaction.schema.json",
+      "schema": "providers/replay-conformance/schemas/deletion-redaction.schema.json",
       "input": "inputs/replay-conformance/deletion-redaction.json",
       "expected": "expected/replay-conformance/deletion-redaction.json"
     },
@@ -56,7 +56,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-downgrade",
       "family": "downgrade",
-      "schema": "support/schemas/downgrade.schema.json",
+      "schema": "providers/replay-conformance/schemas/downgrade.schema.json",
       "input": "inputs/replay-conformance/downgrade.json",
       "expected": "expected/replay-conformance/downgrade.json"
     },
@@ -64,7 +64,7 @@
       "claim_layer": "replay-conformance",
       "case_id": "replay-conformance-independent-evaluation",
       "family": "independent-evaluation",
-      "schema": "support/schemas/independent-evaluation.schema.json",
+      "schema": "providers/replay-conformance/schemas/independent-evaluation.schema.json",
       "input": "inputs/replay-conformance/independent-evaluation.json",
       "expected": "expected/replay-conformance/independent-evaluation.json"
     }

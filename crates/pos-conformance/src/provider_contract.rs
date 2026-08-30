@@ -6,6 +6,7 @@
 //! public subject adapters selected by a fixture.
 
 use ciborium::value::Value;
+use std::collections::BTreeSet;
 use std::io::Cursor;
 use thiserror::Error;
 
@@ -436,25 +437,31 @@ fn validate_package_fields(
         .and_then(|()| validate_descriptor(&package.sbom_descriptor))
         .and_then(|()| validate_descriptor(&package.source_provenance_descriptor))
         .and_then(|()| validate_descriptor(&package.limitations_descriptor))
-        .and_then(|()| {
-            let paths = [
-                &package.licence_descriptor.member_path,
-                &package.notices_descriptor.member_path,
-                &package.sbom_descriptor.member_path,
-                &package.source_provenance_descriptor.member_path,
-                &package.limitations_descriptor.member_path,
-            ];
-            if paths.windows(2).any(|pair| pair[0] == pair[1])
-                || paths
-                    .iter()
-                    .enumerate()
-                    .any(|(index, path)| paths[..index].contains(path))
-            {
-                Err(ProviderContractErrorV1::NonCanonicalOrder)
-            } else {
-                Ok(())
-            }
-        })
+        .and_then(|()| validate_package_paths(package))
+}
+
+fn validate_package_paths(
+    package: &FixtureProviderPackageV1,
+) -> Result<(), ProviderContractErrorV1> {
+    let support = [
+        &package.licence_descriptor,
+        &package.notices_descriptor,
+        &package.sbom_descriptor,
+        &package.source_provenance_descriptor,
+        &package.limitations_descriptor,
+    ];
+    let mut paths = BTreeSet::new();
+    let unique = package
+        .family_schemas
+        .iter()
+        .map(|schema| &schema.schema_descriptor)
+        .chain(support)
+        .all(|descriptor| paths.insert(descriptor.member_path.as_str()));
+    if unique {
+        Ok(())
+    } else {
+        Err(ProviderContractErrorV1::NonCanonicalOrder)
+    }
 }
 
 fn validate_provider_entry(entry: &FixtureProviderEntryV1) -> Result<(), ProviderContractErrorV1> {
@@ -504,88 +511,24 @@ fn validate_descriptor(descriptor: &ArtifactDescriptorV1) -> Result<(), Provider
 }
 
 fn provider_identifier(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= MAX_IDENTIFIER_BYTES
-        && value.is_ascii()
-        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes.iter().skip(1).all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(*byte, b'.' | b'_' | b'/' | b'-')
-        })
+    crate::wire_syntax::identifier(value, MAX_IDENTIFIER_BYTES)
 }
 
 fn semantic_version(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_CONTRACT_VERSION_BYTES || !value.is_ascii() {
-        return false;
-    }
-    let (core_and_pre, build) = match value.split_once('+') {
-        Some((core, suffix)) if !suffix.is_empty() && !suffix.contains('+') => (core, suffix),
-        Some(_) => return false,
-        None => (value, ""),
-    };
-    let (core, pre) = match core_and_pre.split_once('-') {
-        Some((core, suffix)) if !suffix.is_empty() => (core, suffix),
-        Some(_) => return false,
-        None => (core_and_pre, ""),
-    };
-    let core_valid = core.split('.').count() == 3 && core.split('.').all(numeric_semver_identifier);
-    core_valid && semver_identifiers(pre, true) && semver_identifiers(build, false)
-}
-
-fn numeric_semver_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && (value == "0" || !value.starts_with('0'))
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn semver_identifiers(value: &str, numeric_zero_forbidden: bool) -> bool {
-    value.is_empty()
-        || value.split('.').all(|identifier| {
-            !identifier.is_empty()
-                && identifier
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                && (!numeric_zero_forbidden
-                    || !identifier.bytes().all(|byte| byte.is_ascii_digit())
-                    || numeric_semver_identifier(identifier))
-        })
+    crate::wire_syntax::semantic_version(value, MAX_CONTRACT_VERSION_BYTES, None)
 }
 
 fn member_path(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_MEMBER_PATH_BYTES
-        && !value.starts_with('/')
-        && !value.contains('\\')
-        && !value.contains('\0')
-        && value.split('/').count() <= MAX_MEMBER_PATH_COMPONENTS
-        && value.split('/').all(|component| {
-            !component.is_empty()
-                && component != "."
-                && component != ".."
-                && component.len() <= MAX_MEMBER_PATH_COMPONENT_BYTES
-        })
+    crate::wire_syntax::member_path(
+        value,
+        MAX_MEMBER_PATH_BYTES,
+        MAX_MEMBER_PATH_COMPONENTS,
+        MAX_MEMBER_PATH_COMPONENT_BYTES,
+    )
 }
 
 fn media_type(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let has_one_separator = value
-        .split_once('/')
-        .is_some_and(|(top, sub)| !top.is_empty() && !sub.is_empty() && !sub.contains('/'));
-    value.len() >= 3
-        && value.len() <= MAX_MEDIA_TYPE_BYTES
-        && value.is_ascii()
-        && bytes.iter().all(|byte| !byte.is_ascii_uppercase())
-        && has_one_separator
-        && bytes.iter().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(
-                    *byte,
-                    b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-' | b'/'
-                )
-        })
+    crate::wire_syntax::media_type(value, MAX_MEDIA_TYPE_BYTES)
 }
 
 fn digest_fields(domain: &[u8], fields: &Value) -> Result<[u8; 32], ProviderContractErrorV1> {
@@ -856,71 +799,20 @@ fn decode_bounded(bytes: &[u8]) -> Result<Value, ProviderContractErrorV1> {
 }
 
 fn preflight_cbor(bytes: &[u8]) -> Result<(), ProviderContractErrorV1> {
-    fn read_length(
-        bytes: &[u8],
-        index: &mut usize,
-        additional: u8,
-    ) -> Result<u64, ProviderContractErrorV1> {
-        let width = match additional {
-            value @ 0..=23 => return Ok(u64::from(value)),
-            24 => 1,
-            25 => 2,
-            26 => 4,
-            27 => 8,
-            _ => return Err(ProviderContractErrorV1::InvalidEncoding),
-        };
-        let end = index.saturating_add(width);
-        let encoded = bytes
-            .get(*index..end)
-            .ok_or(ProviderContractErrorV1::InvalidEncoding)?;
-        *index = end;
-        let mut value = [0_u8; 8];
-        value[8 - width..].copy_from_slice(encoded);
-        Ok(u64::from_be_bytes(value))
-    }
-
-    fn item(bytes: &[u8], index: &mut usize, depth: u8) -> Result<(), ProviderContractErrorV1> {
-        if depth > MAX_STRUCTURAL_NESTING {
-            return Err(ProviderContractErrorV1::FieldOutOfBounds);
+    crate::wire_syntax::preflight_array_cbor(
+        bytes,
+        MAX_STRUCTURAL_NESTING,
+        MAX_PROVIDER_ENTRIES_CBOR,
+        false,
+    )
+    .map_err(|error| match error {
+        crate::wire_syntax::CborPreflightError::InvalidEncoding => {
+            ProviderContractErrorV1::InvalidEncoding
         }
-        let initial = *bytes
-            .get(*index)
-            .ok_or(ProviderContractErrorV1::InvalidEncoding)?;
-        *index = index.saturating_add(1);
-        let length = read_length(bytes, index, initial & 0x1f)?;
-        match initial >> 5 {
-            0 | 1 => Ok(()),
-            2 | 3 => {
-                let count = usize::try_from(length).unwrap_or(usize::MAX);
-                let end = index
-                    .checked_add(count)
-                    .ok_or(ProviderContractErrorV1::FieldOutOfBounds)?;
-                bytes
-                    .get(*index..end)
-                    .ok_or(ProviderContractErrorV1::InvalidEncoding)?;
-                *index = end;
-                Ok(())
-            }
-            4 => {
-                if length > MAX_PROVIDER_ENTRIES_CBOR {
-                    return Err(ProviderContractErrorV1::FieldOutOfBounds);
-                }
-                for _ in 0..length {
-                    item(bytes, index, depth.saturating_add(1))?;
-                }
-                Ok(())
-            }
-            _ => Err(ProviderContractErrorV1::InvalidEncoding),
+        crate::wire_syntax::CborPreflightError::FieldOutOfBounds => {
+            ProviderContractErrorV1::FieldOutOfBounds
         }
-    }
-
-    let mut index = 0;
-    item(bytes, &mut index, 0)?;
-    if index == bytes.len() {
-        Ok(())
-    } else {
-        Err(ProviderContractErrorV1::InvalidEncoding)
-    }
+    })
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], ProviderContractErrorV1> {
