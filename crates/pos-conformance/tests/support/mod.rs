@@ -534,17 +534,15 @@ fn rebuild_archive_descriptors(archive: &mut [Value]) -> TestResult {
     let descriptors = array_field(archive, ArchiveField::Members.index(), "archive members")?
         .iter()
         .map(|member| {
-            let fields = match member {
-                Value::Array(fields) => fields,
-                _ => return Err("archive member is not an array".into()),
+            let Value::Array(fields) = member else {
+                return Err("archive member is not an array".into());
             };
             let path = fields
                 .get(MemberField::Path.index())
                 .ok_or("archive member path is absent")?
                 .clone();
-            let bytes = match fields.get(MemberField::Bytes.index()) {
-                Some(Value::Bytes(bytes)) => bytes,
-                _ => return Err("archive member bytes are absent".into()),
+            let Some(Value::Bytes(bytes)) = fields.get(MemberField::Bytes.index()) else {
+                return Err("archive member bytes are absent".into());
             };
             let role = fields
                 .get(MemberField::Role.index())

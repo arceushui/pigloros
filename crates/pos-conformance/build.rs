@@ -60,7 +60,7 @@ impl SourceSnapshots {
 
 struct FixturePaths {
     case_id: String,
-    family: CatalogFixtureFamily,
+    family_variant: String,
     schema_path: String,
     contract: CatalogFixtureContract,
     strict_oracle: CatalogStrictOracle,
@@ -82,7 +82,8 @@ struct ProfilePaths {
     wire_code: u64,
     profile: String,
     profile_id: String,
-    claim_layer: CatalogClaimLayer,
+    claim_layer: String,
+    claim_layer_variant: String,
     subject_adapter: CatalogSubjectAdapter,
     profile_record: Vec<u8>,
     fixture_providers: Vec<ProfileFixtureProvider>,
@@ -94,102 +95,9 @@ struct ProfileFixtureProvider {
     fixtures: Vec<FixturePaths>,
 }
 
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum CatalogFixtureFamily {
-    Positive,
-    Denied,
-    Malformed,
-    ResourceExhaustion,
-    DeletionRedaction,
-    Downgrade,
-    IndependentEvaluation,
-}
-
-impl CatalogFixtureFamily {
-    const ALL: [Self; FIXTURES_PER_PROFILE] = [
-        Self::Positive,
-        Self::Denied,
-        Self::Malformed,
-        Self::ResourceExhaustion,
-        Self::DeletionRedaction,
-        Self::Downgrade,
-        Self::IndependentEvaluation,
-    ];
-
-    const fn catalog_name(self) -> &'static str {
-        match self {
-            Self::Positive => "positive",
-            Self::Denied => "denied",
-            Self::Malformed => "malformed",
-            Self::ResourceExhaustion => "resource-exhaustion",
-            Self::DeletionRedaction => "deletion-redaction",
-            Self::Downgrade => "downgrade",
-            Self::IndependentEvaluation => "independent-evaluation",
-        }
-    }
-
-    const fn rust_variant(self) -> &'static str {
-        match self {
-            Self::Positive => "FixtureFamilyV1::Positive",
-            Self::Denied => "FixtureFamilyV1::Denied",
-            Self::Malformed => "FixtureFamilyV1::Malformed",
-            Self::ResourceExhaustion => "FixtureFamilyV1::ResourceExhaustion",
-            Self::DeletionRedaction => "FixtureFamilyV1::DeletionRedaction",
-            Self::Downgrade => "FixtureFamilyV1::Downgrade",
-            Self::IndependentEvaluation => "FixtureFamilyV1::IndependentEvaluation",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum CatalogClaimLayer {
-    ArtifactIntegrity,
-    ReplayConformance,
-    KnowledgeNonInterference,
-    GatewayClientConformance,
-    PluginConformance,
-    MetricConformance,
-    EmpiricalEvaluation,
-}
-
-impl CatalogClaimLayer {
-    fn from_catalog_name(name: &str) -> Result<Self, io::Error> {
-        match name {
-            "artifact-integrity" => Ok(Self::ArtifactIntegrity),
-            "replay-conformance" => Ok(Self::ReplayConformance),
-            "knowledge-non-interference" => Ok(Self::KnowledgeNonInterference),
-            "gateway-client-conformance" => Ok(Self::GatewayClientConformance),
-            "plugin-conformance" => Ok(Self::PluginConformance),
-            "metric-conformance" => Ok(Self::MetricConformance),
-            "empirical-evaluation" => Ok(Self::EmpiricalEvaluation),
-            _ => Err(invalid_data("profile catalog claim_layer is invalid")),
-        }
-    }
-
-    const fn wire_code(self) -> u64 {
-        match self {
-            Self::ArtifactIntegrity => 0,
-            Self::ReplayConformance => 1,
-            Self::KnowledgeNonInterference => 2,
-            Self::GatewayClientConformance => 3,
-            Self::PluginConformance => 4,
-            Self::MetricConformance => 5,
-            Self::EmpiricalEvaluation => 6,
-        }
-    }
-
-    const fn rust_variant(self) -> &'static str {
-        match self {
-            Self::ArtifactIntegrity => "ClaimLayerV1::ArtifactIntegrity",
-            Self::ReplayConformance => "ClaimLayerV1::ReplayConformance",
-            Self::KnowledgeNonInterference => "ClaimLayerV1::KnowledgeNonInterference",
-            Self::GatewayClientConformance => "ClaimLayerV1::GatewayClientConformance",
-            Self::PluginConformance => "ClaimLayerV1::PluginConformance",
-            Self::MetricConformance => "ClaimLayerV1::MetricConformance",
-            Self::EmpiricalEvaluation => "ClaimLayerV1::EmpiricalEvaluation",
-        }
-    }
+struct FixtureFamilyCatalog {
+    canonical_order: Vec<String>,
+    declarations: BTreeMap<String, FixtureFamilyDeclaration>,
 }
 
 #[derive(Clone, Copy)]
@@ -281,7 +189,7 @@ struct FixtureFamilyContract {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FixtureFamilyDeclaration {
-    name: CatalogFixtureFamily,
+    name: String,
     operation: String,
     oracle: FixtureFamilyOracle,
     failure_outcome: CatalogVerificationOutcome,
@@ -355,7 +263,7 @@ enum FixtureFamilyOracle {
 struct EvidenceStatusRecord {
     case_id: String,
     claim_layer: String,
-    family: CatalogFixtureFamily,
+    family: String,
     input_blake3_digest: String,
     status: String,
     execution_result: serde_json::Value,
@@ -452,6 +360,38 @@ impl DraftReproducibilityClass {
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn rust_enum_variant(
+    enum_name: &str,
+    catalog_name: &str,
+    description: &str,
+) -> Result<String, io::Error> {
+    let mut variant = String::new();
+    for segment in catalog_name.split('-') {
+        let Some(first) = segment.chars().next() else {
+            return Err(invalid_data(format!(
+                "{description} must be lowercase kebab-case: {catalog_name}"
+            )));
+        };
+        if !first.is_ascii_lowercase()
+            || !segment
+                .chars()
+                .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+        {
+            return Err(invalid_data(format!(
+                "{description} must be lowercase kebab-case: {catalog_name}"
+            )));
+        }
+        variant.push(first.to_ascii_uppercase());
+        variant.extend(segment.chars().skip(1));
+    }
+    if variant.is_empty() {
+        return Err(invalid_data(format!(
+            "{description} must be lowercase kebab-case: {catalog_name}"
+        )));
+    }
+    Ok(format!("{enum_name}::{variant}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -936,10 +876,7 @@ fn validate_evidence_status(
     claim_layer: &str,
 ) -> Result<(), io::Error> {
     let case_id = json_text(fixture, "case_id")?;
-    let family: CatalogFixtureFamily =
-        serde_json::from_value(json_field(fixture, "family")?.clone()).map_err(|error| {
-            invalid_data(format!("fixture {case_id} family is invalid: {error}"))
-        })?;
+    let family = json_text(fixture, "family")?;
     if json_text(fixture, "claim_layer")? != claim_layer {
         return Err(invalid_data(format!(
             "fixture {case_id} claim layer does not match its profile"
@@ -968,9 +905,7 @@ fn validate_evidence_status(
     }
 }
 
-fn fixture_family_contract(
-    snapshots: &SourceSnapshots,
-) -> Result<BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>, io::Error> {
+fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyCatalog, io::Error> {
     let bytes = snapshots.bytes(
         "support/fixture-family-contract.json",
         "fixture-family contract",
@@ -982,21 +917,26 @@ fn fixture_family_contract(
             "fixture-family contract version is unsupported",
         ));
     }
-    let families = contract
-        .families
-        .into_iter()
-        .map(|family| (family.name, family))
-        .collect::<BTreeMap<_, _>>();
-    if families.len() == FIXTURES_PER_PROFILE
-        && CatalogFixtureFamily::ALL
-            .iter()
-            .all(|family| families.contains_key(family))
-    {
-        Ok(families)
-    } else {
+    if contract.families.len() != FIXTURES_PER_PROFILE {
         Err(invalid_data(
-            "fixture-family contract inventory is incomplete",
+            "fixture-family contract must declare exactly seven families",
         ))
+    } else {
+        let mut canonical_order = Vec::with_capacity(FIXTURES_PER_PROFILE);
+        let mut declarations = BTreeMap::new();
+        for family in contract.families {
+            let family_name = family.name.clone();
+            if declarations.insert(family_name.clone(), family).is_some() {
+                return Err(invalid_data(
+                    "fixture-family contract contains duplicate family names",
+                ));
+            }
+            canonical_order.push(family_name);
+        }
+        Ok(FixtureFamilyCatalog {
+            canonical_order,
+            declarations,
+        })
     }
 }
 
@@ -1020,22 +960,13 @@ fn strict_oracle(
     })
 }
 
-fn fixture_contract(
-    provider: &Value,
-    family: CatalogFixtureFamily,
-) -> Result<CatalogFixtureContract, io::Error> {
+fn fixture_contract(provider: &Value, family: &str) -> Result<CatalogFixtureContract, io::Error> {
     let contract = json_field(provider, "fixture_contracts")?
-        .get(family.catalog_name())
-        .ok_or_else(|| {
-            invalid_data(format!(
-                "provider omits contract for {}",
-                family.catalog_name()
-            ))
-        })?;
+        .get(family)
+        .ok_or_else(|| invalid_data(format!("provider omits contract for {family}")))?;
     serde_json::from_value(contract.clone()).map_err(|error| {
         invalid_data(format!(
-            "provider contract for {} is invalid: {error}",
-            family.catalog_name()
+            "provider contract for {family} is invalid: {error}"
         ))
     })
 }
@@ -1082,55 +1013,49 @@ fn profile_fixtures(
     provider_value: &Value,
     provider: &FixtureProvider,
     provider_schemas: &serde_json::Map<String, Value>,
-    family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
+    family_contract: &FixtureFamilyCatalog,
     claim_layer: &str,
 ) -> Result<Vec<FixturePaths>, io::Error> {
     fixtures
         .iter()
-        .zip(CatalogFixtureFamily::ALL)
+        .zip(&family_contract.canonical_order)
         .map(|(fixture, expected_family)| {
             let case_id = json_text(fixture, "case_id")?;
-            let family: CatalogFixtureFamily =
-                serde_json::from_value(json_field(fixture, "family")?.clone()).map_err(
-                    |error| invalid_data(format!("fixture {case_id} family is invalid: {error}")),
-                )?;
-            if family != expected_family {
+            let family = json_text(fixture, "family")?;
+            if family != expected_family.as_str() {
                 return Err(invalid_data(format!(
                     "profile fixture {case_id} is not in canonical family order"
                 )));
             }
+            let family_variant =
+                rust_enum_variant("FixtureFamilyV1", &family, "profile fixture family")?;
             let schema_path = json_text(fixture, "schema")?;
             let schema = relative_asset(snapshots, fixture, "schema")?;
             let expected_schema = provider_schemas
-                .get(family.catalog_name())
+                .get(&family)
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    invalid_data(format!(
-                        "provider manifest is missing schema {}",
-                        family.catalog_name()
-                    ))
+                    invalid_data(format!("provider manifest is missing schema {}", family))
                 })?;
             if schema.relative != expected_schema {
                 return Err(invalid_data(format!(
                     "profile fixture schema does not match family {}",
-                    family.catalog_name()
+                    family
                 )));
             }
             let input = relative_asset(snapshots, fixture, "input")?;
             let expected = relative_asset(snapshots, fixture, "expected")?;
             let oracle = relative_asset(snapshots, fixture, "oracle")?;
             validate_evidence_status(fixture, &input.bytes, &expected.bytes, claim_layer)?;
-            let family_declaration = family_contract.get(&family).ok_or_else(|| {
-                invalid_data(format!(
-                    "fixture-family contract omits {}",
-                    family.catalog_name()
-                ))
-            })?;
+            let family_declaration = family_contract
+                .declarations
+                .get(&family)
+                .ok_or_else(|| invalid_data(format!("fixture-family contract omits {}", family)))?;
             Ok(FixturePaths {
                 case_id,
-                family,
+                family_variant,
                 schema_path,
-                contract: fixture_contract(provider_value, family)?,
+                contract: fixture_contract(provider_value, &family)?,
                 strict_oracle: strict_oracle(family_declaration, provider)?,
                 failure_outcome: family_declaration.failure_outcome,
                 replay_claim: family_declaration.replay_claim,
@@ -1146,7 +1071,7 @@ fn profile_fixtures(
 
 struct ProfileFixtureContext<'a> {
     snapshots: &'a SourceSnapshots,
-    family_contract: &'a BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
+    family_contract: &'a FixtureFamilyCatalog,
     profile: &'a str,
     claim_layer: &'a str,
     subject_adapter: &'a str,
@@ -1231,7 +1156,7 @@ fn profile_fixture_provider(
 
 fn profile_fixture_providers(
     snapshots: &SourceSnapshots,
-    family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
+    family_contract: &FixtureFamilyCatalog,
     profile: &str,
     claim_layer: &str,
     subject_adapter: &str,
@@ -1299,14 +1224,15 @@ fn profile_fixture_providers(
 
 fn profile_paths(
     snapshots: &SourceSnapshots,
-    family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
+    family_contract: &FixtureFamilyCatalog,
     profile: String,
 ) -> Result<ProfilePaths, Box<dyn Error>> {
     let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
     let profile_value: Value = serde_json::from_slice(&profile_record)?;
     let profile_id = json_text(&profile_value, "profile_id")?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
-    let catalog_claim_layer = CatalogClaimLayer::from_catalog_name(&claim_layer)?;
+    let claim_layer_variant =
+        rust_enum_variant("ClaimLayerV1", &claim_layer, "profile claim layer")?;
     let subject_adapter = json_text(&profile_value, "subject_adapter")?;
     let catalog_subject_adapter = CatalogSubjectAdapter::from_catalog_name(&subject_adapter)?;
     let fixture_root = json_text(&profile_value, "fixture_root")?;
@@ -1336,13 +1262,6 @@ fn profile_paths(
         ))
         .into());
     }
-    let expected_wire_code = catalog_claim_layer.wire_code();
-    if wire_code != expected_wire_code {
-        return Err(invalid_data(format!(
-            "profile manifest {profile} wire_code must be {expected_wire_code}, found {wire_code}"
-        ))
-        .into());
-    }
     let expected_bundle_modes = serde_json::json!(["local", "air-gapped"]);
     if bundle_modes != &expected_bundle_modes {
         return Err(invalid_data(format!(
@@ -1362,7 +1281,8 @@ fn profile_paths(
         wire_code,
         profile,
         profile_id,
-        claim_layer: catalog_claim_layer,
+        claim_layer,
+        claim_layer_variant,
         subject_adapter: catalog_subject_adapter,
         profile_record,
         fixture_providers,
@@ -1417,13 +1337,28 @@ fn discover_profiles(
         .collect::<Result<Vec<_>, _>>()?;
     profiles.sort_unstable_by_key(|profile| profile.wire_code);
     if profiles
-        .windows(2)
-        .any(|pair| pair[0].wire_code >= pair[1].wire_code)
+        .iter()
+        .enumerate()
+        .any(|(index, profile)| profile.wire_code != index as u64)
     {
         return Err(invalid_data(
-            "profile catalog wire codes must be unique and strictly increasing",
+            "profile catalog wire codes must cover the canonical range zero through six",
         )
         .into());
+    }
+    let claim_layers = profiles
+        .iter()
+        .map(|profile| profile.claim_layer.as_str())
+        .collect::<BTreeSet<_>>();
+    if claim_layers.len() != profiles.len() {
+        return Err(invalid_data("profile catalog claim layers must be unique").into());
+    }
+    let profile_ids = profiles
+        .iter()
+        .map(|profile| profile.profile_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if profile_ids.len() != profiles.len() {
+        return Err(invalid_data("profile catalog profile IDs must be unique").into());
     }
     Ok(profiles)
 }
@@ -1568,7 +1503,7 @@ fn emit_fixture(
     writeln!(
         generated,
         "                        family: {},",
-        fixture.family.rust_variant()
+        fixture.family_variant
     )?;
     writeln!(
         generated,
@@ -1629,7 +1564,7 @@ fn emit_profile(
     writeln!(
         generated,
         "                claim_layer: {},",
-        profile.claim_layer.rust_variant()
+        profile.claim_layer_variant
     )?;
     writeln!(
         generated,
