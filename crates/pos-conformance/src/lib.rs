@@ -1907,6 +1907,12 @@ pub mod strict_codec {
         encode_value_to_writer(value, &mut bytes).map(|()| bytes)
     }
 
+    pub(crate) fn encode_value_infallible(value: &Value) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)
+            .map_or_else(|_| std::process::abort(), |()| bytes)
+    }
+
     fn encode_value_to_writer<W: std::io::Write>(
         value: &Value,
         writer: W,

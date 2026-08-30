@@ -45,14 +45,34 @@ const AUTHORITY_INVENTORY_BYTES_V1: &[u8] =
 const DRAFT_AUTHORITY_DECLARATION_BYTES_V1: &[u8] =
     include_bytes!("../../../fixtures/conformance/support/draft-execution-authority.json");
 
+#[derive(serde::Deserialize)]
+struct DraftAuthorityContract {
+    trust_policy_id: String,
+    trust_policy_epoch: u64,
+    effective_timeline_position: u64,
+    offline_valid_through: String,
+    fixture_authority_key_id: String,
+    fixture_authority_public_key_hex: String,
+    execution_profiles: Vec<DraftExecutionProfileContract>,
+}
+
+#[derive(serde::Deserialize)]
+struct DraftExecutionProfileContract {
+    profile_id: String,
+    semantic_version: String,
+    network_allowed: bool,
+    capability_ids: Vec<String>,
+    reproducibility_classes: Vec<String>,
+}
+
+fn draft_authority_contract() -> Result<DraftAuthorityContract, BundleContractErrorV1> {
+    serde_json::from_slice(DRAFT_AUTHORITY_DECLARATION_BYTES_V1)
+        .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+}
+
 fn draft_authority_public_key() -> Result<[u8; 32], BundleContractErrorV1> {
-    let declaration: serde_json::Value =
-        serde_json::from_slice(DRAFT_AUTHORITY_DECLARATION_BYTES_V1)
-            .map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    let hex = declaration
-        .get("fixture_authority_public_key_hex")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    let declaration = draft_authority_contract()?;
+    let hex = declaration.fixture_authority_public_key_hex;
     if hex.len() != 64 {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
