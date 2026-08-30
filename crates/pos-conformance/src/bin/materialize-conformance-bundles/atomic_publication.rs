@@ -257,9 +257,8 @@ fn configure_private_staging(
 ) -> Result<(CString, OwnedFd, DirectoryIdentity), MaterializationError> {
     configure_staging_descriptor(parent, staging_name, parent_identity, effective_uid)
         .map(|(staging, identity)| (staging_name.clone(), staging, identity))
-        .map_err(|error| {
+        .inspect_err(|_| {
             let _cleanup_result = unlink_empty_directory(parent, staging_name);
-            error
         })
 }
 
