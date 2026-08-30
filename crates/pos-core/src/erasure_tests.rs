@@ -438,7 +438,7 @@ pub(super) fn acknowledgement(
         owner: reference(owner + 40),
         command_identity: destruction_command_reference(reference(1), target),
     })
-    .map_or(reference(0), |obligation| obligation.reference());
+    .map_or_else(|_| reference(0), |obligation| obligation.reference());
     ErasureAcknowledgementV1 {
         obligation,
         target,
