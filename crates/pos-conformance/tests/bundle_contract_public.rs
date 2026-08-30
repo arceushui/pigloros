@@ -3273,6 +3273,73 @@ fn independent_verifier_reaches_deep_raw_relationship_rejections() -> TestResult
 }
 
 #[test]
+fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestResult {
+    let reordered = mutate_archive(|archive| {
+        array_field(archive, 1, "archive members")?.swap(0, 1);
+        array_field(
+            array_field(archive, 0, "manifest")?,
+            4,
+            "member descriptors",
+        )?
+        .swap(0, 1);
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&reordered, "paired noncanonical member order");
+
+    let missing_registry = mutate_archive(|archive| {
+        array_field(archive, 1, "archive members")?.retain(|member| {
+            !matches!(member, Value::Array(fields) if fields.first() == Some(&Value::Text(FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1.to_owned())))
+        });
+        array_field(
+            array_field(archive, 0, "manifest")?,
+            4,
+            "member descriptors",
+        )?
+        .retain(|descriptor| {
+            !matches!(descriptor, Value::Array(fields) if fields.first() == Some(&Value::Text(FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1.to_owned())))
+        });
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&missing_registry, "missing provider registry member");
+
+    let wrong_registry_shape = mutate_archive(|archive| {
+        let registry_bytes = encode_value(&Value::Array(vec![Value::Null; 3]))?;
+        replace_archive_member_bytes(
+            archive,
+            FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+            &registry_bytes,
+        )?;
+        refresh_profile_registry_binding(archive, &registry_bytes)
+    })?;
+    assert_archive_rejected_by_both(&wrong_registry_shape, "wrong provider registry shape");
+
+    let undeclared_package = mutate_archive(|archive| {
+        let path = "zz/undeclared-provider.fpp1";
+        let bytes = encode_value(&Value::Array(Vec::new()))?;
+        let digest = blake3::hash(&bytes).as_bytes().to_vec();
+        array_field(archive, 1, "archive members")?.push(Value::Array(vec![
+            Value::Text(path.to_owned()),
+            Value::Bytes(bytes.clone()),
+            Value::Integer(13_u64.into()),
+        ]));
+        array_field(
+            array_field(archive, 0, "manifest")?,
+            4,
+            "member descriptors",
+        )?
+        .push(Value::Array(vec![
+            Value::Text(path.to_owned()),
+            Value::Integer(u64::try_from(bytes.len())?.into()),
+            Value::Bytes(digest),
+            Value::Integer(13_u64.into()),
+        ]));
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&undeclared_package, "undeclared provider package");
+    Ok(())
+}
+
+#[test]
 fn independent_verifier_enforces_every_deterministic_budget_ceiling() -> TestResult {
     let ceilings = [
         1024 * 1024 * 1024_u64,

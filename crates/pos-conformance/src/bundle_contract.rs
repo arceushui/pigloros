@@ -1411,15 +1411,17 @@ fn raw_cpf1_value(profile_fields: &[Value]) -> Result<RawCpf1Summary, BundleCont
     let (registry, required_providers) = raw_provider_binding(&profile_fields[8])?;
     let deterministic_caps = raw_protocol(&profile_fields[11])?;
     let mut fixture_collection = raw_fixtures(&profile_fields[9], &deterministic_caps)?;
+    let claim_layer = fixture_collection.fixtures[0].claim_layer;
     fixture_collection
         .declared_paths
         .insert(registry.path.clone());
     let allowed = raw_allowed_divergences(&profile_fields[10])?;
-    let claim_layer = raw_profile_fixture_relationships(
+    raw_profile_fixture_relationships(
         &required_providers,
         &executions,
         &fixture_collection.fixtures,
         &allowed,
+        claim_layer,
     )?;
     raw_independence(&profile_fields[12])?;
     raw_nullable_digest(&profile_fields[16])?;
@@ -1456,7 +1458,8 @@ fn raw_profile_fixture_relationships(
     executions: &BTreeSet<[u8; 32]>,
     fixtures: &[RawFixtureSummary],
     allowed: &BTreeSet<RawDivergence>,
-) -> Result<u64, BundleContractErrorV1> {
+    claim_layer: u64,
+) -> Result<(), BundleContractErrorV1> {
     raw_fixture_inventory(required, executions, fixtures)?;
     fixtures.iter().try_for_each(|fixture| {
         if !required.contains(&fixture.provider) || !executions.contains(&fixture.execution) {
@@ -1466,15 +1469,11 @@ fn raw_profile_fixture_relationships(
             .and_then(|()| raw_fixture_claim_relationship(fixture))
             .and_then(|()| raw_fixture_downgrade_relationship(fixture))
     })?;
-    let claim_layer = fixtures
-        .first()
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?
-        .claim_layer;
     if fixtures
         .iter()
         .all(|fixture| fixture.claim_layer == claim_layer)
     {
-        Ok(claim_layer)
+        Ok(())
     } else {
         Err(BundleContractErrorV1::ProfileInvalid)
     }
@@ -1485,7 +1484,7 @@ fn raw_fixture_inventory(
     executions: &BTreeSet<[u8; 32]>,
     fixtures: &[RawFixtureSummary],
 ) -> Result<(), BundleContractErrorV1> {
-    let mut inventory = BTreeMap::<(RawProviderKey, [u8; 32], u64), BTreeSet<u64>>::new();
+    let mut inventory = BTreeMap::<(RawProviderKey, [u8; 32], u64), BTreeSet<usize>>::new();
     let mut required_modes = BTreeMap::<[u8; 32], BTreeSet<u64>>::new();
     for fixture in fixtures {
         for mode in &fixture.modes {
@@ -1503,7 +1502,7 @@ fn raw_fixture_inventory(
             }
         }
     }
-    let required_families = (0_u64..=6).collect::<BTreeSet<_>>();
+    let required_families = (0_usize..=6).collect::<BTreeSet<_>>();
     for provider in required {
         for execution in executions {
             let Some(modes) = required_modes.get(execution) else {
@@ -1709,7 +1708,7 @@ struct RawFixtureCollection {
 struct RawFixtureSummary {
     case_id: String,
     claim_layer: u64,
-    family: u64,
+    family: usize,
     provider: RawProviderKey,
     adapter: u64,
     execution: [u8; 32],
@@ -1733,26 +1732,36 @@ fn raw_fixture(
     value: &Value,
     deterministic_caps: &[u64; 8],
 ) -> Result<RawFixtureSummary, BundleContractErrorV1> {
-    let fields = array(value, 24)?;
-    let case_id = text(&fields[0])?;
-    let claim_layer = uint(&fields[2])?;
-    let family = uint(&fields[3])?;
+    let Ok(fields) = array(value, 24) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (Ok(case_id), Ok(claim_layer), Ok(family), Ok(adapter), Ok(execution)) = (
+        text(&fields[0]),
+        uint(&fields[2]),
+        uint(&fields[3]),
+        uint(&fields[5]),
+        digest::<32>(&fields[6]),
+    ) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
     let provider = raw_provider_key(&fields[4])?;
-    let adapter = uint(&fields[5])?;
-    let execution = digest::<32>(&fields[6])?;
     let mode_values = array_values(&fields[7])?;
-    let modes = mode_values
-        .iter()
-        .map(uint)
-        .collect::<Result<Vec<_>, _>>()?;
+    let modes = raw_ordered_modes(mode_values)?;
     let network_allowed = raw_capabilities(&fields[18])?;
+    let family = match family {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        5 => 5,
+        6 => 6,
+        _ => return Err(BundleContractErrorV1::ProfileInvalid),
+    };
     if !raw_identifier(case_id, 128)
         || claim_layer > 6
-        || family > 6
         || adapter > 2
         || !matches!(&fields[1], Value::Bool(_))
-        || modes.is_empty()
-        || !raw_uints_ordered(mode_values)?
         || network_allowed && (adapter == 2 || modes.contains(&1))
     {
         return Err(BundleContractErrorV1::ProfileInvalid);
@@ -1761,14 +1770,10 @@ fn raw_fixture(
     raw_watchdog(&fields[17])?;
     let schema = raw_artifact(&fields[8])?;
     let payload = raw_artifact(&fields[9])?;
-    let auxiliary_values = array_values(&fields[10])?;
-    if auxiliary_values.len() > 64 || !raw_descriptor_paths_ordered(auxiliary_values)? {
+    let auxiliary = raw_ordered_artifacts(array_values(&fields[10])?)?;
+    if auxiliary.len() > 64 {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
-    let auxiliary = auxiliary_values
-        .iter()
-        .map(raw_artifact)
-        .collect::<Result<Vec<_>, _>>()?;
     let oracle = raw_oracle(&fields[11])?;
     let mut artifact_paths = [&schema, &payload]
         .into_iter()
@@ -2090,12 +2095,7 @@ fn raw_fixture_schema_binding(
     fixture: &RawFixtureSummary,
     provider: &RawProviderSummary,
 ) -> Result<(), BundleContractErrorV1> {
-    let family =
-        usize::try_from(fixture.family).map_err(|_| BundleContractErrorV1::ProfileInvalid)?;
-    let schema = provider
-        .schemas
-        .get(family)
-        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    let schema = &provider.schemas[fixture.family];
     if schema.path == fixture.schema.path
         && schema.size == fixture.schema.size
         && schema.digest == fixture.schema.digest
@@ -2331,6 +2331,7 @@ struct RawExpectedResult {
     key: (String, u64),
     bytes: Vec<u8>,
     path: String,
+    order_key: RawExpectedOrderKey,
 }
 
 fn raw_expected_results(
@@ -2340,31 +2341,34 @@ fn raw_expected_results(
     mode: u64,
 ) -> Result<RawExpectedResults, BundleContractErrorV1> {
     array_values(value).and_then(|expected| {
-        raw_expected_ordered(expected).and_then(|ordered| {
-            if !ordered {
+        let mut results = BTreeMap::new();
+        let mut member_paths = BTreeSet::new();
+        let mut previous = None;
+        for record in expected {
+            let result = raw_expected_result(record, profile, members, mode)?;
+            if previous
+                .as_ref()
+                .is_some_and(|old| old >= &result.order_key)
+            {
                 return Err(BundleContractErrorV1::NonCanonicalOrder);
             }
-            let mut results = BTreeMap::new();
-            let mut member_paths = BTreeSet::new();
-            for record in expected {
-                let result = raw_expected_result(record, profile, members, mode)?;
-                results.insert(result.key, result.bytes);
-                member_paths.insert(result.path);
-            }
-            let selected = profile
-                .fixtures
-                .iter()
-                .filter(|fixture| fixture.modes.contains(&mode))
-                .count();
-            if expected.len() == selected && results.len() == expected.len() {
-                Ok(RawExpectedResults {
-                    results,
-                    member_paths,
-                })
-            } else {
-                Err(BundleContractErrorV1::ExpectedResultMismatch)
-            }
-        })
+            previous = Some(result.order_key);
+            results.insert(result.key, result.bytes);
+            member_paths.insert(result.path);
+        }
+        let selected = profile
+            .fixtures
+            .iter()
+            .filter(|fixture| fixture.modes.contains(&mode))
+            .count();
+        if expected.len() == selected && results.len() == expected.len() {
+            Ok(RawExpectedResults {
+                results,
+                member_paths,
+            })
+        } else {
+            Err(BundleContractErrorV1::ExpectedResultMismatch)
+        }
     })
 }
 
@@ -2374,15 +2378,30 @@ fn raw_expected_result(
     members: &[RawArchiveMember<'_>],
     mode: u64,
 ) -> Result<RawExpectedResult, BundleContractErrorV1> {
-    let fields = array(value, 6)?;
-    let case_id = text(&fields[0])?;
-    let claim_layer = uint(&fields[1])?;
-    let execution = digest::<32>(&fields[2])?;
-    if uint(&fields[3])? != mode {
+    let Ok(fields) = array(value, 6) else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    let (
+        Ok(case_id),
+        Ok(claim_layer),
+        Ok(execution),
+        Ok(record_mode),
+        Ok(path),
+        Ok(recorded_digest),
+    ) = (
+        text(&fields[0]),
+        uint(&fields[1]),
+        digest::<32>(&fields[2]),
+        uint(&fields[3]),
+        text(&fields[4]),
+        digest::<32>(&fields[5]),
+    )
+    else {
+        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
+    };
+    if record_mode != mode {
         return Err(BundleContractErrorV1::ExpectedResultMismatch);
     }
-    let path = text(&fields[4])?;
-    let recorded_digest = digest::<32>(&fields[5])?;
     let member = raw_member(members, path, 1)?;
     let member_bytes = member.bytes;
     if *blake3::hash(member_bytes).as_bytes() != recorded_digest
@@ -2398,10 +2417,20 @@ fn raw_expected_result(
     {
         Err(BundleContractErrorV1::ExpectedResultMismatch)
     } else {
+        let case_id = case_id.to_owned();
+        let path = path.to_owned();
         Ok(RawExpectedResult {
-            key: (case_id.to_owned(), claim_layer),
+            key: (case_id.clone(), claim_layer),
             bytes: member_bytes.to_vec(),
-            path: path.to_owned(),
+            path: path.clone(),
+            order_key: (
+                case_id,
+                claim_layer,
+                execution,
+                record_mode,
+                path,
+                recorded_digest,
+            ),
         })
     }
 }
@@ -2441,19 +2470,19 @@ fn raw_expected_artifact_bound(
     artifact.path == path && artifact.digest == digest && artifact.size == size
 }
 
-fn raw_descriptor_paths_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
-    raw_paths_ordered(values, 4)
-}
-fn raw_paths_ordered(values: &[Value], width: usize) -> Result<bool, BundleContractErrorV1> {
-    let mut previous = "";
+fn raw_ordered_artifacts(values: &[Value]) -> Result<Vec<RawArtifact>, BundleContractErrorV1> {
+    let mut artifacts = Vec::with_capacity(values.len());
     for value in values {
-        let current = text(&array(value, width)?[0])?;
-        if !previous.is_empty() && previous >= current {
-            return Ok(false);
+        let artifact = raw_artifact(value)?;
+        if artifacts
+            .last()
+            .is_some_and(|previous: &RawArtifact| previous.path.as_str() >= artifact.path.as_str())
+        {
+            return Err(BundleContractErrorV1::ProfileInvalid);
         }
-        previous = current;
+        artifacts.push(artifact);
     }
-    Ok(true)
+    Ok(artifacts)
 }
 fn raw_digests_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
     let mut previous = None;
@@ -2466,17 +2495,20 @@ fn raw_digests_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> 
     }
     Ok(true)
 }
-fn raw_uints_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
-    values
-        .iter()
-        .try_fold((None, true), |(previous, ordered), value| {
-            uint(value).map(|current| {
-                let next_ordered =
-                    ordered && current <= 3 && previous.is_none_or(|old| old < current);
-                (Some(current), next_ordered)
-            })
-        })
-        .map(|(_, ordered)| ordered)
+fn raw_ordered_modes(values: &[Value]) -> Result<Vec<u64>, BundleContractErrorV1> {
+    let mut modes = Vec::with_capacity(values.len());
+    for value in values {
+        let mode = uint(value)?;
+        if mode > 3 || modes.last().is_some_and(|previous| previous >= &mode) {
+            return Err(BundleContractErrorV1::ProfileInvalid);
+        }
+        modes.push(mode);
+    }
+    if modes.is_empty() {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(modes)
+    }
 }
 fn raw_provider_keys_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
     values
@@ -2538,43 +2570,7 @@ fn raw_fixture_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> 
     }
     Ok(true)
 }
-fn raw_expected_ordered(values: &[Value]) -> Result<bool, BundleContractErrorV1> {
-    values
-        .iter()
-        .try_fold((None, true), |(previous, ordered), value| {
-            raw_expected_order_key(value).map(|current| {
-                let next_ordered = ordered && previous.as_ref().is_none_or(|old| old < &current);
-                (Some(current), next_ordered)
-            })
-        })
-        .map(|(_, ordered)| ordered)
-}
-
 type RawExpectedOrderKey = (String, u64, [u8; 32], u64, String, [u8; 32]);
-
-fn raw_expected_order_key(value: &Value) -> Result<RawExpectedOrderKey, BundleContractErrorV1> {
-    let Ok(fields) = array(value, 6) else {
-        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-    };
-    let (Ok(case_id), Ok(claim_layer), Ok(execution_profile), Ok(mode), Ok(path), Ok(digest)) = (
-        text(&fields[0]),
-        uint(&fields[1]),
-        digest::<32>(&fields[2]),
-        uint(&fields[3]),
-        text(&fields[4]),
-        digest::<32>(&fields[5]),
-    ) else {
-        return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
-    };
-    Ok((
-        case_id.to_owned(),
-        claim_layer,
-        execution_profile,
-        mode,
-        path.to_owned(),
-        digest,
-    ))
-}
 fn length_bound(value: &Value) -> Result<Vec<u8>, BundleContractErrorV1> {
     encode(value).map(|encoded| {
         let mut bound = u64::try_from(encoded.len())
