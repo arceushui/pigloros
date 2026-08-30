@@ -836,35 +836,6 @@ fn authority_members_reject_closed_contract_mutations() -> TestResult {
     Ok(())
 }
 
-fn signed_bundle_with_authority(
-    matrix_bytes: &[u8],
-    inventory_bytes: &[u8],
-) -> TestResult<Vec<u8>> {
-    let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
-    inputs.profile.execution_matrix_digest = *blake3::hash(matrix_bytes).as_bytes();
-    inputs.profile.profile_digest = inputs.profile.digest();
-    for member in &mut inputs.members {
-        let replacement = match member.role {
-            BundleMemberRoleV1::ExecutionMatrix => Some(matrix_bytes),
-            BundleMemberRoleV1::AuthorityInventory => Some(inventory_bytes),
-            _ => None,
-        };
-        if let Some(bytes) = replacement {
-            member.bytes = bytes.to_vec();
-            member.digest = *blake3::hash(bytes).as_bytes();
-        }
-    }
-    ConformanceBundleV1::materialize(
-        &inputs.profile,
-        BundleModeV1::Local,
-        inputs.members,
-        inputs.expected,
-    )?
-    .sign(&SigningKey::from_bytes(&[7; 32]))?
-    .to_canonical_cbor()
-    .map_err(Into::into)
-}
-
 fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
@@ -1003,6 +974,19 @@ fn array_field<'a>(
         Some(Value::Array(values)) => Ok(values),
         _ => Err(format!("{name} is not an array").into()),
     }
+}
+
+fn fixture_with_family(fields: &mut [Value], family: u64) -> TestResult<&mut Vec<Value>> {
+    fields
+        .iter_mut()
+        .find_map(|fixture| {
+            let Value::Array(fixture_fields) = fixture else {
+                return None;
+            };
+            matches!(fixture_fields.get(3), Some(Value::Integer(value)) if u64::try_from(*value) == Ok(family))
+                .then_some(fixture_fields)
+        })
+        .ok_or_else(|| format!("fixture family {family} is absent").into())
 }
 
 fn replace_value(fields: &mut [Value], index: usize, value: Value, name: &str) -> TestResult {
@@ -1224,6 +1208,38 @@ fn refresh_profile_registry_binding(archive: &mut [Value], registry_bytes: &[u8]
         array_field(archive, 0, "manifest")?,
         3,
         Value::Bytes(profile_digest),
+        "manifest profile digest",
+    )
+}
+
+fn refresh_profile_matrix_binding(archive: &mut [Value], matrix_bytes: &[u8]) -> TestResult {
+    let profile_bytes = match archive_member_fields(archive, "profile/CPF1.cbor")?.get(1) {
+        Some(Value::Bytes(bytes)) => bytes.clone(),
+        _ => return Err("profile member is not bytes".into()),
+    };
+    let mut profile: Value = ciborium::from_reader(profile_bytes.as_slice())?;
+    let Value::Array(profile_fields) = &mut profile else {
+        return Err("profile is not an array".into());
+    };
+    replace_value(
+        profile_fields,
+        4,
+        Value::Bytes(blake3::hash(matrix_bytes).as_bytes().to_vec()),
+        "execution matrix digest",
+    )?;
+    let profile_digest = contract_digest(b"PiglorOS.ConformanceProfile.v1", &profile_fields[..17])?;
+    replace_value(
+        profile_fields,
+        17,
+        Value::Bytes(profile_digest.to_vec()),
+        "profile digest",
+    )?;
+    let profile_bytes = encode_value(&profile)?;
+    replace_archive_member_bytes(archive, "profile/CPF1.cbor", &profile_bytes)?;
+    replace_value(
+        array_field(archive, 0, "manifest")?,
+        3,
+        Value::Bytes(profile_digest.to_vec()),
         "manifest profile digest",
     )
 }
@@ -3495,7 +3511,17 @@ fn independent_verifier_exercises_active_provider_transitions() -> TestResult {
 
     for endpoint in 0..2 {
         let invalid = mutate_profile_archive(|profile| {
-            replace_nested_profile_value(profile, &[9, 5, 22, endpoint], Value::Map(Vec::new()))
+            let transition = array_field(
+                fixture_with_family(array_field(profile, 9, "fixtures")?, 5)?,
+                22,
+                "provider transition",
+            )?;
+            replace_value(
+                transition,
+                endpoint,
+                Value::Map(Vec::new()),
+                "provider transition endpoint",
+            )
         })?;
         assert_archive_rejected_by_both(&invalid, "malformed provider transition");
     }
@@ -3581,7 +3607,7 @@ fn assert_independent_fixture_semantic_relationships() -> TestResult {
 
     let incomplete_downgrade = mutate_profile_archive(|profile| {
         replace_value(
-            array_field(array_field(profile, 9, "fixtures")?, 5, "downgrade fixture")?,
+            fixture_with_family(array_field(profile, 9, "fixtures")?, 5)?,
             22,
             Value::Null,
             "provider transition",
@@ -3738,7 +3764,7 @@ fn assert_deep_raw_archive_rejections() -> TestResult {
 
     let equal_transition_endpoints = mutate_profile_archive(|profile| {
         let transition = array_field(
-            array_field(array_field(profile, 9, "fixtures")?, 5, "downgrade fixture")?,
+            fixture_with_family(array_field(profile, 9, "fixtures")?, 5)?,
             22,
             "provider transition",
         )?;
@@ -3884,7 +3910,10 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
     let mut matrix: serde_json::Value = serde_json::from_slice(MATRIX_BYTES)?;
     matrix["case_count"] = serde_json::Value::from(191);
     let matrix_bytes = serde_json::to_vec_pretty(&matrix)?;
-    let invalid_matrix = signed_bundle_with_authority(&matrix_bytes, AUTHORITY_INVENTORY_BYTES)?;
+    let invalid_matrix = mutate_archive(|archive| {
+        replace_archive_member_bytes(archive, "authority/execution-matrix.json", &matrix_bytes)?;
+        refresh_profile_matrix_binding(archive, &matrix_bytes)
+    })?;
     assert_eq!(
         verify_archive_independently(&invalid_matrix),
         Err(BundleContractErrorV1::ProfileInvalid)
@@ -3894,7 +3923,13 @@ fn independent_verifier_rejects_archive_authority_structure_mutations() -> TestR
     inventory["entries"][0]["materialization_status"] =
         serde_json::Value::String("materialized".to_owned());
     let inventory_bytes = serde_json::to_vec_pretty(&inventory)?;
-    let invalid_inventory = signed_bundle_with_authority(MATRIX_BYTES, &inventory_bytes)?;
+    let invalid_inventory = mutate_archive(|archive| {
+        replace_archive_member_bytes(
+            archive,
+            "authority/expected-authority-inventory.json",
+            &inventory_bytes,
+        )
+    })?;
     assert_eq!(
         verify_archive_independently(&invalid_inventory),
         Err(BundleContractErrorV1::ProfileInvalid)
@@ -4127,12 +4162,12 @@ fn independent_verifier_matches_typed_fixture_caps_and_schema_binding() -> TestR
 
     let wrong_family_schema = mutate_profile_archive(|profile| {
         let fixtures = array_field(profile, 9, "fixtures")?;
-        let denied_schema = array_field(fixtures, 1, "denied fixture")?
+        let denied_schema = fixture_with_family(fixtures, 1)?
             .get(8)
             .ok_or("denied schema is absent")?
             .clone();
         replace_value(
-            array_field(fixtures, 0, "positive fixture")?,
+            fixture_with_family(fixtures, 0)?,
             8,
             denied_schema,
             "positive schema",
