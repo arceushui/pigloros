@@ -161,7 +161,7 @@ impl CatalogBundleMode {
 }
 
 impl CatalogFixtureFamily {
-    const ALL: [Self; REQUIRED_FIXTURE_FAMILIES] = [
+    const ALL: [Self; 7] = [
         Self::Positive,
         Self::Denied,
         Self::Malformed,
