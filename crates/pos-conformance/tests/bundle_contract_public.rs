@@ -3997,6 +3997,48 @@ fn independent_verifier_rejects_manifest_member_and_expected_mutations() -> Test
 }
 
 #[test]
+fn independent_verifier_rejects_invalid_raw_protocol_codes() -> TestResult {
+    for (field, code, name) in [
+        (3, 7_u64, "fixture family"),
+        (5, 3_u64, "subject adapter"),
+        (12, 6_u64, "verification outcome"),
+        (14, 5_u64, "replay claim"),
+        (15, 4_u64, "redaction state"),
+    ] {
+        let archive = mutate_profile_archive(|profile| {
+            let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+            replace_value(
+                fixture,
+                field,
+                Value::Integer(code.into()),
+                "raw fixture protocol code",
+            )
+        })?;
+        assert!(
+            verify_archive_independently(&archive).is_err(),
+            "accepted invalid raw {name} code"
+        );
+    }
+
+    let invalid_member_role = mutate_archive(|archive| {
+        replace_value(
+            archive_member_fields(archive, "profile/CPF1.cbor")?,
+            2,
+            Value::Integer(14_u64.into()),
+            "raw member role",
+        )?;
+        replace_value(
+            archive_descriptor_fields(archive, "profile/CPF1.cbor")?,
+            3,
+            Value::Integer(14_u64.into()),
+            "raw descriptor role",
+        )
+    })?;
+    assert!(verify_archive_independently(&invalid_member_role).is_err());
+    Ok(())
+}
+
+#[test]
 fn independent_verifier_rejects_valid_archive_with_wrong_release_filename() -> TestResult {
     let archive = signed_current_bundle(BundleModeV1::Local)?.to_canonical_cbor()?;
     assert_eq!(
