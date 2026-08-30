@@ -786,9 +786,30 @@ fn assert_public_contract<S: ErasurePersistencePortV1>(
     Ok(())
 }
 
+fn assert_missing_cas_record<S: ErasurePersistencePortV1>(
+    mut store: S,
+) -> Result<(), ErasureErrorV1> {
+    let record = submitted_record()?;
+    let request = record.request().reference();
+    assert_eq!(
+        store.compare_and_swap_scope_extension(request, reference(90), record.clone()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        store.compare_and_swap_administrative_resolution(request, None, record),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
 #[test]
 fn memory_erasure_persistence_exposes_the_public_contract() -> Result<(), ErasureErrorV1> {
     assert_public_contract(&mut MemoryStore::new())
+}
+
+#[test]
+fn memory_erasure_cas_rejects_a_missing_record() -> Result<(), ErasureErrorV1> {
+    assert_missing_cas_record(MemoryStore::new())
 }
 
 #[test]
@@ -993,6 +1014,13 @@ fn sqlite_erasure_persistence_matches_memory_contract() -> Result<(), ErasureErr
     let mut store =
         SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
     assert_public_contract(&mut store)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_erasure_cas_rejects_a_missing_record() -> Result<(), ErasureErrorV1> {
+    let store = SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    assert_missing_cas_record(store)
 }
 
 #[cfg(feature = "sqlite")]

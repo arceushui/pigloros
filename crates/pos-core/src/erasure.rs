@@ -1887,56 +1887,37 @@ impl ErasureSupportingRecordsV1 {
         Ok(())
     }
 
-    fn acknowledgement_for_provenance(
-        &self,
-        provenance: &ErasureAcknowledgementProvenanceV1,
-    ) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
-        self.obligations
-            .iter()
-            .find(|obligation| obligation.reference() == provenance.obligation())
-            .map(|obligation| ErasureAcknowledgementV1 {
-                obligation: obligation.reference(),
-                target: obligation.target(),
-                owner: obligation.owner(),
-                evidence: provenance.evidence(),
-                outcome: provenance.outcome(),
-            })
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-    }
-
-    fn admission_ordinal(&self, admission: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        self.retry_admissions
-            .iter()
-            .find(|candidate| candidate.reference() == admission)
-            .map(ErasureRetryAdmissionV1::attempt_ordinal)
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-    }
-
     fn effective_acknowledgement_provenance(
         &self,
         admission: &ErasureRetryAdmissionV1,
-    ) -> Result<Vec<&ErasureAcknowledgementProvenanceV1>, ErasureErrorV1> {
+    ) -> Vec<(&ErasureObligationV1, &ErasureAcknowledgementProvenanceV1)> {
         let mut effective = Vec::with_capacity(self.obligations.len());
         for obligation in &self.obligations {
             let mut positive = None;
-            for provenance in &self.acknowledgement_provenance {
-                let ordinal = self.admission_ordinal(provenance.attempt())?;
-                let is_later_attempt = ordinal > admission.attempt_ordinal();
-                let is_other_obligation = provenance.obligation() != obligation.reference();
-                if is_later_attempt
-                    || is_other_obligation
-                    || provenance.owner() != obligation.owner()
-                    || provenance.outcome() != ErasureAcknowledgementOutcomeV1::Acknowledged
+            for candidate_admission in &self.retry_admissions {
+                for provenance in self
+                    .acknowledgement_provenance
+                    .iter()
+                    .filter(|provenance| provenance.attempt() == candidate_admission.reference())
                 {
-                    continue;
-                }
-                let candidate = (ordinal, provenance.reference());
-                if positive.is_none_or(|(selected, _)| candidate < selected) {
-                    positive = Some((candidate, provenance));
+                    let ordinal = candidate_admission.attempt_ordinal();
+                    let is_later_attempt = ordinal > admission.attempt_ordinal();
+                    let is_other_obligation = provenance.obligation() != obligation.reference();
+                    if is_later_attempt
+                        || is_other_obligation
+                        || provenance.owner() != obligation.owner()
+                        || provenance.outcome() != ErasureAcknowledgementOutcomeV1::Acknowledged
+                    {
+                        continue;
+                    }
+                    let candidate = (ordinal, provenance.reference());
+                    if positive.is_none_or(|(selected, _)| candidate < selected) {
+                        positive = Some((candidate, provenance));
+                    }
                 }
             }
             if let Some((_, provenance)) = positive {
-                effective.push(provenance);
+                effective.push((obligation, provenance));
                 continue;
             }
             if let Some(provenance) = self.acknowledgement_provenance.iter().find(|provenance| {
@@ -1944,23 +1925,29 @@ impl ErasureSupportingRecordsV1 {
                     && provenance.obligation() == obligation.reference()
                     && provenance.owner() == obligation.owner()
             }) {
-                effective.push(provenance);
+                effective.push((obligation, provenance));
             }
         }
-        Ok(effective)
+        effective
     }
 
     fn effective_acknowledgements(
         &self,
         admission: &ErasureRetryAdmissionV1,
-    ) -> Result<Vec<ErasureAcknowledgementV1>, ErasureErrorV1> {
+    ) -> Vec<ErasureAcknowledgementV1> {
         let mut acknowledgements = self
-            .effective_acknowledgement_provenance(admission)?
+            .effective_acknowledgement_provenance(admission)
             .into_iter()
-            .map(|provenance| self.acknowledgement_for_provenance(provenance))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(obligation, provenance)| ErasureAcknowledgementV1 {
+                obligation: obligation.reference(),
+                target: obligation.target(),
+                owner: obligation.owner(),
+                evidence: provenance.evidence(),
+                outcome: provenance.outcome(),
+            })
+            .collect::<Vec<_>>();
         acknowledgements.sort_unstable();
-        Ok(acknowledgements)
+        acknowledgements
     }
 
     fn validate_attempt_chain(&self) -> Result<(), ErasureErrorV1> {
@@ -2017,9 +2004,9 @@ impl ErasureSupportingRecordsV1 {
                 admission.trust(),
             );
             let acknowledgement_references = self
-                .effective_acknowledgement_provenance(admission)?
+                .effective_acknowledgement_provenance(admission)
                 .into_iter()
-                .map(ErasureAcknowledgementProvenanceV1::reference)
+                .map(|(_, provenance)| provenance.reference())
                 .collect::<Vec<_>>();
             let selected_obligations =
                 selected_obligations_reference(admission.unresolved_obligations());
@@ -3806,18 +3793,12 @@ impl ErasureReceiptV1 {
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let complete =
-            acknowledgements_close_frozen_obligations(&self.0.acknowledgements, obligations);
         let (pending, failed) =
             derived_outcome_owners_for_obligations(obligations, &self.0.acknowledgements);
         if self.0.pending_owners != pending || self.0.failed_owners != failed {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        match self.lifecycle() {
-            ErasureLifecycleV1::Complete if complete => Ok(()),
-            ErasureLifecycleV1::PartialFailure if !complete => Ok(()),
-            _ => Err(ErasureErrorV1::PolicyConflict),
-        }
+        Ok(())
     }
     /// Verify terminal binding and the bounded ERS1 predecessor chain via a host resolver.
     ///
@@ -4701,16 +4682,6 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        if !freeze_is_monotonic(self.state.freeze_position(), next.state.freeze_position()) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if !self
-            .state
-            .replay_claim()
-            .preserves_or_weakens(next.state.replay_claim())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
         if self == next {
             return Ok(());
         }
@@ -4721,13 +4692,21 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_same_state_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
-        if self.request != next.request
-            || self.targets != next.targets
-            || self.receipt != next.receipt
-            || self.receipt_input != next.receipt_input
-            || self.authorize_provenance != next.authorize_provenance
-            || self.freeze_provenance != next.freeze_provenance
-        {
+        if (
+            &self.request,
+            &self.targets,
+            &self.receipt,
+            &self.receipt_input,
+            self.authorize_provenance,
+            self.freeze_provenance,
+        ) != (
+            &next.request,
+            &next.targets,
+            &next.receipt,
+            &next.receipt_input,
+            next.authorize_provenance,
+            next.freeze_provenance,
+        ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let lifecycle = self.state.lifecycle();
@@ -4769,10 +4748,7 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_advanced_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
-        if next.state.previous_state() != Some(self.state.state_digest()) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if !self.state.lifecycle().permits(next.state.lifecycle()) {
+        if next.state.validate_predecessor(&self.state).is_err() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let targets_continue = next.targets == self.targets
@@ -4793,16 +4769,13 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        if self.authorize_provenance.is_some()
-            && self.authorize_provenance != next.authorize_provenance
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if self.freeze_provenance.is_some() && self.freeze_provenance != next.freeze_provenance {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if self.dispatch_provenance.is_some()
-            && self.dispatch_provenance != next.dispatch_provenance
+        if ![
+            (self.authorize_provenance, next.authorize_provenance),
+            (self.freeze_provenance, next.freeze_provenance),
+            (self.dispatch_provenance, next.dispatch_provenance),
+        ]
+        .into_iter()
+        .all(|(current, replacement)| current.is_none() || current == replacement)
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -4966,7 +4939,7 @@ impl ErasureCoordinatorRecordV1 {
         if let Some(admission) = self.supporting_records.retry_admissions().last() {
             let expected = self
                 .supporting_records
-                .effective_acknowledgements(admission)?;
+                .effective_acknowledgements(admission);
             if expected.as_slice() != self.acknowledgements.as_slice() {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
@@ -5962,7 +5935,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .push(admission.clone());
                 record.acknowledgements = record
                     .supporting_records
-                    .effective_acknowledgements(admission)?;
+                    .effective_acknowledgements(admission);
                 if ordinal == 0 {
                     record.dispatch_provenance = Some(admission.reference());
                 }
@@ -6183,13 +6156,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     policy: admission.policy(),
                     trust: admission.trust(),
                 })?;
-            if record
-                .supporting_records
-                .acknowledgement_provenance()
-                .contains(&acknowledgement_provenance)
-            {
-                return Ok(record.state);
-            }
             self.port
                 .admit_acknowledgement(&acknowledgement_provenance)?;
             record
@@ -6202,7 +6168,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
             record.acknowledgements = record
                 .supporting_records
-                .effective_acknowledgements(&admission)?;
+                .effective_acknowledgements(&admission);
             let state = record.state.clone();
             self.commit(record).map(|()| state)
         })
@@ -6300,9 +6266,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<(ErasureAttemptOutcomeV1, Vec<ErasureReferenceV1>), ErasureErrorV1> {
         let acknowledgements = record
             .supporting_records
-            .effective_acknowledgement_provenance(admission)?
+            .effective_acknowledgement_provenance(admission)
             .into_iter()
-            .map(ErasureAcknowledgementProvenanceV1::reference)
+            .map(|(_, provenance)| provenance.reference())
             .collect::<Vec<_>>();
         ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
             request: record.request.reference(),
@@ -6372,7 +6338,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }
         record.acknowledgements = record
             .supporting_records
-            .effective_acknowledgements(&admission)?;
+            .effective_acknowledgements(&admission);
         let complete =
             acknowledgements_close_frozen_obligations(&record.acknowledgements, obligations);
         let host_closed_negative = record

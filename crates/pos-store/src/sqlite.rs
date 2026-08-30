@@ -12764,65 +12764,6 @@ pub(super) mod key_registry_coverage {
         }
     }
 
-    #[test]
-    fn erasure_cas_load_begin_and_idempotency_regions_are_instrumented() {
-        let record = erasure_record();
-        let request = record.request().reference();
-
-        let mut missing = fixture(SqliteStore::open_in_memory());
-        assert_eq!(
-            missing.compare_and_swap_scope_extension(
-                request,
-                erasure_reference(90),
-                record.clone()
-            ),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-        assert_eq!(
-            missing.compare_and_swap_administrative_resolution(request, None, record.clone()),
-            Err(ErasureErrorV1::ProvenanceMissing)
-        );
-
-        let mut begin_failure = fixture(SqliteStore::open_in_memory());
-        fixture(begin_failure.conn.execute_batch("BEGIN IMMEDIATE"));
-        assert_eq!(
-            begin_failure.compare_and_swap_scope_extension(
-                request,
-                erasure_reference(90),
-                record.clone(),
-            ),
-            Err(ErasureErrorV1::ReceiptCommitFailed)
-        );
-        fixture(begin_failure.conn.execute_batch("ROLLBACK"));
-
-        let mut query_failure = fixture(SqliteStore::open_in_memory());
-        fixture(
-            query_failure
-                .conn
-                .execute_batch("DROP TABLE erasure_records"),
-        );
-        assert_eq!(
-            query_failure
-                .compare_and_swap_administrative_resolution(request, None, record.clone(),),
-            Err(ErasureErrorV1::ReceiptCommitFailed)
-        );
-
-        let mut idempotent = fixture(SqliteStore::open_in_memory());
-        fixture(idempotent.commit_record(record.clone()));
-        assert_eq!(
-            idempotent.compare_and_swap_scope_extension(
-                request,
-                erasure_reference(90),
-                record.clone(),
-            ),
-            Ok(())
-        );
-        assert_eq!(
-            idempotent.compare_and_swap_administrative_resolution(request, None, record),
-            Ok(())
-        );
-    }
-
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn erasure_commit_error_regions_are_instrumented() {

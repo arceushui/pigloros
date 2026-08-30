@@ -1003,6 +1003,18 @@ fn replacement_validation_rejects_identity_and_evidence_regressions() -> Result<
         frozen_record.validate_replacement(&authorized_record),
         Err(ErasureErrorV1::PolicyConflict)
     );
+
+    let history = awaiting_fixture(vec![target(10)])?;
+    let authorized = historical_record(&history.state, ErasureLifecycleV1::Authorized, |_| true)?;
+    let dispatched = historical_record(
+        &history.state,
+        ErasureLifecycleV1::DestructionDispatched,
+        |_| true,
+    )?;
+    assert_eq!(
+        authorized.validate_replacement(&dispatched),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     Ok(())
 }
 
