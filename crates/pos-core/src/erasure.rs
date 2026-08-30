@@ -1192,26 +1192,26 @@ impl ErasureSupportingRecordsV1 {
     }
 
     fn validate_attempt_chain(&self) -> Result<(), ErasureErrorV1> {
-        let mut ordinal = 0_u64;
         let mut expected_predecessor = None;
         let mut receipt_digests = self.receipts.iter().map(ErasureReceiptV1::receipt_digest);
-        for admission in &self.retry_admissions {
+        for (ordinal, admission) in self.retry_admissions.iter().enumerate() {
+            let ordinal = ordinal as u64;
             if admission.attempt_ordinal() != ordinal
                 || admission.source_receipt() != expected_predecessor
             {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
             expected_predecessor = receipt_digests.next();
-            ordinal += 1;
         }
-        let mut ordinal = 0_u64;
-        for (((outcome, receipt), provenance), admission) in self
+        for (ordinal, (((outcome, receipt), provenance), admission)) in self
             .attempt_outcomes
             .iter()
             .zip(&self.receipts)
             .zip(&self.receipt_provenance)
             .zip(&self.retry_admissions)
+            .enumerate()
         {
+            let ordinal = ordinal as u64;
             let outcome_matches = (
                 outcome.request(),
                 outcome.attempt(),
@@ -1247,7 +1247,6 @@ impl ErasureSupportingRecordsV1 {
             if !outcome_matches || !provenance_matches {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            ordinal += 1;
         }
         Ok(())
     }
