@@ -1353,19 +1353,19 @@ fn bounded_fixture_id(value: &str) -> bool {
 }
 
 fn valid_identifier(value: &str) -> bool {
-    crate::wire_syntax::identifier(value, 128)
+    crate::identifier(value, 128)
 }
 
 fn valid_member_path(value: &str) -> bool {
-    crate::wire_syntax::member_path(value, 512, 16, 128)
+    crate::member_path(value, 512, 16, 128)
 }
 
 fn valid_media_type(value: &str) -> bool {
-    crate::wire_syntax::media_type(value, 127)
+    crate::media_type(value, 127)
 }
 
 fn semantic_version(value: &str) -> bool {
-    crate::wire_syntax::semantic_version(value, MAX_STRING_BYTES, Some(MAX_SEMVER_COMPONENT_BYTES))
+    crate::semantic_version(value, MAX_STRING_BYTES, Some(MAX_SEMVER_COMPONENT_BYTES))
 }
 
 fn contract_version(value: &str) -> bool {
@@ -2036,20 +2036,14 @@ fn decode_value(bytes: &[u8]) -> Result<Value, ConformanceContractError> {
 }
 
 fn preflight_cbor(bytes: &[u8]) -> Result<(), ConformanceContractError> {
-    crate::wire_syntax::preflight_array_cbor(
-        bytes,
-        MAX_STRUCTURAL_NESTING,
-        MAX_FIXTURES as u64,
-        true,
+    crate::preflight_array_cbor(bytes, MAX_STRUCTURAL_NESTING, MAX_FIXTURES as u64, true).map_err(
+        |error| match error {
+            crate::CborPreflightError::InvalidEncoding => ConformanceContractError::InvalidEncoding,
+            crate::CborPreflightError::FieldOutOfBounds => {
+                ConformanceContractError::FieldOutOfBounds
+            }
+        },
     )
-    .map_err(|error| match error {
-        crate::wire_syntax::CborPreflightError::InvalidEncoding => {
-            ConformanceContractError::InvalidEncoding
-        }
-        crate::wire_syntax::CborPreflightError::FieldOutOfBounds => {
-            ConformanceContractError::FieldOutOfBounds
-        }
-    })
 }
 
 fn array(value: &Value, length: usize) -> Result<&[Value], ConformanceContractError> {

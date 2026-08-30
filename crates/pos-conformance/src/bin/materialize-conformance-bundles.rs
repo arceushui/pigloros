@@ -21,9 +21,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error as ThisError;
 
-#[path = "materialize-conformance-bundles/atomic_publication.rs"]
-mod atomic_publication;
-use atomic_publication::{publish_materialized_tree, AtomicPublication};
+include!("materialize-conformance-bundles/atomic_publication.rs");
 
 const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
 const OUTPUT_CHECKSUM_INVENTORY_PATH: &str = "SHA256SUMS";

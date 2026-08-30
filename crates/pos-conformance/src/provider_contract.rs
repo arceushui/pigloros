@@ -511,15 +511,15 @@ fn validate_descriptor(descriptor: &ArtifactDescriptorV1) -> Result<(), Provider
 }
 
 fn provider_identifier(value: &str) -> bool {
-    crate::wire_syntax::identifier(value, MAX_IDENTIFIER_BYTES)
+    crate::identifier(value, MAX_IDENTIFIER_BYTES)
 }
 
 fn semantic_version(value: &str) -> bool {
-    crate::wire_syntax::semantic_version(value, MAX_CONTRACT_VERSION_BYTES, None)
+    crate::semantic_version(value, MAX_CONTRACT_VERSION_BYTES, None)
 }
 
 fn member_path(value: &str) -> bool {
-    crate::wire_syntax::member_path(
+    crate::member_path(
         value,
         MAX_MEMBER_PATH_BYTES,
         MAX_MEMBER_PATH_COMPONENTS,
@@ -528,7 +528,7 @@ fn member_path(value: &str) -> bool {
 }
 
 fn media_type(value: &str) -> bool {
-    crate::wire_syntax::media_type(value, MAX_MEDIA_TYPE_BYTES)
+    crate::media_type(value, MAX_MEDIA_TYPE_BYTES)
 }
 
 fn digest_fields(domain: &[u8], fields: &Value) -> Result<[u8; 32], ProviderContractErrorV1> {
@@ -799,19 +799,15 @@ fn decode_bounded(bytes: &[u8]) -> Result<Value, ProviderContractErrorV1> {
 }
 
 fn preflight_cbor(bytes: &[u8]) -> Result<(), ProviderContractErrorV1> {
-    crate::wire_syntax::preflight_array_cbor(
+    crate::preflight_array_cbor(
         bytes,
         MAX_STRUCTURAL_NESTING,
         MAX_PROVIDER_ENTRIES_CBOR,
         false,
     )
     .map_err(|error| match error {
-        crate::wire_syntax::CborPreflightError::InvalidEncoding => {
-            ProviderContractErrorV1::InvalidEncoding
-        }
-        crate::wire_syntax::CborPreflightError::FieldOutOfBounds => {
-            ProviderContractErrorV1::FieldOutOfBounds
-        }
+        crate::CborPreflightError::InvalidEncoding => ProviderContractErrorV1::InvalidEncoding,
+        crate::CborPreflightError::FieldOutOfBounds => ProviderContractErrorV1::FieldOutOfBounds,
     })
 }
 

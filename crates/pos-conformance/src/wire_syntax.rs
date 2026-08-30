@@ -1,10 +1,10 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CborPreflightError {
+pub(crate) enum CborPreflightError {
     InvalidEncoding,
     FieldOutOfBounds,
 }
 
-pub(super) fn preflight_array_cbor(
+pub(crate) fn preflight_array_cbor(
     bytes: &[u8],
     maximum_depth: u8,
     maximum_items: u64,
@@ -99,7 +99,7 @@ pub(super) fn preflight_array_cbor(
     }
 }
 
-pub(super) fn identifier(value: &str, maximum_bytes: usize) -> bool {
+pub(crate) fn identifier(value: &str, maximum_bytes: usize) -> bool {
     let Some(first) = value.bytes().next() else {
         return false;
     };
@@ -113,7 +113,7 @@ pub(super) fn identifier(value: &str, maximum_bytes: usize) -> bool {
         })
 }
 
-pub(super) fn member_path(
+pub(crate) fn member_path(
     value: &str,
     maximum_bytes: usize,
     maximum_components: usize,
@@ -134,7 +134,7 @@ pub(super) fn member_path(
         })
 }
 
-pub(super) fn media_type(value: &str, maximum_bytes: usize) -> bool {
+pub(crate) fn media_type(value: &str, maximum_bytes: usize) -> bool {
     let Some((type_name, subtype)) = value.split_once('/') else {
         return false;
     };
@@ -153,7 +153,7 @@ pub(super) fn media_type(value: &str, maximum_bytes: usize) -> bool {
         })
 }
 
-pub(super) fn semantic_version(
+pub(crate) fn semantic_version(
     value: &str,
     maximum_bytes: usize,
     maximum_numeric_component_bytes: Option<usize>,

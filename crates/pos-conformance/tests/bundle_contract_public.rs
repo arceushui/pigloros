@@ -2957,6 +2957,179 @@ fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestR
 }
 
 #[test]
+fn independent_verifier_reaches_deep_raw_relationship_rejections() -> TestResult {
+    for field in 0..3 {
+        let invalid_manifest_header = mutate_archive(|archive| {
+            replace_value(
+                array_field(archive, 0, "manifest")?,
+                field,
+                Value::Null,
+                "manifest header field",
+            )
+        })?;
+        assert_archive_rejected_by_both(
+            &invalid_manifest_header,
+            &format!("non-scalar manifest header field {field}"),
+        );
+    }
+
+    let invalid_member_collection =
+        mutate_archive(|archive| replace_value(archive, 1, Value::Null, "archive members"))?;
+    assert_archive_rejected_by_both(&invalid_member_collection, "non-array archive members");
+
+    let mixed_claim_layers = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            2,
+            Value::Integer(1_u64.into()),
+            "fixture claim layer",
+        )
+    })?;
+    assert_archive_rejected_by_both(&mixed_claim_layers, "mixed profile claim layers");
+
+    let execution_without_fixtures = mutate_profile_archive(|profile| {
+        array_field(profile, 7, "profile executions")?.insert(0, Value::Bytes(vec![2; 32]));
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(
+        &execution_without_fixtures,
+        "execution profile without fixture modes",
+    );
+
+    let noncanonical_divergences = mutate_profile_archive(|profile| {
+        replace_value(
+            profile,
+            10,
+            Value::Array(vec![
+                Value::Array(vec![Value::Integer(1_u64.into()), Value::Bytes(vec![2])]),
+                Value::Array(vec![Value::Integer(0_u64.into()), Value::Bytes(vec![1])]),
+            ]),
+            "allowed divergences",
+        )
+    })?;
+    assert_archive_rejected_by_both(
+        &noncanonical_divergences,
+        "noncanonical allowed divergences",
+    );
+
+    let duplicate_artifact_path = mutate_profile_archive(|profile| {
+        let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+        let schema_path = array_field(fixture, 8, "fixture schema")?
+            .first()
+            .ok_or("fixture schema path is absent")?
+            .clone();
+        replace_value(
+            array_field(
+                array_field(fixture, 10, "auxiliary artifacts")?,
+                0,
+                "auxiliary artifact",
+            )?,
+            0,
+            schema_path,
+            "auxiliary artifact path",
+        )
+    })?;
+    assert_archive_rejected_by_both(&duplicate_artifact_path, "duplicate fixture artifact path");
+
+    let missing_bound_member = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                9,
+                "fixture payload",
+            )?,
+            0,
+            Value::Text("fixtures/missing/input.bin".to_owned()),
+            "fixture payload path",
+        )
+    })?;
+    assert_archive_rejected_by_both(&missing_bound_member, "unbound fixture payload");
+
+    let malformed_registry_bytes = mutate_archive(|archive| {
+        let bytes = [0xff];
+        replace_archive_member_bytes(archive, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, &bytes)?;
+        refresh_profile_registry_binding(archive, &bytes)
+    })?;
+    assert_archive_rejected_by_both(
+        &malformed_registry_bytes,
+        "malformed bound provider registry",
+    );
+
+    let equal_transition_endpoints = mutate_profile_archive(|profile| {
+        let transition = array_field(
+            array_field(array_field(profile, 9, "fixtures")?, 5, "downgrade fixture")?,
+            22,
+            "provider transition",
+        )?;
+        let from = transition
+            .first()
+            .ok_or("provider transition source is absent")?
+            .clone();
+        replace_value(transition, 1, from, "provider transition target")
+    })?;
+    assert_archive_rejected_by_both(
+        &equal_transition_endpoints,
+        "equal provider transition endpoints",
+    );
+
+    let invalid_profile_digest_type = mutate_archive(|archive| {
+        let profile_bytes = match archive_member_fields(archive, "profile/CPF1.cbor")?.get(1) {
+            Some(Value::Bytes(bytes)) => bytes.clone(),
+            _ => return Err("profile member is not bytes".into()),
+        };
+        let mut profile: Value = ciborium::from_reader(profile_bytes.as_slice())?;
+        let Value::Array(profile_fields) = &mut profile else {
+            return Err("profile is not an array".into());
+        };
+        replace_value(profile_fields, 17, Value::Null, "profile digest")?;
+        replace_archive_member_bytes(archive, "profile/CPF1.cbor", &encode_value(&profile)?)
+    })?;
+    assert_archive_rejected_by_both(&invalid_profile_digest_type, "non-byte profile digest");
+
+    let invalid_manifest_digest_type = mutate_archive(|archive| {
+        replace_value(
+            array_field(archive, 0, "manifest")?,
+            3,
+            Value::Null,
+            "manifest profile digest",
+        )
+    })?;
+    assert_archive_rejected_by_both(
+        &invalid_manifest_digest_type,
+        "non-byte manifest profile digest",
+    );
+
+    let unbound_expected_result = mutate_archive(|archive| {
+        replace_value(
+            array_field(
+                array_field(array_field(archive, 0, "manifest")?, 5, "expected results")?,
+                0,
+                "expected result",
+            )?,
+            0,
+            Value::Text("missing-case".to_owned()),
+            "expected result case ID",
+        )
+    })?;
+    assert_archive_rejected_by_both(&unbound_expected_result, "unbound expected result");
+
+    let invalid_signature_key = mutate_unsealed_archive(|archive| {
+        replace_value(
+            archive,
+            2,
+            Value::Bytes(vec![0xff; 32]),
+            "archive signer public key",
+        )
+    })?;
+    assert_archive_rejected_by_both(&invalid_signature_key, "invalid signature public key");
+    assert!(
+        verify_release_tree_independently(&[invalid_signature_key.as_slice()]).is_err(),
+        "release-tree verification accepted an invalid archive"
+    );
+    Ok(())
+}
+
+#[test]
 fn independent_verifier_enforces_every_deterministic_budget_ceiling() -> TestResult {
     let ceilings = [
         1024 * 1024 * 1024_u64,

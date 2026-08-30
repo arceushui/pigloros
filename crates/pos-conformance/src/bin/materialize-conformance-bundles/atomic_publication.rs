@@ -1,7 +1,3 @@
-#[cfg(target_os = "linux")]
-use super::verify_public_archive;
-use super::{MaterializationError, MaterializedFile};
-#[cfg(target_os = "linux")]
 use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, ResolveFlags, CWD};
 #[cfg(target_os = "linux")]
 use rustix::io::Errno;
@@ -10,17 +6,15 @@ use std::ffi::{CStr, CString};
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
+use std::io::Read as _;
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "linux")]
 use std::path::Component;
-use std::path::Path;
-
 #[cfg(target_os = "linux")]
-pub(super) struct AtomicPublication {
+struct AtomicPublication {
     parent: OwnedFd,
     staging: OwnedFd,
     staging_name: CString,
@@ -47,18 +41,18 @@ struct RelativeFilePath {
 struct VerifiedPublication(AtomicPublication);
 
 #[cfg(not(target_os = "linux"))]
-pub(super) struct AtomicPublication;
+struct AtomicPublication;
 
 #[cfg(not(target_os = "linux"))]
 impl AtomicPublication {
-    pub(super) const fn prepare(_destination: &Path) -> Result<Self, MaterializationError> {
+    const fn prepare(_destination: &Path) -> Result<Self, MaterializationError> {
         Err(MaterializationError::AtomicPublicationUnsupported)
     }
 }
 
 #[cfg(target_os = "linux")]
 impl AtomicPublication {
-    pub(super) fn prepare(destination: &Path) -> Result<Self, MaterializationError> {
+    fn prepare(destination: &Path) -> Result<Self, MaterializationError> {
         output_parent_and_name(destination).and_then(|(parent_path, destination_name)| {
             let effective_uid = effective_uid();
             open_trusted_parent(parent_path, effective_uid).and_then(|(parent, parent_identity)| {
@@ -203,7 +197,7 @@ impl Drop for AtomicPublication {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn publish_materialized_tree(
+fn publish_materialized_tree(
     publication: AtomicPublication,
     files: &[MaterializedFile],
 ) -> Result<(), MaterializationError> {
@@ -215,7 +209,7 @@ pub(super) fn publish_materialized_tree(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn publish_materialized_tree(
+fn publish_materialized_tree(
     _publication: AtomicPublication,
     _files: &[MaterializedFile],
 ) -> Result<(), MaterializationError> {
