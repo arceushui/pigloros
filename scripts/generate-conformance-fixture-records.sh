@@ -5,6 +5,10 @@ fixture_root="${1:-fixtures/conformance}"
 profile_root="${fixture_root}/profiles"
 family_contract="${fixture_root}/support/fixture-family-contract.json"
 mode="${2:---check}"
+
+# This is the current JSON provider adapter. It owns JSON payload expansion and
+# JSON-Schema checks; CPF1's generic catalog builder and verifier treat the
+# resulting provider artifacts as opaque bytes.
 [[ "${mode}" == "--check" || "${mode}" == "--write" ]] || {
   echo "usage: $0 [fixture-root] [--check|--write]" >&2
   exit 1

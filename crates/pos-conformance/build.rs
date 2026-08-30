@@ -222,6 +222,17 @@ struct FixtureProvider {
     abi_major: u16,
     abi_minor: u16,
     package_path: String,
+    schema_media_type: String,
+    payload_media_type: String,
+    oracle_media_type: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderArtifactMediaTypes {
+    schema: String,
+    payload: String,
+    oracle: String,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -259,21 +270,25 @@ enum CatalogStrictOracle {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FixtureOracleRecord {
-    case_id: String,
-    claim_layer: String,
-    family: CatalogFixtureFamily,
-    oracle: CatalogStrictOracle,
-    output: Option<Value>,
+struct FixtureFamilyContract {
+    magic: String,
+    version: u64,
+    families: Vec<FixtureFamilyDeclaration>,
 }
 
 #[derive(serde::Deserialize)]
-struct FixtureInputIdentity {
-    case_id: String,
-    claim_layer: String,
-    family: CatalogFixtureFamily,
-    provider_contract: String,
-    subject_adapter: String,
+#[serde(deny_unknown_fields)]
+struct FixtureFamilyDeclaration {
+    name: CatalogFixtureFamily,
+    operation: String,
+    oracle: FixtureFamilyOracle,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum FixtureFamilyOracle {
+    CanonicalOutput,
+    NamespacedFailure { code_id: String },
 }
 
 #[derive(serde::Deserialize)]
@@ -627,31 +642,30 @@ fn validate_fixture_provider(
     subject_adapter: &str,
 ) -> Result<(), io::Error> {
     let schemas = json_field(provider, "schemas")?.as_object();
-    let operations = json_field(provider, "fixture_operations")?.as_object();
-    let payloads = json_field(provider, "fixture_payloads")?.as_object();
     let contracts = json_field(provider, "fixture_contracts")?.as_object();
-    let contracts_match_families = schemas
-        .zip(operations)
-        .zip(payloads)
-        .zip(contracts)
-        .is_some_and(|(((schemas, operations), payloads), contracts)| {
-            let schema_families = schemas.keys().collect::<BTreeSet<_>>();
-            let operation_families = operations.keys().collect::<BTreeSet<_>>();
-            let payload_families = payloads.keys().collect::<BTreeSet<_>>();
-            let contract_families = contracts.keys().collect::<BTreeSet<_>>();
-            schemas.len() == FIXTURES_PER_PROFILE
-                && operations.len() == FIXTURES_PER_PROFILE
-                && payloads.len() == FIXTURES_PER_PROFILE
-                && contracts.len() == FIXTURES_PER_PROFILE
-                && schema_families == operation_families
-                && schema_families == payload_families
-                && schema_families == contract_families
-        });
+    let contracts_match_families = schemas.zip(contracts).is_some_and(|(schemas, contracts)| {
+        let schema_families = schemas.keys().collect::<BTreeSet<_>>();
+        let contract_families = contracts.keys().collect::<BTreeSet<_>>();
+        schemas.len() == FIXTURES_PER_PROFILE
+            && contracts.len() == FIXTURES_PER_PROFILE
+            && schema_families == contract_families
+    });
+    let media_types: ProviderArtifactMediaTypes = serde_json::from_value(
+        json_field(provider, "artifact_media_types")?.clone(),
+    )
+    .map_err(|error| {
+        invalid_data(format!(
+            "provider artifact media types are invalid: {error}"
+        ))
+    })?;
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
         && u16::try_from(json_u64(provider, "abi_minor")?).is_ok()
         && !json_text(provider, "package_path")?.is_empty()
+        && valid_media_type(&media_types.schema)
+        && valid_media_type(&media_types.payload)
+        && valid_media_type(&media_types.oracle)
         && json_text(provider, "claim_layer")? == claim_layer
         && json_text(provider, "subject_adapter")? == subject_adapter
         && contracts_match_families;
@@ -664,16 +678,23 @@ fn validate_fixture_provider(
     }
 }
 
-fn validate_fixture_records(
+fn valid_media_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 127
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"!#$&^_.+-/".contains(&byte)
+        })
+        && value.split_once('/').is_some_and(|(kind, subtype)| {
+            !kind.is_empty() && !subtype.is_empty() && !subtype.contains('/')
+        })
+}
+
+fn validate_evidence_status(
     fixture: &Value,
-    provider: &Value,
-    schema_bytes: &[u8],
     input_bytes: &[u8],
     expected_bytes: &[u8],
-    oracle_bytes: &[u8],
     claim_layer: &str,
-    subject_adapter: &str,
-) -> Result<CatalogStrictOracle, io::Error> {
+) -> Result<(), io::Error> {
     let case_id = json_text(fixture, "case_id")?;
     let family: CatalogFixtureFamily =
         serde_json::from_value(json_field(fixture, "family")?.clone()).map_err(|error| {
@@ -684,275 +705,78 @@ fn validate_fixture_records(
             "fixture {case_id} claim layer does not match its profile"
         )));
     }
-    let input: Value = serde_json::from_slice(input_bytes)
-        .map_err(|error| invalid_data(format!("fixture {case_id} input is invalid: {error}")))?;
-    let input_identity: FixtureInputIdentity =
-        serde_json::from_slice(input_bytes).map_err(|error| {
-            invalid_data(format!(
-                "fixture {case_id} input identity is invalid: {error}"
-            ))
-        })?;
     let evidence: EvidenceStatusRecord =
         serde_json::from_slice(expected_bytes).map_err(|error| {
             invalid_data(format!(
                 "fixture {case_id} evidence status is invalid: {error}"
             ))
         })?;
-    let oracle: FixtureOracleRecord = serde_json::from_slice(oracle_bytes)
-        .map_err(|error| invalid_data(format!("fixture {case_id} oracle is invalid: {error}")))?;
-    let provider_contract = format!(
-        "{}@{}",
-        json_text(provider, "provider_id")?,
-        json_text(provider, "contract_version")?
-    );
-    let operation = json_field(provider, "fixture_operations")?
-        .get(family.catalog_name())
-        .ok_or_else(|| {
-            invalid_data(format!(
-                "provider omits operation for {}",
-                family.catalog_name()
-            ))
-        })?;
-    let actual_operation = input.pointer("/stimulus/operation");
-    let operation_matches = match operation {
-        Value::Null => actual_operation.is_none(),
-        Value::String(expected) => actual_operation.and_then(Value::as_str) == Some(expected),
-        _ => false,
-    };
     let input_digest = blake3::hash(input_bytes).to_hex().to_string();
-    let schema_accepts_input = json_schema_accepts(schema_bytes, &input)?;
-    let schema_result_matches = schema_accepts_input == (family != CatalogFixtureFamily::Malformed);
-    let expected_shape_matches = if family == CatalogFixtureFamily::IndependentEvaluation {
-        input.get("expected").is_none()
-            && input
-                .get("expected_digest")
-                .and_then(Value::as_str)
-                .is_some_and(|digest| digest.len() == 64)
-    } else {
-        input.get("expected").is_some_and(Value::is_object)
-    };
-    let oracle_shape_matches = match &oracle.oracle {
-        CatalogStrictOracle::CanonicalOutput => oracle.output.is_some(),
-        CatalogStrictOracle::NamespacedFailure { .. } => oracle.output.is_none(),
-    };
-    let identity_matches = input_identity.case_id == case_id
-        && input_identity.claim_layer == claim_layer
-        && input_identity.family == family
-        && input_identity.provider_contract == provider_contract
-        && input_identity.subject_adapter == subject_adapter
-        && expected_shape_matches
-        && evidence.case_id == case_id
+    let identity_matches = evidence.case_id == case_id
         && evidence.claim_layer == claim_layer
         && evidence.family == family
         && evidence.input_blake3_digest == input_digest
         && evidence.status == "pending"
         && evidence.execution_result == Value::Null
-        && evidence.executed_at == Value::Null
-        && oracle.case_id == case_id
-        && oracle.claim_layer == claim_layer
-        && oracle.family == family
-        && oracle_shape_matches
-        && schema_result_matches;
-    if operation_matches && identity_matches {
-        Ok(oracle.oracle)
+        && evidence.executed_at == Value::Null;
+    if identity_matches {
+        Ok(())
     } else {
         Err(invalid_data(format!(
-            "fixture {case_id} does not match its profile/provider identity"
+            "fixture {case_id} evidence status does not match its profile identity"
         )))
     }
 }
 
-fn json_schema_accepts(schema_bytes: &[u8], instance: &Value) -> Result<bool, io::Error> {
-    let schema: Value = serde_json::from_slice(schema_bytes)
-        .map_err(|error| invalid_data(format!("fixture schema is invalid: {error}")))?;
-    validate_supported_schema(&schema).and_then(|()| value_matches_schema(instance, &schema))
-}
-
-fn validate_supported_schema(schema: &Value) -> Result<(), io::Error> {
-    let object = schema
-        .as_object()
-        .ok_or_else(|| invalid_data("fixture schema node must be an object"))?;
-    let supported = [
-        "$schema",
-        "additionalProperties",
-        "const",
-        "maximum",
-        "minLength",
-        "minimum",
-        "pattern",
-        "properties",
-        "required",
-        "type",
-    ];
-    if object.keys().any(|key| !supported.contains(&key.as_str())) {
-        return Err(invalid_data("fixture schema uses an unsupported keyword"));
+fn fixture_family_contract(
+    snapshots: &SourceSnapshots,
+) -> Result<BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>, io::Error> {
+    let bytes = snapshots.bytes(
+        "support/fixture-family-contract.json",
+        "fixture-family contract",
+    )?;
+    let contract: FixtureFamilyContract = serde_json::from_slice(bytes)
+        .map_err(|error| invalid_data(format!("fixture-family contract is invalid: {error}")))?;
+    if contract.magic != "FFM1" || contract.version != 1 {
+        return Err(invalid_data(
+            "fixture-family contract version is unsupported",
+        ));
     }
-    let metadata_valid = object
-        .get("$schema")
-        .is_none_or(|value| value.as_str() == Some("https://json-schema.org/draft/2020-12/schema"))
-        && object
-            .get("additionalProperties")
-            .is_none_or(Value::is_boolean)
-        && object
-            .get("minLength")
-            .is_none_or(|value| value.as_u64().is_some())
-        && object
-            .get("minimum")
-            .is_none_or(|value| value.as_i64().is_some())
-        && object
-            .get("maximum")
-            .is_none_or(|value| value.as_i64().is_some())
-        && object
-            .get("pattern")
-            .is_none_or(|value| value.as_str() == Some("^[0-9a-f]{64}$"))
-        && object.get("required").is_none_or(|value| {
-            value
-                .as_array()
-                .is_some_and(|names| names.iter().all(Value::is_string))
-        });
-    if !metadata_valid {
-        return Err(invalid_data("fixture schema keyword value is unsupported"));
-    }
-    schema_type_matches(&Value::Null, object.get("type"))?;
-    object.get("properties").map_or(Ok(()), |properties| {
-        properties
-            .as_object()
-            .ok_or_else(|| invalid_data("fixture schema properties must be an object"))?
-            .values()
-            .try_for_each(validate_supported_schema)
-    })
-}
-
-fn value_matches_schema(instance: &Value, schema: &Value) -> Result<bool, io::Error> {
-    let object = schema
-        .as_object()
-        .ok_or_else(|| invalid_data("fixture schema node must be an object"))?;
-    if !schema_type_matches(instance, object.get("type"))?
-        || object
-            .get("const")
-            .is_some_and(|constant| constant != instance)
-        || !schema_scalar_constraints_match(instance, object)?
-    {
-        return Ok(false);
-    }
-    schema_object_constraints_match(instance, object)
-}
-
-fn schema_type_matches(instance: &Value, declared: Option<&Value>) -> Result<bool, io::Error> {
-    declared.map_or(Ok(true), |value| {
-        value
-            .as_str()
-            .ok_or_else(|| invalid_data("fixture schema type must be a string"))
-            .and_then(|kind| match kind {
-                "array" => Ok(instance.is_array()),
-                "integer" => Ok(instance.as_i64().is_some() || instance.as_u64().is_some()),
-                "object" => Ok(instance.is_object()),
-                "string" => Ok(instance.is_string()),
-                _ => Err(invalid_data("fixture schema type is unsupported")),
-            })
-    })
-}
-
-fn schema_scalar_constraints_match(
-    instance: &Value,
-    schema: &serde_json::Map<String, Value>,
-) -> Result<bool, io::Error> {
-    let minimum_length = schema.get("minLength").map_or(Ok(None), |value| {
-        value
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| invalid_data("fixture schema minLength must be unsigned"))
-    })?;
-    let length_matches = minimum_length.is_none_or(|minimum| {
-        instance.as_str().is_some_and(|value| {
-            u64::try_from(value.chars().count()).is_ok_and(|length| length >= minimum)
-        })
-    });
-    let pattern_matches = schema.get("pattern").map_or(Ok(true), |pattern| {
-        pattern
-            .as_str()
-            .ok_or_else(|| invalid_data("fixture schema pattern must be a string"))
-            .and_then(|pattern| {
-                if pattern == "^[0-9a-f]{64}$" {
-                    Ok(instance.as_str().is_some_and(|value| {
-                        value.len() == 64
-                            && value
-                                .bytes()
-                                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-                    }))
-                } else {
-                    Err(invalid_data("fixture schema pattern is unsupported"))
-                }
-            })
-    })?;
-    let minimum_matches = integer_bound_matches(instance, schema.get("minimum"), false)?;
-    let maximum_matches = integer_bound_matches(instance, schema.get("maximum"), true)?;
-    Ok(length_matches && pattern_matches && minimum_matches && maximum_matches)
-}
-
-fn integer_bound_matches(
-    instance: &Value,
-    bound: Option<&Value>,
-    maximum: bool,
-) -> Result<bool, io::Error> {
-    bound.map_or(Ok(true), |bound| {
-        let bound = bound
-            .as_i64()
-            .ok_or_else(|| invalid_data("fixture schema bound must be an integer"))?;
-        let value = instance
-            .as_i64()
-            .ok_or_else(|| invalid_data("fixture integer does not fit the supported range"))?;
-        Ok(if maximum {
-            value <= bound
-        } else {
-            value >= bound
-        })
-    })
-}
-
-fn schema_object_constraints_match(
-    instance: &Value,
-    schema: &serde_json::Map<String, Value>,
-) -> Result<bool, io::Error> {
-    let Some(instance) = instance.as_object() else {
-        return Ok(true);
-    };
-    let properties = schema.get("properties").map_or(Ok(None), |value| {
-        value
-            .as_object()
-            .map(Some)
-            .ok_or_else(|| invalid_data("fixture schema properties must be an object"))
-    })?;
-    let required = schema.get("required").map_or(Ok(Vec::new()), |value| {
-        value
-            .as_array()
-            .ok_or_else(|| invalid_data("fixture schema required must be an array"))?
+    let families = contract
+        .families
+        .into_iter()
+        .map(|family| (family.name, family))
+        .collect::<BTreeMap<_, _>>();
+    if families.len() == FIXTURES_PER_PROFILE
+        && CatalogFixtureFamily::ALL
             .iter()
-            .map(|name| {
-                name.as_str()
-                    .ok_or_else(|| invalid_data("fixture schema required entry must be a string"))
-            })
-            .collect::<Result<Vec<_>, _>>()
-    })?;
-    if required.iter().any(|name| !instance.contains_key(*name)) {
-        return Ok(false);
-    }
-    if schema.get("additionalProperties") == Some(&Value::Bool(false))
-        && instance
-            .keys()
-            .any(|name| properties.is_none_or(|known| !known.contains_key(name)))
+            .all(|family| families.contains_key(family))
     {
-        return Ok(false);
+        Ok(families)
+    } else {
+        Err(invalid_data(
+            "fixture-family contract inventory is incomplete",
+        ))
     }
-    properties.map_or(Ok(true), |properties| {
-        properties
-            .iter()
-            .try_fold(true, |matches, (name, child_schema)| {
-                instance.get(name).map_or(Ok(matches), |child| {
-                    value_matches_schema(child, child_schema)
-                        .map(|child_matches| matches && child_matches)
-                })
-            })
+}
+
+fn strict_oracle(
+    family: &FixtureFamilyDeclaration,
+    provider: &FixtureProvider,
+) -> Result<CatalogStrictOracle, io::Error> {
+    let operation_valid = matches!(family.operation.as_str(), "required" | "optional");
+    if !operation_valid {
+        return Err(invalid_data("fixture-family operation policy is invalid"));
+    }
+    Ok(match &family.oracle {
+        FixtureFamilyOracle::CanonicalOutput => CatalogStrictOracle::CanonicalOutput,
+        FixtureFamilyOracle::NamespacedFailure { code_id } => {
+            CatalogStrictOracle::NamespacedFailure {
+                owner_id: provider.provider_id.clone(),
+                contract_version: provider.contract_version.clone(),
+                code_id: code_id.clone(),
+            }
+        }
     })
 }
 
@@ -981,12 +805,23 @@ fn fixture_provider(provider: &Value) -> Result<FixtureProvider, io::Error> {
         .map_err(|_| invalid_data("provider abi_major must fit u16"))?;
     let abi_minor = u16::try_from(json_u64(provider, "abi_minor")?)
         .map_err(|_| invalid_data("provider abi_minor must fit u16"))?;
+    let media_types: ProviderArtifactMediaTypes = serde_json::from_value(
+        json_field(provider, "artifact_media_types")?.clone(),
+    )
+    .map_err(|error| {
+        invalid_data(format!(
+            "provider artifact media types are invalid: {error}"
+        ))
+    })?;
     Ok(FixtureProvider {
         provider_id: json_text(provider, "provider_id")?,
         contract_version: json_text(provider, "contract_version")?,
         abi_major,
         abi_minor,
         package_path: json_text(provider, "package_path")?,
+        schema_media_type: media_types.schema,
+        payload_media_type: media_types.payload,
+        oracle_media_type: media_types.oracle,
     })
 }
 
@@ -1005,9 +840,10 @@ fn profile_fixtures(
     snapshots: &SourceSnapshots,
     profile_value: &Value,
     provider_value: &Value,
+    provider: &FixtureProvider,
     provider_schemas: &serde_json::Map<String, Value>,
+    family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
     claim_layer: &str,
-    subject_adapter: &str,
 ) -> Result<Vec<FixturePaths>, io::Error> {
     let fixtures = json_field(profile_value, "fixtures")?
         .as_array()
@@ -1046,22 +882,19 @@ fn profile_fixtures(
             let input = relative_asset(snapshots, fixture, "input")?;
             let expected = relative_asset(snapshots, fixture, "expected")?;
             let oracle = relative_asset(snapshots, fixture, "oracle")?;
-            let strict_oracle = validate_fixture_records(
-                fixture,
-                provider_value,
-                &schema.bytes,
-                &input.bytes,
-                &expected.bytes,
-                &oracle.bytes,
-                claim_layer,
-                subject_adapter,
-            )?;
+            validate_evidence_status(fixture, &input.bytes, &expected.bytes, claim_layer)?;
+            let family_declaration = family_contract.get(&family).ok_or_else(|| {
+                invalid_data(format!(
+                    "fixture-family contract omits {}",
+                    family.catalog_name()
+                ))
+            })?;
             Ok(FixturePaths {
                 case_id,
                 family,
                 schema_path,
                 contract: fixture_contract(provider_value, family)?,
-                strict_oracle,
+                strict_oracle: strict_oracle(family_declaration, provider)?,
                 schema,
                 input,
                 expected,
@@ -1073,6 +906,7 @@ fn profile_fixtures(
 
 fn profile_paths(
     snapshots: &SourceSnapshots,
+    family_contract: &BTreeMap<CatalogFixtureFamily, FixtureFamilyDeclaration>,
     profile: String,
 ) -> Result<ProfilePaths, Box<dyn Error>> {
     let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
@@ -1107,9 +941,10 @@ fn profile_paths(
         snapshots,
         &profile_value,
         &provider_value,
+        &fixture_provider,
         provider_schemas,
+        family_contract,
         &claim_layer,
-        &subject_adapter,
     )?;
     let bundle_modes = json_field(&profile_value, "bundle_modes")?;
     let execution_profiles = json_field(&profile_value, "execution_profiles")?;
@@ -1172,6 +1007,7 @@ fn discover_profiles(
     snapshots: &SourceSnapshots,
 ) -> Result<Vec<ProfilePaths>, Box<dyn Error>> {
     let profile_manifests = profile_manifests(root)?;
+    let family_contract = fixture_family_contract(snapshots)?;
     if profile_manifests.len() != PROFILE_COUNT {
         return Err(invalid_data(format!(
             "profile root must contain exactly {PROFILE_COUNT} profile directories, found {}",
@@ -1181,7 +1017,7 @@ fn discover_profiles(
     }
     let mut profiles = profile_manifests
         .into_iter()
-        .map(|profile| profile_paths(snapshots, profile))
+        .map(|profile| profile_paths(snapshots, &family_contract, profile))
         .collect::<Result<Vec<_>, _>>()?;
     profiles.sort_unstable_by_key(|profile| profile.wire_code);
     if profiles
@@ -1422,6 +1258,21 @@ fn emit_profile(
         generated,
         "                    package_path: {:?},",
         profile.fixture_provider.package_path
+    )?;
+    writeln!(
+        generated,
+        "                    schema_media_type: {:?},",
+        profile.fixture_provider.schema_media_type
+    )?;
+    writeln!(
+        generated,
+        "                    payload_media_type: {:?},",
+        profile.fixture_provider.payload_media_type
+    )?;
+    writeln!(
+        generated,
+        "                    oracle_media_type: {:?},",
+        profile.fixture_provider.oracle_media_type
     )?;
     writeln!(generated, "                }},")?;
     writeln!(

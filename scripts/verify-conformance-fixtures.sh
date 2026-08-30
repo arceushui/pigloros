@@ -252,7 +252,7 @@ for layer in "${profile_layers[@]}"; do
   }
   jq -e --arg layer "${layer}" --argjson family_names "${family_names}" --argjson family_count "${family_count}" \
     '(keys | sort) == ([
-       "abi_major", "abi_minor", "claim_layer", "contract_version", "fixture_contracts",
+       "abi_major", "abi_minor", "artifact_media_types", "claim_layer", "contract_version", "fixture_contracts",
        "fixture_operations", "fixture_payloads", "package_path", "provider_id", "schemas",
        "subject_adapter"
      ] | sort) and
@@ -261,6 +261,10 @@ for layer in "${profile_layers[@]}"; do
      (.contract_version | type == "string" and length > 0) and
      (.abi_major | type == "number") and (.abi_minor | type == "number") and
      (.package_path | type == "string" and length > 0) and
+     (.artifact_media_types | keys | sort) == (["oracle", "payload", "schema"] | sort) and
+     all(.artifact_media_types[];
+       type == "string" and length > 2 and length <= 127 and
+       test("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")) and
      (.subject_adapter | type == "string" and length > 0) and
      (.fixture_operations | keys | sort) == ($family_names | sort) and
      all(.fixture_operations[]; . == null or (type == "string" and length > 0)) and
@@ -287,26 +291,17 @@ for layer in "${profile_layers[@]}"; do
     echo "invalid provider manifest for ${layer}" >&2
     exit 1
   }
-  provider_id="$(jq -r '.provider_id' "${provider_manifest}")"
-  contract_version="$(jq -r '.contract_version' "${provider_manifest}")"
   subject_adapter="$(jq -r '.subject_adapter' "${provider_manifest}")"
   jq -e --arg subject_adapter "${subject_adapter}" '.subject_adapter == $subject_adapter' "${profile}" >/dev/null || {
     echo "profile subject adapter does not match its provider manifest: ${layer}" >&2
     exit 1
   }
   while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path oracle_path; do
-    fixture_operation="$(jq -r --arg family "${family}" '.fixture_operations[$family] // ""' "${provider_manifest}")"
     family_metadata="$(jq -ce --arg family "${family}" '.families[] | select(.name == $family)' "${family_contract}")" || {
       echo "profile declares an unknown fixture family: ${case_id}" >&2
       exit 1
     }
-    operation_requirement="$(jq -r '.operation' <<<"${family_metadata}")"
-    oracle_kind="$(jq -r '.oracle.kind' <<<"${family_metadata}")"
-    oracle_code_id="$(jq -r '.oracle.code_id // empty' <<<"${family_metadata}")"
-    [[ "${operation_requirement}" != "required" || -n "${fixture_operation}" ]] || {
-      echo "provider omits required fixture operation: ${case_id}" >&2
-      exit 1
-    }
+    [[ -n "${family_metadata}" ]] || exit 1
     for path in "${schema_path}" "${input_path}" "${expected_path}" "${oracle_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
         echo "unsafe profile fixture path for ${layer}: ${path}" >&2
@@ -317,98 +312,8 @@ for layer in "${profile_layers[@]}"; do
         exit 1
       }
     done
-    jq -e --arg family "${family}" --arg fixture_operation "${fixture_operation}" \
-      '.properties.family.const == $family and .additionalProperties == false and
-       (if $fixture_operation == "" then
-          (.properties.stimulus.type == "string" or (.properties | has("stimulus") | not))
-        else
-          ((.properties.stimulus.properties.operation.type == "string") or
-           (.properties.stimulus.properties.operation.const | type == "string") or
-           (.properties.stimulus.const.operation | type == "string")) and
-          ((.properties.stimulus.properties.operation.const // .properties.stimulus.const.operation // $fixture_operation) == $fixture_operation)
-        end)' \
-      "${fixture_root}/${schema_path}" >/dev/null || {
-      echo "invalid fixture-family schema for ${layer}: ${schema_path}" >&2
-      exit 1
-    }
-    jq -e \
-      --arg case_id "${case_id}" \
-      --arg fixture_layer "${fixture_layer}" \
-      --arg family "${family}" \
-      --arg provider_contract "${provider_id}@${contract_version}" \
-      --arg subject_adapter "${subject_adapter}" \
-      --arg fixture_operation "${fixture_operation}" \
-      '.case_id == $case_id and .claim_layer == $fixture_layer and
-       .family == $family and
-       .provider_contract == $provider_contract and .subject_adapter == $subject_adapter and
-       (if $fixture_operation == "" then
-          ((.stimulus? | type) != "object" or (.stimulus | has("operation") | not))
-        else
-          .stimulus.operation == $fixture_operation
-        end)' \
-      "${fixture_root}/${input_path}" >/dev/null || {
-      echo "invalid input fixture record for ${layer}: ${input_path}" >&2
-      exit 1
-    }
-    jq -e --arg family "${family}" --slurpfile schema "${fixture_root}/${schema_path}" '
-      def supported_schema($value):
-        ($value | type) == "object" and
-        (($value | keys) - ["$schema", "additionalProperties", "const", "maximum",
-          "minLength", "minimum", "pattern", "properties", "required", "type"] | length) == 0 and
-        (($value | has("$schema") | not) or
-          $value["$schema"] == "https://json-schema.org/draft/2020-12/schema") and
-        (($value | has("type") | not) or
-          (["array", "integer", "object", "string"] | index($value.type)) != null) and
-        (($value | has("additionalProperties") | not) or
-          ($value.additionalProperties | type) == "boolean") and
-        (($value | has("minLength") | not) or
-          (($value.minLength | type) == "number" and
-           ($value.minLength | floor) == $value.minLength and $value.minLength >= 0)) and
-        (($value | has("minimum") | not) or
-          (($value.minimum | type) == "number" and ($value.minimum | floor) == $value.minimum)) and
-        (($value | has("maximum") | not) or
-          (($value.maximum | type) == "number" and ($value.maximum | floor) == $value.maximum)) and
-        (($value | has("pattern") | not) or $value.pattern == "^[0-9a-f]{64}$") and
-        (($value | has("required") | not) or
-          (($value.required | type) == "array" and all($value.required[]; type == "string"))) and
-        (($value.properties // {}) | type) == "object" and
-        all(($value.properties // {})[]; supported_schema(.));
-      def type_matches($value):
-        (($value.type? // null) as $type |
-          $type == null or
-          ($type == "array" and (type == "array")) or
-          ($type == "integer" and (type == "number") and (floor == .)) or
-          ($type == "object" and (type == "object")) or
-          ($type == "string" and (type == "string")));
-      def conforms($value):
-        . as $instance |
-        type_matches($value) and
-        (($value | has("const") | not) or $instance == $value.const) and
-        (($value | has("minLength") | not) or
-          (($instance | type) == "string" and ($instance | length) >= $value.minLength)) and
-        (($value | has("pattern") | not) or
-          ($value.pattern == "^[0-9a-f]{64}$" and
-           ($instance | type) == "string" and ($instance | test($value.pattern)))) and
-        (($value | has("minimum") | not) or
-          (($instance | type) == "number" and $instance >= $value.minimum)) and
-        (($value | has("maximum") | not) or
-          (($instance | type) == "number" and $instance <= $value.maximum)) and
-        (if ($instance | type) == "object" then
-          (($value.required // []) | all(.[]; . as $name | $instance | has($name))) and
-          (($value | has("additionalProperties") | not) or
-            $value.additionalProperties != false or
-            (($instance | keys) - (($value.properties // {}) | keys) | length) == 0) and
-          (($value.properties // {}) | to_entries |
-            all(.[]; . as $property |
-              ($instance | has($property.key) | not) or
-              ($instance[$property.key] | conforms($property.value))))
-        else true end);
-      supported_schema($schema[0]) and
-      (conforms($schema[0]) == ($family != "malformed"))
-    ' "${fixture_root}/${input_path}" >/dev/null || {
-      echo "fixture input does not have the required pinned-schema result: ${input_path}" >&2
-      exit 1
-    }
+    # Provider schema, payload, and oracle bytes are opaque to CPF1. The
+    # provider-specific generator validates the current JSON adapter.
     input_blake3_digest="$(b3sum "${fixture_root}/${input_path}" | awk '{print $1}')"
     jq -e \
       --arg case_id "${case_id}" \
@@ -424,26 +329,6 @@ for layer in "${profile_layers[@]}"; do
        (keys | sort) == (["case_id", "claim_layer", "executed_at", "execution_result", "family", "input_blake3_digest", "status"] | sort)' \
       "${fixture_root}/${expected_path}" >/dev/null || {
       echo "invalid pending evidence-status record for ${layer}: ${expected_path}" >&2
-      exit 1
-    }
-    jq -e --arg case_id "${case_id}" --arg fixture_layer "${fixture_layer}" --arg family "${family}" --arg provider_id "${provider_id}" --arg contract_version "${contract_version}" --arg oracle_kind "${oracle_kind}" --arg oracle_code_id "${oracle_code_id}" \
-      '.case_id == $case_id and .claim_layer == $fixture_layer and .family == $family and
-       if $oracle_kind == "canonical-output" then
-         (keys | sort) == (["case_id", "claim_layer", "family", "oracle", "output"] | sort) and
-         (.oracle | keys) == ["kind"] and
-         .oracle.kind == $oracle_kind and
-         has("output") and (.output != null)
-       elif $oracle_kind == "namespaced-failure" then
-         (keys | sort) == (["case_id", "claim_layer", "family", "oracle"] | sort) and
-         (.oracle | keys | sort) == (["code_id", "contract_version", "kind", "owner_id"] | sort) and
-         .oracle.kind == $oracle_kind and
-         (.oracle.owner_id == $provider_id) and
-         (.oracle.contract_version == $contract_version) and
-         (.oracle.code_id == $oracle_code_id) and
-         (has("output") | not)
-       else false end' \
-      "${fixture_root}/${oracle_path}" >/dev/null || {
-      echo "invalid provider-owned oracle record for ${layer}: ${oracle_path}" >&2
       exit 1
     }
   done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, .oracle] | @tsv' "${profile}")

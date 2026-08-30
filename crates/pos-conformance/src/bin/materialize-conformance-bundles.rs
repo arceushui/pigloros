@@ -333,6 +333,9 @@ struct FixtureProvider {
     abi_major: u16,
     abi_minor: u16,
     package_path: &'static str,
+    schema_media_type: &'static str,
+    payload_media_type: &'static str,
+    oracle_media_type: &'static str,
 }
 
 struct CatalogFixtureContract {
@@ -609,7 +612,7 @@ fn provider_schema_artifacts(layer: &LayerCatalogEntry) -> Vec<PublicArtifact> {
         .map(|fixture| {
             public_artifact(
                 fixture.schema_path,
-                "application/schema+json",
+                layer.fixture_provider.schema_media_type,
                 fixture.schema,
             )
         })
@@ -1095,8 +1098,11 @@ fn fixture_descriptor_from_record(
         &execution_profile_digest,
     );
     let evidence = artifact_descriptor(&evidence_path, "application/json", fixture.expected);
-    let oracle_output =
-        artifact_descriptor(&oracle_output_path, "application/json", fixture.oracle);
+    let oracle_output = artifact_descriptor(
+        &oracle_output_path,
+        layer.fixture_provider.oracle_media_type,
+        fixture.oracle,
+    );
     let expectation = fixture_expectation(fixture, &oracle_output);
     let auxiliary = if expectation.strict_oracle.output.is_some() {
         vec![evidence]
@@ -1139,10 +1145,14 @@ fn fixture_descriptor_from_record(
                 subject_adapter: layer.subject_adapter,
                 schema: artifact_descriptor(
                     fixture.schema_path,
-                    "application/schema+json",
+                    layer.fixture_provider.schema_media_type,
                     fixture.schema,
                 ),
-                payload: artifact_descriptor(&payload_path, "application/json", fixture.input),
+                payload: artifact_descriptor(
+                    &payload_path,
+                    layer.fixture_provider.payload_media_type,
+                    fixture.input,
+                ),
                 auxiliary,
                 strict_oracle: expectation.strict_oracle,
                 expected_verification_outcome: expectation.verification_outcome,
@@ -1255,7 +1265,7 @@ fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {
 
 fn fixture_payload_member_path(case_id: &str, execution_profile_digest: &[u8; 32]) -> String {
     format!(
-        "fixtures/{case_id}/{}.json",
+        "fixtures/{case_id}/{}.payload",
         pos_conformance::hex_digest(execution_profile_digest)
     )
 }

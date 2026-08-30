@@ -19,10 +19,15 @@ second fixture or layer inventory in source code.
 
 `support/fixture-family-contract.json` is the shared source only for family
 requirements and oracle kinds. Each provider manifest owns its exact public-adapter
-payload templates, provider ID, contract version, ABI, subject adapter, and operation
-mapping. The generation and verification scripts combine those provider-owned values
-with the shared family semantics. No script carries an adapter allowlist, provider
-version literal, generic payload template, or second family catalog.
+payload templates, provider ID, contract version, ABI, subject adapter, operation
+mapping, and artifact media types. CPF1 treats provider schema, payload, and oracle
+bytes as opaque artifacts and binds their exact bytes and declared media types. The
+current provider adapter happens to generate JSON and validates its JSON schemas in
+`generate-conformance-fixture-records.sh`; neither the Rust catalog builder nor the
+independent CPF1 verifier interprets those provider-owned bytes. A future provider
+adapter may use another representation without changing the CPF1 verifier. No script
+carries an adapter allowlist, provider version literal, generic payload template, or
+second family catalog.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
@@ -42,8 +47,9 @@ ExecutionProfile while the paired bundles retain identical oracle bytes.
 Provider-owned records under `oracles/` define canonical outputs or namespaced
 failures. Records under `expected/` bind the exact input digest but contain only
 `status: "pending"`, null execution result, and null execution timestamp. The
-materializer packages both artifacts separately, and only the oracle is bound
-as the manifest's expected result. Pending evidence metadata is never used as
+materializer packages both artifacts separately using the provider-declared media
+types, and only the oracle is bound as the manifest's expected result. Pending
+evidence metadata is never used as
 a canonical output or represented as an executed conformance claim.
 
 `SHA256SUMS` and `BLAKE3SUMS` are independent byte inventories for every
