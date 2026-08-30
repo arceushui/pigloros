@@ -173,6 +173,8 @@ for layer in "${profile_layers[@]}"; do
     echo "invalid public profile manifest for ${layer}" >&2
     exit 1
   }
+  subject_adapter="$(jq -r '.subject_adapter' "${profile}")"
+  provider_id="$(jq -r '.fixture_provider.provider_id' "${profile}")"
   while IFS=$'\t' read -r case_id fixture_layer family schema_path input_path expected_path; do
     for path in "${schema_path}" "${input_path}" "${expected_path}"; do
       [[ "${path}" != /* && "${path}" != *".."* ]] || {
@@ -194,10 +196,19 @@ for layer in "${profile_layers[@]}"; do
       --arg case_id "${case_id}" \
       --arg fixture_layer "${fixture_layer}" \
       --arg family "${family}" \
+      --arg provider_contract "${provider_id}@1.0.0" \
+      --arg subject_adapter "${subject_adapter}" \
       '.case_id == $case_id and .claim_layer == $fixture_layer and
        .family == $family and
-       ((.subject | type) == "string") and (.subject != "") and
-       ((.assertion | type) == "string") and (.assertion != "")' \
+       .provider_contract == $provider_contract and .subject_adapter == $subject_adapter and
+       (if $family == "positive" then .stimulus.operation == "execute-positive-case" and .expected.result == "accepted"
+        elif $family == "denied" then .stimulus.required_capability == "mutate-subject" and .expected.failure_code == "capability-denied"
+        elif $family == "malformed" then (.stimulus | type) == "string" and .expected.failure_code == "malformed-payload"
+        elif $family == "resource-exhaustion" then .limit.maximum == 10000000 and .limit.requested == 10000001 and .expected.failure_code == "resource-limit"
+        elif $family == "deletion-redaction" then .stimulus.operation == "redact-synthetic-subject" and .expected.post_state.prohibited_data_present == false
+        elif $family == "downgrade" then .stimulus.allow_fallback == false and .expected.failure_code == "incompatible-contract"
+        elif $family == "independent-evaluation" then .algorithm == "BLAKE3-256" and (.expected_digest | test("^[0-9a-f]{64}$"))
+        else false end)' \
       "${fixture_root}/${input_path}" >/dev/null || {
       echo "invalid input fixture record for ${layer}: ${input_path}" >&2
       exit 1
@@ -208,12 +219,25 @@ for layer in "${profile_layers[@]}"; do
       --arg fixture_layer "${fixture_layer}" \
       --arg family "${family}" \
       --arg input_blake3_digest "${input_blake3_digest}" \
+      --arg provider_id "${provider_id}" \
       '.case_id == $case_id and .claim_layer == $fixture_layer and
        .family == $family and
        .input_blake3_digest == $input_blake3_digest and
        ((.result | type) == "string") and (.result != "") and
        .status == "pending" and
-       .draft_expected_result == {kind: "namespaced-failure", owner_id: "pigloros.core", contract_version: "1.0.0", code_id: "provenance-missing"} and
+       (if ($family == "positive" or $family == "deletion-redaction" or $family == "independent-evaluation") then
+          .draft_expected_result == {kind: "canonical-output"}
+        else
+          .draft_expected_result.owner_id == $provider_id and
+          .draft_expected_result.contract_version == "1.0.0" and
+          .draft_expected_result.kind == "namespaced-failure" and
+          .draft_expected_result.code_id ==
+            (if $family == "denied" then "capability-denied"
+             elif $family == "malformed" then "malformed-payload"
+             elif $family == "resource-exhaustion" then "resource-limit"
+             elif $family == "downgrade" then "incompatible-contract"
+             else "" end)
+        end) and
        (has("verification") | not) and
        (has("source") | not)' \
       "${fixture_root}/${expected_path}" >/dev/null || {

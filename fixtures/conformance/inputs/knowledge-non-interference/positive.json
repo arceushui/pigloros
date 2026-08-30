@@ -1,1 +1,1 @@
-{"claim_layer":"knowledge-non-interference","case_id":"knowledge-non-interference-positive","family":"positive","subject":"knowledge-non-interference","assertion":"positive public knowledge-non-interference contract"}
+{"case_id":"knowledge-non-interference-positive","claim_layer":"knowledge-non-interference","family":"positive","provider_contract":"pigloros.fixture.knowledge-non-interference@1.0.0","subject_adapter":"exported-artifact","stimulus":{"operation":"execute-positive-case","arguments":{"seed":1}},"expected":{"result":"accepted","post_state":{"committed":true}}}

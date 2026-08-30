@@ -1,1 +1,1 @@
-{"claim_layer":"metric-conformance","case_id":"metric-conformance-denied","family":"denied","subject":"metric-conformance","assertion":"denied public metric-conformance contract"}
+{"case_id":"metric-conformance-denied","claim_layer":"metric-conformance","family":"denied","provider_contract":"pigloros.fixture.metric-conformance@1.0.0","subject_adapter":"exported-artifact","stimulus":{"operation":"mutate-subject","required_capability":"mutate-subject","pre_state":{"revision":1}},"expected":{"failure_code":"capability-denied","post_state":{"revision":1}}}

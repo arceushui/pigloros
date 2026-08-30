@@ -2,13 +2,10 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-independent-evaluation",
   "family": "independent-evaluation",
-  "input_blake3_digest": "b913971bbb029e2bb02e7a878285ec8cbbeebe25d0348d79ebcce3466f1f7cdb",
+  "input_blake3_digest": "a9af3dd280d9f44494fa1c614ebdd2af7acd7ce6aeec39093228cb8bb7052fad",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

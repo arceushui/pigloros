@@ -2,13 +2,13 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "1bada36798d2253426cec487f939ec43d76b22efe9504f74339d3dcc56000896",
+  "input_blake3_digest": "8e1a4c187aeb2909723b33132343fce8bfcadf80daecfde54f0c7a93a656cabe",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.plugin-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "capability-denied"
   }
 }

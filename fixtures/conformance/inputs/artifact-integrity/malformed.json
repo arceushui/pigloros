@@ -1,1 +1,1 @@
-{"claim_layer":"artifact-integrity","case_id":"artifact-integrity-malformed","family":"malformed","subject":"artifact-integrity","assertion":"malformed public artifact-integrity contract"}
+{"case_id":"artifact-integrity-malformed","claim_layer":"artifact-integrity","family":"malformed","provider_contract":"pigloros.fixture.artifact-integrity@1.0.0","subject_adapter":"exported-artifact","stimulus":"malformed-provider-payload","expected":{"failure_code":"malformed-payload"}}

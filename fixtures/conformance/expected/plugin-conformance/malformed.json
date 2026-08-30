@@ -2,13 +2,13 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-malformed",
   "family": "malformed",
-  "input_blake3_digest": "e4abc9dda3d9b2ba2282d17a4ac1800d0754984f6f4f343a86b11ef4584e7522",
+  "input_blake3_digest": "9172d3e969ccd12c85e647f257c602642ce92c84b20cd16043179eb9f296848c",
   "result": "namespaced-failure",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.plugin-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "malformed-payload"
   }
 }

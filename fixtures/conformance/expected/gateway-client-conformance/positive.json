@@ -2,13 +2,10 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "1772ef91a72f7118dc55fdb35b88759837efe7b9f3de2d2be38fff23adf90324",
+  "input_blake3_digest": "36aa871cbc3befe12c07f960fac96cd1c8d8ebc76d4917c5f60196320c2317a1",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

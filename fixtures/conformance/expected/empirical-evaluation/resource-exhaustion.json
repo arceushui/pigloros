@@ -2,13 +2,13 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "0ebe5b0ede4f02996b21f3fd627ae8ed657b4479149607b6b3d861c0de919b68",
+  "input_blake3_digest": "5208415362b9968df29c8bdbfd66d0039baf1d4847d458646c929a6ae0a02c5e",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.empirical-evaluation",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "resource-limit"
   }
 }

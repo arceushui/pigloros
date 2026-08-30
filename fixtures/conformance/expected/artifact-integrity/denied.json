@@ -2,13 +2,13 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-denied",
   "family": "denied",
-  "input_blake3_digest": "774d63d91ab94b9364e1564c7299b0e1379c488157293e1bd183c38396375d73",
+  "input_blake3_digest": "ff9d7a29073c065ea30cbb688259c03aae6a38597d8c842ed484dc8730d1490f",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.artifact-integrity",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "capability-denied"
   }
 }

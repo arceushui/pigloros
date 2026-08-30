@@ -2,13 +2,13 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-denied",
   "family": "denied",
-  "input_blake3_digest": "b851939b2900edfb3e5e7fc76d20d9dd2da9f5b4c6eee2152db75e34d32a785c",
+  "input_blake3_digest": "d85585090c3d50e4bf76315334758d9fd8344c585050e7b58958cd2a993fedf7",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.knowledge-non-interference",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "capability-denied"
   }
 }

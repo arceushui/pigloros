@@ -2,13 +2,13 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "a522539846182ce27981267f227f5a26c7cf27f3d93b4d7189d3208526695c4a",
+  "input_blake3_digest": "d902a13cc7c57254ab287acb11a2856fc042e51b4a82770312193f6529459780",
   "result": "not-authorized",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.metric-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "incompatible-contract"
   }
 }

@@ -2,13 +2,10 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-positive",
   "family": "positive",
-  "input_blake3_digest": "2a4c3dfd15f56edaa49b5e519de32d5cfa0b784cc0893a7212cf616adb4198f4",
+  "input_blake3_digest": "cdd20c6c9bacddf815f6b051eb289e3eaa9c730b76f1facfc925c1458c21a9cd",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

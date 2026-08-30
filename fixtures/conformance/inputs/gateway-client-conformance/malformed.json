@@ -1,1 +1,1 @@
-{"claim_layer":"gateway-client-conformance","case_id":"gateway-client-conformance-malformed","family":"malformed","subject":"gateway-client-conformance","assertion":"malformed public gateway-client-conformance contract"}
+{"case_id":"gateway-client-conformance-malformed","claim_layer":"gateway-client-conformance","family":"malformed","provider_contract":"pigloros.fixture.gateway-client-conformance@1.0.0","subject_adapter":"public-gateway-protocol","stimulus":"malformed-provider-payload","expected":{"failure_code":"malformed-payload"}}

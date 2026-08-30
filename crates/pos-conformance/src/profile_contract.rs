@@ -2379,7 +2379,7 @@ mod current_wire_contract_tests {
         }
     }
 
-    fn fixture() -> FixtureDescriptorV1 {
+    fn fixture_descriptor() -> FixtureDescriptorV1 {
         let mut value = FixtureDescriptorV1 {
             case_id: "core/positive/one".to_owned(),
             mandatory: true,
@@ -2439,7 +2439,7 @@ mod current_wire_contract_tests {
         FIXTURE_FAMILIES
             .into_iter()
             .map(|family| {
-                let mut value = fixture();
+                let mut value = fixture_descriptor();
                 let family_name = match family {
                     FixtureFamilyV1::Positive => "positive",
                     FixtureFamilyV1::Denied => "denied",
@@ -2534,7 +2534,7 @@ mod current_wire_contract_tests {
             Ok(18)
         );
         assert_eq!(
-            array_values(&encode_fixture(&fixture())).map(<[Value]>::len),
+            array_values(&encode_fixture(&fixture_descriptor())).map(<[Value]>::len),
             Ok(24)
         );
         Ok(())

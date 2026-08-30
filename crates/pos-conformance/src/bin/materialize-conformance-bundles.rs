@@ -127,8 +127,6 @@ enum CatalogExecutionProfile {
 }
 
 impl CatalogExecutionProfile {
-    const ALL: [Self; 2] = [Self::DeterministicLocalV1, Self::DeterministicAirGappedV1];
-
     const fn name(self) -> &'static str {
         match self {
             Self::DeterministicLocalV1 => "deterministic-local-v1",
@@ -230,10 +228,14 @@ struct ProfileFixtureRecord {
 }
 
 #[derive(Clone, Deserialize)]
-struct CatalogStrictOracle {
-    owner_id: String,
-    contract_version: String,
-    code_id: String,
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum CatalogStrictOracle {
+    CanonicalOutput,
+    NamespacedFailure {
+        owner_id: String,
+        contract_version: String,
+        code_id: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -376,7 +378,7 @@ fn package_support_artifacts() -> [PublicArtifact; 5] {
 }
 
 fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
-    let schemas = provider_schema_artifacts(catalog);
+    let schemas = provider_schema_artifacts(catalog)?;
     let package_support = package_support_artifacts();
     let mut packages = catalog
         .entries
@@ -465,16 +467,34 @@ fn provider_package(
     })
 }
 
-fn provider_schema_artifacts(catalog: &LayerCatalog) -> Vec<PublicArtifact> {
-    catalog.entries[0]
-        .fixtures
-        .iter()
-        .map(|fixture| {
-            public_artifact(
-                &fixture.record.schema,
-                "application/schema+json",
-                fixture.schema,
-            )
+fn provider_schema_artifacts(
+    catalog: &LayerCatalog,
+) -> Result<Vec<PublicArtifact>, Box<dyn Error>> {
+    let mut schemas = std::collections::BTreeMap::new();
+    for fixture in catalog.entries.iter().flat_map(|entry| &entry.fixtures) {
+        let artifact = public_artifact(
+            &fixture.record.schema,
+            "application/schema+json",
+            fixture.schema,
+        );
+        if schemas
+            .insert(fixture.record.family, artifact.clone())
+            .is_some_and(|existing: PublicArtifact| {
+                existing.path != artifact.path || existing.bytes != artifact.bytes
+            })
+        {
+            return Err("fixture family schemas differ between providers".into());
+        }
+    }
+    if schemas.len() != REQUIRED_FIXTURE_FAMILIES {
+        return Err("provider catalog must define exactly seven family schemas".into());
+    }
+    CatalogFixtureFamily::ALL
+        .into_iter()
+        .map(|family| {
+            schemas.remove(&family).ok_or_else(|| {
+                Box::<dyn Error>::from("provider catalog is missing a family schema")
+            })
         })
         .collect()
 }
@@ -997,10 +1017,57 @@ fn fixture_descriptor_from_record(
     .to_string();
     let fixture_record_digest =
         labeled_digest("PiglorOS.CPF1FixtureRecord.v1", fixture_record.as_bytes());
-    let failure = NamespacedFailureV1 {
-        owner_id: fixture.strict_oracle.owner_id.clone(),
-        contract_version: fixture.strict_oracle.contract_version.clone(),
-        code_id: fixture.strict_oracle.code_id.clone(),
+    let auxiliary = artifact_descriptor(&expected_path, "application/json", fixture.expected);
+    let (strict_oracle, expected_verification_outcome, expected_verification_error) =
+        match &fixture.strict_oracle {
+            CatalogStrictOracle::CanonicalOutput => (
+                StrictOracleV1 {
+                    kind: StrictOracleKindV1::Output,
+                    output: Some(auxiliary.clone()),
+                    failure: None,
+                    divergence: None,
+                },
+                VerificationOutcomeV1::VerifiedExact,
+                None,
+            ),
+            CatalogStrictOracle::NamespacedFailure {
+                owner_id,
+                contract_version,
+                code_id,
+            } => {
+                let failure = NamespacedFailureV1 {
+                    owner_id: owner_id.clone(),
+                    contract_version: contract_version.clone(),
+                    code_id: code_id.clone(),
+                };
+                let outcome = match fixture.record.family {
+                    CatalogFixtureFamily::ResourceExhaustion => {
+                        VerificationOutcomeV1::ResourceLimitExceeded
+                    }
+                    CatalogFixtureFamily::Downgrade => VerificationOutcomeV1::IncompatibleProfile,
+                    _ => VerificationOutcomeV1::InvalidManifest,
+                };
+                (
+                    StrictOracleV1 {
+                        kind: StrictOracleKindV1::Failure,
+                        output: None,
+                        failure: Some(failure.clone()),
+                        divergence: None,
+                    },
+                    outcome,
+                    Some(failure),
+                )
+            }
+        };
+    let (replay_claim, redaction_state) = match fixture.record.family {
+        CatalogFixtureFamily::DeletionRedaction => (
+            ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            RedactionStateV1::RedactedViews,
+        ),
+        CatalogFixtureFamily::Downgrade => {
+            (ReplayClaimV1::IncompatibleProfile, RedactionStateV1::None)
+        }
+        _ => (ReplayClaimV1::Exact, RedactionStateV1::None),
     };
     let downgrade = fixture.record.family == CatalogFixtureFamily::Downgrade;
     let mut descriptor = FixtureDescriptorV1 {
@@ -1018,24 +1085,15 @@ fn fixture_descriptor_from_record(
             fixture.schema,
         ),
         payload: artifact_descriptor(&payload_path, "application/json", fixture.input),
-        auxiliary: vec![artifact_descriptor(
-            &expected_path,
-            "application/json",
-            fixture.expected,
-        )],
-        strict_oracle: StrictOracleV1 {
-            kind: StrictOracleKindV1::Failure,
-            output: None,
-            failure: Some(failure.clone()),
-            divergence: None,
-        },
-        expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
-        expected_verification_error: Some(failure),
-        replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
-        redaction_state: RedactionStateV1::EvidenceMissing,
+        auxiliary: vec![auxiliary],
+        strict_oracle,
+        expected_verification_outcome,
+        expected_verification_error,
+        replay_claim,
+        redaction_state,
         deterministic_budget: fixture_budget(),
         operational_safety: fixture_operational_safety(),
-        capability_policy: fixture_capability_policy(),
+        capability_policy: fixture_capability_policy(fixture.record.family),
         provenance: fixture_provenance(context),
         trust_policy_snapshot_digest: downgrade.then(|| {
             labeled_digest(
@@ -1091,10 +1149,16 @@ const fn fixture_operational_safety() -> OperationalSafetyV1 {
     }
 }
 
-fn fixture_capability_policy() -> CapabilityPolicyV1 {
+fn fixture_capability_policy(family: CatalogFixtureFamily) -> CapabilityPolicyV1 {
+    let capability = match family {
+        CatalogFixtureFamily::Denied => None,
+        CatalogFixtureFamily::DeletionRedaction => Some("redact-synthetic-subject"),
+        CatalogFixtureFamily::Downgrade => Some("verify-release-admission"),
+        _ => Some("read-public-bundle"),
+    };
     CapabilityPolicyV1 {
         network_allowed: false,
-        capability_ids: vec!["read-public-bundle".to_owned()],
+        capability_ids: capability.into_iter().map(str::to_owned).collect(),
     }
 }
 

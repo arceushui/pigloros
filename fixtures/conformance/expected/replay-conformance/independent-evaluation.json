@@ -2,13 +2,10 @@
   "claim_layer": "replay-conformance",
   "case_id": "replay-conformance-independent-evaluation",
   "family": "independent-evaluation",
-  "input_blake3_digest": "f38f8946047c979a5c48c1cbb9c83dbb1eb991493082f31fb3d7664af2c37198",
+  "input_blake3_digest": "d1d43fd4801aacd411baf63c2c1d51174c94a79c6670653c0253f6ae1c180349",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

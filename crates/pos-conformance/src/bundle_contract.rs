@@ -894,6 +894,7 @@ pub fn verify_release_tree_independently(archives: &[&[u8]]) -> Result<(), Bundl
     let mut registry_bytes: Option<Vec<u8>> = None;
     let mut registry_providers: Option<BTreeSet<RawProviderKey>> = None;
     let mut profile_modes = BTreeMap::<[u8; 32], BTreeSet<u64>>::new();
+    let mut claim_layers = BTreeSet::new();
     let mut referenced_providers = BTreeSet::new();
 
     for archive in archives {
@@ -914,11 +915,13 @@ pub fn verify_release_tree_independently(archives: &[&[u8]]) -> Result<(), Bundl
             .entry(summary.profile_digest)
             .or_default()
             .insert(summary.mode);
+        claim_layers.insert(summary.claim_layer);
         referenced_providers.extend(summary.required_providers);
     }
 
     let complete_modes = BTreeSet::from([0, 1]);
     if profile_modes.len() == 7
+        && claim_layers == BTreeSet::from([0, 1, 2, 3, 4, 5, 6])
         && profile_modes.values().all(|modes| *modes == complete_modes)
         && registry_providers.as_ref() == Some(&referenced_providers)
     {
@@ -932,6 +935,7 @@ type RawProviderKey = (String, String, u64, u64);
 
 struct RawReleaseArchiveSummary {
     profile_digest: [u8; 32],
+    claim_layer: u64,
     mode: u64,
     registry_bytes: Vec<u8>,
     registry_providers: BTreeSet<RawProviderKey>,
@@ -948,6 +952,8 @@ fn raw_release_archive_summary(
     let profile_member = raw_member(members, PROFILE_PATH, 2)?;
     let profile = decode(bytes(&profile_member[1])?)?;
     let profile_fields = array(&profile, 18)?;
+    let fixtures = array_values(&profile_fields[9])?;
+    let claim_layer = raw_profile_claim_layer(fixtures)?;
     let binding = array(&profile_fields[8], 2)?;
     let required_providers = array_values(&binding[1])?
         .iter()
@@ -966,11 +972,28 @@ fn raw_release_archive_summary(
         .collect::<Result<_, _>>()?;
     Ok(RawReleaseArchiveSummary {
         profile_digest: digest::<32>(&profile_fields[17])?,
+        claim_layer,
         mode: uint(&manifest[2])?,
         registry_bytes,
         registry_providers,
         required_providers,
     })
+}
+
+fn raw_profile_claim_layer(fixtures: &[Value]) -> Result<u64, BundleContractErrorV1> {
+    let first = fixtures
+        .first()
+        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    let claim_layer = uint(&array(first, 24)?[2])?;
+    if claim_layer <= 6
+        && fixtures.iter().all(|fixture| {
+            array(fixture, 24).and_then(|fields| uint(&fields[2])) == Ok(claim_layer)
+        })
+    {
+        Ok(claim_layer)
+    } else {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    }
 }
 
 fn raw_manifest_header(manifest: &[Value]) -> Result<(), BundleContractErrorV1> {

@@ -1,1 +1,1 @@
-{"claim_layer":"empirical-evaluation","case_id":"empirical-evaluation-denied","family":"denied","subject":"empirical-evaluation","assertion":"denied public empirical-evaluation contract"}
+{"case_id":"empirical-evaluation-denied","claim_layer":"empirical-evaluation","family":"denied","provider_contract":"pigloros.fixture.empirical-evaluation@1.0.0","subject_adapter":"exported-artifact","stimulus":{"operation":"mutate-subject","required_capability":"mutate-subject","pre_state":{"revision":1}},"expected":{"failure_code":"capability-denied","post_state":{"revision":1}}}

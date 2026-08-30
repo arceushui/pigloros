@@ -2,13 +2,13 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-malformed",
   "family": "malformed",
-  "input_blake3_digest": "b82f27692675dbd9d1e23959a91140d2654c9aae1a62c2655da1ca187f1c9421",
+  "input_blake3_digest": "83392582567633189693703a9ddc6f8904be2cf3b4427f19578cd6b1947fe44a",
   "result": "namespaced-failure",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.knowledge-non-interference",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "malformed-payload"
   }
 }

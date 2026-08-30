@@ -2,13 +2,10 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-independent-evaluation",
   "family": "independent-evaluation",
-  "input_blake3_digest": "91aa82fcb1eee65d4146d7deaed4c0856742125ddc7cb0f456129bcac4135f2e",
+  "input_blake3_digest": "b581c319f565b924e927ec0583944993fc78921e287076526ea81f71ba4889c3",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

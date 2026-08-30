@@ -1,1 +1,1 @@
-{"claim_layer":"plugin-conformance","case_id":"plugin-conformance-denied","family":"denied","subject":"plugin-conformance","assertion":"denied public plugin-conformance contract"}
+{"case_id":"plugin-conformance-denied","claim_layer":"plugin-conformance","family":"denied","provider_contract":"pigloros.fixture.plugin-conformance@1.0.0","subject_adapter":"public-plugin-protocol","stimulus":{"operation":"mutate-subject","required_capability":"mutate-subject","pre_state":{"revision":1}},"expected":{"failure_code":"capability-denied","post_state":{"revision":1}}}

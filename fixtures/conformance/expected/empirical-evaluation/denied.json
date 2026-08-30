@@ -2,13 +2,13 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-denied",
   "family": "denied",
-  "input_blake3_digest": "62403df9448d39d0989b2b4e1f27578e1e1ed0f96468ba1dce195046f20b74ac",
+  "input_blake3_digest": "cfd249c91da3231629fad53e42d53a258120c78432166f6dc1d37e836de71826",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.empirical-evaluation",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "capability-denied"
   }
 }

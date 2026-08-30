@@ -2,13 +2,13 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "a90adb3f71a01ed32a5a2c51642f8abfab8521f522dc2dd67f38353fbdd59719",
+  "input_blake3_digest": "c70cadb53b7859ad5fe6721abf5077882d1b27f6ccaf1d715b7eea3480791a51",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.metric-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "capability-denied"
   }
 }

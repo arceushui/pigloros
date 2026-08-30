@@ -2,13 +2,10 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-positive",
   "family": "positive",
-  "input_blake3_digest": "b6d1bd8cf68a9d268022eb6d192d3e4b03890e88f50284d1ac444eddb094afa5",
+  "input_blake3_digest": "841400ba555c0836e409f971dda73f30fd0bbf1662d546458cd515afe1fb49bf",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

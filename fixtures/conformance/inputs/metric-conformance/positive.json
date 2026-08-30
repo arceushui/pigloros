@@ -1,1 +1,1 @@
-{"claim_layer":"metric-conformance","case_id":"metric-conformance-positive","family":"positive","subject":"metric-conformance","assertion":"positive public metric-conformance contract"}
+{"case_id":"metric-conformance-positive","claim_layer":"metric-conformance","family":"positive","provider_contract":"pigloros.fixture.metric-conformance@1.0.0","subject_adapter":"exported-artifact","stimulus":{"operation":"execute-positive-case","arguments":{"seed":1}},"expected":{"result":"accepted","post_state":{"committed":true}}}

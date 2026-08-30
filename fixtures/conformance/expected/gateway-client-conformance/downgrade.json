@@ -2,13 +2,13 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "05f063e27e66a44bc0b850d81b939a461aba1f73e903daac4ea1380dfb863ab4",
+  "input_blake3_digest": "373605d6e75bda398ae1a32bee60ee1ec7058ca9aae0166e5cde0079a9394775",
   "result": "not-authorized",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.gateway-client-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "incompatible-contract"
   }
 }

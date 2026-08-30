@@ -2,13 +2,13 @@
   "claim_layer": "gateway-client-conformance",
   "case_id": "gateway-client-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "23f7663555b07f78707762b5215eea652382210a2d16f969ac4f58378a29f5a4",
+  "input_blake3_digest": "8e475e8616bf90476750bd38fa576fb6cfac3bdf159d32c36b6cc69f61c0dc27",
   "result": "rejected",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.gateway-client-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "capability-denied"
   }
 }

@@ -2,13 +2,13 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-malformed",
   "family": "malformed",
-  "input_blake3_digest": "0d1890857a5f4effcf25f3d11111a85a3ab17786dc6a5cdd30739bacb348692e",
+  "input_blake3_digest": "715a6e17700c59ac7a65928a268caa6e75184186a5e982280777889c89ddf212",
   "result": "namespaced-failure",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.empirical-evaluation",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "malformed-payload"
   }
 }

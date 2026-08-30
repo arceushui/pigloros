@@ -1209,6 +1209,33 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
     Ok(())
 }
 
+#[test]
+fn independent_release_tree_requires_each_claim_layer() -> TestResult {
+    let mut archives = Vec::new();
+    for profile_index in 0..7 {
+        for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
+            let mut inputs = current_bundle_inputs(mode)?;
+            inputs.profile.profile_id = format!("duplicate-layer-profile-{profile_index}");
+            inputs.profile.profile_digest = inputs.profile.digest();
+            let archive = ConformanceBundleV1::materialize(
+                &inputs.profile,
+                mode,
+                inputs.members,
+                inputs.expected,
+            )?
+            .sign(&SigningKey::from_bytes(&[7; 32]))?
+            .to_canonical_cbor()?;
+            archives.push(archive);
+        }
+    }
+    let archive_refs = archives.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    assert_eq!(
+        verify_release_tree_independently(&archive_refs),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn root_materializer_test_drops_groups_gid_and_uid_before_publication() -> TestResult {

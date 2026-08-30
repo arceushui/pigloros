@@ -2,13 +2,13 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "49c642a06c8583980c307fbc129cc38731cf592d11cff4b8e3c717bd5d33e95e",
+  "input_blake3_digest": "f104abbab7ce0725defaa1ef62c7f43c1607a9e49e98b860f168f76102ad8da7",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.metric-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "resource-limit"
   }
 }

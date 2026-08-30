@@ -2,13 +2,10 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-positive",
   "family": "positive",
-  "input_blake3_digest": "5cfb744243831d7f2ec7070bd8a7b87923df67e7a26f3056f64915eb7a8edf21",
+  "input_blake3_digest": "333fc4b2b970cd943124442116647d3b185192608d0fd27f22a16ad0da44fb9c",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

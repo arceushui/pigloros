@@ -2,13 +2,10 @@
   "claim_layer": "replay-conformance",
   "case_id": "replay-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "9021389ebdaa473c9e0840fcb139e910802986fe4c7e1309a535ca86dee885b6",
+  "input_blake3_digest": "697454ab21be0ccf8f797acb88703801c79d5e6ea911543e2dbf75f17c1b0230",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

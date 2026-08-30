@@ -16,14 +16,20 @@ struct CatalogRoot {
 }
 
 struct FixturePaths {
-    schema: String,
-    input: String,
-    expected: String,
+    schema: FixtureAsset,
+    input: FixtureAsset,
+    expected: FixtureAsset,
+}
+
+struct FixtureAsset {
+    relative: String,
+    bytes: Vec<u8>,
 }
 
 struct ProfilePaths {
     wire_code: u64,
     profile: String,
+    profile_record: Vec<u8>,
     fixtures: Vec<FixturePaths>,
 }
 
@@ -181,16 +187,32 @@ fn validate_fixture_provider(profile: &Value, claim_layer: &str) -> Result<(), i
     }
 }
 
-fn relative_asset(root: &CatalogRoot, value: &Value, field: &str) -> Result<String, io::Error> {
+fn relative_asset(
+    root: &CatalogRoot,
+    value: &Value,
+    field: &str,
+) -> Result<FixtureAsset, io::Error> {
     let relative = json_text(value, field)?;
-    non_symlink_relative_path(root, &relative, &format!("profile catalog {field}"), false)?;
-    Ok(relative)
+    let description = format!("profile catalog {field}");
+    let canonical = non_symlink_relative_path(root, &relative, &description, false)?;
+    let bytes = fs::read(&canonical).map_err(|error| {
+        invalid_data(format!(
+            "{description} cannot be read at {}: {error}",
+            canonical.display()
+        ))
+    })?;
+    Ok(FixtureAsset { relative, bytes })
 }
 
 fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Box<dyn Error>> {
     let canonical_profile = non_symlink_relative_path(root, &profile, "profile manifest", false)?;
-    let bytes = fs::read(&canonical_profile)?;
-    let profile_value: Value = serde_json::from_slice(&bytes)?;
+    let profile_record = fs::read(&canonical_profile).map_err(|error| {
+        invalid_data(format!(
+            "profile manifest cannot be read at {}: {error}",
+            canonical_profile.display()
+        ))
+    })?;
+    let profile_value: Value = serde_json::from_slice(&profile_record)?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
     validate_fixture_provider(&profile_value, &claim_layer)?;
     let wire_code = json_field(&profile_value, "wire_code")?
@@ -204,7 +226,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
             let family = json_text(fixture, "family")?;
             let schema = relative_asset(root, fixture, "schema")?;
             let expected_schema = format!("support/schemas/{family}.schema.json");
-            if schema != expected_schema {
+            if schema.relative != expected_schema {
                 return Err(invalid_data(format!(
                     "profile fixture schema does not match family {family}"
                 )));
@@ -226,6 +248,7 @@ fn profile_paths(root: &CatalogRoot, profile: String) -> Result<ProfilePaths, Bo
     Ok(ProfilePaths {
         wire_code,
         profile,
+        profile_record,
         fixtures,
     })
 }
@@ -273,26 +296,26 @@ fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
         writeln!(generated, "    LayerSource {{")?;
         writeln!(
             generated,
-            "        profile_record: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../fixtures/conformance/\", {:?})),",
-            profile.profile
+            "        profile_record: &{:?},",
+            profile.profile_record
         )?;
         writeln!(generated, "        fixtures: &[")?;
         for fixture in &profile.fixtures {
             writeln!(generated, "            FixtureSource {{")?;
             writeln!(
                 generated,
-                "                schema: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../fixtures/conformance/\", {:?})),",
-                fixture.schema
+                "                schema: &{:?},",
+                fixture.schema.bytes
             )?;
             writeln!(
                 generated,
-                "                input: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../fixtures/conformance/\", {:?})),",
-                fixture.input
+                "                input: &{:?},",
+                fixture.input.bytes
             )?;
             writeln!(
                 generated,
-                "                expected: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../fixtures/conformance/\", {:?})),",
-                fixture.expected
+                "                expected: &{:?},",
+                fixture.expected.bytes
             )?;
             writeln!(generated, "            }},")?;
         }
@@ -312,9 +335,9 @@ fn emit_rerun_directives(root: &CatalogRoot, profiles: &[ProfilePaths]) {
         }
         paths.insert(profile_path);
         for fixture in &profile.fixtures {
-            paths.insert(root.source.join(&fixture.schema));
-            paths.insert(root.source.join(&fixture.input));
-            paths.insert(root.source.join(&fixture.expected));
+            paths.insert(root.source.join(&fixture.schema.relative));
+            paths.insert(root.source.join(&fixture.input.relative));
+            paths.insert(root.source.join(&fixture.expected.relative));
         }
     }
     for path in paths {

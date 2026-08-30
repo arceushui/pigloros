@@ -2,13 +2,10 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-independent-evaluation",
   "family": "independent-evaluation",
-  "input_blake3_digest": "0848374f538c28493a7483f6c51024982d0a33ca1149d4cf3041f4dec9f82676",
+  "input_blake3_digest": "fc593ff882498385f5f6e446dce109f075dab163369c9e439085eff1d194090d",
   "result": "corroborated",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

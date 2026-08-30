@@ -3,6 +3,11 @@ set -euo pipefail
 
 fixture_root="${1:-fixtures/conformance}"
 profile_root="${fixture_root}/profiles"
+mode="${2:---check}"
+[[ "${mode}" == "--check" || "${mode}" == "--write" ]] || {
+  echo "usage: $0 [fixture-root] [--check|--write]" >&2
+  exit 1
+}
 
 command -v jq >/dev/null || {
   echo "jq is required to independently regenerate conformance fixture records" >&2
@@ -23,7 +28,7 @@ trap 'rm -rf "${generated_root}"' EXIT
 
 generated_count=0
 declare -A seen_expected_paths=()
-while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path; do
+while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expected_path subject_adapter provider_id; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
@@ -64,59 +69,99 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path input_path expect
     echo "fixture schema does not bind its family: ${case_id}" >&2
     exit 1
   }
-  jq -e \
-    --arg case_id "${case_id}" \
-    --arg claim_layer "${claim_layer}" \
-    --arg family "${family}" \
-    '.case_id == $case_id and .claim_layer == $claim_layer and .family == $family and
-     ((.subject | type) == "string") and (.subject != "") and
-     ((.assertion | type) == "string") and (.assertion != "")' \
-    "${input_file}" >/dev/null || {
-    echo "input fixture does not match its public profile declaration: ${case_id}" >&2
-    exit 1
-  }
-
+  generated_file="${generated_root}/${expected_path}"
+  mkdir -p "$(dirname "${generated_file}")"
+  generated_input="${generated_root}/${input_path}"
+  mkdir -p "$(dirname "${generated_input}")"
   case "${family}" in
-    positive) result=accepted ;;
-    denied) result=rejected ;;
-    malformed) result=namespaced-failure ;;
-    resource-exhaustion) result=resource-limit ;;
-    deletion-redaction) result=destroyed ;;
-    downgrade) result=not-authorized ;;
-    independent-evaluation) result=corroborated ;;
+    positive)
+      result=accepted
+      oracle_kind=canonical-output
+      operation=execute-positive-case
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg operation "${operation}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:$operation,arguments:{seed:1}},expected:{result:"accepted",post_state:{committed:true}}}' > "${generated_input}"
+      ;;
+    denied)
+      result=rejected
+      oracle_kind=namespaced-failure
+      code_id=capability-denied
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"mutate-subject",required_capability:"mutate-subject",pre_state:{revision:1}},expected:{failure_code:"capability-denied",post_state:{revision:1}}}' > "${generated_input}"
+      ;;
+    malformed)
+      result=namespaced-failure
+      oracle_kind=namespaced-failure
+      code_id=malformed-payload
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:"malformed-provider-payload",expected:{failure_code:"malformed-payload"}}' > "${generated_input}"
+      ;;
+    resource-exhaustion)
+      result=resource-limit
+      oracle_kind=namespaced-failure
+      code_id=resource-limit
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"consume-execution-steps"},limit:{kind:"execution-steps",maximum:10000000,requested:10000001},expected:{failure_code:"resource-limit"}}' > "${generated_input}"
+      ;;
+    deletion-redaction)
+      result=destroyed
+      oracle_kind=canonical-output
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,pre_state:{prohibited_data:"synthetic-secret",retained_metadata:{record_id:"synthetic-1"}},stimulus:{operation:"redact-synthetic-subject"},expected:{post_state:{prohibited_data_present:false,retained_metadata:{record_id:"synthetic-1"}}}}' > "${generated_input}"
+      ;;
+    downgrade)
+      result=not-authorized
+      oracle_kind=namespaced-failure
+      code_id=incompatible-contract
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_id "${provider_id}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,stimulus:{operation:"verify-release-admission",from_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:1},to_provider:{provider_id:$provider_id,contract_version:"1.0.0",abi_major:1,abi_minor:0},allow_fallback:false},expected:{failure_code:"incompatible-contract"}}' > "${generated_input}"
+      ;;
+    independent-evaluation)
+      result=corroborated
+      oracle_kind=canonical-output
+      independent_input="PiglorOS independent fixture ${claim_layer}"
+      expected_digest="$(printf '%s' "${independent_input}" | b3sum | awk '{print $1}')"
+      jq -cn --arg case_id "${case_id}" --arg claim_layer "${claim_layer}" --arg family "${family}" --arg provider_contract "${provider_id}@1.0.0" --arg subject_adapter "${subject_adapter}" --arg input "${independent_input}" --arg expected_digest "${expected_digest}" \
+        '{case_id:$case_id,claim_layer:$claim_layer,family:$family,provider_contract:$provider_contract,subject_adapter:$subject_adapter,algorithm:"BLAKE3-256",input:$input,expected_digest:$expected_digest}' > "${generated_input}"
+      ;;
     *)
       echo "unknown public fixture family: ${family}" >&2
       exit 1
       ;;
   esac
 
-  generated_file="${generated_root}/${expected_path}"
-  mkdir -p "$(dirname "${generated_file}")"
-  generated_input="${generated_root}/${input_path}"
-  mkdir -p "$(dirname "${generated_input}")"
-  jq -c '.' "${input_file}" > "${generated_input}"
-  cmp -- "${generated_input}" "${input_file}" || {
-    echo "input fixture is not canonical JSON: ${case_id}" >&2
-    exit 1
-  }
-  input_blake3_digest="$(b3sum "${input_file}" | awk '{print $1}')"
+  input_blake3_digest="$(b3sum "${generated_input}" | awk '{print $1}')"
+  if [[ "${oracle_kind}" == "canonical-output" ]]; then
+    oracle="$(jq -cn '{kind:"canonical-output"}')"
+  else
+    oracle="$(jq -cn --arg owner_id "${provider_id}" --arg code_id "${code_id}" '{kind:"namespaced-failure",owner_id:$owner_id,contract_version:"1.0.0",code_id:$code_id}')"
+  fi
   jq -n \
     --arg claim_layer "${claim_layer}" \
     --arg case_id "${case_id}" \
     --arg family "${family}" \
     --arg input_blake3_digest "${input_blake3_digest}" \
     --arg result "${result}" \
-    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, result: $result, status: "pending", draft_expected_result: {kind: "namespaced-failure", owner_id: "pigloros.core", contract_version: "1.0.0", code_id: "provenance-missing"}}' \
+    --argjson oracle "${oracle}" \
+    '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, result: $result, status: "pending", draft_expected_result: $oracle}' \
     > "${generated_file}"
-  cmp -- "${generated_file}" "${expected_file}" || {
-    echo "expected fixture record is not independently reproducible: ${case_id}" >&2
-    exit 1
-  }
+  if [[ "${mode}" == "--write" ]]; then
+    install -m 0644 -- "${generated_input}" "${input_file}"
+    install -m 0644 -- "${generated_file}" "${expected_file}"
+  else
+    cmp -- "${generated_input}" "${input_file}" || {
+      echo "input fixture is not independently reproducible: ${case_id}" >&2
+      exit 1
+    }
+    cmp -- "${generated_file}" "${expected_file}" || {
+      echo "expected fixture record is not independently reproducible: ${case_id}" >&2
+      exit 1
+    }
+  fi
   generated_count=$((generated_count + 1))
 done < <(
   find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 |
     sort -z |
-    xargs -0 -r jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected] | @tsv'
+    xargs -0 -r jq -r '. as $profile | .fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, $profile.subject_adapter, $profile.fixture_provider.provider_id] | @tsv'
 )
 
 if (( generated_count != 49 )); then
@@ -175,13 +220,24 @@ generated_blake3="${generated_root}/BLAKE3SUMS"
     sort -z |
     xargs -0 sha256sum
 ) > "${generated_sha256}"
-cmp -- "${generated_blake3}" "${fixture_root}/BLAKE3SUMS" || {
-  echo "BLAKE3SUMS is not independently reproducible" >&2
-  exit 1
-}
-cmp -- "${generated_sha256}" "${fixture_root}/SHA256SUMS" || {
-  echo "SHA256SUMS is not independently reproducible" >&2
-  exit 1
-}
+if [[ "${mode}" == "--write" ]]; then
+  install -m 0644 -- "${generated_blake3}" "${fixture_root}/BLAKE3SUMS"
+  (
+    cd "${fixture_root}"
+    { printf '%s\0' BLAKE3SUMS; find expected-authority expected inputs matrix profiles support -type f -print0; } |
+      sort -z |
+      xargs -0 sha256sum
+  ) > "${generated_sha256}"
+  install -m 0644 -- "${generated_sha256}" "${fixture_root}/SHA256SUMS"
+else
+  cmp -- "${generated_blake3}" "${fixture_root}/BLAKE3SUMS" || {
+    echo "BLAKE3SUMS is not independently reproducible" >&2
+    exit 1
+  }
+  cmp -- "${generated_sha256}" "${fixture_root}/SHA256SUMS" || {
+    echo "SHA256SUMS is not independently reproducible" >&2
+    exit 1
+  }
+fi
 
 echo "independently regenerated ${generated_count} public fixture records, the Draft authority inventory, and byte inventories"

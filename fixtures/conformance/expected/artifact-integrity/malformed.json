@@ -2,13 +2,13 @@
   "claim_layer": "artifact-integrity",
   "case_id": "artifact-integrity-malformed",
   "family": "malformed",
-  "input_blake3_digest": "0d06779040fbad6e827a31b0cf3540657f80ad1595e7acb19341f074ffedec44",
+  "input_blake3_digest": "21e13395bf035761bc507ccf45aa8a3c47bd630ef5f2286246ef832735d83ac6",
   "result": "namespaced-failure",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.artifact-integrity",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "malformed-payload"
   }
 }

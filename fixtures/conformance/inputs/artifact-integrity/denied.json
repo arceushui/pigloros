@@ -1,1 +1,1 @@
-{"claim_layer":"artifact-integrity","case_id":"artifact-integrity-denied","family":"denied","subject":"artifact-integrity","assertion":"denied public artifact-integrity contract"}
+{"case_id":"artifact-integrity-denied","claim_layer":"artifact-integrity","family":"denied","provider_contract":"pigloros.fixture.artifact-integrity@1.0.0","subject_adapter":"exported-artifact","stimulus":{"operation":"mutate-subject","required_capability":"mutate-subject","pre_state":{"revision":1}},"expected":{"failure_code":"capability-denied","post_state":{"revision":1}}}

@@ -2,13 +2,13 @@
   "claim_layer": "knowledge-non-interference",
   "case_id": "knowledge-non-interference-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "9892e68134cee528672222a2a2e322e858574a2d51c8bceb35bce84dc0fc57dc",
+  "input_blake3_digest": "3820287f63aa138ef5c71c76eae2db9881f045828082f8c042e42fe52aeb090d",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.knowledge-non-interference",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "resource-limit"
   }
 }

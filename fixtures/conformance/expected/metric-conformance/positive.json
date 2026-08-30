@@ -2,13 +2,10 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-positive",
   "family": "positive",
-  "input_blake3_digest": "d001875200b66ddf91bcfa0e151366d9ff34589b5ec62ece05432762c10ac7aa",
+  "input_blake3_digest": "3456e0f62eed80c9926cc3e2729b96549fcbb447df582770147ab9655eb03eda",
   "result": "accepted",
   "status": "pending",
   "draft_expected_result": {
-    "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
-    "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "kind": "canonical-output"
   }
 }

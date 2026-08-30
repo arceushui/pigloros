@@ -2,13 +2,13 @@
   "claim_layer": "metric-conformance",
   "case_id": "metric-conformance-malformed",
   "family": "malformed",
-  "input_blake3_digest": "e9b747b0cf2b1119d82d0e00d0a5bb1ed01f6efd00bc6d6f01a97786be21b103",
+  "input_blake3_digest": "52783c593e9d2b1aa185dedc41a0e02aa0ca5914368477dc91d70ad6417fd5cb",
   "result": "namespaced-failure",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.metric-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "malformed-payload"
   }
 }

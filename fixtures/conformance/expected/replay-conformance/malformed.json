@@ -2,13 +2,13 @@
   "claim_layer": "replay-conformance",
   "case_id": "replay-conformance-malformed",
   "family": "malformed",
-  "input_blake3_digest": "7c1a4c298f92c953bb3f7a4134146dd0e4041c96d191e9a396e51f1befec34d2",
+  "input_blake3_digest": "925dd063d9c250fe699926c64db0558e1a195e387d0c2986df2675e96ff59e1a",
   "result": "namespaced-failure",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.replay-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "malformed-payload"
   }
 }

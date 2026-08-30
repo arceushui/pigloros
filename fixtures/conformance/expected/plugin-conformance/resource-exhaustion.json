@@ -2,13 +2,13 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-resource-exhaustion",
   "family": "resource-exhaustion",
-  "input_blake3_digest": "9f6edc9e23b96d0cab694cc7941466e428c6fc1ebcc66b5aa6aa6239c931ab26",
+  "input_blake3_digest": "7a8dba89ee57eaca60c7e9dbd885ee3c76a9dd0d493be1db8447afa5cbd46b83",
   "result": "resource-limit",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.plugin-conformance",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "resource-limit"
   }
 }

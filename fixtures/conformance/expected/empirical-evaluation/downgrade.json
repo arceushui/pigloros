@@ -2,13 +2,13 @@
   "claim_layer": "empirical-evaluation",
   "case_id": "empirical-evaluation-downgrade",
   "family": "downgrade",
-  "input_blake3_digest": "010b64fdbc3046bee5995ed0af3699f1a8148f4d3c6187775679b55908685ce7",
+  "input_blake3_digest": "f003fdfd3f68a5ec27092073277bfd9898309c1daee88ab8e655747cc0772175",
   "result": "not-authorized",
   "status": "pending",
   "draft_expected_result": {
     "kind": "namespaced-failure",
-    "owner_id": "pigloros.core",
+    "owner_id": "pigloros.fixture.empirical-evaluation",
     "contract_version": "1.0.0",
-    "code_id": "provenance-missing"
+    "code_id": "incompatible-contract"
   }
 }
