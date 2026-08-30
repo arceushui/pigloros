@@ -1240,17 +1240,19 @@ fn fixture_descriptor_from_record(
         to: provider_key.clone(),
     });
     trust_policy_snapshot_digest().and_then(|trust_policy_snapshot_digest| {
-        let release_admission_digest = match transition.as_ref() {
-            Some(transition) => release_admission_bytes(
-                &fixture.record.case_id,
-                execution_profile_digest,
-                trust_policy_snapshot_digest,
-                &transition.from,
-                &transition.to,
-            )
-            .map(|bytes| Some(*blake3::hash(&bytes).as_bytes())),
-            None => Ok(None),
-        };
+        let release_admission_digest = transition.as_ref().map_or_else(
+            || Ok(None),
+            |transition| {
+                release_admission_bytes(
+                    &fixture.record.case_id,
+                    execution_profile_digest,
+                    trust_policy_snapshot_digest,
+                    &transition.from,
+                    &transition.to,
+                )
+                .map(|bytes| Some(*blake3::hash(&bytes).as_bytes()))
+            },
+        );
         release_admission_digest.map(|release_admission_digest| {
             let mut descriptor = FixtureDescriptorV1 {
                 case_id: fixture.record.case_id.clone(),
@@ -1557,7 +1559,7 @@ fn append_supporting_members(
         include_bytes!("../../../../fixtures/conformance/matrix/execution-matrix.json").to_vec(),
     );
     members.push(matrix);
-    append_draft_authority_members(members, profile, mode).and_then(|()| {
+    append_draft_authority_members(members, profile, mode).map(|()| {
         members.push(BundleMemberV1::fixture_provider_registry(
             providers.registry.bytes.clone(),
         ));
@@ -1567,7 +1569,6 @@ fn append_supporting_members(
                 package.artifact.bytes.clone(),
             ));
         }
-        Ok(())
     })
 }
 
