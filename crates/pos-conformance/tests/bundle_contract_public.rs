@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 //! Public archive-contract regression tests for the current CPF1/FPR1/FPP1 surface.
 
 pub mod support;
