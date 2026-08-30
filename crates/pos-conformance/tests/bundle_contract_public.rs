@@ -3086,16 +3086,17 @@ fn both_verifiers_reject_stale_profile_identity_for_each_selected_ceiling() -> T
         let archive = mutate_profile_archive_after_profile_digest(|profile| {
             let protocol = array_field(profile, 11, "evaluator protocol")?;
             let hard_caps = array_field(protocol, 4, "evaluator hard caps")?;
-            let Value::Integer(selected) = hard_caps
+            let selected = match hard_caps
                 .get(10 + field)
                 .ok_or_else(|| format!("selected ceiling {field} is absent"))?
-            else {
-                return Err("selected deterministic ceiling is not an integer".into());
+            {
+                Value::Integer(value) => u64::try_from(*value)?,
+                _ => return Err("selected deterministic ceiling is not an integer".into()),
             };
             replace_value(
                 hard_caps,
                 10 + field,
-                Value::Integer(u64::try_from(*selected)?.saturating_sub(1).into()),
+                Value::Integer(selected.saturating_sub(1).into()),
                 "selected deterministic ceiling",
             )
         })?;
