@@ -612,10 +612,10 @@ fn state_after_acknowledgements(
 #[test]
 fn public_coordinator_rejects_conflicting_retries_and_propagates_commit_failure(
 ) -> Result<(), ErasureErrorV1> {
-    let request = request()?;
-    let request_reference = request.reference();
+    let submitted_request = request()?;
+    let request_reference = submitted_request.reference();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(public_port(false), reference(91));
-    coordinator.submit(request, reference(92))?;
+    coordinator.submit(submitted_request, reference(92))?;
     coordinator.authorize(request_reference, reference(93))?;
     assert_eq!(
         coordinator.authorize(request_reference, reference(99)),
