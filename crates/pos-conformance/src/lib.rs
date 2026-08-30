@@ -381,6 +381,43 @@ mod coverage_entrypoints {
         ]
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn divergence_report() -> DivergenceReportV1 {
+        let mut report = DivergenceReportV1 {
+            request_digest: [1; 32],
+            manifest_digest: [2; 32],
+            execution_profile_digest: [3; 32],
+            fixture_digest: Some([4; 32]),
+            evaluator_digest: [5; 32],
+            reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
+            replay_claim: ReplayClaimV1::Exact,
+            location_kind: DivergenceLocationKindV1::TimelineSeq,
+            timeline_or_worldcut_id: [6; 16],
+            timeline_seq_or_cut_ordinal: 7,
+            tick: 8,
+            scheduler_position: Some(9),
+            driver_or_plugin_id: Some("world".to_owned()),
+            output_ordinal: Some(10),
+            mismatch_kind: DivergenceMismatchKindV1::CanonicalBytes,
+            expected: DigestSizeV1 {
+                digest: Some([11; 32]),
+                size: Some(12),
+            },
+            actual: DigestSizeV1 {
+                digest: Some([13; 32]),
+                size: Some(14),
+            },
+            prior_matching_checkpoint_digest: Some([15; 32]),
+            follow_on_counts: vec![FollowOnMismatchV1 {
+                kind: DivergenceMismatchKindV1::Artifact,
+                count: 1,
+            }],
+            report_digest: [0; 32],
+        };
+        report.report_digest = ok(report.digest());
+        report
+    }
+
     #[test]
     fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
         let boundary = wave8_plugin_boundary();
@@ -644,6 +681,93 @@ mod coverage_entrypoints {
                 result
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn public_record_rejections_cover_semantic_boundaries() {
+        let mut invalid_evidence = tests::evidence();
+        invalid_evidence.format_version += 1;
+        expect_err(&invalid_evidence.to_verification_result());
+
+        let evidence = tests::evidence();
+        assert!(evidence.to_verification_result_cbor().is_ok());
+        let result = ok(evidence.to_verification_result());
+        for mutate in [
+            |value: &mut VerificationResultV1| value.checked_artifact_count = 65_537,
+            |value: &mut VerificationResultV1| value.provenance_digest = [0; 32],
+            |value: &mut VerificationResultV1| value.result_digest = [0; 32],
+        ] {
+            let mut invalid = result.clone();
+            mutate(&mut invalid);
+            expect_err(&invalid.to_canonical_cbor());
+        }
+        let mut oversized_coordinate = result.clone();
+        oversized_coordinate.verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        oversized_coordinate.authoritative_result_digest = None;
+        oversized_coordinate.first_error = Some(VerificationErrorV1 {
+            code: SafeErrorCodeV1::InvalidEncoding,
+            field_ordinal: Some(1),
+            canonical_coordinate: Some(vec![0; 129]),
+            related_digest: None,
+        });
+        oversized_coordinate.result_digest = ok(oversized_coordinate.digest());
+        expect_err(&oversized_coordinate.to_canonical_cbor());
+
+        let result_value = decode_value(ok(result.to_canonical_cbor()));
+        let negative_count = replace_field(
+            result_value.clone(),
+            15,
+            ciborium::Value::Integer((-1_i64).into()),
+        );
+        expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
+            &negative_count,
+        )));
+        let mut trailing_result = ok(result.to_canonical_cbor());
+        trailing_result.push(0);
+        expect_err(&VerificationResultV1::from_canonical_cbor(&trailing_result));
+
+        let mut error_result = result;
+        error_result.verification_outcome = VerificationOutcomeV1::InvalidManifest;
+        error_result.authoritative_result_digest = None;
+        error_result.first_error = Some(VerificationErrorV1 {
+            code: SafeErrorCodeV1::InvalidEncoding,
+            field_ordinal: None,
+            canonical_coordinate: None,
+            related_digest: None,
+        });
+        error_result.result_digest = ok(error_result.digest());
+        let error_value = decode_value(ok(error_result.to_canonical_cbor()));
+        let invalid_safe_error =
+            replace_nested_field(error_value, 14, 0, ciborium::Value::Integer(14_u64.into()));
+        expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
+            &invalid_safe_error,
+        )));
+
+        let report = divergence_report();
+        let invalid_reports: [fn(&mut DivergenceReportV1); 9] = [
+            |value| value.timeline_seq_or_cut_ordinal = u64::MAX,
+            |value| value.tick = u64::MAX,
+            |value| value.scheduler_position = Some(u32::MAX),
+            |value| value.output_ordinal = Some(u32::MAX),
+            |value| value.driver_or_plugin_id = Some(String::new()),
+            |value| value.report_digest = [0; 32],
+            |value| value.follow_on_counts = vec![value.follow_on_counts[0].clone(); 33],
+            |value| value.follow_on_counts[0].count = 0,
+            |value| {
+                value
+                    .follow_on_counts
+                    .push(value.follow_on_counts[0].clone());
+            },
+        ];
+        for mutate in invalid_reports {
+            let mut invalid = report.clone();
+            mutate(&mut invalid);
+            expect_err(&invalid.to_canonical_cbor());
+        }
+        let mut trailing_report = ok(report.to_canonical_cbor());
+        trailing_report.push(0);
+        expect_err(&DivergenceReportV1::from_canonical_cbor(&trailing_report));
     }
 }
 
