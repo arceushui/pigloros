@@ -1194,7 +1194,7 @@ fn coordinator_propagates_authentication_authorization_and_resolution_failures(
         Err(ErasureErrorV1::Unauthorized)
     );
 
-    let mut resolve = submitted_fixture(Vec::new())?;
+    let mut resolve = authorized_fixture(Vec::new())?;
     let record = latest_record(&resolve.state, resolve.request)?;
     resolve.state.borrow_mut().resolver_error = Some(ErasureErrorV1::Unauthorized);
     assert_eq!(
