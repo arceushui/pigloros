@@ -43,7 +43,7 @@ enum StagingMutation {
     ReplaceIdentity,
     RelaxPermissions,
     InjectSymlink,
-    InjectSocket,
+    InjectFifo,
     BlockFutureDirectory,
     TamperStagedFile,
 }
@@ -170,10 +170,14 @@ fn mutate_live_staging(
         }
         StagingMutation::InjectSymlink => symlink("/dev/null", staging.join("injected-link"))
             .and_then(|()| fs::create_dir(&destination)),
-        StagingMutation::InjectSocket => {
-            std::os::unix::net::UnixListener::bind(staging.join("injected-socket"))
-                .map(drop)
-                .and_then(|()| fs::create_dir(&destination))
+        StagingMutation::InjectFifo => {
+            let status = Command::new("mkfifo")
+                .arg(staging.join("injected-fifo"))
+                .status()?;
+            if !status.success() {
+                return Err("mkfifo could not create the staged special file".into());
+            }
+            fs::create_dir(&destination)
         }
         StagingMutation::BlockFutureDirectory => {
             symlink("/dev/null", staging.join("empirical-evaluation"))
@@ -2801,7 +2805,7 @@ fn public_materializer_rejects_live_staging_replacement_and_contamination() -> T
     )?;
     assert!(stderr.contains("SymlinkDetected"));
 
-    let stderr = mutate_live_staging(materializer.as_os_str(), key, StagingMutation::InjectSocket)?;
+    let stderr = mutate_live_staging(materializer.as_os_str(), key, StagingMutation::InjectFifo)?;
     assert!(stderr.contains("UntrustedOutputDirectory"));
 
     let stderr = mutate_live_staging(
