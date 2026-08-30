@@ -35,6 +35,106 @@ fn materializer_process_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum StagingMutation {
+    ReplaceIdentity,
+    RelaxPermissions,
+    InjectSymlink,
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn signal_process(child: &std::process::Child, signal: &str) -> TestResult {
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(child.id().to_string())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("failed to send {signal} to materializer").into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn await_staging_directory(parent: &Path, child: &mut std::process::Child) -> TestResult<PathBuf> {
+    for _ in 0..200_000 {
+        if let Some(status) = child.try_wait()? {
+            return Err(
+                format!("materializer exited before staging was observable: {status}").into(),
+            );
+        }
+        if let Some(staging) = fs::read_dir(parent)?.find_map(|entry| {
+            entry.ok().and_then(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".pigloros-conformance-staging-")
+                    .then(|| entry.path())
+            })
+        }) {
+            return Ok(staging);
+        }
+        std::thread::yield_now();
+    }
+    child.kill()?;
+    child.wait()?;
+    Err("materializer staging directory was not observable".into())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn mutate_live_staging(
+    materializer: &std::ffi::OsStr,
+    key: &str,
+    mutation: StagingMutation,
+) -> TestResult<String> {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::process::Stdio;
+
+    let root = temporary_root("materializer-staging-mutation")?;
+    let _cleanup = TemporaryOutput(root.clone());
+    fs::create_dir_all(&root)?;
+    let destination = root.join(source_inventory_address());
+    let mut child = Command::new(materializer)
+        .env("PIGLOROS_CONFORMANCE_SIGNING_KEY", key)
+        .arg(&destination)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let staging = await_staging_directory(&root, &mut child)?;
+    signal_process(&child, "STOP")?;
+
+    let mutation_result = match mutation {
+        StagingMutation::ReplaceIdentity => {
+            let retained = root.join("retained-staging");
+            fs::rename(&staging, retained).and_then(|()| fs::create_dir(&staging))
+        }
+        StagingMutation::RelaxPermissions => {
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))
+        }
+        StagingMutation::InjectSymlink => symlink("/dev/null", staging.join("injected-link"))
+            .and_then(|()| fs::create_dir(&destination)),
+    };
+    let resume_result = signal_process(&child, "CONT");
+    if let Err(error) = mutation_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error.into());
+    }
+    if let Err(error) = resume_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    let output = child.wait_with_output()?;
+    assert!(!output.status.success());
+    Ok(String::from_utf8(output.stderr)?)
+}
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const CURRENT_SCHEMA_BYTES: [&[u8]; 7] = [
@@ -2610,6 +2710,31 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
         .arg(source_inventory_address())
         .status()?
         .success());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_materializer_rejects_live_staging_replacement_and_contamination() -> TestResult {
+    let _guard = materializer_process_guard();
+    let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    let key = "0707070707070707070707070707070707070707070707070707070707070707";
+
+    for mutation in [
+        StagingMutation::ReplaceIdentity,
+        StagingMutation::RelaxPermissions,
+    ] {
+        let stderr = mutate_live_staging(materializer.as_os_str(), key, mutation)?;
+        assert!(stderr.contains("UntrustedOutputDirectory"));
+    }
+
+    let stderr = mutate_live_staging(
+        materializer.as_os_str(),
+        key,
+        StagingMutation::InjectSymlink,
+    )?;
+    assert!(stderr.contains("SymlinkDetected"));
     Ok(())
 }
 

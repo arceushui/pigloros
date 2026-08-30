@@ -607,45 +607,52 @@ fn sync_fd<Fd: std::os::fd::AsFd>(fd: Fd) -> Result<(), MaterializationError> {
 
 #[cfg(target_os = "linux")]
 const fn map_open_error(error: Errno) -> MaterializationError {
-    match error {
-        Errno::LOOP => MaterializationError::SymlinkDetected,
-        Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV => {
-            MaterializationError::AtomicPublicationUnsupported
-        }
-        _ => MaterializationError::UntrustedOutputDirectory,
+    if error == Errno::LOOP {
+        MaterializationError::SymlinkDetected
+    } else if atomic_publication_is_unsupported(error) {
+        MaterializationError::AtomicPublicationUnsupported
+    } else {
+        MaterializationError::UntrustedOutputDirectory
     }
 }
 
 #[cfg(target_os = "linux")]
 const fn map_publish_error(error: Errno) -> MaterializationError {
-    match error {
-        Errno::EXIST => MaterializationError::DestinationExists,
-        Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV => {
-            MaterializationError::AtomicPublicationUnsupported
-        }
-        _ => MaterializationError::UntrustedOutputDirectory,
+    if error == Errno::EXIST {
+        MaterializationError::DestinationExists
+    } else if atomic_publication_is_unsupported(error) {
+        MaterializationError::AtomicPublicationUnsupported
+    } else {
+        MaterializationError::UntrustedOutputDirectory
     }
 }
 
 #[cfg(target_os = "linux")]
 const fn map_sync_error(error: Errno) -> MaterializationError {
-    match error {
-        Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV => {
-            MaterializationError::AtomicPublicationUnsupported
-        }
-        _ => MaterializationError::DurabilitySyncFailed,
+    if atomic_publication_is_unsupported(error) {
+        MaterializationError::AtomicPublicationUnsupported
+    } else {
+        MaterializationError::DurabilitySyncFailed
     }
 }
 
 #[cfg(target_os = "linux")]
 const fn map_cleanup_error(error: Errno) -> MaterializationError {
-    match error {
-        Errno::LOOP => MaterializationError::SymlinkDetected,
-        Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV => {
-            MaterializationError::AtomicPublicationUnsupported
-        }
-        _ => MaterializationError::UntrustedOutputDirectory,
+    if error == Errno::LOOP {
+        MaterializationError::SymlinkDetected
+    } else if atomic_publication_is_unsupported(error) {
+        MaterializationError::AtomicPublicationUnsupported
+    } else {
+        MaterializationError::UntrustedOutputDirectory
     }
+}
+
+#[cfg(target_os = "linux")]
+const fn atomic_publication_is_unsupported(error: Errno) -> bool {
+    matches!(
+        error,
+        Errno::NOSYS | Errno::INVAL | Errno::OPNOTSUPP | Errno::XDEV
+    )
 }
 
 #[cfg(target_os = "linux")]
