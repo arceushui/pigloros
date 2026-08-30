@@ -725,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn pure_path_and_errno_boundaries_are_closed() {
         assert_error(
             output_parent_and_name(Path::new("")),
@@ -1052,6 +1053,70 @@ mod tests {
                 &publication.parent,
                 &rejected_name,
                 wrong_device,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn private_staging_failures_are_rejected_at_the_filesystem_boundary() {
+        let root = TestDirectory::create("staging-failures");
+        let destination = root.0.join("published");
+        let publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
+        let wrong_parent = DirectoryIdentity {
+            device: publication.parent_identity.device ^ 1,
+            inode: publication.parent_identity.inode,
+        };
+
+        assert_error(
+            create_private_staging(&publication.parent, wrong_parent, effective_uid()),
+            "untrusted output directory",
+        );
+        assert_error(
+            open_or_create_directory(&publication.parent, &c"missing/child".to_owned()),
+            "untrusted output directory",
+        );
+
+        let inaccessible_name = c"inaccessible".to_owned();
+        ok(
+            fs::mkdirat(
+                &publication.parent,
+                inaccessible_name.as_c_str(),
+                Mode::empty(),
+            ),
+            "create inaccessible directory",
+        );
+        assert_error(
+            configure_private_staging(
+                &publication.parent,
+                &inaccessible_name,
+                publication.parent_identity,
+                effective_uid(),
+            ),
+            "untrusted output directory",
+        );
+
+        let retained_name = c"retained-untrusted".to_owned();
+        ok(
+            fs::mkdirat(&publication.parent, retained_name.as_c_str(), Mode::RWXU),
+            "create retained directory",
+        );
+        let retained = ok(
+            open_directory(&publication.parent, retained_name.as_c_str()),
+            "open retained directory",
+        );
+        ok(
+            fs::fchmod(&retained, Mode::empty()),
+            "make retained directory untrusted",
+        );
+        assert_error(
+            staging_identity(
+                &publication.parent,
+                publication.staging_name.as_c_str(),
+                &retained,
+                publication.parent_identity,
                 effective_uid(),
             ),
             "untrusted output directory",

@@ -207,18 +207,12 @@ mod coverage_entrypoints {
         path: &mut Vec<usize>,
         paths: &mut Vec<Vec<usize>>,
     ) {
-        if paths.len() == 512 {
-            return;
-        }
         if let ciborium::Value::Array(fields) = value {
             for (index, field) in fields.iter().enumerate() {
                 path.push(index);
                 paths.push(path.clone());
                 structural_paths(field, path, paths);
                 path.pop();
-                if paths.len() == 512 {
-                    break;
-                }
             }
         }
     }
@@ -401,7 +395,7 @@ mod coverage_entrypoints {
         let value = decode_value(ok(evidence.to_canonical_cbor()));
         let mut paths = Vec::new();
         structural_paths(&value, &mut Vec::new(), &mut paths);
-        assert_eq!(paths.len(), 512);
+        assert!(paths.len() > 512);
         for path in paths {
             let mut mutant = value.clone();
             replace_at_path(
