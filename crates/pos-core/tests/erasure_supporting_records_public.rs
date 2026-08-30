@@ -45,16 +45,20 @@ fn changed_array(bytes: &[u8], change: impl FnOnce(&mut Vec<Value>)) -> Vec<u8> 
     changed
 }
 
-fn assert_each_field_rejects<T>(bytes: &[u8], decode: impl Fn(&[u8]) -> Result<T, ErasureErrorV1>) {
-    let decoded: Result<Value, _> = ciborium::from_reader(bytes);
-    assert!(decoded.is_ok());
-    let Value::Array(fields) = decoded.unwrap_or(Value::Null) else {
-        panic!("portable record must be an array");
+fn assert_each_field_rejects<T>(
+    bytes: &[u8],
+    decode: impl Fn(&[u8]) -> Result<T, ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    let decoded: Value =
+        ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let Value::Array(fields) = decoded else {
+        return Err(ErasureErrorV1::InvalidEncoding);
     };
     for (index, _) in fields.iter().enumerate() {
         let malformed = changed_array(bytes, |changed| changed[index] = Value::Bool(false));
         assert!(decode(&malformed).is_err(), "field {index} accepted a bool");
     }
+    Ok(())
 }
 
 const fn required_target() -> ErasureRequiredTargetV1 {
@@ -684,27 +688,27 @@ fn every_portable_decoder_rejects_a_wrong_type_in_every_field() -> Result<(), Er
     assert_each_field_rejects(
         &correction.to_canonical_cbor()?,
         ErasureCorrectionProvenanceV1::from_canonical_cbor,
-    );
+    )?;
     assert_each_field_rejects(
         &input.retry_admissions[0].to_canonical_cbor()?,
         ErasureRetryAdmissionV1::from_canonical_cbor,
-    );
+    )?;
     assert_each_field_rejects(
         &input.acknowledgement_provenance[0].to_canonical_cbor()?,
         ErasureAcknowledgementProvenanceV1::from_canonical_cbor,
-    );
+    )?;
     assert_each_field_rejects(
         &input.attempt_outcomes[0].to_canonical_cbor()?,
         ErasureAttemptOutcomeV1::from_canonical_cbor,
-    );
+    )?;
     assert_each_field_rejects(
         &input.receipt_provenance[0].to_canonical_cbor()?,
         ErasureReceiptProvenanceV1::from_canonical_cbor,
-    );
+    )?;
     assert_each_field_rejects(
         &input.administrative_resolutions[0].to_canonical_cbor()?,
         ErasureAdministrativeResolutionV1::from_canonical_cbor,
-    );
+    )?;
     Ok(())
 }
 
