@@ -10,18 +10,20 @@ use pos_core::{
     ErasureAcknowledgementV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
     ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
-    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureCoordinatorPortV1,
-    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
-    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureFreezeFailureInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
-    ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
-    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureCoordinator,
+    ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
+    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
+    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeFailureInputV1,
+    ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
+    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
     ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
+    ErasureSupportingRecordsV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -1734,5 +1736,134 @@ fn coordinator_rejects_duplicate_acknowledgement_identity_by_owner() -> Result<(
         ErasureCoordinatorRecordV1::from_parts(parts, COORDINATOR),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    Ok(())
+}
+
+#[test]
+fn coordinator_cas_methods_advance_and_retry_exact_evidence() -> Result<(), ErasureErrorV1> {
+    let mut fixture = authorized_fixture(vec![target(10)])?;
+    fixture.state.borrow_mut().lineage_rule = Some(reference(55));
+    fixture
+        .machine
+        .freeze_inventory(fixture.request, freeze_transition())?;
+
+    let frozen = latest_record(&fixture.state, fixture.request)?;
+    let scope = frozen
+        .supporting_records()
+        .scope_commitment()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: fixture.request,
+        scope_commitment: scope.reference(),
+        fork: reference(56),
+        lineage_rule: reference(55),
+        predecessor_extension: None,
+        admission_provenance: reference(57),
+    })?;
+    ErasureCoordinator::append_scope_extension(
+        &mut fixture.machine,
+        fixture.request,
+        extension.clone(),
+    )?;
+    ErasureCoordinator::append_scope_extension(
+        &mut fixture.machine,
+        fixture.request,
+        extension.clone(),
+    )?;
+    let extended = latest_record(&fixture.state, fixture.request)?;
+    assert_eq!(
+        extended.supporting_records().scope_extensions().last(),
+        Some(&extension)
+    );
+
+    let wrong_predecessor = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: fixture.request,
+        scope_commitment: scope.reference(),
+        fork: reference(58),
+        lineage_rule: reference(55),
+        predecessor_extension: None,
+        admission_provenance: reference(59),
+    })?;
+    assert_eq!(
+        fixture
+            .machine
+            .append_scope_extension(fixture.request, wrong_predecessor),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let resolution = administrative_resolution(&extended)?;
+    ErasureCoordinator::resolve_administratively(
+        &mut fixture.machine,
+        fixture.request,
+        resolution.clone(),
+    )?;
+    ErasureCoordinator::resolve_administratively(
+        &mut fixture.machine,
+        fixture.request,
+        resolution.clone(),
+    )?;
+    let resolved = latest_record(&fixture.state, fixture.request)?;
+    assert_eq!(
+        resolved.administrative_resolution_head(),
+        Some(resolution.reference())
+    );
+
+    let wrong_predecessor =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: fixture.request,
+            affected_digests: vec![resolved.state().state_digest()],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: scope.reference(),
+            policy: resolved.request().policy(),
+            trust: resolved
+                .supporting_records()
+                .obligation_set()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?
+                .trust(),
+            principal: reference(72),
+            authorization_provenance: reference(73),
+            reason: reference(75),
+            issue_position: 22,
+            predecessor_resolution: None,
+        })?;
+    assert_eq!(
+        fixture
+            .machine
+            .resolve_administratively(fixture.request, wrong_predecessor),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn coordinator_trait_forwards_public_lifecycle_operations() -> Result<(), ErasureErrorV1> {
+    let mut submitted = submitted_fixture(vec![target(10)])?;
+    let second_request = request_with(reference(40), reference(41))?;
+    let second_reference = second_request.reference();
+    ErasureCoordinator::submit(&mut submitted.machine, second_request)?;
+    ErasureCoordinator::authorize(&mut submitted.machine, second_reference, reference(42))?;
+
+    let target = target(10);
+    let mut awaiting = awaiting_fixture(vec![target])?;
+    let acknowledgement = acknowledgement_for(
+        awaiting.request,
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+        reference(95),
+    )?;
+    ErasureCoordinator::acknowledge(&mut awaiting.machine, awaiting.request, acknowledgement)?;
+    let receipt = ErasureCoordinator::finalize(
+        &mut awaiting.machine,
+        awaiting.request,
+        receipt_input(
+            awaiting.request,
+            target,
+            acknowledgement,
+            ErasureLifecycleV1::Complete,
+            11,
+        ),
+    )?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     Ok(())
 }

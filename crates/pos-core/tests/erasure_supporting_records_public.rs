@@ -8,16 +8,20 @@ use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureCoordinatorRecordPartsV1,
-    ErasureCoordinatorRecordV1, ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionInputV1,
+    ErasureAuthorizationRejectionV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
+    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureFreezeFailureInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
+    ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
+    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
     ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
     ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeV1, ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionLedgerInputV1,
+    ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
+    ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
     ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
     ERASURE_MAX_INVENTORY_RESULTS, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RETRY_ADMISSION_MAX_BYTES,
@@ -125,6 +129,239 @@ const fn inventory() -> ErasureInventoryResultV1 {
         },
         retained_disclosure: reference(39),
     }
+}
+
+#[test]
+fn portable_scope_and_obligation_records_expose_canonical_public_seams(
+) -> Result<(), ErasureErrorV1> {
+    let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request: reference(1),
+        authorization_provenance: reference(2),
+    })?;
+    let rejection = roundtrip(
+        &rejection,
+        ErasureAuthorizationRejectionV1::to_canonical_cbor,
+        ErasureAuthorizationRejectionV1::from_canonical_cbor,
+    )?;
+    assert_eq!(rejection.request(), reference(1));
+    assert_eq!(rejection.authorization_provenance(), reference(2));
+    assert_ne!(rejection.reference(), reference(0));
+
+    let obligation = obligation(reference(1))?;
+    let obligation = roundtrip(
+        &obligation,
+        ErasureObligationV1::to_canonical_cbor,
+        ErasureObligationV1::from_canonical_cbor,
+    )?;
+    assert_eq!(obligation.category(), ErasureInventoryCategoryV1::Artifact);
+    assert_eq!(obligation.target(), required_target());
+    assert_eq!(obligation.owner(), reference(36));
+    assert_eq!(
+        obligation.command_identity(),
+        destruction_command_reference(reference(1), required_target())
+    );
+    assert_ne!(obligation.reference(), reference(0));
+
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request: reference(1),
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let obligation_set = roundtrip(
+        &obligation_set,
+        ErasureObligationSetV1::to_canonical_cbor,
+        ErasureObligationSetV1::from_canonical_cbor,
+    )?;
+    assert_eq!(obligation_set.request(), reference(1));
+    assert_eq!(obligation_set.obligations(), &[obligation.reference()]);
+    assert_eq!(obligation_set.policy(), reference(4));
+    assert_eq!(obligation_set.trust(), reference(5));
+    assert_ne!(obligation_set.reference(), reference(0));
+
+    let scope = scope_commitment(reference(1))?;
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: scope.reference(),
+        fork: reference(6),
+        lineage_rule: reference(7),
+        predecessor_extension: None,
+        admission_provenance: reference(8),
+    })?;
+    let extension = roundtrip(
+        &extension,
+        ErasureScopeExtensionV1::to_canonical_cbor,
+        ErasureScopeExtensionV1::from_canonical_cbor,
+    )?;
+    assert_eq!(extension.request(), reference(1));
+    assert_eq!(extension.scope_commitment(), scope.reference());
+    assert_eq!(extension.fork(), reference(6));
+    assert_eq!(extension.lineage_rule(), reference(7));
+    assert_eq!(extension.predecessor_extension(), None);
+    assert_eq!(extension.admission_provenance(), reference(8));
+    assert_ne!(extension.reference(), reference(0));
+
+    let ledger = ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        scope_commitment: scope.reference(),
+        extensions: vec![extension.reference()],
+        head: Some(extension.reference()),
+    })?;
+    let ledger = roundtrip(
+        &ledger,
+        ErasureScopeExtensionLedgerV1::to_canonical_cbor,
+        ErasureScopeExtensionLedgerV1::from_canonical_cbor,
+    )?;
+    assert_eq!(ledger.scope_commitment(), scope.reference());
+    assert_eq!(ledger.extensions(), &[extension.reference()]);
+    assert_eq!(ledger.head(), Some(extension.reference()));
+    assert_ne!(ledger.reference(), reference(0));
+    Ok(())
+}
+
+#[test]
+fn supporting_records_reject_incoherent_top_level_evidence_shapes() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let scope = scope_commitment(request)?;
+    let obligation = obligation(request)?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: obligation_set.reference(),
+        freeze_position: 10,
+        host_evidence: reference(6),
+    })?;
+    let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request,
+        authorization_provenance: reference(7),
+    })?;
+    let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request,
+        authorization_provenance: reference(7),
+        evidence: reference(8),
+        error: ErasureErrorV1::AccessFreezeFailed,
+    })?;
+
+    let rejected_with_failure = ErasureSupportingRecordsInputV1 {
+        authorization_rejection: Some(rejection),
+        freeze_failure: Some(failure),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(rejected_with_failure),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let rejected_with_scope = ErasureSupportingRecordsInputV1 {
+        authorization_rejection: Some(rejection),
+        scope_commitment: Some(scope.clone()),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(rejected_with_scope),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let failure_with_scope = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        freeze_failure: Some(failure),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(failure_with_scope),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let obligations_without_scope = ErasureSupportingRecordsInputV1 {
+        obligations: vec![obligation.clone()],
+        obligation_set: Some(obligation_set.clone()),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(obligations_without_scope),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let freeze_without_scope = ErasureSupportingRecordsInputV1 {
+        freeze_provenance: Some(freeze),
+        obligation_set: Some(obligation_set.clone()),
+        obligations: vec![obligation.clone()],
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(freeze_without_scope),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let freeze_without_obligation_set = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        freeze_provenance: Some(freeze),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(freeze_without_obligation_set),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let mismatched_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: reference(99),
+        obligation_set: obligation_set.reference(),
+        freeze_position: 10,
+        host_evidence: reference(6),
+    })?;
+    let mismatched_freeze = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        freeze_provenance: Some(mismatched_freeze),
+        obligations: vec![obligation.clone()],
+        obligation_set: Some(obligation_set.clone()),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(mismatched_freeze),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let missing_obligation_objects = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        obligation_set: Some(obligation_set.clone()),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(missing_obligation_objects),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let wrong_obligation_objects = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope.clone()),
+        obligations: vec![obligation(reference(9))?],
+        obligation_set: Some(obligation_set),
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_obligation_objects),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let ledger_without_lineage =
+        ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+            scope_commitment: scope.reference(),
+            extensions: Vec::new(),
+            head: None,
+        })?;
+    let ledger_without_lineage = ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope),
+        obligations: vec![obligation.clone()],
+        obligation_set: Some(ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request,
+            obligations: vec![obligation.reference()],
+            policy: reference(4),
+            trust: reference(5),
+        })?),
+        scope_extension_ledgers: vec![ledger_without_lineage],
+        ..ErasureSupportingRecordsInputV1::default()
+    };
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(ledger_without_lineage),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
 }
 
 fn complete_receipt(
