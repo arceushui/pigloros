@@ -4166,6 +4166,84 @@ fn coordinator_rejects_storage_and_lifecycle_seams() -> Result<(), ErasureErrorV
 }
 
 #[test]
+fn dispatch_rejects_an_empty_closure_after_freeze() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let mut frozen = record_after_freeze(vec![target])?;
+    frozen.targets.clear();
+    let mut port = test_port(true, vec![target]);
+    port.records.borrow_mut().push(frozen);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    assert_eq!(
+        coordinator.dispatch_destruction(reference(1), reference(9)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn acknowledgement_requires_both_the_admitted_obligation_and_command() -> Result<(), ErasureErrorV1>
+{
+    let mut ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let port = test_port(true, vec![ack.target]);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    ack.obligation = reference(99);
+    assert_eq!(
+        coordinator.acknowledge(reference(1), ack),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+#[test]
+fn finalization_accepts_the_exact_attempt_deadline() -> Result<(), ErasureErrorV1> {
+    let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
+    let port = test_port(true, vec![ack.target]);
+    let persisted = port.records.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    persisted
+        .borrow_mut()
+        .first_mut()
+        .and_then(|record| record.supporting_records.retry_admissions.last_mut())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .input
+        .deadline_position = 11;
+    let mut input = receipt_input(
+        ErasureLifecycleV1::PartialFailure,
+        Vec::new(),
+        vec![ack.target.replica_id],
+        Vec::new(),
+    );
+    input.inventories.artifacts = vec![inventory_result(ack.target)];
+    input.issue_position = 11;
+    assert!(coordinator.finalize(reference(1), input).is_ok());
+    Ok(())
+}
+
+#[test]
 fn replacement_validation_accepts_idempotent_and_same_state_extensions(
 ) -> Result<(), ErasureErrorV1> {
     let submitted = record_after_submit()?;
