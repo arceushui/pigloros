@@ -465,7 +465,7 @@ fn supporting_records_accept_one_active_attempt_and_a_nonbranching_resolution(
         })?;
     let records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
         retry_admissions: vec![admission.clone()],
-        acknowledgement_provenance: vec![acknowledgement.clone()],
+        acknowledgement_provenance: vec![acknowledgement],
         administrative_resolutions: vec![resolution.clone()],
         ..ErasureSupportingRecordsInputV1::default()
     })?;
