@@ -748,7 +748,11 @@ fn invalid_catalog(message: &str) -> Box<dyn Error> {
 }
 
 fn layer_catalog() -> Result<LayerCatalog, Box<dyn Error>> {
-    let entries = LAYER_SOURCES
+    layer_catalog_from_sources(LAYER_SOURCES)
+}
+
+fn layer_catalog_from_sources(sources: &[LayerSource]) -> Result<LayerCatalog, Box<dyn Error>> {
+    let entries = sources
         .iter()
         .map(catalog_entry)
         .collect::<Result<Vec<_>, _>>()?;
@@ -1945,6 +1949,42 @@ fn catalog_fixture_rejects_conflicting_public_records() {
         Some("wrong-operation"),
     )
     .is_err());
+
+    let mut invalid_source = *source;
+    invalid_source.oracle = b"{";
+    assert!(catalog_fixture(
+        record,
+        &invalid_source,
+        contract,
+        &provider_contract,
+        &input.record.subject_adapter,
+        operation,
+    )
+    .is_err());
+
+    invalid_source = *source;
+    invalid_source.input = b"{";
+    assert!(catalog_fixture(
+        record,
+        &invalid_source,
+        contract,
+        &provider_contract,
+        &input.record.subject_adapter,
+        operation,
+    )
+    .is_err());
+
+    invalid_source = *source;
+    invalid_source.expected = b"{";
+    assert!(catalog_fixture(
+        record,
+        &invalid_source,
+        contract,
+        &provider_contract,
+        &input.record.subject_adapter,
+        operation,
+    )
+    .is_err());
 }
 
 #[cfg(test)]
@@ -1980,6 +2020,24 @@ fn catalog_entry_rejects_profile_and_provider_drift() {
         fixtures: source.fixtures,
     };
     assert!(catalog_entry(&changed).is_err());
+
+    let mut profile: serde_json::Value = tested(serde_json::from_slice(source.profile_record));
+    profile["wire_code"] = serde_json::json!(255);
+    let profile = Box::leak(tested(serde_json::to_vec(&profile)).into_boxed_slice());
+    let changed = LayerSource {
+        profile_record: profile,
+        provider_record: source.provider_record,
+        fixtures: source.fixtures,
+    };
+    assert!(catalog_entry(&changed).is_err());
+
+    let invalid_provider = LayerSource {
+        profile_record: source.profile_record,
+        provider_record: b"{",
+        fixtures: source.fixtures,
+    };
+    assert!(catalog_entry_input(&invalid_provider).is_err());
+    assert!(layer_catalog_from_sources(&[invalid_provider]).is_err());
 
     let mut input = first_catalog_input();
     input
