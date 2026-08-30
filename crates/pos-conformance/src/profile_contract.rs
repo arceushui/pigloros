@@ -5,22 +5,20 @@
 //! evaluator identity, independence evidence, and lifecycle claim.
 
 use crate::{
-    ArtifactDescriptorV1, CaseOutcomeStatusV1, ClaimLayerV1, ConformanceReportV1,
-    DivergenceMismatchKindV1, ExecutionModeV1, FixtureFamilyV1, FixtureProviderKeyV1,
-    FixtureProviderRegistryBindingV1, ImplementationIdentityV1, IndependenceEvidenceV1,
-    ProfileCaseOutcomeV1, RedactionStateV1, ReplayClaimV1, SafeErrorCodeV1, VerificationOutcomeV1,
+    ArtifactDescriptorV1, ClaimLayerV1, DivergenceMismatchKindV1, ExecutionModeV1, FixtureFamilyV1,
+    FixtureProviderKeyV1, FixtureProviderRegistryBindingV1, ImplementationIdentityV1,
+    RedactionStateV1, ReplayClaimV1, VerificationOutcomeV1,
 };
 use ciborium::value::Value;
-use pos_core::{CanonicalBytes, PublicKey, Signature};
-use pos_crypto::signing;
 use std::collections::BTreeSet;
+
+use crate::{decode_artifact_descriptor_value, encode_artifact_descriptor_value};
 use std::io::Cursor;
 
 /// Magic for the immutable CPF1 conformance-profile record.
 pub const CONFORMANCE_PROFILE_MAGIC_V1: &str = "CPF1";
 /// Magic for the public evaluator request record.
 pub const EVALUATOR_REQUEST_MAGIC_V1: &str = "EVR1";
-type CaseOutcomeV1 = ProfileCaseOutcomeV1;
 type FixtureSortKey<'a> = (
     (&'a str, &'a str, u16, u16),
     FixtureFamilyV1,
@@ -31,6 +29,8 @@ type FixtureSortKey<'a> = (
 const MAX_PROFILE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXECUTION_PROFILES: usize = 64;
 const MAX_FIXTURES: usize = 65_536;
+const MAX_AUXILIARY_ARTIFACTS: usize = 64;
+const MAX_CAPABILITY_IDS: usize = 256;
 const MAX_STRING_BYTES: usize = 256;
 const MAX_SEMVER_COMPONENT_BYTES: usize = 10;
 const MAX_COORDINATE_BYTES: usize = 128;
@@ -39,6 +39,15 @@ const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_COMPRESSION_EXPANSION: u32 = 100;
 const MAX_STRUCTURAL_NESTING: u8 = 32;
+const FIXTURE_FAMILIES: [FixtureFamilyV1; 7] = [
+    FixtureFamilyV1::Positive,
+    FixtureFamilyV1::Denied,
+    FixtureFamilyV1::Malformed,
+    FixtureFamilyV1::ResourceExhaustion,
+    FixtureFamilyV1::DeletionRedaction,
+    FixtureFamilyV1::Downgrade,
+    FixtureFamilyV1::IndependentEvaluation,
+];
 /// Closed safe errors exposed by the CPF1 and evaluator-request interfaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ConformanceContractError {
@@ -376,91 +385,9 @@ pub struct IndependenceRequirementsV1 {
     pub requirements_digest: [u8; 32],
 }
 
-/// Externally supplied trust authority for Stable evidence.
-///
-/// A CPF1 profile may name the policy snapshot it requires, but it cannot
-/// select the keys in that policy. Callers must supply this root set when
-/// validating Stable evidence; a signer is accepted only when its public key
-/// is a member of this independently obtained set.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TrustedRootPolicyV1 {
-    pub trusted_root_public_keys: Vec<[u8; 32]>,
-    pub trust_policy_snapshot_digest: [u8; 32],
-}
-
-impl TrustedRootPolicyV1 {
-    /// Return the content identity of this root-set snapshot.
-    #[must_use]
-    pub fn digest(&self) -> [u8; 32] {
-        digest_bytes(
-            b"PiglorOS.ConformanceTrustPolicy.v1",
-            &Value::Array(
-                self.trusted_root_public_keys
-                    .iter()
-                    .map(|key| Value::Bytes(key.to_vec()))
-                    .collect(),
-            ),
-        )
-    }
-
-    /// Validate the externally supplied policy and its canonical root order.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConformanceContractError::IndependenceEvidenceMissing`] when
-    /// the root set is empty, invalidly ordered, or has a mismatched digest.
-    pub fn validate(&self) -> Result<(), ConformanceContractError> {
-        if self.trusted_root_public_keys.is_empty()
-            || self.trusted_root_public_keys.len() > 64
-            || self.trusted_root_public_keys.iter().any(zero_digest)
-            || !crate::strictly_ordered(&self.trusted_root_public_keys)
-            || self.trust_policy_snapshot_digest != self.digest()
-        {
-            Err(ConformanceContractError::IndependenceEvidenceMissing)
-        } else {
-            Ok(())
-        }
-    }
-
-    #[must_use]
-    fn contains(&self, key: &[u8; 32]) -> bool {
-        self.trusted_root_public_keys.binary_search(key).is_ok()
-    }
-}
-
-/// Evidence from one separately developed implementation under test.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StableImplementationEvidenceV1 {
-    pub implementation: ImplementationIdentityV1,
-    pub independence: IndependenceEvidenceV1,
-    pub evaluator_protocol_digest: [u8; 32],
-    pub report: ConformanceReportV1,
-    pub case_outcomes: Vec<ProfileCaseOutcomeV1>,
-    /// Authenticated attribution for this evidence. Stable evidence is not
-    /// accepted from the implementation's self-authored metadata alone.
-    pub attestation: StableEvidenceAttestationV1,
-}
-
-/// Signature-bearing trust-root evidence for one Stable implementation.
-///
-/// The signer key is content-addressed by `trust_root_digest`; the signature
-/// covers the implementation identity, independence declaration, evaluator
-/// protocol, and every profile case outcome. A caller that accepts Stable
-/// evidence must additionally find the signer in its externally supplied
-/// trusted-root policy; a bare declaration or reviewer string is never
-/// sufficient.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StableEvidenceAttestationV1 {
-    pub signer_public_key: [u8; 32],
-    pub signature: [u8; 64],
-    pub trust_root_digest: [u8; 32],
-}
-
 /// Immutable CPF1 public contract. It deliberately carries no aggregate pass flag.
 ///
 /// `profile_digest` commits exactly the current 18-field CPF1 wire record.
-/// Stable-promotion evidence is validated as a separately transported sidecar
-/// and is never hidden in a non-wire digest extension.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConformanceProfileV1 {
     pub profile_id: String,
@@ -479,9 +406,6 @@ pub struct ConformanceProfileV1 {
     pub limitations_digest: [u8; 32],
     pub provenance_digest: [u8; 32],
     pub previous_profile_digest: Option<[u8; 32]>,
-    /// Stable-promotion evidence is a signed sidecar, not a CPF1 wire field.
-    /// It must be supplied when validating or decoding a Stable profile.
-    pub stable_evidence: Vec<StableImplementationEvidenceV1>,
     pub profile_digest: [u8; 32],
 }
 
@@ -517,7 +441,7 @@ impl ConformanceProfileV1 {
     ///
     /// Returns a closed safe error when an invariant is absent or invalid.
     pub fn validate(&self) -> Result<(), ConformanceContractError> {
-        validate_profile(self, None).and_then(|()| {
+        validate_profile(self).and_then(|()| {
             if self.profile_digest == self.digest() {
                 Ok(())
             } else {
@@ -536,19 +460,6 @@ impl ConformanceProfileV1 {
             .and_then(|()| encode_value(&encode_profile(self)))
     }
 
-    /// Validate and encode a Stable profile using an externally supplied root policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error when the policy, profile, or encoded contract is invalid.
-    pub fn to_canonical_cbor_with_trust_policy(
-        &self,
-        policy: &TrustedRootPolicyV1,
-    ) -> Result<Vec<u8>, ConformanceContractError> {
-        self.validate_with_trust_policy(policy)
-            .and_then(|()| encode_value(&encode_profile(self)))
-    }
-
     /// Decode exact-length canonical CPF1 bytes and validate every contract invariant.
     ///
     /// # Errors
@@ -563,74 +474,6 @@ impl ConformanceProfileV1 {
             .and_then(|profile| profile.validate().map(|()| profile))
     }
 
-    /// Decode and validate a profile without attaching Stable sidecar evidence.
-    ///
-    /// Stable profiles require [`Self::from_canonical_cbor_with_stable_evidence`]
-    /// so their separately transported promotion evidence is available for
-    /// validation and digest verification.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error for malformed, noncanonical, or policy-incompatible CPF1 bytes.
-    pub fn from_canonical_cbor_with_trust_policy(
-        bytes: &[u8],
-        policy: &TrustedRootPolicyV1,
-    ) -> Result<Self, ConformanceContractError> {
-        if bytes.len() > MAX_PROFILE_BYTES {
-            return Err(ConformanceContractError::FieldOutOfBounds);
-        }
-        decode_value(bytes)
-            .and_then(|value| decode_profile(&value))
-            .and_then(|profile| profile.validate_with_trust_policy(policy).map(|()| profile))
-    }
-
-    /// Decode a Stable CPF1 record together with its separately transported
-    /// signed promotion evidence and external trust policy.
-    ///
-    /// Stable evidence is intentionally a sidecar: the exact CPF1 wire record
-    /// does not contain an undocumented evidence field. Callers transport and
-    /// authenticate it through the evidence channel rather than extending CPF1.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error when the profile, sidecar evidence, or
-    /// external policy is invalid or the sidecar does not match the profile
-    /// digest.
-    pub fn from_canonical_cbor_with_stable_evidence(
-        bytes: &[u8],
-        stable_evidence: Vec<StableImplementationEvidenceV1>,
-        policy: &TrustedRootPolicyV1,
-    ) -> Result<Self, ConformanceContractError> {
-        if bytes.len() > MAX_PROFILE_BYTES {
-            return Err(ConformanceContractError::FieldOutOfBounds);
-        }
-        decode_value(bytes).and_then(|value| {
-            decode_profile(&value).and_then(|mut profile| {
-                profile.stable_evidence = stable_evidence;
-                profile.validate_with_trust_policy(policy).map(|()| profile)
-            })
-        })
-    }
-
-    /// Validate a profile, requiring a trusted-root policy for Stable profiles.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error when the policy, profile, or profile digest is invalid.
-    pub fn validate_with_trust_policy(
-        &self,
-        policy: &TrustedRootPolicyV1,
-    ) -> Result<(), ConformanceContractError> {
-        policy.validate()?;
-        validate_profile(self, Some(policy)).and_then(|()| {
-            if self.profile_digest == self.digest() {
-                Ok(())
-            } else {
-                Err(ConformanceContractError::FixtureDigestMismatch)
-            }
-        })
-    }
-
     /// Digest the exact current CPF1 wire fields excluding the self digest.
     ///
     /// Stable evidence remains a separately transported validation input; it is
@@ -641,69 +484,6 @@ impl ConformanceProfileV1 {
             b"PiglorOS.ConformanceProfile.v1",
             &encode_profile_fields(self),
         )
-    }
-
-    /// Promote only along the closed lifecycle graph and never manufacture Stable evidence.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error if the transition or its independent evidence is invalid.
-    pub fn transition_to(
-        &self,
-        target: ProfileLifecycleV1,
-        stable_evidence: Vec<StableImplementationEvidenceV1>,
-    ) -> Result<Self, ConformanceContractError> {
-        let permitted = matches!(
-            (self.lifecycle, target),
-            (ProfileLifecycleV1::Draft, ProfileLifecycleV1::Candidate)
-                | (
-                    ProfileLifecycleV1::Candidate,
-                    ProfileLifecycleV1::Stable | ProfileLifecycleV1::Retired
-                )
-                | (ProfileLifecycleV1::Stable, ProfileLifecycleV1::Retired)
-        );
-        if !permitted {
-            return Err(ConformanceContractError::ProfileLifecycleInvalid);
-        }
-        let mut next = self.clone();
-        next.lifecycle = target;
-        next.stable_evidence = stable_evidence;
-        // The selected CPF identity excludes Stable evidence, so it can be
-        // computed before structural Stable validation and used by the report
-        // binding checks below.
-        next.profile_digest = next.digest();
-        if target == ProfileLifecycleV1::Stable {
-            // This constructor performs only structural checks. The returned
-            // Stable value is not publishable or validatable without the
-            // external policy supplied to `validate_with_trust_policy`.
-            validate_stable_evidence(&next, None)?;
-        } else if !next.stable_evidence.is_empty() {
-            return Err(ConformanceContractError::ProfileLifecycleInvalid);
-        }
-        if target == ProfileLifecycleV1::Stable {
-            Ok(next)
-        } else {
-            next.validate().map(|()| next)
-        }
-    }
-
-    /// Promote a profile to Stable only after validating evidence against an
-    /// externally supplied trusted-root policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error when the lifecycle transition, evidence, policy, or digest is invalid.
-    pub fn transition_to_with_trust_policy(
-        &self,
-        target: ProfileLifecycleV1,
-        stable_evidence: Vec<StableImplementationEvidenceV1>,
-        policy: &TrustedRootPolicyV1,
-    ) -> Result<Self, ConformanceContractError> {
-        let next = self.transition_to(target, stable_evidence)?;
-        if target == ProfileLifecycleV1::Stable {
-            return next.validate_with_trust_policy(policy).map(|()| next);
-        }
-        Ok(next)
     }
 }
 
@@ -754,22 +534,6 @@ impl EvaluatorRequestV1 {
     ) -> Result<(), ConformanceContractError> {
         self.validate().and_then(|()| {
             profile.validate()?;
-            self.validate_against_validated_profile(profile)
-        })
-    }
-
-    /// Validate this request against a Stable CPF and its external trust policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed safe error when the request, profile, policy, or selected identity is invalid.
-    pub fn validate_against_profile_with_trust_policy(
-        &self,
-        profile: &ConformanceProfileV1,
-        policy: &TrustedRootPolicyV1,
-    ) -> Result<(), ConformanceContractError> {
-        self.validate().and_then(|()| {
-            profile.validate_with_trust_policy(policy)?;
             self.validate_against_validated_profile(profile)
         })
     }
@@ -921,12 +685,8 @@ impl EvaluatorRequestV1 {
     }
 }
 
-fn validate_profile(
-    profile: &ConformanceProfileV1,
-    policy: Option<&TrustedRootPolicyV1>,
-) -> Result<(), ConformanceContractError> {
+fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
     if !valid_identifier(&profile.profile_id)
-        || profile.profile_id.contains("#matrix=")
         || !semantic_version(&profile.semantic_version)
         || zero_digest(&profile.normative_spec_digest)
         || zero_digest(&profile.execution_matrix_digest)
@@ -956,19 +716,10 @@ fn validate_profile(
         .and_then(|()| validate_fixtures(profile))
         .and_then(|()| validate_selected_caps(profile))
         .and_then(|()| validate_allowed_divergences(&profile.allowed_divergences))
-        .and_then(|()| match profile.lifecycle {
-            _ if profile.fixtures.is_empty() => {
-                Err(ConformanceContractError::ExpectedResultMissing)
-            }
-            ProfileLifecycleV1::Stable => {
-                if policy.is_none() {
-                    Err(ConformanceContractError::IndependenceEvidenceMissing)
-                } else {
-                    validate_stable_evidence(profile, policy)
-                }
-            }
-            _ if profile.stable_evidence.is_empty() => Ok(()),
-            _ => Err(ConformanceContractError::ProfileLifecycleInvalid),
+        .and(if profile.fixtures.is_empty() {
+            Err(ConformanceContractError::ExpectedResultMissing)
+        } else {
+            Ok(())
         })
 }
 
@@ -979,6 +730,17 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
         .any(|pair| fixture_key(&pair[0]) >= fixture_key(&pair[1]))
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
+    }
+    for provider_key in &profile.fixture_provider_registry.required_provider_keys {
+        let provider_families = profile
+            .fixtures
+            .iter()
+            .filter(|fixture| fixture.provider_key == *provider_key)
+            .map(|fixture| fixture.family)
+            .collect::<BTreeSet<_>>();
+        if provider_families != FIXTURE_FAMILIES.into_iter().collect() {
+            return Err(ConformanceContractError::ExpectedResultMissing);
+        }
     }
     profile.fixtures.iter().try_for_each(|fixture| {
         validate_fixture(fixture, profile)
@@ -1103,6 +865,9 @@ fn validate_fixture(
             },
         );
     }
+    if fixture.auxiliary.len() > MAX_AUXILIARY_ARTIFACTS {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
     if !crate::strictly_ordered(&fixture.modes)
         || fixture
             .auxiliary
@@ -1154,327 +919,10 @@ fn validate_fixture(
         })
 }
 
-fn validate_stable_evidence(
-    profile: &ConformanceProfileV1,
-    policy: Option<&TrustedRootPolicyV1>,
-) -> Result<(), ConformanceContractError> {
-    if !profile
-        .independence_requirements
-        .technical_independence_required
-        || !profile
-            .independence_requirements
-            .authorship_independence_required
-        || profile.stable_evidence.len() != 2
-    {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
-    let first = &profile.stable_evidence[0];
-    let second = &profile.stable_evidence[1];
-    validate_identity(&first.implementation)?;
-    validate_identity(&second.implementation)?;
-    if first.implementation.implementation_id >= second.implementation.implementation_id
-        || first.implementation.source_digest == second.implementation.source_digest
-        || first.implementation.build_digest == second.implementation.build_digest
-        || first.implementation.binary_digest == second.implementation.binary_digest
-        || first.implementation.public_contract_digest
-            != second.implementation.public_contract_digest
-        || first.report.subject_artifact_digest != second.report.subject_artifact_digest
-        || first.report.report_digest == second.report.report_digest
-    {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
-    validate_stable_implementation(first, profile, policy)
-        .and_then(|()| validate_stable_implementation(second, profile, policy))
-        .and_then(|()| {
-            validate_report_binding(first, profile)
-                .and_then(|()| validate_report_binding(second, profile))
-        })
-}
-
-fn validate_stable_implementation(
-    evidence: &StableImplementationEvidenceV1,
-    profile: &ConformanceProfileV1,
-    policy: Option<&TrustedRootPolicyV1>,
-) -> Result<(), ConformanceContractError> {
-    let seen = evidence
-        .case_outcomes
-        .iter()
-        .map(stable_case_key)
-        .collect::<BTreeSet<_>>();
-    profile
-        .evaluator_protocol
-        .hard_caps
-        .validate_case_count(u32::try_from(evidence.case_outcomes.len()).unwrap_or(u32::MAX))?;
-    if evidence.case_outcomes.iter().any(|case| {
-        case.first_coordinate.as_ref().is_some_and(|coordinate| {
-            coordinate.len()
-                > usize::from(profile.evaluator_protocol.hard_caps.max_coordinate_bytes)
-        })
-    }) {
-        return Err(ConformanceContractError::FieldOutOfBounds);
-    }
-    let required = profile
-        .fixtures
-        .iter()
-        .filter(|fixture| fixture.mandatory)
-        .flat_map(|fixture| {
-            fixture
-                .modes
-                .iter()
-                .filter(|&&mode| {
-                    [ExecutionModeV1::Local, ExecutionModeV1::AirGapped].contains(&mode)
-                })
-                .map(move |mode| {
-                    (
-                        fixture.case_id.as_str(),
-                        *mode,
-                        fixture.claim_layer,
-                        fixture.digest(),
-                    )
-                })
-        })
-        .collect::<BTreeSet<_>>();
-    if !required.iter().all(|key| seen.contains(key)) {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
-    validate_identity(&evidence.implementation)
-        .and_then(|()| {
-            validate_independence_evidence(
-                &evidence.independence,
-                &profile.independence_requirements,
-            )
-        })
-        .and_then(|()| {
-            validate_stable_attestation(evidence, &profile.independence_requirements, policy)
-        })
-        .and_then(|()| {
-            if profile
-                .fixtures
-                .iter()
-                .filter(|fixture| fixture.mandatory)
-                .flat_map(|fixture| {
-                    fixture
-                        .modes
-                        .iter()
-                        .filter(|mode| {
-                            [ExecutionModeV1::Local, ExecutionModeV1::AirGapped].contains(mode)
-                        })
-                        .map(move |mode| (fixture, *mode))
-                })
-                .any(|(fixture, mode)| {
-                    !evidence
-                        .case_outcomes
-                        .iter()
-                        .any(|case| case.mode == mode && case_matches_fixture(case, fixture))
-                })
-            {
-                Err(ConformanceContractError::IndependenceEvidenceMissing)
-            } else {
-                Ok(())
-            }
-        })
-}
-
-fn validate_stable_attestation(
-    evidence: &StableImplementationEvidenceV1,
-    requirements: &IndependenceRequirementsV1,
-    policy: Option<&TrustedRootPolicyV1>,
-) -> Result<(), ConformanceContractError> {
-    let attestation = &evidence.attestation;
-    validate_stable_attestation_fields(attestation, requirements, policy)
-        .and_then(|()| {
-            signing::verifying_key_from_public_key(&PublicKey::from_bytes(
-                attestation.signer_public_key,
-            ))
-            .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
-        })
-        .and_then(|key| {
-            let signature = Signature::from_bytes(attestation.signature);
-            encode_value(&stable_attestation_payload(evidence)).and_then(|payload| {
-                signing::verify(&key, &CanonicalBytes::from_vec(payload), &signature)
-                    .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)
-            })
-        })
-}
-
-fn validate_stable_attestation_fields(
-    attestation: &StableEvidenceAttestationV1,
-    requirements: &IndependenceRequirementsV1,
-    policy: Option<&TrustedRootPolicyV1>,
-) -> Result<(), ConformanceContractError> {
-    if zero_digest(&attestation.signer_public_key)
-        || attestation.signature == [0; 64]
-        || zero_digest(&attestation.trust_root_digest)
-        || attestation.trust_root_digest
-            != digest_bytes(
-                b"PiglorOS.ConformanceTrustRoot.v1",
-                &Value::Bytes(attestation.signer_public_key.to_vec()),
-            )
-        || policy.is_some_and(|value| {
-            requirements.trust_policy_snapshot_digest != value.trust_policy_snapshot_digest
-                || !value.contains(&attestation.signer_public_key)
-        })
-    {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
-    Ok(())
-}
-
-fn stable_attestation_payload(evidence: &StableImplementationEvidenceV1) -> Value {
-    Value::Array(vec![
-        encode_identity(&evidence.implementation),
-        encode_independence(&evidence.independence),
-        digest(&evidence.evaluator_protocol_digest),
-        digest(&evidence.report.report_digest),
-        Value::Array(evidence.case_outcomes.iter().map(encode_case).collect()),
-        digest(&evidence.attestation.signer_public_key),
-        digest(&evidence.attestation.trust_root_digest),
-    ])
-}
-
-fn stable_case_key(case: &CaseOutcomeV1) -> (&str, ExecutionModeV1, ClaimLayerV1, [u8; 32]) {
-    (
-        &case.case_id,
-        case.mode,
-        case.claim_layer,
-        case.fixture_digest,
-    )
-}
-
-fn validate_report_binding(
-    evidence: &StableImplementationEvidenceV1,
-    profile: &ConformanceProfileV1,
-) -> Result<(), ConformanceContractError> {
-    let report = &evidence.report;
-    report
-        .validate()
-        .map_err(|_| ConformanceContractError::IndependenceEvidenceMissing)?;
-    if report.implementation != evidence.implementation
-        || report.independence != evidence.independence
-        || report.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
-        || evidence.evaluator_protocol_digest != profile.evaluator_protocol.protocol_digest
-        || report.normative_spec_digest != profile.normative_spec_digest
-        || report.limitations_digest != profile.limitations_digest
-        || report.provenance_digest != profile.provenance_digest
-        || report.fixture_bundle_digest != fixture_bundle_digest(profile)
-        || report.profile_digest != selected_profile_digest(profile)
-        || !profile
-            .execution_profile_digests
-            .contains(&report.execution_profile_digest)
-        || report.cases.iter().any(|report_case| {
-            !profile.fixtures.iter().any(|fixture| {
-                fixture.case_id == report_case.case_id
-                    && fixture.claim_layer == report_case.claim_layer
-                    && fixture.digest() == report_case.fixture_digest
-                    && fixture.execution_profile_digest == report_case.execution_profile_digest
-                    && fixture.modes.contains(&report_case.mode)
-            })
-        })
-        || report.cases.len() != evidence.case_outcomes.len()
-    {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
-    if report
-        .cases
-        .iter()
-        .zip(&evidence.case_outcomes)
-        .any(|(report_case, profile_case)| {
-            report_case.case_id != profile_case.case_id
-                || report_case.fixture_digest != profile_case.fixture_digest
-                || report_case.execution_profile_digest != profile_case.execution_profile_digest
-                || report_case.mode != profile_case.mode
-                || report_case.claim_layer != profile_case.claim_layer
-                || report_case.outcome != profile_case.outcome
-                || report_case.first_coordinate != profile_case.first_coordinate
-                || report_case.expected_digest != profile_case.expected_digest
-                || report_case.actual_digest != profile_case.actual_digest
-                || report_case.expected_error != profile_case.expected_error
-                || report_case.actual_error != profile_case.actual_error
-                || report_case.replay_claim != profile_case.replay_claim
-                || report_case.redaction_state != profile_case.redaction_state
-                || report_case.provenance_digest != profile_case.provenance_digest
-        })
-    {
-        return Err(ConformanceContractError::IndependenceEvidenceMissing);
-    }
-    Ok(())
-}
-
-fn selected_profile_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
-    profile.digest()
-}
-
 fn fixture_bundle_digest(profile: &ConformanceProfileV1) -> [u8; 32] {
     contract_digest(
         b"PiglorOS.ConformanceFixtureBundle.v1",
         &Value::Array(profile.fixtures.iter().map(encode_fixture).collect()),
-    )
-}
-
-fn case_matches_fixture(case: &CaseOutcomeV1, fixture: &FixtureDescriptorV1) -> bool {
-    let case_binding = (
-        case.case_id.as_str(),
-        case.fixture_digest,
-        case.claim_layer,
-        case.execution_profile_digest,
-        case.outcome,
-        case.replay_claim,
-        case.redaction_state,
-        case.provenance_digest,
-    );
-    let fixture_binding = (
-        fixture.case_id.as_str(),
-        fixture.digest(),
-        fixture.claim_layer,
-        fixture.execution_profile_digest,
-        CaseOutcomeStatusV1::Pass,
-        fixture.replay_claim,
-        fixture.redaction_state,
-        fixture_provenance_digest(&fixture.provenance),
-    );
-    if case_binding != fixture_binding {
-        return false;
-    }
-    match fixture.strict_oracle.kind {
-        StrictOracleKindV1::Output => {
-            let Some(output) = fixture.strict_oracle.output.as_ref() else {
-                return false;
-            };
-            match case.verification_outcome {
-                VerificationOutcomeV1::VerifiedExact => {
-                    (case.expected_digest, case.actual_digest)
-                        == (Some(output.blake3_digest), Some(output.blake3_digest))
-                }
-                VerificationOutcomeV1::UnverifiableArtifactsMissing => {
-                    (case.expected_digest, case.actual_digest) == (None, None)
-                }
-                _ => false,
-            }
-        }
-        StrictOracleKindV1::Failure => {
-            case.verification_outcome == fixture.expected_verification_outcome
-        }
-        StrictOracleKindV1::Divergence => {
-            let Some(divergence) = fixture.strict_oracle.divergence.as_ref() else {
-                return false;
-            };
-            (
-                case.verification_outcome,
-                case.divergence_kind,
-                case.first_coordinate.as_deref(),
-            ) == (
-                VerificationOutcomeV1::Diverged,
-                Some(divergence.classification),
-                Some(divergence.first_coordinate.as_slice()),
-            )
-        }
-    }
-}
-
-fn fixture_provenance_digest(provenance: &FixtureProvenanceV1) -> [u8; 32] {
-    digest_bytes(
-        b"PiglorOS.ConformanceFixtureProvenance.v1",
-        &encode_fixture_provenance(provenance),
     )
 }
 
@@ -1490,30 +938,6 @@ fn validate_identity(identity: &ImplementationIdentityV1) -> Result<(), Conforma
         || zero_digest(&identity.public_contract_digest)
     {
         Err(ConformanceContractError::ProvenanceMissing)
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_independence_evidence(
-    evidence: &IndependenceEvidenceV1,
-    requirements: &IndependenceRequirementsV1,
-) -> Result<(), ConformanceContractError> {
-    if (requirements.technical_independence_required && !evidence.technical_independent)
-        || (requirements.authorship_independence_required && !evidence.authorship_independent)
-        || (requirements.organizational_independence_required
-            && !evidence.organizational_independent)
-        || evidence.reviewer_ids.is_empty()
-        || evidence.reviewer_ids.len() > 32
-        || evidence
-            .reviewer_ids
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        || evidence.reviewer_ids.iter().any(|id| !valid_identifier(id))
-        || zero_digest(&evidence.declaration_digest)
-        || zero_digest(&evidence.shared_code_audit_digest)
-    {
-        Err(ConformanceContractError::IndependenceEvidenceMissing)
     } else {
         Ok(())
     }
@@ -1630,7 +1054,9 @@ const fn validate_operational_safety(
 }
 
 fn validate_capability_policy(policy: &CapabilityPolicyV1) -> Result<(), ConformanceContractError> {
-    if policy
+    if policy.capability_ids.len() > MAX_CAPABILITY_IDS {
+        Err(ConformanceContractError::FieldOutOfBounds)
+    } else if policy
         .capability_ids
         .windows(2)
         .any(|pair| pair[0] >= pair[1])
@@ -1727,7 +1153,8 @@ fn validate_allowed_divergence(
     divergence: &AllowedDivergenceV1,
     allowed: &[AllowedDivergenceV1],
 ) -> Result<(), ConformanceContractError> {
-    if divergence.first_coordinate.is_empty()
+    if !fixture_divergence_supported(divergence.classification)
+        || divergence.first_coordinate.is_empty()
         || divergence.first_coordinate.len() > MAX_COORDINATE_BYTES
     {
         Err(ConformanceContractError::FieldOutOfBounds)
@@ -1795,7 +1222,9 @@ fn validate_allowed_divergences(
     values: &[AllowedDivergenceV1],
 ) -> Result<(), ConformanceContractError> {
     if values.iter().any(|value| {
-        value.first_coordinate.is_empty() || value.first_coordinate.len() > MAX_COORDINATE_BYTES
+        !fixture_divergence_supported(value.classification)
+            || value.first_coordinate.is_empty()
+            || value.first_coordinate.len() > MAX_COORDINATE_BYTES
     }) {
         return Err(ConformanceContractError::FieldOutOfBounds);
     }
@@ -1807,6 +1236,19 @@ fn validate_allowed_divergences(
     } else {
         Ok(())
     }
+}
+
+const fn fixture_divergence_supported(value: DivergenceMismatchKindV1) -> bool {
+    matches!(
+        value,
+        DivergenceMismatchKindV1::EventIdentity
+            | DivergenceMismatchKindV1::EventOrder
+            | DivergenceMismatchKindV1::CanonicalBytes
+            | DivergenceMismatchKindV1::ProjectionCheckpoint
+            | DivergenceMismatchKindV1::TypedFailure
+            | DivergenceMismatchKindV1::Artifact
+            | DivergenceMismatchKindV1::SchemaOrUpcaster
+    )
 }
 
 const fn bounded_text(value: &str, maximum: usize) -> bool {
@@ -2022,13 +1464,13 @@ fn fixture_fields(value: &FixtureDescriptorV1) -> Vec<Value> {
         adapter(value.subject_adapter),
         digest(&value.execution_profile_digest),
         Value::Array(value.modes.iter().copied().map(mode).collect()),
-        encode_artifact_descriptor(&value.schema),
-        encode_artifact_descriptor(&value.payload),
+        encode_artifact_descriptor_value(&value.schema),
+        encode_artifact_descriptor_value(&value.payload),
         Value::Array(
             value
                 .auxiliary
                 .iter()
-                .map(encode_artifact_descriptor)
+                .map(encode_artifact_descriptor_value)
                 .collect(),
         ),
         encode_strict_oracle(&value.strict_oracle),
@@ -2051,15 +1493,6 @@ fn fixture_fields(value: &FixtureDescriptorV1) -> Vec<Value> {
     ]
 }
 
-fn encode_artifact_descriptor(value: &ArtifactDescriptorV1) -> Value {
-    Value::Array(vec![
-        text(&value.member_path),
-        text(&value.media_type),
-        uint(value.byte_length),
-        digest(&value.blake3_digest),
-    ])
-}
-
 fn encode_provider_key(value: &FixtureProviderKeyV1) -> Value {
     Value::Array(vec![
         text(&value.provider_id),
@@ -2071,7 +1504,7 @@ fn encode_provider_key(value: &FixtureProviderKeyV1) -> Value {
 
 fn encode_provider_registry_binding(value: &FixtureProviderRegistryBindingV1) -> Value {
     Value::Array(vec![
-        encode_artifact_descriptor(&value.registry_artifact),
+        encode_artifact_descriptor_value(&value.registry_artifact),
         Value::Array(
             value
                 .required_provider_keys
@@ -2085,7 +1518,7 @@ fn encode_provider_registry_binding(value: &FixtureProviderRegistryBindingV1) ->
 fn encode_strict_oracle(value: &StrictOracleV1) -> Value {
     Value::Array(vec![
         uint(value.kind.wire_code()),
-        optional(value.output.as_ref().map(encode_artifact_descriptor)),
+        optional(value.output.as_ref().map(encode_artifact_descriptor_value)),
         optional(value.failure.as_ref().map(encode_namespaced_failure)),
         optional(value.divergence.as_ref().map(encode_divergence)),
     ])
@@ -2249,7 +1682,6 @@ fn decode_profile(value: &Value) -> Result<ConformanceProfileV1, ConformanceCont
         limitations_digest: digest_value(&fields[14])?,
         provenance_digest: digest_value(&fields[15])?,
         previous_profile_digest: optional_digest(&fields[16])?,
-        stable_evidence: Vec::new(),
         profile_digest: digest_value(&fields[17])?,
     })
 }
@@ -2293,13 +1725,7 @@ fn decode_fixture(value: &Value) -> Result<FixtureDescriptorV1, ConformanceContr
 fn decode_artifact_descriptor(
     value: &Value,
 ) -> Result<ArtifactDescriptorV1, ConformanceContractError> {
-    let fields = array(value, 4)?;
-    Ok(ArtifactDescriptorV1 {
-        member_path: text_value(&fields[0])?,
-        media_type: text_value(&fields[1])?,
-        byte_length: uint_value(&fields[2])?,
-        blake3_digest: digest_value(&fields[3])?,
-    })
+    decode_artifact_descriptor_value(value).ok_or(ConformanceContractError::InvalidEncoding)
 }
 
 fn decode_provider_key(value: &Value) -> Result<FixtureProviderKeyV1, ConformanceContractError> {
@@ -2550,43 +1976,6 @@ fn decode_identity(value: &Value) -> Result<ImplementationIdentityV1, Conformanc
         public_contract_digest: digest_value(&fields[4])?,
         organization_id: optional_text(&fields[5])?,
     })
-}
-
-fn encode_independence(value: &IndependenceEvidenceV1) -> Value {
-    Value::Array(vec![
-        Value::Bool(value.technical_independent),
-        Value::Bool(value.authorship_independent),
-        Value::Bool(value.organizational_independent),
-        digest(&value.declaration_digest),
-        digest(&value.shared_code_audit_digest),
-        strings(&value.reviewer_ids),
-    ])
-}
-
-fn encode_case(value: &CaseOutcomeV1) -> Value {
-    Value::Array(vec![
-        text(&value.case_id),
-        digest(&value.fixture_digest),
-        digest(&value.execution_profile_digest),
-        mode(value.mode),
-        claim_layer(value.claim_layer),
-        case_outcome(value.outcome),
-        verification_outcome(value.verification_outcome),
-        optional(value.divergence_kind.map(divergence_mismatch)),
-        optional(
-            value
-                .first_coordinate
-                .as_ref()
-                .map(|coordinate| Value::Bytes(coordinate.clone())),
-        ),
-        optional(value.expected_digest.as_ref().map(digest)),
-        optional(value.actual_digest.as_ref().map(digest)),
-        optional(value.expected_error.map(safe_error)),
-        optional(value.actual_error.map(safe_error)),
-        replay_claim(value.replay_claim),
-        redaction(value.redaction_state),
-        digest(&value.provenance_digest),
-    ])
 }
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ConformanceContractError> {
@@ -2864,15 +2253,6 @@ fn decode_family(value: &Value) -> Result<FixtureFamilyV1, ConformanceContractEr
         _ => Err(ConformanceContractError::InvalidEncoding),
     }
 }
-fn case_outcome(value: CaseOutcomeStatusV1) -> Value {
-    uint(match value {
-        CaseOutcomeStatusV1::Pass => 0,
-        CaseOutcomeStatusV1::Fail => 1,
-        CaseOutcomeStatusV1::Skip => 2,
-        CaseOutcomeStatusV1::Unavailable => 3,
-        CaseOutcomeStatusV1::NotApplicable => 4,
-    })
-}
 fn verification_outcome(value: VerificationOutcomeV1) -> Value {
     uint(match value {
         VerificationOutcomeV1::VerifiedExact => 0,
@@ -2960,24 +2340,6 @@ fn decode_redaction(value: &Value) -> Result<RedactionStateV1, ConformanceContra
         3 => Ok(RedactionStateV1::EvidenceMissing),
         _ => Err(ConformanceContractError::InvalidEncoding),
     }
-}
-fn safe_error(value: SafeErrorCodeV1) -> Value {
-    uint(match value {
-        SafeErrorCodeV1::InvalidEncoding => 0,
-        SafeErrorCodeV1::UnsupportedVersion => 1,
-        SafeErrorCodeV1::FieldOutOfBounds => 2,
-        SafeErrorCodeV1::NonCanonicalOrder => 3,
-        SafeErrorCodeV1::DigestMismatch => 4,
-        SafeErrorCodeV1::SignatureInvalid => 5,
-        SafeErrorCodeV1::TrustRootUnknown => 6,
-        SafeErrorCodeV1::TrustSnapshotRollback => 7,
-        SafeErrorCodeV1::ArtifactRevoked => 8,
-        SafeErrorCodeV1::ClosureIncomplete => 9,
-        SafeErrorCodeV1::ProfileClassMismatch => 10,
-        SafeErrorCodeV1::ProfileUnsupported => 11,
-        SafeErrorCodeV1::ProvenanceMissing => 12,
-        SafeErrorCodeV1::ResourceLimitExceeded => 13,
-    })
 }
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -3073,6 +2435,38 @@ mod current_wire_contract_tests {
         value
     }
 
+    fn fixtures() -> Vec<FixtureDescriptorV1> {
+        FIXTURE_FAMILIES
+            .into_iter()
+            .map(|family| {
+                let mut value = fixture();
+                let family_name = match family {
+                    FixtureFamilyV1::Positive => "positive",
+                    FixtureFamilyV1::Denied => "denied",
+                    FixtureFamilyV1::Malformed => "malformed",
+                    FixtureFamilyV1::ResourceExhaustion => "resource-exhaustion",
+                    FixtureFamilyV1::DeletionRedaction => "deletion-redaction",
+                    FixtureFamilyV1::Downgrade => "downgrade",
+                    FixtureFamilyV1::IndependentEvaluation => "independent-evaluation",
+                };
+                value.case_id = format!("core/{family_name}/one");
+                value.family = family;
+                if family == FixtureFamilyV1::Downgrade {
+                    value.trust_policy_snapshot_digest = Some(digest(30));
+                    value.release_admission_digest = Some(digest(31));
+                    let mut next_provider = provider_key();
+                    next_provider.abi_minor = 1;
+                    value.transition = Some(FixtureContractTransitionV1 {
+                        from: provider_key(),
+                        to: next_provider,
+                    });
+                }
+                value.fixture_digest = value.digest();
+                value
+            })
+            .collect()
+    }
+
     fn profile() -> ConformanceProfileV1 {
         let mut value = ConformanceProfileV1 {
             profile_id: "pigloros.current.conformance".to_owned(),
@@ -3082,7 +2476,7 @@ mod current_wire_contract_tests {
             execution_matrix_digest: digest(14),
             execution_profile_digests: vec![digest(2)],
             fixture_provider_registry: registry(),
-            fixtures: vec![fixture()],
+            fixtures: fixtures(),
             allowed_divergences: vec![],
             evaluator_protocol: EvaluatorProtocolV1 {
                 protocol_id: "pigloros.evaluator.v1".to_owned(),
@@ -3113,7 +2507,6 @@ mod current_wire_contract_tests {
             limitations_digest: digest(21),
             provenance_digest: digest(22),
             previous_profile_digest: None,
-            stable_evidence: vec![],
             profile_digest: [0; 32],
         };
         value.profile_digest = value.digest();

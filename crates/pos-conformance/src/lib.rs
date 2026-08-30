@@ -26,7 +26,8 @@ pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
 
 pub use bundle_contract::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
-    verify_archive_release_filename, BundleContractErrorV1, BundleExpectedResultV1,
+    verify_archive_release_filename, verify_release_tree_independently, BundleContractErrorV1,
+    BundleExpectedResultV1,
     BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
     ConformanceBundlePairV1, ConformanceBundleV1, CONFORMANCE_BUNDLE_MAGIC_V1,
     MAX_CONFORMANCE_BUNDLE_BYTES_V1,
@@ -36,8 +37,7 @@ pub use profile_contract::{
     DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1,
     EvaluatorRequestV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureProvenanceV1,
     IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
-    StableEvidenceAttestationV1, StableImplementationEvidenceV1, StrictOracleKindV1,
-    StrictOracleV1, SubjectAdapterKindV1, TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1,
+    StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, CONFORMANCE_PROFILE_MAGIC_V1,
     EVALUATOR_REQUEST_MAGIC_V1,
 };
 pub use provider_contract::{
@@ -47,6 +47,32 @@ pub use provider_contract::{
     FIXTURE_PROVIDER_REGISTRY_MAGIC_V1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
     MAX_PROVIDER_ARTIFACT_BYTES_V1,
 };
+
+fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {
+    Value::Array(vec![
+        Value::Text(value.member_path.clone()),
+        Value::Text(value.media_type.clone()),
+        Value::Integer(value.byte_length.into()),
+        Value::Bytes(value.blake3_digest.to_vec()),
+    ])
+}
+
+fn decode_artifact_descriptor_value(value: &Value) -> Option<ArtifactDescriptorV1> {
+    let Value::Array(fields) = value else {
+        return None;
+    };
+    let [Value::Text(member_path), Value::Text(media_type), Value::Integer(byte_length), Value::Bytes(digest)] =
+        fields.as_slice()
+    else {
+        return None;
+    };
+    Some(ArtifactDescriptorV1 {
+        member_path: member_path.clone(),
+        media_type: media_type.clone(),
+        byte_length: u64::try_from(*byte_length).ok()?,
+        blake3_digest: digest.as_slice().try_into().ok()?,
+    })
+}
 
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;

@@ -4,7 +4,8 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
-    verify_archive_release_filename, ArtifactDescriptorV1, BundleContractErrorV1,
+    verify_archive_release_filename, verify_release_tree_independently, ArtifactDescriptorV1,
+    BundleContractErrorV1,
     BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1,
     BundleModeV1, CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1,
     ConformanceProfileV1, DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1,
@@ -157,88 +158,107 @@ fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
     })
 }
 
-fn current_fixture(family_schemas: &[ProviderFamilySchemaV1]) -> TestResult<FixtureDescriptorV1> {
-    let positive_schema = family_schemas
-        .first()
-        .ok_or("positive family schema is absent")?
-        .schema_descriptor
-        .clone();
+fn current_fixtures(
+    family_schemas: &[ProviderFamilySchemaV1],
+) -> TestResult<Vec<FixtureDescriptorV1>> {
     let execution = digest(31);
-    let expected_path = expected_result_member_path(
-        "example-positive",
-        ClaimLayerV1::ArtifactIntegrity,
-        &execution,
-    );
     let failure = NamespacedFailureV1 {
         owner_id: "pigloros.core".to_owned(),
         contract_version: "1.0.0".to_owned(),
         code_id: "provenance-missing".to_owned(),
     };
-    let mut fixture = FixtureDescriptorV1 {
-        case_id: "example-positive".to_owned(),
-        mandatory: true,
-        claim_layer: ClaimLayerV1::ArtifactIntegrity,
-        family: FixtureFamilyV1::Positive,
-        provider_key: provider_key(),
-        subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
-        execution_profile_digest: execution,
-        modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
-        schema: positive_schema,
-        payload: artifact(
-            "fixtures/positive/input.bin",
-            "application/octet-stream",
-            PAYLOAD_BYTES,
-        )?,
-        auxiliary: vec![artifact(
-            &expected_path,
-            "application/json",
-            EXPECTED_BYTES,
-        )?],
-        strict_oracle: StrictOracleV1 {
-            kind: StrictOracleKindV1::Failure,
-            output: None,
-            failure: Some(failure.clone()),
-            divergence: None,
-        },
-        expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
-        expected_verification_error: Some(failure),
-        replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
-        redaction_state: RedactionStateV1::EvidenceMissing,
-        deterministic_budget: DeterministicBudgetV1 {
-            memory_bytes: 1024,
-            cpu_fuel: 1024,
-            host_calls: 16,
-            event_count: 16,
-            output_bytes: 1024,
-            storage_bytes: 1024,
-            execution_steps: 1024,
-            simulation_time_ns: 1024,
-        },
-        operational_safety: OperationalSafetyV1 { watchdog_ms: 1000 },
-        capability_policy: CapabilityPolicyV1 {
-            network_allowed: false,
-            capability_ids: vec!["read-public-bundle".to_owned()],
-        },
-        trust_policy_snapshot_digest: None,
-        release_admission_digest: None,
-        provenance: FixtureProvenanceV1 {
-            licence_id: "MIT".to_owned(),
-            notices_digest: *blake3::hash(NOTICE_BYTES).as_bytes(),
-            sbom_digest: *blake3::hash(SBOM_BYTES).as_bytes(),
-            source_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
-            build_digest: digest(41),
-            publication_review_digest: digest(42),
-            limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
-        },
-        transition: None,
-        fixture_digest: [0; 32],
-    };
-    fixture.fixture_digest = fixture.digest();
-    Ok(fixture)
+    family_schemas
+        .iter()
+        .map(|family_schema| {
+            let family_name = match family_schema.family {
+                FixtureFamilyV1::Positive => "positive",
+                FixtureFamilyV1::Denied => "denied",
+                FixtureFamilyV1::Malformed => "malformed",
+                FixtureFamilyV1::ResourceExhaustion => "resource-exhaustion",
+                FixtureFamilyV1::DeletionRedaction => "deletion-redaction",
+                FixtureFamilyV1::Downgrade => "downgrade",
+                FixtureFamilyV1::IndependentEvaluation => "independent-evaluation",
+            };
+            let case_id = format!("example-{family_name}");
+            let expected_path =
+                expected_result_member_path(&case_id, ClaimLayerV1::ArtifactIntegrity, &execution);
+            let mut fixture = FixtureDescriptorV1 {
+                case_id,
+                mandatory: true,
+                claim_layer: ClaimLayerV1::ArtifactIntegrity,
+                family: family_schema.family,
+                provider_key: provider_key(),
+                subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
+                execution_profile_digest: execution,
+                modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
+                schema: family_schema.schema_descriptor.clone(),
+                payload: artifact(
+                    &format!("fixtures/{family_name}/input.bin"),
+                    "application/octet-stream",
+                    PAYLOAD_BYTES,
+                )?,
+                auxiliary: vec![artifact(
+                    &expected_path,
+                    "application/json",
+                    EXPECTED_BYTES,
+                )?],
+                strict_oracle: StrictOracleV1 {
+                    kind: StrictOracleKindV1::Failure,
+                    output: None,
+                    failure: Some(failure.clone()),
+                    divergence: None,
+                },
+                expected_verification_outcome: VerificationOutcomeV1::UnverifiableArtifactsMissing,
+                expected_verification_error: Some(failure.clone()),
+                replay_claim: ReplayClaimV1::UnverifiableArtifactsMissing,
+                redaction_state: RedactionStateV1::EvidenceMissing,
+                deterministic_budget: DeterministicBudgetV1 {
+                    memory_bytes: 1024,
+                    cpu_fuel: 1024,
+                    host_calls: 16,
+                    event_count: 16,
+                    output_bytes: 1024,
+                    storage_bytes: 1024,
+                    execution_steps: 1024,
+                    simulation_time_ns: 1024,
+                },
+                operational_safety: OperationalSafetyV1 { watchdog_ms: 1000 },
+                capability_policy: CapabilityPolicyV1 {
+                    network_allowed: false,
+                    capability_ids: vec!["read-public-bundle".to_owned()],
+                },
+                trust_policy_snapshot_digest: None,
+                release_admission_digest: None,
+                provenance: FixtureProvenanceV1 {
+                    licence_id: "MIT".to_owned(),
+                    notices_digest: *blake3::hash(NOTICE_BYTES).as_bytes(),
+                    sbom_digest: *blake3::hash(SBOM_BYTES).as_bytes(),
+                    source_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
+                    build_digest: digest(41),
+                    publication_review_digest: digest(42),
+                    limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
+                },
+                transition: None,
+                fixture_digest: [0; 32],
+            };
+            if fixture.family == FixtureFamilyV1::Downgrade {
+                let mut next_provider = provider_key();
+                next_provider.abi_minor = 1;
+                fixture.trust_policy_snapshot_digest = Some(digest(43));
+                fixture.release_admission_digest = Some(digest(44));
+                fixture.transition = Some(pos_conformance::FixtureContractTransitionV1 {
+                    from: provider_key(),
+                    to: next_provider,
+                });
+            }
+            fixture.fixture_digest = fixture.digest();
+            Ok(fixture)
+        })
+        .collect()
 }
 
 fn current_profile(
-    fixture: FixtureDescriptorV1,
+    fixtures: Vec<FixtureDescriptorV1>,
     registry_bytes: &[u8],
 ) -> TestResult<ConformanceProfileV1> {
     let mut profile = ConformanceProfileV1 {
@@ -247,7 +267,7 @@ fn current_profile(
         lifecycle: ProfileLifecycleV1::Draft,
         normative_spec_digest: *blake3::hash(NORMATIVE_BYTES).as_bytes(),
         execution_matrix_digest: *blake3::hash(MATRIX_BYTES).as_bytes(),
-        execution_profile_digests: vec![fixture.execution_profile_digest],
+        execution_profile_digests: vec![digest(31)],
         fixture_provider_registry: FixtureProviderRegistryBindingV1 {
             registry_artifact: artifact(
                 FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
@@ -256,7 +276,7 @@ fn current_profile(
             )?,
             required_provider_keys: vec![provider_key()],
         },
-        fixtures: vec![fixture],
+        fixtures,
         allowed_divergences: Vec::new(),
         evaluator_protocol: EvaluatorProtocolV1 {
             protocol_id: "pigloros.evaluator.v1".to_owned(),
@@ -287,7 +307,6 @@ fn current_profile(
         limitations_digest: *blake3::hash(LIMITATIONS_BYTES).as_bytes(),
         provenance_digest: *blake3::hash(PROVENANCE_BYTES).as_bytes(),
         previous_profile_digest: None,
-        stable_evidence: Vec::new(),
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();
@@ -302,25 +321,26 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         registry_bytes,
     } = current_provider_contract_inputs()?;
 
-    let fixture = current_fixture(&family_schemas)?;
-    let execution = fixture.execution_profile_digest;
-    let expected_path = expected_result_member_path(
-        "example-positive",
-        ClaimLayerV1::ArtifactIntegrity,
-        &execution,
-    );
-    let profile = current_profile(fixture, &registry_bytes)?;
-
-    let expected_member =
-        BundleMemberV1::expected_result(expected_path.clone(), EXPECTED_BYTES.to_vec());
-    let expected = vec![BundleExpectedResultV1 {
-        case_id: "example-positive".to_owned(),
-        claim_layer: ClaimLayerV1::ArtifactIntegrity,
-        execution_profile_digest: execution,
-        mode,
-        member_path: expected_path,
-        digest: expected_member.digest,
-    }];
+    let fixtures = current_fixtures(&family_schemas)?;
+    let mut expected = fixtures
+        .iter()
+        .map(|fixture| {
+            let descriptor = fixture
+                .auxiliary
+                .first()
+                .ok_or("expected-result descriptor is absent")?;
+            Ok(BundleExpectedResultV1 {
+                case_id: fixture.case_id.clone(),
+                claim_layer: fixture.claim_layer,
+                execution_profile_digest: fixture.execution_profile_digest,
+                mode,
+                member_path: descriptor.member_path.clone(),
+                digest: descriptor.blake3_digest,
+            })
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    expected.sort_unstable();
+    let profile = current_profile(fixtures, &registry_bytes)?;
     let mut members = family_schemas
         .iter()
         .zip(CURRENT_SCHEMA_BYTES)
@@ -332,9 +352,18 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
             )
         })
         .collect::<Vec<_>>();
+    members.extend(profile.fixtures.iter().flat_map(|fixture| {
+        let payload = BundleMemberV1::fixture_input(
+            fixture.payload.member_path.clone(),
+            PAYLOAD_BYTES.to_vec(),
+        );
+        let expected = BundleMemberV1::expected_result(
+            fixture.auxiliary[0].member_path.clone(),
+            EXPECTED_BYTES.to_vec(),
+        );
+        [payload, expected]
+    }));
     members.extend([
-        BundleMemberV1::fixture_input("fixtures/positive/input.bin", PAYLOAD_BYTES.to_vec()),
-        expected_member,
         BundleMemberV1::supporting(
             "support/normative-requirements.md",
             NORMATIVE_BYTES.to_vec(),
@@ -1145,14 +1174,20 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(archives.len(), 14);
-    for archive_path in &archives {
-        let bytes = fs::read(archive_path)?;
-        verify_archive_independently(&bytes)?;
+    let archive_bytes = archives.iter().map(fs::read).collect::<Result<Vec<_>, _>>()?;
+    let archive_refs = archive_bytes.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    verify_release_tree_independently(&archive_refs)?;
+    assert_eq!(
+        verify_release_tree_independently(&archive_refs[..13]),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+    for (archive_path, bytes) in archives.iter().zip(&archive_bytes) {
+        verify_archive_independently(bytes)?;
         let filename = archive_path
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or("archive filename is not UTF-8")?;
-        verify_archive_release_filename(&bytes, filename)?;
+        verify_archive_release_filename(bytes, filename)?;
     }
     let metadata_path = files
         .iter()
@@ -1169,6 +1204,65 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
     let verifier = std::env::var_os("CARGO_BIN_EXE_verify-conformance-bundle")
         .ok_or("verifier binary path is unavailable")?;
     assert!(Command::new(verifier).args(&archives).status()?.success());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn root_materializer_test_drops_groups_gid_and_uid_before_publication() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let current_uid = Command::new("id").arg("-u").output()?;
+    if current_uid.stdout != b"0\n" {
+        return Ok(());
+    }
+    let user_identity = Command::new("id").args(["-u", "nobody"]).output()?;
+    let group_identity = Command::new("id").args(["-g", "nobody"]).output()?;
+    if !user_identity.status.success() || !group_identity.status.success() {
+        return Err("root privilege-drop test requires the nobody identity".into());
+    }
+    let uid = std::str::from_utf8(&user_identity.stdout)?.trim();
+    let gid = std::str::from_utf8(&group_identity.stdout)?.trim();
+
+    let _guard = materializer_process_guard();
+    let root = temporary_root("unprivileged-materializer")?;
+    let _cleanup = TemporaryOutput(root.clone());
+    fs::create_dir_all(&root)?;
+    let source = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    let executable = root.join("materializer-under-test");
+    fs::copy(source, &executable)?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
+    let ownership = format!("{uid}:{gid}");
+    assert!(
+        Command::new("chown")
+            .args([ownership.as_str()])
+            .arg(&root)
+            .status()?
+            .success(),
+        "root privilege-drop test must transfer the output directory"
+    );
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    let publication = root.join(source_inventory_address());
+
+    let status = Command::new("setpriv")
+        .current_dir(&root)
+        .args(["--clear-groups", "--regid", gid, "--reuid", uid, "--"])
+        .arg(&executable)
+        .arg(&publication)
+        .env(
+            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
+            "0707070707070707070707070707070707070707070707070707070707070707",
+        )
+        .status()?;
+    assert!(status.success(), "unprivileged materialization must succeed");
+    assert_eq!(
+        release_files(&publication)?
+            .iter()
+            .filter(|path| path.extension().is_some_and(|extension| extension == "cfb1"))
+            .count(),
+        14
+    );
     Ok(())
 }
 
@@ -1921,7 +2015,7 @@ fn mutate_profile_nested_contracts(profile: &mut [Value], mutation: usize) -> Te
                 "evaluator hard caps",
             )?,
             9,
-            Value::Integer(0_u64.into()),
+            Value::Integer(1_048_577_u64.into()),
             "evaluator final hard cap",
         ),
         90 => replace_value(
@@ -2280,14 +2374,10 @@ fn assert_archive_rejected_by_both(archive: &[u8], label: &str) {
 fn independent_verifier_rejects_each_current_profile_contract_mutation() -> TestResult {
     for mutation in 0..102 {
         let archive = mutate_profile_archive(|profile| mutate_profile_fields(profile, mutation))?;
-        if matches!(mutation, 4 | 89) {
+        if mutation == 4 {
             assert_eq!(
                 verify_archive_independently(&archive),
-                Err(if mutation == 4 {
-                    BundleContractErrorV1::LifecycleInvalid
-                } else {
-                    BundleContractErrorV1::ProfileInvalid
-                })
+                Err(BundleContractErrorV1::LifecycleInvalid)
             );
         } else {
             assert_archive_rejected_by_both(&archive, &format!("profile mutation {mutation}"));
@@ -2401,7 +2491,7 @@ fn both_verifiers_reject_wrong_types_across_every_archive_record() -> TestResult
 }
 
 #[test]
-fn both_verifiers_accept_the_full_divergence_classification_vocabulary() -> TestResult {
+fn both_verifiers_reject_divergence_classes_outside_the_cpf1_contract() -> TestResult {
     for classification in 7_u64..=8 {
         let archive = mutate_profile_archive(|profile| {
             replace_value(
@@ -2414,8 +2504,7 @@ fn both_verifiers_accept_the_full_divergence_classification_vocabulary() -> Test
                 "allowed divergence",
             )
         })?;
-        verify_archive_independently(&archive)?;
-        ConformanceBundleV1::from_canonical_cbor(&archive)?;
+        assert_archive_rejected_by_both(&archive, "out-of-contract divergence classification");
     }
     Ok(())
 }
@@ -2475,7 +2564,7 @@ fn independent_verifier_exercises_active_divergence_oracles() -> TestResult {
 }
 
 fn set_raw_downgrade_fixture(profile: &mut [Value]) -> TestResult {
-    let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+    let fixture = array_field(array_field(profile, 9, "fixtures")?, 5, "downgrade fixture")?;
     let from = fixture
         .get(4)
         .ok_or("fixture provider key is absent")?
@@ -2490,7 +2579,6 @@ fn set_raw_downgrade_fixture(profile: &mut [Value]) -> TestResult {
         Value::Integer(1_u64.into()),
         "target ABI minor",
     )?;
-    replace_value(fixture, 3, Value::Integer(5_u64.into()), "downgrade family")?;
     let schema_bytes = CURRENT_SCHEMA_BYTES[5];
     replace_value(
         fixture,
@@ -2522,10 +2610,185 @@ fn independent_verifier_exercises_active_provider_transitions() -> TestResult {
     for endpoint in 0..2 {
         let invalid = mutate_profile_archive(|profile| {
             set_raw_downgrade_fixture(profile)?;
-            replace_nested_profile_value(profile, &[9, 0, 22, endpoint], Value::Map(Vec::new()))
+            replace_nested_profile_value(profile, &[9, 5, 22, endpoint], Value::Map(Vec::new()))
         })?;
         assert_archive_rejected_by_both(&invalid, "malformed provider transition");
     }
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestResult {
+    let missing_family = mutate_profile_archive(|profile| {
+        array_field(profile, 9, "fixtures")?.pop();
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&missing_family, "missing required fixture family");
+
+    let unknown_provider = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?
+                .get_mut(4)
+                .and_then(|value| match value {
+                    Value::Array(fields) => Some(fields.as_mut_slice()),
+                    _ => None,
+                })
+                .ok_or("fixture provider is absent")?,
+            0,
+            Value::Text("other.provider".to_owned()),
+            "fixture provider identifier",
+        )
+    })?;
+    assert_archive_rejected_by_both(&unknown_provider, "unknown fixture provider");
+
+    let outcome_mismatch = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            12,
+            Value::Integer(1_u64.into()),
+            "verification outcome",
+        )
+    })?;
+    assert_archive_rejected_by_both(&outcome_mismatch, "oracle and outcome mismatch");
+
+    let claim_mismatch = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            14,
+            Value::Integer(0_u64.into()),
+            "replay claim",
+        )
+    })?;
+    assert_archive_rejected_by_both(&claim_mismatch, "replay and redaction mismatch");
+
+    let misplaced_downgrade_authority = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            19,
+            Value::Bytes(vec![70; 32]),
+            "trust snapshot digest",
+        )
+    })?;
+    assert_archive_rejected_by_both(
+        &misplaced_downgrade_authority,
+        "authority on non-downgrade fixture",
+    );
+
+    let incomplete_downgrade = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 5, "downgrade fixture")?,
+            22,
+            Value::Null,
+            "provider transition",
+        )
+    })?;
+    assert_archive_rejected_by_both(&incomplete_downgrade, "incomplete downgrade authority");
+
+    let wrong_failure_owner = mutate_profile_archive(|profile| {
+        let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+        for field in [11, 13] {
+            let failure = if field == 11 {
+                array_field(array_field(fixture, field, "oracle")?, 2, "oracle failure")?
+            } else {
+                array_field(fixture, field, "expected failure")?
+            };
+            replace_value(
+                failure,
+                0,
+                Value::Text("other.provider".to_owned()),
+                "failure owner",
+            )?;
+        }
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&wrong_failure_owner, "unowned provider failure");
+
+    let unallowed_divergence = mutate_profile_archive(|profile| {
+        set_raw_divergence_fixture(profile, Value::Integer(5_u64.into()), Value::Bytes(vec![1]))?;
+        replace_value(profile, 10, Value::Array(Vec::new()), "allowed divergences")
+    })?;
+    assert_archive_rejected_by_both(&unallowed_divergence, "unallowed fixture divergence");
+    Ok(())
+}
+
+#[test]
+fn both_verifiers_accept_all_current_fixture_execution_modes() -> TestResult {
+    let archive = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+            7,
+            Value::Array(
+                (0_u64..=3)
+                    .map(|mode| Value::Integer(mode.into()))
+                    .collect(),
+            ),
+            "fixture execution modes",
+        )
+    })?;
+    verify_archive_independently(&archive)?;
+    ConformanceBundleV1::from_canonical_cbor(&archive)?;
+    Ok(())
+}
+
+#[test]
+fn independent_verifier_matches_typed_fixture_caps_and_schema_binding() -> TestResult {
+    let excessive_auxiliary = mutate_profile_archive(|profile| {
+        let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+        let template = array_field(fixture, 10, "auxiliary descriptors")?
+            .first()
+            .ok_or("auxiliary descriptor is absent")?
+            .clone();
+        let auxiliary = (0..65)
+            .map(|index| {
+                let mut descriptor = template.clone();
+                let Value::Array(fields) = &mut descriptor else {
+                    return Err("auxiliary descriptor is not an array".into());
+                };
+                fields[0] = Value::Text(format!("expected/excessive-{index:02}.json"));
+                Ok(descriptor)
+            })
+            .collect::<TestResult<Vec<_>>>()?;
+        replace_value(
+            fixture,
+            10,
+            Value::Array(auxiliary),
+            "auxiliary descriptors",
+        )
+    })?;
+    assert_archive_rejected_by_both(&excessive_auxiliary, "excessive auxiliary descriptors");
+
+    let excessive_capabilities = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                18,
+                "capability policy",
+            )?,
+            1,
+            Value::Array(
+                (0..257)
+                    .map(|index| Value::Text(format!("capability-{index:03}")))
+                    .collect(),
+            ),
+            "capability identifiers",
+        )
+    })?;
+    assert_archive_rejected_by_both(&excessive_capabilities, "excessive capabilities");
+
+    let wrong_family_schema = mutate_profile_archive(|profile| {
+        let fixtures = array_field(profile, 9, "fixtures")?;
+        let denied_schema = array_field(fixtures, 1, "denied fixture")?
+            .get(8)
+            .ok_or("denied schema is absent")?
+            .clone();
+        replace_value(
+            array_field(fixtures, 0, "positive fixture")?,
+            8,
+            denied_schema,
+            "positive schema",
+        )
+    })?;
+    assert_archive_rejected_by_both(&wrong_family_schema, "wrong provider family schema");
     Ok(())
 }
 

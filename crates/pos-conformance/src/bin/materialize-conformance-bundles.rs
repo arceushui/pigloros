@@ -2,7 +2,8 @@
 
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
-    expected_result_member_path, verify_archive_release_filename, ArtifactDescriptorV1,
+    expected_result_member_path, verify_archive_release_filename, verify_release_tree_independently,
+    ArtifactDescriptorV1,
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
     ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1,
     DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureContractTransitionV1,
@@ -803,11 +804,17 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
                 outputs
             })
         })
-        .map(|mut outputs| {
+        .and_then(|mut outputs| {
+            let archives = outputs
+                .iter()
+                .filter(|output| output.archive_release_filename.is_some())
+                .map(|output| output.bytes.as_slice())
+                .collect::<Vec<_>>();
+            verify_release_tree_independently(&archives).map_err(Box::<dyn Error>::from)?;
             let published_file_count = outputs.len().saturating_add(2);
             outputs.push(materialization_metadata(&catalog, published_file_count));
             outputs.push(output_checksum_inventory(&outputs));
-            outputs
+            Ok(outputs)
         })
 }
 
@@ -1136,7 +1143,6 @@ fn profile_from_catalog(
         limitations_digest: context.limitations_digest,
         provenance_digest: context.provenance_digest,
         previous_profile_digest: None,
-        stable_evidence: Vec::new(),
         profile_digest: [0; 32],
     };
     profile.profile_digest = profile.digest();

@@ -9,7 +9,10 @@ use ciborium::value::Value;
 use std::io::Cursor;
 use thiserror::Error;
 
-use crate::{ClaimLayerV1, SubjectAdapterKindV1};
+use crate::{
+    decode_artifact_descriptor_value, encode_artifact_descriptor_value, ClaimLayerV1,
+    SubjectAdapterKindV1,
+};
 
 /// Magic for the fixture-provider registry record.
 pub const FIXTURE_PROVIDER_REGISTRY_MAGIC_V1: &str = "FPR1";
@@ -608,7 +611,7 @@ fn encode_registry_fields(registry: &FixtureProviderRegistryV1) -> Value {
 
 fn encode_registry_binding(value: &FixtureProviderRegistryBindingV1) -> Value {
     Value::Array(vec![
-        encode_artifact_descriptor(&value.registry_artifact),
+        encode_artifact_descriptor_value(&value.registry_artifact),
         Value::Array(
             value
                 .required_provider_keys
@@ -657,11 +660,11 @@ fn package_fields(package: &FixtureProviderPackageV1) -> Vec<Value> {
                 .map(encode_family_schema)
                 .collect(),
         ),
-        encode_artifact_descriptor(&package.licence_descriptor),
-        encode_artifact_descriptor(&package.notices_descriptor),
-        encode_artifact_descriptor(&package.sbom_descriptor),
-        encode_artifact_descriptor(&package.source_provenance_descriptor),
-        encode_artifact_descriptor(&package.limitations_descriptor),
+        encode_artifact_descriptor_value(&package.licence_descriptor),
+        encode_artifact_descriptor_value(&package.notices_descriptor),
+        encode_artifact_descriptor_value(&package.sbom_descriptor),
+        encode_artifact_descriptor_value(&package.source_provenance_descriptor),
+        encode_artifact_descriptor_value(&package.limitations_descriptor),
     ]
 }
 
@@ -673,7 +676,7 @@ fn encode_provider_entry(value: &FixtureProviderEntryV1) -> Value {
         uint(u64::from(value.provider_key.abi_minor)),
         claim_layer(value.claim_layer),
         subject_adapter(value.subject_adapter),
-        encode_artifact_descriptor(&value.provider_package_descriptor),
+        encode_artifact_descriptor_value(&value.provider_package_descriptor),
     ])
 }
 
@@ -689,16 +692,7 @@ fn encode_provider_key(value: &FixtureProviderKeyV1) -> Value {
 fn encode_family_schema(value: &ProviderFamilySchemaV1) -> Value {
     Value::Array(vec![
         uint(value.family.wire_code()),
-        encode_artifact_descriptor(&value.schema_descriptor),
-    ])
-}
-
-fn encode_artifact_descriptor(value: &ArtifactDescriptorV1) -> Value {
-    Value::Array(vec![
-        text(&value.member_path),
-        text(&value.media_type),
-        uint(value.byte_length),
-        digest(&value.blake3_digest),
+        encode_artifact_descriptor_value(&value.schema_descriptor),
     ])
 }
 
@@ -832,20 +826,9 @@ fn decode_family_schema(value: &Value) -> Result<ProviderFamilySchemaV1, Provide
 fn decode_artifact_descriptor(
     value: &Value,
 ) -> Result<ArtifactDescriptorV1, ProviderContractErrorV1> {
-    let fields = array(value, 4)?;
-    text_value(&fields[0]).and_then(|member_path| {
-        text_value(&fields[1]).and_then(|media_type| {
-            uint_value(&fields[2]).and_then(|byte_length| {
-                digest_value(&fields[3]).map(|blake3_digest| ArtifactDescriptorV1 {
-                    member_path,
-                    media_type,
-                    byte_length,
-                    blake3_digest,
-                })
-            })
-        })
-    })
+    decode_artifact_descriptor_value(value).ok_or(ProviderContractErrorV1::InvalidEncoding)
 }
+
 
 fn encode_value(value: &Value) -> Result<Vec<u8>, ProviderContractErrorV1> {
     let mut bytes = Vec::new();
