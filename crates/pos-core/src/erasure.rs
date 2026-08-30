@@ -5772,7 +5772,13 @@ mod erasure_coverage_tests {
                 .validate_terminal(wrong_acknowledgements.state.lifecycle(), coordinator()),
             Err(ErasureErrorV1::PolicyConflict)
         );
+        Ok(())
+    }
 
+    #[test]
+    fn terminal_validation_rejects_missing_or_mismatched_provenance() -> Result<(), ErasureErrorV1>
+    {
+        let complete = tests::complete_record()?;
         let mut missing_outcome = complete.clone();
         missing_outcome.supporting_records.attempt_outcomes.clear();
         assert_eq!(
@@ -5798,7 +5804,7 @@ mod erasure_coverage_tests {
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
-        let mut wrong_receipt_provenance = complete.clone();
+        let mut wrong_receipt_provenance = complete;
         replace_terminal_input(&mut wrong_receipt_provenance, |input| {
             input.provenance = ErasureReferenceV1::from_digest([76; 32]);
         })?;
