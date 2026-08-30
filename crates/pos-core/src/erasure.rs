@@ -5765,7 +5765,7 @@ mod erasure_coverage_tests {
             Err(ErasureErrorV1::PolicyConflict)
         );
 
-        let mut wrong_acknowledgements = complete.clone();
+        let mut wrong_acknowledgements = complete;
         wrong_acknowledgements.acknowledgements.clear();
         assert_eq!(
             wrong_acknowledgements
