@@ -577,7 +577,7 @@ pub(super) fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV
 pub(super) fn record_after_dispatch_intent(
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
-    let mut port = test_port(true, vec![target]);
+    let port = test_port(true, vec![target]);
     port.dispatch_error = Some(ErasureErrorV1::KeyDestructionFailed);
     let persisted = port.clone();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
