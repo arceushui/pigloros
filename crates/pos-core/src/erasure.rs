@@ -4767,7 +4767,7 @@ mod erasure_coverage_tests {
         let mut noncanonical = bytes.clone();
         assert_eq!(
             &noncanonical[..8],
-            &[0x8c, 0x65, b'E', b'R', b'C', b'R', b'1', 0x01]
+            &[0x8d, 0x65, b'E', b'R', b'C', b'R', b'1', 0x01]
         );
         noncanonical[7] = 0x18;
         noncanonical.insert(8, 1);
