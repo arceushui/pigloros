@@ -487,26 +487,17 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
     }
 }
 
-fn embedded_catalog_result<T, E: std::fmt::Display>(
-    result: Result<T, E>,
-    invariant: &'static str,
-) -> T {
+fn embedded_catalog_result<T, E>(result: Result<T, E>) -> T {
     match result {
         Ok(value) => value,
-        Err(error) => {
-            eprintln!("embedded conformance catalog invariant violated ({invariant}): {error}");
-            std::process::exit(1);
-        }
+        Err(_) => std::process::abort(),
     }
 }
 
-fn embedded_catalog_option<T>(value: Option<T>, invariant: &'static str) -> T {
+fn embedded_catalog_option<T>(value: Option<T>) -> T {
     match value {
         Some(value) => value,
-        None => {
-            eprintln!("embedded conformance catalog invariant violated ({invariant})");
-            std::process::exit(1);
-        }
+        None => std::process::abort(),
     }
 }
 
@@ -571,10 +562,7 @@ fn provider_catalog(catalog: &LayerCatalog) -> ProviderCatalog {
         providers,
         registry_digest: [0; 32],
     };
-    registry.registry_digest = embedded_catalog_result(
-        registry.digest(),
-        "the build-validated provider catalog must be valid",
-    );
+    registry.registry_digest = embedded_catalog_result(registry.digest());
     registry
         .providers
         .iter()
@@ -585,16 +573,12 @@ fn provider_catalog(catalog: &LayerCatalog) -> ProviderCatalog {
                     .and_then(|decoded| {
                         decoded.validate_registry_binding(entry, &catalog_package.artifact.bytes)
                     }),
-                "the materializer must preserve its provider registry binding",
             );
         });
     let registry = public_artifact(
         FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
         "application/cbor",
-        &embedded_catalog_result(
-            registry.to_canonical_cbor(),
-            "the build-validated provider registry must encode",
-        ),
+        &embedded_catalog_result(registry.to_canonical_cbor()),
     );
     ProviderCatalog {
         registry,
@@ -634,17 +618,11 @@ fn provider_package(
         limitations_descriptor: limitations.descriptor(),
         package_digest: [0; 32],
     };
-    package.package_digest = embedded_catalog_result(
-        package.digest(),
-        "the build-validated provider package must be valid",
-    );
+    package.package_digest = embedded_catalog_result(package.digest());
     let artifact = public_artifact(
         &layer.fixture_provider.package_path,
         "application/cbor",
-        &embedded_catalog_result(
-            package.to_canonical_cbor(),
-            "the build-validated provider package must encode",
-        ),
+        &embedded_catalog_result(package.to_canonical_cbor()),
     );
     ProviderPackage {
         provider_key,
@@ -701,14 +679,8 @@ fn catalog_entry(source: &LayerSource) -> LayerCatalogEntry {
 }
 
 fn catalog_entry_input(source: &LayerSource) -> CatalogEntryInput {
-    let record = embedded_catalog_result(
-        serde_json::from_slice(source.profile_record),
-        "the build-validated profile catalog must decode",
-    );
-    let fixture_provider = embedded_catalog_result(
-        serde_json::from_slice(source.provider_record),
-        "the build-validated provider catalog must decode",
-    );
+    let record = embedded_catalog_result(serde_json::from_slice(source.profile_record));
+    let fixture_provider = embedded_catalog_result(serde_json::from_slice(source.provider_record));
     CatalogEntryInput {
         record,
         fixture_provider,
@@ -716,14 +688,10 @@ fn catalog_entry_input(source: &LayerSource) -> CatalogEntryInput {
 }
 
 fn catalog_identity(record: &ProfileCatalogRecord) -> (ClaimLayerV1, SubjectAdapterKindV1) {
-    let claim_layer = embedded_catalog_option(
-        ClaimLayerV1::from_wire_code(record.wire_code),
-        "the build-validated profile catalog must use a known claim layer",
-    );
-    let subject_adapter = embedded_catalog_option(
-        SubjectAdapterKindV1::from_catalog_name(&record.subject_adapter),
-        "the build-validated profile catalog must use a known subject adapter",
-    );
+    let claim_layer = embedded_catalog_option(ClaimLayerV1::from_wire_code(record.wire_code));
+    let subject_adapter = embedded_catalog_option(SubjectAdapterKindV1::from_catalog_name(
+        &record.subject_adapter,
+    ));
     (claim_layer, subject_adapter)
 }
 
@@ -741,7 +709,6 @@ fn catalog_fixtures(
                 fixture_provider
                     .fixture_contracts
                     .get(&fixture_record.family),
-                "the build-validated provider catalog must cover every fixture family",
             );
             catalog_fixture(fixture_record, fixture_source, contract)
         })
@@ -753,10 +720,8 @@ fn catalog_fixture(
     source: &FixtureSource,
     contract: &CatalogFixtureContract,
 ) -> CatalogFixture {
-    let oracle: FixtureOracleRecord = embedded_catalog_result(
-        serde_json::from_slice(source.oracle),
-        "the build-validated fixture oracle must decode",
-    );
+    let oracle: FixtureOracleRecord =
+        embedded_catalog_result(serde_json::from_slice(source.oracle));
     CatalogFixture {
         record: ProfileFixtureRecord {
             case_id: record.case_id.clone(),
@@ -874,10 +839,7 @@ fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>,
                 .filter(|output| output.archive_release_filename.is_some())
                 .map(|output| output.bytes.as_slice())
                 .collect::<Vec<_>>();
-            embedded_catalog_result(
-                verify_release_tree_independently(&archives),
-                "the materializer must produce an independently valid release tree",
-            );
+            embedded_catalog_result(verify_release_tree_independently(&archives));
             let published_file_count = outputs.len().saturating_add(2);
             outputs.push(materialization_metadata(&catalog, published_file_count));
             outputs.push(output_checksum_inventory(&outputs));
@@ -1492,7 +1454,6 @@ fn bundle_inputs_from_profile(
                 .fixtures
                 .iter()
                 .find(|source| source.record.case_id == fixture.case_id),
-            "the profile must only contain fixtures from its typed catalog",
         );
         members.push(BundleMemberV1::fixture_input(
             fixture.payload.member_path.clone(),
@@ -1664,14 +1625,8 @@ fn append_draft_release_admissions(
         .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
         .filter(|fixture| fixture.modes.contains(&execution_mode))
         .try_for_each(|fixture| {
-            let transition = embedded_catalog_option(
-                fixture.transition.as_ref(),
-                "downgrade descriptors must carry a provider transition",
-            );
-            let trust_snapshot = embedded_catalog_option(
-                fixture.trust_policy_snapshot_digest,
-                "downgrade descriptors must carry a trust-policy snapshot digest",
-            );
+            let transition = embedded_catalog_option(fixture.transition.as_ref());
+            let trust_snapshot = embedded_catalog_option(fixture.trust_policy_snapshot_digest);
             release_admission_bytes(
                 &fixture.case_id,
                 fixture.execution_profile_digest,

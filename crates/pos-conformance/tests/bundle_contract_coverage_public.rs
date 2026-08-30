@@ -462,7 +462,7 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
 
     let invalid_mode = mutate_profile(&archive, |profile| {
         let fixtures = array_field(profile, 9, "profile fixtures")?;
-        array_field(&mut fixtures[0], "fixture")?[7] =
+        array_mut(&mut fixtures[0], "fixture")?[7] =
             Value::Array(vec![Value::Integer(99_u64.into())]);
         Ok(())
     })?;
@@ -486,7 +486,7 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
 
     let unknown_provider = mutate_profile(&archive, |profile| {
         let fixtures = array_field(profile, 9, "profile fixtures")?;
-        array_field(&mut fixtures[0], "fixture")?[4] = Value::Array(vec![
+        array_mut(&mut fixtures[0], "fixture")?[4] = Value::Array(vec![
             Value::Text("a.provider".to_owned()),
             Value::Text("1.0.0".to_owned()),
             Value::Integer(1_u64.into()),
@@ -498,7 +498,7 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
 
     let unordered_artifacts = mutate_profile(&archive, |profile| {
         let fixtures = array_field(profile, 9, "profile fixtures")?;
-        let auxiliary = array_field(array_field(&mut fixtures[0], "fixture")?, 10, "auxiliary")?;
+        let auxiliary = array_field(array_mut(&mut fixtures[0], "fixture")?, 10, "auxiliary")?;
         let duplicate = auxiliary
             .first()
             .cloned()
@@ -510,7 +510,7 @@ fn public_independent_verifier_rejects_profile_invariants() -> TestResult {
 
     let invalid_identifier = mutate_profile(&archive, |profile| {
         let fixtures = array_field(profile, 9, "profile fixtures")?;
-        array_field(array_field(&mut fixtures[0], "fixture")?, 4, "provider key")?[0] =
+        array_field(array_mut(&mut fixtures[0], "fixture")?, 4, "provider key")?[0] =
             Value::Text("INVALID".to_owned());
         Ok(())
     })?;
