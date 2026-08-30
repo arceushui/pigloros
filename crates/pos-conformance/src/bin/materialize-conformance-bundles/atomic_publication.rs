@@ -105,10 +105,7 @@ impl AtomicPublication {
         })
     }
 
-    fn verify_and_sync(
-        self,
-        files: &[MaterializedFile],
-    ) -> Result<VerifiedPublication, MaterializationError> {
+    fn verify_and_sync(&self, files: &[MaterializedFile]) -> Result<(), MaterializationError> {
         files
             .iter()
             .try_for_each(|file| {
@@ -125,7 +122,21 @@ impl AtomicPublication {
                 })
             })
             .and_then(|()| sync_fd(&self.staging))
-            .map(|()| VerifiedPublication(self))
+    }
+
+    fn abort(&mut self) -> Result<(), MaterializationError> {
+        if !self.staging_present {
+            return Ok(());
+        }
+        remove_staging_tree(
+            &self.parent,
+            self.parent_identity,
+            &self.staging_name,
+            self.staging_identity,
+            effective_uid(),
+        )?;
+        self.staging_present = false;
+        Ok(())
     }
 
     fn read_file(&self, relative_path: &str) -> Result<Vec<u8>, MaterializationError> {
@@ -164,7 +175,7 @@ impl AtomicPublication {
 impl VerifiedPublication {
     fn publish(self) -> Result<(), MaterializationError> {
         let mut publication = self.0;
-        publication.revalidate_for_publish().and_then(|()| {
+        let result = publication.revalidate_for_publish().and_then(|()| {
             fs::renameat_with(
                 &publication.parent,
                 publication.staging_name.as_c_str(),
@@ -177,35 +188,34 @@ impl VerifiedPublication {
                 publication.staging_present = false;
                 sync_fd(&publication.parent)
             })
-        })
+        });
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => publication.abort().and(Err(error)),
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
 impl Drop for AtomicPublication {
     fn drop(&mut self) {
-        if self.staging_present {
-            drop(remove_staging_tree(
-                &self.parent,
-                self.parent_identity,
-                &self.staging_name,
-                self.staging_identity,
-                effective_uid(),
-            ));
-        }
+        drop(self.abort());
     }
 }
 
 #[cfg(target_os = "linux")]
 fn publish_materialized_tree(
-    publication: AtomicPublication,
+    mut publication: AtomicPublication,
     files: &[MaterializedFile],
 ) -> Result<(), MaterializationError> {
-    files
+    let result = files
         .iter()
         .try_for_each(|file| publication.write_file(&file.relative_path, &file.bytes))
-        .and_then(|()| publication.verify_and_sync(files))
-        .and_then(VerifiedPublication::publish)
+        .and_then(|()| publication.verify_and_sync(files));
+    match result {
+        Ok(()) => VerifiedPublication(publication).publish(),
+        Err(error) => publication.abort().and(Err(error)),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -702,7 +712,10 @@ mod tests {
                 "pigloros-atomic-publication-{label}-{}-{nonce}",
                 std::process::id()
             ));
-            std::fs::create_dir(&path).expect("create atomic-publication test directory");
+            ok(
+                std::fs::create_dir(&path),
+                "create atomic-publication test directory",
+            );
             Self(path)
         }
     }
@@ -716,8 +729,18 @@ mod tests {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn assert_error<T>(result: Result<T, MaterializationError>, expected: &str) {
-        let error = result.err().expect("operation must be rejected");
+        let error = match result {
+            Ok(_) => std::panic::resume_unwind(Box::new("operation must be rejected")),
+            Err(error) => error,
+        };
         assert_eq!(error.to_string(), expected);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("{context}: {error:?}")))
+        })
     }
 
     #[test]
@@ -793,7 +816,7 @@ mod tests {
     fn retained_directory_identity_and_staged_bytes_are_revalidated() {
         let root = TestDirectory::create("revalidation");
         let destination = root.0.join("published");
-        let mut publication = AtomicPublication::prepare(&destination).expect("prepare staging");
+        let mut publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
 
         let original_parent_identity = publication.parent_identity;
         publication.parent_identity.inode ^= 1;
@@ -811,9 +834,10 @@ mod tests {
         );
         publication.staging_identity = original_staging_identity;
 
-        publication
-            .write_file("result.cbor", b"changed")
-            .expect("write staged file");
+        ok(
+            publication.write_file("result.cbor", b"changed"),
+            "write staged file",
+        );
         assert_error(
             publication.verify_and_sync(&[MaterializedFile {
                 relative_path: "result.cbor".to_owned(),
@@ -828,16 +852,16 @@ mod tests {
     fn metadata_and_cleanup_reject_untrusted_objects() {
         let root = TestDirectory::create("metadata");
         let destination = root.0.join("published");
-        let publication = AtomicPublication::prepare(&destination).expect("prepare staging");
+        let publication = ok(AtomicPublication::prepare(&destination), "prepare staging");
 
-        let mut parent_metadata = fs::fstat(&publication.parent).expect("inspect parent");
+        let mut parent_metadata = ok(fs::fstat(&publication.parent), "inspect parent");
         parent_metadata.st_uid = parent_metadata.st_uid.wrapping_add(1);
         assert_error(
             validate_trusted_parent(parent_metadata, effective_uid()),
             "untrusted output directory",
         );
 
-        let mut staging_metadata = fs::fstat(&publication.staging).expect("inspect staging");
+        let mut staging_metadata = ok(fs::fstat(&publication.staging), "inspect staging");
         staging_metadata.st_mode = 0o600;
         assert_error(
             validate_private_staging(
@@ -861,23 +885,23 @@ mod tests {
             "untrusted output directory",
         );
 
-        let symlink_name = CString::new("unsafe-link").expect("literal has no NUL");
-        std::os::unix::fs::symlink(
-            "missing-target",
-            root.0
-                .join(publication.staging_name.to_string_lossy().as_ref())
-                .join("unsafe-link"),
-        )
-        .expect("create staged symlink");
+        let symlink_name = c"unsafe-link";
+        ok(
+            std::os::unix::fs::symlink(
+                "missing-target",
+                root.0
+                    .join(publication.staging_name.to_string_lossy().as_ref())
+                    .join("unsafe-link"),
+            ),
+            "create staged symlink",
+        );
         assert_error(
-            remove_directory_entry(&publication.staging, symlink_name.as_c_str()),
+            remove_directory_entry(&publication.staging, symlink_name),
             "symbolic link detected in output path",
         );
-        fs::unlinkat(
-            &publication.staging,
-            symlink_name.as_c_str(),
-            AtFlags::empty(),
-        )
-        .expect("remove staged symlink");
+        ok(
+            fs::unlinkat(&publication.staging, symlink_name, AtFlags::empty()),
+            "remove staged symlink",
+        );
     }
 }

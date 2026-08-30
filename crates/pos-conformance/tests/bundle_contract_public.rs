@@ -2044,6 +2044,14 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
         .arg(&output)
         .status()?
         .success());
+    assert!(fs::read_dir(&root)?.all(|entry| {
+        entry.is_ok_and(|entry| {
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pigloros-conformance-staging-")
+        })
+    }));
 
     let relative_root = temporary_root("relative-materializer")?;
     let _relative_cleanup = TemporaryOutput(relative_root.clone());
@@ -2054,6 +2062,29 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
         .arg(source_inventory_address())
         .status()?
         .success());
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn public_materializer_reports_unsupported_atomic_publication() -> TestResult {
+    let _guard = materializer_process_guard();
+    let root = temporary_root("unsupported-atomic-publication")?;
+    let _cleanup = TemporaryOutput(root.clone());
+    fs::create_dir_all(&root)?;
+    let output = root.join(source_inventory_address());
+    let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
+        .ok_or("materializer binary path is unavailable")?;
+    let result = Command::new(materializer)
+        .env(
+            "PIGLOROS_CONFORMANCE_SIGNING_KEY",
+            "0707070707070707070707070707070707070707070707070707070707070707",
+        )
+        .arg(&output)
+        .output()?;
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("atomic publication is unsupported"));
+    assert!(!output.exists());
     Ok(())
 }
 

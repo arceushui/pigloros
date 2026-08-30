@@ -202,27 +202,40 @@ mod coverage_entrypoints {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn malformed_variants(value: &ciborium::Value) -> Vec<ciborium::Value> {
-        let mut variants = vec![
-            ciborium::Value::Map(Vec::new()),
-            ciborium::Value::Array(Vec::new()),
-            ciborium::Value::Text("not-a-canonical-value".to_owned()),
-            ciborium::Value::Integer(u64::MAX.into()),
-            ciborium::Value::Bytes(vec![0; 129]),
-        ];
+    fn structural_paths(
+        value: &ciborium::Value,
+        path: &mut Vec<usize>,
+        paths: &mut Vec<Vec<usize>>,
+    ) {
+        if paths.len() == 512 {
+            return;
+        }
         if let ciborium::Value::Array(fields) = value {
-            if !fields.is_empty() {
-                variants.push(ciborium::Value::Array(fields[..fields.len() - 1].to_vec()));
-            }
             for (index, field) in fields.iter().enumerate() {
-                for replacement in malformed_variants(field) {
-                    let mut changed = fields.clone();
-                    changed[index] = replacement;
-                    variants.push(ciborium::Value::Array(changed));
+                path.push(index);
+                paths.push(path.clone());
+                structural_paths(field, path, paths);
+                path.pop();
+                if paths.len() == 512 {
+                    break;
                 }
             }
         }
-        variants
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn replace_at_path(value: &mut ciborium::Value, path: &[usize], replacement: ciborium::Value) {
+        let mut current = value;
+        for index in &path[..path.len() - 1] {
+            current = &mut current
+                .as_array_mut()
+                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("array path changed")))
+                [*index];
+        }
+        current
+            .as_array_mut()
+            .unwrap_or_else(|| std::panic::resume_unwind(Box::new("array path changed")))
+            [path[path.len() - 1]] = replacement;
     }
 
     #[test]
@@ -308,13 +321,20 @@ mod coverage_entrypoints {
             &evidence.authoritative_events,
         ));
         let value = decode_value(ok(evidence.to_canonical_cbor()));
-        let rejected = malformed_variants(&value)
-            .into_iter()
-            .filter(|mutant| {
-                MoatProofEvidenceV1::from_canonical_cbor(&encode_value(mutant)).is_err()
-            })
-            .count();
-        assert!(rejected > 100);
+        let mut paths = Vec::new();
+        structural_paths(&value, &mut Vec::new(), &mut paths);
+        assert_eq!(paths.len(), 512);
+        for path in paths {
+            let mut mutant = value.clone();
+            replace_at_path(
+                &mut mutant,
+                &path,
+                ciborium::Value::Tag(u64::MAX, Box::new(ciborium::Value::Null)),
+            );
+            expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
+                &mutant,
+            )));
+        }
         expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &replace_field(value.clone(), 0, ciborium::Value::Text("wrong".to_owned())),
         )));
