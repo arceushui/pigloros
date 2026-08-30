@@ -1188,7 +1188,7 @@ fn public_request_rejects_invalid_selected_profile_authorities() -> TestResult {
         Err(ConformanceContractError::FieldOutOfBounds)
     );
 
-    let mut invalid_protocol = profile.evaluator_protocol.clone();
+    let mut invalid_protocol = profile.evaluator_protocol;
     invalid_protocol.protocol_id.clear();
     assert_eq!(
         request.validate_with_protocol(&invalid_protocol),
