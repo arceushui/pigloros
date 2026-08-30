@@ -1535,8 +1535,8 @@ impl RawArchiveMode {
 
     const fn fixture_mode(self) -> RawFixtureMode {
         match self {
-            Self::Local => RawFixtureMode::Local,
-            Self::AirGapped => RawFixtureMode::AirGapped,
+            Self::Local => RawFixtureMode(0),
+            Self::AirGapped => RawFixtureMode(1),
         }
     }
 }
