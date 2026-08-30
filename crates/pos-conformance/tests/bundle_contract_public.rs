@@ -1341,7 +1341,6 @@ impl ProviderRegistryField {
 
 #[derive(Clone, Copy)]
 enum ProviderEntryField {
-    Key,
     ClaimLayer,
     SubjectAdapter,
     PackageDescriptor,
@@ -1350,7 +1349,6 @@ enum ProviderEntryField {
 impl ProviderEntryField {
     const fn index(self) -> usize {
         match self {
-            Self::Key => 0,
             Self::ClaimLayer => 4,
             Self::SubjectAdapter => 5,
             Self::PackageDescriptor => 6,
@@ -1649,12 +1647,13 @@ fn replace_registry_key_field(
     value: Value,
     name: &str,
 ) -> TestResult<bool> {
-    let key = array_field(
+    replace_mutated_value(
         provider_registry_entry(fields)?,
-        ProviderEntryField::Key.index(),
-        "provider key",
-    )?;
-    replace_mutated_value(key, field.index(), value, name, true)
+        field.index(),
+        value,
+        name,
+        true,
+    )
 }
 
 fn replace_registry_package_field(
