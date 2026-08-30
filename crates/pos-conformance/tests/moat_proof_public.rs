@@ -770,7 +770,8 @@ fn divergence_report() -> DivergenceReportV1 {
 }
 
 #[test]
-fn public_consent_audit_codec_round_trips_and_rejects_each_field_type() {
+fn public_consent_audit_codec_round_trips_and_rejects_each_field_type() -> Result<(), &'static str>
+{
     let audit = ConsentAuditV1 {
         subject: "gateway-subject".to_owned(),
         requested_after_seq: 10,
@@ -784,7 +785,7 @@ fn public_consent_audit_codec_round_trips_and_rejects_each_field_type() {
     assert_eq!(ok(strict_codec::decode_consent(&encoded)), audit);
 
     let ciborium::Value::Array(fields) = encoded else {
-        panic!("the public consent codec must emit its closed array shape");
+        return Err("the public consent codec did not emit its closed array shape");
     };
     let mut malformed = vec![ciborium::Value::Array(fields[..6].to_vec())];
     for index in 0..fields.len() {
@@ -795,6 +796,7 @@ fn public_consent_audit_codec_round_trips_and_rejects_each_field_type() {
     for value in malformed {
         expect_err(&strict_codec::decode_consent(&value));
     }
+    Ok(())
 }
 
 #[test]
