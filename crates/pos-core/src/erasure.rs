@@ -238,7 +238,7 @@ impl ErasureLifecycleV1 {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Complete | Self::PartialFailure | Self::Rejected)
     }
-    /// Report whether generic EventStore access must be rejected.
+    /// Report whether generic `EventStore` access must be rejected.
     ///
     /// V1 uses a conservative store-wide boundary because the scope-aware
     /// Timeline integration is owned by the subsequent access-freeze work.
