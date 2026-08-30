@@ -581,22 +581,22 @@ fn sync_fd<Fd: std::os::fd::AsFd>(fd: Fd) -> Result<(), MaterializationError> {
 }
 
 #[cfg(target_os = "linux")]
-fn map_open_error(error: Errno) -> MaterializationError {
+const fn map_open_error(error: Errno) -> MaterializationError {
     map_atomic_error(AtomicOperation::Open, error)
 }
 
 #[cfg(target_os = "linux")]
-fn map_publish_error(error: Errno) -> MaterializationError {
+const fn map_publish_error(error: Errno) -> MaterializationError {
     map_atomic_error(AtomicOperation::Publish, error)
 }
 
 #[cfg(target_os = "linux")]
-fn map_sync_error(error: Errno) -> MaterializationError {
+const fn map_sync_error(error: Errno) -> MaterializationError {
     map_atomic_error(AtomicOperation::Sync, error)
 }
 
 #[cfg(target_os = "linux")]
-fn map_cleanup_error(error: Errno) -> MaterializationError {
+const fn map_cleanup_error(error: Errno) -> MaterializationError {
     map_atomic_error(AtomicOperation::Cleanup, error)
 }
 
