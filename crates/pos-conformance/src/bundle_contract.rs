@@ -1894,6 +1894,7 @@ struct RawFixtureTransition {
 struct RawExpectedResultKey {
     case_id: String,
     claim_layer: RawClaimLayer,
+    execution_profile_digest: [u8; 32],
 }
 
 struct RawReleaseArchiveSummary {
@@ -3754,6 +3755,7 @@ fn raw_expected_result(
                 key: RawExpectedResultKey {
                     case_id: case_id.clone(),
                     claim_layer,
+                    execution_profile_digest: execution,
                 },
                 bytes: member_bytes.to_vec(),
                 path: path.clone(),

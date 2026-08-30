@@ -465,7 +465,7 @@ fn append_release_admissions(
 fn current_bundle_members(
     family_schemas: &[ProviderFamilySchemaV1],
     profile: &ConformanceProfileV1,
-    execution_profiles: [Vec<u8>; 2],
+    execution_profiles: &[Vec<u8>; 2],
     trust_policy_snapshot: Vec<u8>,
     package_path: &str,
     package_bytes: Vec<u8>,
@@ -593,7 +593,7 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
     let members = current_bundle_members(
         &family_schemas,
         &profile,
-        execution_profiles,
+        &execution_profiles,
         trust_policy_snapshot,
         package_path,
         package_bytes,

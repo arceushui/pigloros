@@ -126,7 +126,7 @@ jobs:
         with:
           shared-key: conformance-materialization
       - name: Install fixture verification tools
-        run: sudo apt-get update && sudo apt-get install --yes jq
+        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Reject non-main manual materialization
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
         run: |
@@ -148,6 +148,8 @@ jobs:
           # materialization. This job never receives the repository signing key.
           PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
         run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
+      - name: Exercise build-time fixture rejection boundary
+        run: bash scripts/test-conformance-build-validation.sh
       - name: Upload main-branch Draft verification artifact
         if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
