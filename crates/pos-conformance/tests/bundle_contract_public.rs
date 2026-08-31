@@ -4832,14 +4832,10 @@ fn assert_deep_raw_profile_rejections() -> TestResult {
             .ok_or("fixture schema path is absent")?
             .clone();
         replace_value(
-            array_field(
-                array_field(fixture, 10, "auxiliary artifacts")?,
-                0,
-                "auxiliary artifact",
-            )?,
+            array_field(fixture, 9, "fixture payload")?,
             0,
             schema_path,
-            "auxiliary artifact path",
+            "fixture payload path",
         )
     })?;
     assert_archive_rejected_by_both(&duplicate_artifact_path, "duplicate fixture artifact path");
@@ -5290,6 +5286,97 @@ fn assert_independent_selected_caps() -> TestResult {
         )
     })?;
     assert_archive_rejected_by_both(&coordinate_cap_violation, "coordinate hard cap");
+
+    let schema_cap_violation = mutate_profile_archive(|profile| {
+        let registry_size = {
+            let binding = array_field(profile, 8, "provider registry binding")?;
+            let registry = array_field(binding, 0, "provider registry descriptor")?;
+            match registry.get(2) {
+                Some(Value::Integer(size)) => u64::try_from(*size)?,
+                _ => return Err("provider registry size is not an integer".into()),
+            }
+        };
+        replace_value(
+            array_field(
+                array_field(profile, 11, "evaluator protocol")?,
+                4,
+                "hard caps",
+            )?,
+            4,
+            Value::Integer(registry_size.into()),
+            "selected member cap",
+        )?;
+        replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                8,
+                "fixture schema",
+            )?,
+            2,
+            Value::Integer(registry_size.saturating_add(1).into()),
+            "fixture schema size",
+        )
+    })?;
+    assert_archive_rejected_by_both(&schema_cap_violation, "selected fixture schema cap");
+
+    let output_cap_violation = mutate_profile_archive(|profile| {
+        let registry_size = {
+            let binding = array_field(profile, 8, "provider registry binding")?;
+            let registry = array_field(binding, 0, "provider registry descriptor")?;
+            match registry.get(2) {
+                Some(Value::Integer(size)) => u64::try_from(*size)?,
+                _ => return Err("provider registry size is not an integer".into()),
+            }
+        };
+        replace_value(
+            array_field(
+                array_field(profile, 11, "evaluator protocol")?,
+                4,
+                "hard caps",
+            )?,
+            4,
+            Value::Integer(registry_size.into()),
+            "selected member cap",
+        )?;
+        let fixtures = array_field(profile, 9, "fixtures")?;
+        for fixture in fixtures {
+            let Value::Array(fields) = fixture else {
+                return Err("fixture is not an array".into());
+            };
+            for descriptor_index in [8, 9] {
+                replace_value(
+                    array_field(fields, descriptor_index, "fixture artifact")?,
+                    2,
+                    Value::Integer(1_u64.into()),
+                    "fixture artifact size",
+                )?;
+            }
+            for auxiliary in array_field(fields, 10, "auxiliary artifacts")? {
+                let Value::Array(descriptor) = auxiliary else {
+                    return Err("auxiliary descriptor is not an array".into());
+                };
+                replace_value(
+                    descriptor,
+                    2,
+                    Value::Integer(1_u64.into()),
+                    "auxiliary artifact size",
+                )?;
+            }
+            let oracle = array_field(fields, 11, "strict oracle")?;
+            if matches!(oracle.first(), Some(Value::Integer(kind)) if u64::try_from(*kind) == Ok(0))
+            {
+                replace_value(
+                    array_field(oracle, 1, "expected output")?,
+                    2,
+                    Value::Integer(registry_size.saturating_add(1).into()),
+                    "expected output size",
+                )?;
+                return Ok(());
+            }
+        }
+        Err("output oracle is absent".into())
+    })?;
+    assert_archive_rejected_by_both(&output_cap_violation, "selected fixture output cap");
     Ok(())
 }
 
