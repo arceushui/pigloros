@@ -1,19 +1,15 @@
-use pos_core::erasure::{
-    target_closure_digest, ErasureApplicabilityDecisionV1, ErasureAuthorizationDecisionV1,
-};
+#[path = "support/coordinator.rs"]
+mod coordinator_support;
+#[path = "support/erasure.rs"]
+mod erasure_support;
+
+use coordinator_support::{PublicCoordinatorPort as PublicPort, PublicCoordinatorPortConfig};
 use pos_core::{
-    destruction_command_reference, ErasureAcknowledgementProvenanceV1, ErasureArtifactClassV1,
-    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
-    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureCoordinatorPortV1,
-    ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
-    ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
-    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinatorStateMachineV1,
+    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
+    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureScopeV1, ErasureStateTransitionV1,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -74,283 +70,19 @@ const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 
     }
 }
 
-fn freeze_evidence_fixture(
-    request: ErasureReferenceV1,
-    scope: &ErasureScopeCommitmentInputV1,
-    obligation_set: &ErasureObligationSetV1,
-    targets: &[ErasureRequiredTargetV1],
-    obligations: &[ErasureObligationV1],
-    freeze_position: u64,
-    proof: ErasureReferenceV1,
-) -> Result<
-    (
-        ErasureFreezeAdmissionEvidenceV1,
-        ErasureFreezeAuthorizationEvidenceV1,
-    ),
-    ErasureErrorV1,
-> {
-    let mut applicability_matrix = Vec::with_capacity(targets.len().saturating_mul(4));
-    for category in [
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-    ] {
-        for (target_index, target) in targets.iter().enumerate() {
-            let owner = obligations
-                .iter()
-                .find(|obligation| {
-                    obligation.category() == category && obligation.target() == *target
-                })
-                .map(ErasureObligationV1::owner);
-            applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
-                category,
-                target_index as u64,
-                if owner.is_some() {
-                    ErasureApplicabilityDecisionV1::Applicable
-                } else {
-                    ErasureApplicabilityDecisionV1::Inapplicable
-                },
-                owner,
-            )?);
-        }
-    }
-    let input = ErasureFreezeAdmissionEvidenceInputV1 {
-        request,
-        scope_commitment: ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
-        obligation_set: obligation_set.reference(),
-        applicability_matrix,
-        freeze_position,
-        policy: obligation_set.policy(),
-        trust: obligation_set.trust(),
-        authorization_provenance: reference(0),
-    };
-    let provisional = ErasureFreezeAdmissionEvidenceV1::new(input.clone())?;
-    let authorization =
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: provisional.authorization_body_digest()?,
-            policy: obligation_set.policy(),
-            trust: obligation_set.trust(),
-            evidence: proof.digest().to_vec(),
-        })?;
-    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
-        authorization_provenance: authorization.reference(),
-        ..input
-    })?;
-    Ok((admission, authorization))
-}
-
-struct PublicPort {
-    records: Vec<ErasureCoordinatorRecordV1>,
-    states: Vec<pos_core::ErasureStateV1>,
-    target: ErasureRequiredTargetV1,
-}
-
-impl ErasureStateResolverV1 for PublicPort {
-    fn resolve_state(
-        &self,
-        digest: ErasureReferenceV1,
-    ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
-        Ok(self
-            .states
-            .iter()
-            .find(|state| state.state_digest() == digest)
-            .cloned())
-    }
-}
-
-impl ErasureCoordinatorPortV1 for PublicPort {
-    fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_authorization(
-        &self,
-        _request: ErasureReferenceV1,
-        _provenance: ErasureReferenceV1,
-        _decision: ErasureAuthorizationDecisionV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_corrected_submission(
-        &self,
-        _request: &ErasureRequestV1,
-        _correction: &pos_core::ErasureCorrectionProvenanceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_atomic_freeze(
-        &self,
-        request: ErasureReferenceV1,
-        _requested: &ErasureStateTransitionV1,
-    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
-        let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
-            category: ErasureInventoryCategoryV1::Artifact,
-            target: self.target,
-            owner: self.target.replica_id,
-            command_identity: destruction_command_reference(request, self.target),
-        })?;
-        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
-            request,
-            obligations: vec![obligation.reference()],
-            policy: reference(5),
-            trust: reference(3),
-        })?;
-        let scope = ErasureScopeCommitmentInputV1 {
-            request,
-            scope_members: vec![reference(7)],
-            target_closure: target_closure_digest(&[self.target]),
-            lineage_rule: None,
-        };
-        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
-            request,
-            &scope,
-            &obligation_set,
-            &[self.target],
-            &[obligation],
-            10,
-            reference(9),
-        )?;
-        Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(
-            ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
-                targets: vec![self.target],
-                scope,
-                obligations: vec![obligation],
-                obligation_set,
-                freeze_position: 10,
-                freeze_admission_evidence,
-                freeze_authorization_evidence,
-            })?,
-        )))
-    }
-
-    fn validate_freeze_authorization(
-        &self,
-        admission: &ErasureFreezeAdmissionEvidenceV1,
-        authorization: &ErasureFreezeAuthorizationEvidenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
-    }
-
-    fn dispatch_destruction(
-        &self,
-        _request: ErasureReferenceV1,
-        _commands: &[pos_core::ErasureDestructionCommandV1],
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-    fn admit_attempt(
-        &self,
-        _admission: &pos_core::ErasureRetryAdmissionV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_acknowledgement(
-        &self,
-        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-    fn admit_scope_extension(
-        &self,
-        _extension: &pos_core::ErasureScopeExtensionV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-    fn admit_administrative_resolution(
-        &self,
-        _resolution: &pos_core::ErasureAdministrativeResolutionV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-}
-
-impl ErasurePersistencePortV1 for PublicPort {
-    fn load_record(
-        &self,
-        request: ErasureReferenceV1,
-    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
-        Ok(self
-            .records
-            .iter()
-            .find(|record| record.request().reference() == request)
-            .cloned())
-    }
-
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        self.commit_records(std::slice::from_ref(&record))
-    }
-
-    fn commit_records(
-        &mut self,
-        records: &[ErasureCoordinatorRecordV1],
-    ) -> Result<(), ErasureErrorV1> {
-        let mut staged_records = self.records.clone();
-        let mut staged_states = self.states.clone();
-        for record in records {
-            if let Some(existing) = staged_records
-                .iter()
-                .find(|existing| existing.request() == record.request())
-            {
-                if existing != record {
-                    existing.validate_replacement(record)?;
-                }
-            } else if record.state().previous_state().is_some() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            if let Some(existing) = staged_records
-                .iter_mut()
-                .find(|existing| existing.request() == record.request())
-            {
-                *existing = record.clone();
-            } else {
-                staged_records.push(record.clone());
-            }
-            staged_states.push(record.state().clone());
-        }
-        self.records = staged_records;
-        self.states = staged_states;
-        Ok(())
-    }
-
-    fn compare_and_swap_scope_extension(
-        &mut self,
-        _request: ErasureReferenceV1,
-        _expected_ledger: ErasureReferenceV1,
-        record: ErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1> {
-        self.commit_record(record)
-    }
-
-    fn compare_and_swap_administrative_resolution(
-        &mut self,
-        _request: ErasureReferenceV1,
-        _expected_head: Option<ErasureReferenceV1>,
-        record: ErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1> {
-        self.commit_record(record)
-    }
-}
-
 #[test]
 fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(), ErasureErrorV1> {
     let target = target();
     let request = request()?;
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(
-        PublicPort {
-            records: Vec::new(),
-            states: Vec::new(),
-            target,
-        },
+        PublicPort::new(PublicCoordinatorPortConfig {
+            targets: vec![target],
+            fail_commits: false,
+            policy: reference(5),
+            trust: reference(3),
+            scope_member: reference(7),
+            freeze_evidence: reference(9),
+        }),
         reference(2),
     );
     coordinator.submit(request, reference(3))?;

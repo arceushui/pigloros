@@ -1,3 +1,10 @@
+//! Crate-local invariant tests supplement the public integration suites.
+//!
+//! Tests in this module may use internal seams to construct corrupted states
+//! that public constructors intentionally reject. They verify fail-closed
+//! validation branches; externally observable lifecycle behavior remains
+//! covered through `ErasureCoordinator` in `tests/`.
+
 fn test_uint(value: u64) -> Value {
     Value::Integer(value.into())
 }

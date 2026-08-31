@@ -12719,6 +12719,9 @@ pub(super) mod key_registry_coverage {
         (record, predecessor)
     }
 
+    // These adapter-internal tests inject malformed rows and SQL failures that
+    // cannot cross the public store interface. Public recovery and backend
+    // parity remain covered by `tests/erasure_persistence.rs`.
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn erasure_state_resolution_error_regions_are_instrumented() {

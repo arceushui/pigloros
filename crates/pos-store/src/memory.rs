@@ -5401,6 +5401,9 @@ mod coverage_entrypoints {
         ))
     }
 
+    // This internal seam injects address/content mismatches that the public
+    // constructors cannot produce. Public MemoryStore/SQLite parity remains
+    // covered by `tests/erasure_persistence.rs`.
     #[test]
     fn memory_erasure_corruption_boundaries_are_instrumented() {
         let record = erasure_record();

@@ -4661,7 +4661,15 @@ fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1>(
     Err(ErasureErrorV1::ProvenanceMissing)
 }
 
-/// Host-owned port; adapters supply durable and irreversible work.
+/// Application-facing erasure lifecycle interface.
+///
+/// This interface hides the concrete host-port type carried by
+/// [`ErasureCoordinatorStateMachineV1`], so consumers depend on one stable
+/// lifecycle seam rather than its persistence, policy, and irreversible-work
+/// adapters. Those adapters vary independently in production and tests; this
+/// interface is therefore the application seam, not a pass-through adapter.
+/// Implementations must preserve the coordinator's validation and ordering
+/// rules rather than forwarding directly to persistence.
 pub trait ErasureCoordinator {
     /// Record an idempotent ERQ1 request.
     ///
