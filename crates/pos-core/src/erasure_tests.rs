@@ -4996,7 +4996,7 @@ fn durable_validation_helpers_reject_each_incomplete_evidence_shape() -> Result<
 
     let coordinator =
         ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
-    let mut partial_authorization = frozen.clone();
+    let mut partial_authorization = frozen;
     partial_authorization
         .supporting_records
         .freeze_authorization_evidence = None;
