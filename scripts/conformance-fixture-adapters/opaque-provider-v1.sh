@@ -6,6 +6,7 @@ provider_manifest="$2"
 family_contract="$3"
 
 validate_provider() {
+  local fixture_root="${provider_manifest%/providers/*}"
   jq -e --slurpfile families "${family_contract}" '
     .fixture_adapter.id == "opaque-provider-v1" and
     (.fixture_adapter.config.operations | keys | sort) ==
@@ -17,6 +18,9 @@ validate_provider() {
       (.with_operation | type == "object") and
       ((has("without_operation") | not) or (.without_operation | type == "object")))
   ' "${provider_manifest}" >/dev/null
+  while IFS= read -r schema; do
+    [[ "$(<"${fixture_root}/${schema}")" == "opaque-schema-v1" ]]
+  done < <(jq -r '.schemas[]' "${provider_manifest}")
 }
 
 case "${command_name}" in

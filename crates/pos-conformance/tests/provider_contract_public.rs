@@ -373,6 +373,19 @@ fn registry_and_binding_reject_empty_duplicate_and_noncanonical_keys() -> TestRe
             Err(ProviderContractErrorV1::NonCanonicalOrder)
         );
     }
+
+    let mut oversized = registry_binding(&registry_bytes)?;
+    oversized.required_provider_keys = (0..=4096)
+        .map(|index| provider_key(&format!("pigloros.fixture.{index:04}")))
+        .collect();
+    assert_eq!(
+        oversized.validate(),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
+    assert_eq!(
+        oversized.to_canonical_cbor(),
+        Err(ProviderContractErrorV1::FieldOutOfBounds)
+    );
     Ok(())
 }
 

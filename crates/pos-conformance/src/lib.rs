@@ -22,6 +22,8 @@ mod provider_contract;
 include!("wire_syntax.rs");
 include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
+pub(crate) const MAX_PROVIDER_ENTRIES: usize = 4096;
+
 pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
     values.windows(2).all(|pair| pair[0] < pair[1])
 }

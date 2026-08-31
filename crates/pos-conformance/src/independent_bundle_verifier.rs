@@ -9,19 +9,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     array, array_values, bytes, decode, digest, digest_domain, draft_authority_verifying_key,
-    encode, text, uint, BundleContractErrorV1, AUTHORITY_INVENTORY_BYTES_V1,
-    AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH, CONFORMANCE_BUNDLE_MAGIC_V1,
-    DRAFT_AUTHORITY_DECLARATION_BYTES_V1, DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION,
-    DRAFT_AUTHORITY_KEY_ID, DRAFT_AUTHORITY_MINIMUM_VERSIONS,
-    DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH, DRAFT_AUTHORITY_ROOT_ALGORITHM,
-    DRAFT_AUTHORITY_ROOT_VERSION, DRAFT_AUTHORITY_TRUST_POLICY_EPOCH,
-    DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES, EVALUATOR_PROTOCOL_BYTES,
-    EVALUATOR_PROTOCOL_PATH, EVALUATOR_REPORT_SCHEMA_BYTES, EVALUATOR_REPORT_SCHEMA_PATH,
-    EVALUATOR_REQUEST_SCHEMA_BYTES, EVALUATOR_REQUEST_SCHEMA_PATH, EXECUTION_MATRIX_BYTES_V1,
-    EXECUTION_MATRIX_PATH, FIXTURE_CONTRACT_POLICY_PATH, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
-    LIMITATIONS_PATH, MAX_CONFORMANCE_BUNDLE_LEN_V1, NORMATIVE_SPEC_PATH, NOTICE_PATH,
-    PROFILE_PATH, PROFILE_SCHEMA_PATH, PUBLICATION_REVIEW_PATH, SBOM_PATH, SOURCE_PROVENANCE_PATH,
-    SUPPORT_PACKAGE_MANIFEST_BYTES_V1, SUPPORT_PACKAGE_MANIFEST_PATH, TRUST_POLICY_SNAPSHOT_PATH,
+    encode, prohibited_secret_material, text, uint, BundleContractErrorV1,
+    AUTHORITY_INVENTORY_BYTES_V1, AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH,
+    CONFORMANCE_BUNDLE_MAGIC_V1, DRAFT_AUTHORITY_DECLARATION_BYTES_V1,
+    DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
+    DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
+    DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
+    DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
+    EVALUATOR_PROTOCOL_BYTES, EVALUATOR_PROTOCOL_PATH, EVALUATOR_REPORT_SCHEMA_BYTES,
+    EVALUATOR_REPORT_SCHEMA_PATH, EVALUATOR_REQUEST_SCHEMA_BYTES, EVALUATOR_REQUEST_SCHEMA_PATH,
+    EXECUTION_MATRIX_BYTES_V1, EXECUTION_MATRIX_PATH, FIXTURE_CONTRACT_POLICY_PATH,
+    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, LIMITATIONS_PATH, MAX_CONFORMANCE_BUNDLE_LEN_V1,
+    NORMATIVE_SPEC_PATH, NOTICE_PATH, PROFILE_PATH, PROFILE_SCHEMA_PATH, PUBLICATION_REVIEW_PATH,
+    SBOM_PATH, SOURCE_PROVENANCE_PATH, SUPPORT_PACKAGE_MANIFEST_BYTES_V1,
+    SUPPORT_PACKAGE_MANIFEST_PATH, TRUST_POLICY_SNAPSHOT_PATH,
 };
 
 /// Independently validate canonical CFB1, CPF1, FPR1, and FPP1 bytes without typed codecs.
@@ -438,7 +439,12 @@ fn raw_archive_body(
                 .map(|(member, descriptor)| raw_member_descriptor_pair(member, descriptor))
                 .collect::<Result<Vec<_>, _>>()
                 .and_then(|members| {
-                    if members.windows(2).any(|pair| pair[0].path >= pair[1].path) {
+                    if members
+                        .iter()
+                        .any(|member| prohibited_secret_material(member.bytes))
+                    {
+                        Err(BundleContractErrorV1::SecretMaterialDetected)
+                    } else if members.windows(2).any(|pair| pair[0].path >= pair[1].path) {
                         Err(BundleContractErrorV1::ArchiveEncodingInvalid)
                     } else {
                         raw_archive_profile(manifest, &members, mode)
@@ -1267,6 +1273,12 @@ fn raw_fixture_inventory(
         RawFixtureFamily::Downgrade,
         RawFixtureFamily::IndependentEvaluation,
     ]);
+    if inventory
+        .values()
+        .any(|families| families != &required_families)
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
     let required_modes = [
         RawFixtureMode(RawArchiveMode::Local.code()),
         RawFixtureMode(RawArchiveMode::AirGapped.code()),
@@ -1375,9 +1387,9 @@ fn raw_cpf1_header(fields: &[Value]) -> Result<[[u8; 32]; 5], BundleContractErro
         Ok(lifecycle),
         Ok(normative_spec),
         Ok(execution_matrix),
+        Ok(fixture_contract_policy),
         Ok(limitations),
         Ok(provenance),
-        Ok(provider_registry),
     ) = (
         text(&fields[0]),
         uint(&fields[1]),
@@ -1400,16 +1412,16 @@ fn raw_cpf1_header(fields: &[Value]) -> Result<[[u8; 32]; 5], BundleContractErro
         && lifecycle <= 3
         && normative_spec != [0; 32]
         && execution_matrix != [0; 32]
+        && fixture_contract_policy != [0; 32]
         && limitations != [0; 32]
         && provenance != [0; 32]
-        && provider_registry != [0; 32]
     {
         Ok([
             normative_spec,
             execution_matrix,
+            fixture_contract_policy,
             limitations,
             provenance,
-            provider_registry,
         ])
     } else {
         Err(BundleContractErrorV1::ProfileInvalid)
@@ -1435,7 +1447,10 @@ fn raw_provider_binding(
         raw_artifact(&binding[0]).and_then(|registry| {
             array_values(&binding[1]).and_then(|provider_keys| {
                 raw_provider_keys_ordered(provider_keys).and_then(|ordered| {
-                    if provider_keys.is_empty() || !ordered {
+                    if provider_keys.is_empty()
+                        || provider_keys.len() > crate::MAX_PROVIDER_ENTRIES
+                        || !ordered
+                    {
                         return Err(BundleContractErrorV1::ProfileInvalid);
                     }
                     provider_keys
@@ -1763,7 +1778,7 @@ fn raw_failure(value: &Value) -> Result<RawFailure, BundleContractErrorV1> {
 fn raw_provenance(value: &Value) -> Result<[[u8; 32]; 6], BundleContractErrorV1> {
     array(value, 7).and_then(|fields| {
         text(&fields[0]).and_then(|licence| {
-            if licence.is_empty() {
+            if !(1..=128).contains(&licence.len()) {
                 return Err(BundleContractErrorV1::ProfileInvalid);
             }
             let mut digests = [[0; 32]; 6];
@@ -1839,7 +1854,7 @@ fn raw_archive_selected_caps(
 fn raw_protocol(value: &Value) -> Result<RawEvaluatorProtocol, BundleContractErrorV1> {
     array(value, 5).and_then(|fields| {
         text(&fields[0]).and_then(|version| {
-            if version.is_empty() {
+            if !raw_identifier(version, 128) {
                 return Err(BundleContractErrorV1::ProfileInvalid);
             }
             let (Ok(protocol), Ok(request), Ok(report)) = (
@@ -1980,15 +1995,15 @@ fn raw_value_depth(value: &Value) -> usize {
 }
 fn raw_independence(value: &Value) -> Result<[u8; 32], BundleContractErrorV1> {
     array(value, 5).and_then(|fields| {
-        digest::<32>(&fields[3]).and_then(|shared_code_audit| {
+        digest::<32>(&fields[3]).and_then(|trust_policy_snapshot_digest| {
             digest::<32>(&fields[4]).and_then(|declaration| {
                 if fields[..3]
                     .iter()
                     .all(|value| matches!(value, Value::Bool(_)))
-                    && shared_code_audit != [0; 32]
+                    && trust_policy_snapshot_digest != [0; 32]
                     && declaration != [0; 32]
                 {
-                    Ok(shared_code_audit)
+                    Ok(trust_policy_snapshot_digest)
                 } else {
                     Err(BundleContractErrorV1::ProfileInvalid)
                 }
@@ -2077,7 +2092,12 @@ fn raw_registry_fields(
         uint(&fields[1]).and_then(|version| {
             array_values(&fields[2]).and_then(|providers| {
                 raw_provider_entries_ordered(providers).and_then(|ordered| {
-                    if magic != "FPR1" || version != 1 || providers.is_empty() || !ordered {
+                    if magic != "FPR1"
+                        || version != 1
+                        || providers.is_empty()
+                        || providers.len() > crate::MAX_PROVIDER_ENTRIES
+                        || !ordered
+                    {
                         return Err(BundleContractErrorV1::ProfileInvalid);
                     }
                     raw_registry_digest(fields).and_then(|()| {

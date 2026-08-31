@@ -492,10 +492,10 @@ fn run(
             signing_key_from_encoded(encoded_signing_key).map(|signing_key| (command, signing_key))
         })
         .and_then(|(command, signing_key)| {
-            prepare_command(command).map(|command| (command, signing_key))
+            materialized_files(&signing_key).map(|outputs| (command, outputs))
         })
-        .and_then(|(command, signing_key)| {
-            materialized_files(&signing_key).and_then(|outputs| execute_command(command, &outputs))
+        .and_then(|(command, outputs)| {
+            prepare_command(command).and_then(|command| execute_command(command, &outputs))
         })
 }
 

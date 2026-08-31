@@ -26,7 +26,6 @@ const PROVIDER_RECORD_MEDIA_TYPE_V1: &str = "application/cbor";
 /// Largest raw artifact that a provider descriptor may name.
 pub const MAX_PROVIDER_ARTIFACT_BYTES_V1: u64 = 64 * 1024 * 1024;
 const MAX_PROVIDER_RECORD_BYTES: usize = 16 * 1024 * 1024;
-const MAX_PROVIDER_ENTRIES: usize = 4096;
 const MAX_PROVIDER_ENTRIES_CBOR: u64 = 4096;
 const MAX_MEMBER_PATH_BYTES: usize = 512;
 const MAX_MEMBER_PATH_COMPONENTS: usize = 16;
@@ -288,7 +287,9 @@ impl FixtureProviderRegistryBindingV1 {
                 Err(ProviderContractErrorV1::InvalidMemberPath)
             } else if self.registry_artifact.media_type != PROVIDER_RECORD_MEDIA_TYPE_V1 {
                 Err(ProviderContractErrorV1::InvalidMediaType)
-            } else if self.required_provider_keys.is_empty() {
+            } else if self.required_provider_keys.is_empty()
+                || self.required_provider_keys.len() > crate::MAX_PROVIDER_ENTRIES
+            {
                 Err(ProviderContractErrorV1::FieldOutOfBounds)
             } else if self
                 .required_provider_keys
@@ -414,7 +415,7 @@ impl FixtureProviderPackageV1 {
 fn validate_registry_fields(
     registry: &FixtureProviderRegistryV1,
 ) -> Result<(), ProviderContractErrorV1> {
-    if registry.providers.is_empty() || registry.providers.len() > MAX_PROVIDER_ENTRIES {
+    if registry.providers.is_empty() || registry.providers.len() > crate::MAX_PROVIDER_ENTRIES {
         return Err(ProviderContractErrorV1::FieldOutOfBounds);
     }
     if registry

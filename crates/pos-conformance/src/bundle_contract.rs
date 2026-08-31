@@ -13,9 +13,9 @@ use std::io::Cursor;
 use thiserror::Error;
 
 use crate::{
-    ArtifactDescriptorV1, ConformanceProfileV1, ExecutionModeV1, FixtureFamilyV1,
-    FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryV1, ProfileLifecycleV1,
-    DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
+    ArtifactDescriptorV1, ConformanceContractError, ConformanceProfileV1, ExecutionModeV1,
+    FixtureFamilyV1, FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryV1,
+    ProfileLifecycleV1, DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
     DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
     DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
     DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
@@ -611,6 +611,13 @@ impl ConformanceBundleV1 {
         {
             return Err(BundleContractErrorV1::MemberOutOfBounds);
         }
+        if self
+            .members
+            .iter()
+            .any(|member| prohibited_secret_material(&member.bytes))
+        {
+            return Err(BundleContractErrorV1::SecretMaterialDetected);
+        }
         if self.manifest.magic != CONFORMANCE_BUNDLE_MAGIC_V1
             || self.manifest.lifecycle != ProfileLifecycleV1::Draft
             || !ordered_members(&self.members)
@@ -621,7 +628,12 @@ impl ConformanceBundleV1 {
         member_by_role_and_path(&self.members, BundleMemberRoleV1::Profile, PROFILE_PATH).and_then(
             |profile_member| {
                 ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)
-                    .map_err(|_| BundleContractErrorV1::ProfileInvalid)
+                    .map_err(|error| match error {
+                        ConformanceContractError::ProfileLifecycleInvalid => {
+                            BundleContractErrorV1::LifecycleInvalid
+                        }
+                        _ => BundleContractErrorV1::ProfileInvalid,
+                    })
                     .and_then(|profile| {
                         if profile.lifecycle != self.manifest.lifecycle {
                             return Err(BundleContractErrorV1::LifecycleInvalid);
@@ -775,20 +787,30 @@ fn validate_profile_support_members(
                 }
             })
         })
-        .and_then(|()| {
-            member_by_role_and_path(
-                members,
-                BundleMemberRoleV1::AuthorityDeclaration,
-                "support/draft-execution-authority.json",
-            )
-            .and_then(|member| {
-                if member.bytes == DRAFT_AUTHORITY_DECLARATION_BYTES_V1 {
-                    Ok(())
-                } else {
-                    Err(BundleContractErrorV1::MemberDigestMismatch)
-                }
-            })
-        })
+        .and_then(|()| validate_authority_declaration(members))
+}
+
+fn validate_authority_declaration(members: &[BundleMemberV1]) -> Result<(), BundleContractErrorV1> {
+    if members
+        .iter()
+        .filter(|member| member.role == BundleMemberRoleV1::AuthorityDeclaration)
+        .count()
+        != 1
+    {
+        return Err(BundleContractErrorV1::UndeclaredMember);
+    }
+    member_by_role_and_path(
+        members,
+        BundleMemberRoleV1::AuthorityDeclaration,
+        "support/draft-execution-authority.json",
+    )
+    .and_then(|member| {
+        if member.bytes == DRAFT_AUTHORITY_DECLARATION_BYTES_V1 {
+            Ok(())
+        } else {
+            Err(BundleContractErrorV1::MemberDigestMismatch)
+        }
+    })
 }
 
 fn validate_evaluator_support_members(
@@ -1077,8 +1099,8 @@ fn validate_release_admission_fields(
                         && case_id == fixture.case_id
                         && execution == fixture.execution_profile_digest
                         && policy == snapshot
-                        && fields[6] == provider_key_value(&transition.from)
-                        && fields[7] == provider_key_value(&transition.to)
+                        && fields[6] == fixture_provider_key_value(&transition.from)
+                        && fields[7] == fixture_provider_key_value(&transition.to)
                         && fields[8] == Value::Bool(false)
                         && key_id == DRAFT_AUTHORITY_KEY_ID
                     {
@@ -1090,15 +1112,6 @@ fn validate_release_admission_fields(
         }),
         _ => Err(BundleContractErrorV1::ProfileInvalid),
     }
-}
-
-fn provider_key_value(key: &crate::FixtureProviderKeyV1) -> Value {
-    Value::Array(vec![
-        Value::Text(key.provider_id.clone()),
-        Value::Text(key.contract_version.clone()),
-        Value::Integer(u64::from(key.abi_major).into()),
-        Value::Integer(u64::from(key.abi_minor).into()),
-    ])
 }
 
 fn validate_fixture_provenance_members(
@@ -1765,6 +1778,114 @@ pub fn verify_archive_release_filename(
 fn ordered_members(members: &[BundleMemberV1]) -> bool {
     members.windows(2).all(|pair| pair[0].path < pair[1].path)
 }
+
+fn sensitive_name(value: &str) -> bool {
+    matches!(
+        value,
+        "api_key"
+            | "apikey"
+            | "password"
+            | "credential"
+            | "credentials"
+            | "access_token"
+            | "refresh_token"
+            | "authorization"
+            | "bearer_token"
+            | "client_secret"
+            | "subject_secret"
+            | "private_key"
+            | "privatekey"
+            | "secret"
+            | "token"
+    )
+}
+
+fn sensitive_key(value: &str) -> (bool, bool) {
+    let normalized = value.to_ascii_lowercase().replace('-', "_");
+    let without_digest = normalized.strip_suffix("_digest");
+    let name = without_digest.unwrap_or(&normalized);
+    (sensitive_name(name), without_digest.is_some())
+}
+
+fn json_secret(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            let (sensitive, digest) = sensitive_key(key);
+            (sensitive && (digest || !value.is_null() && value.as_str() != Some("")))
+                || json_secret(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(json_secret),
+        _ => false,
+    }
+}
+
+const fn cbor_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Text(text) => text.is_empty(),
+        Value::Bytes(bytes) => bytes.is_empty(),
+        _ => false,
+    }
+}
+
+fn cbor_secret(value: &Value) -> bool {
+    match value {
+        Value::Map(fields) => fields.iter().any(|(key, value)| {
+            let sensitive = key.as_text().map(sensitive_key);
+            sensitive.is_some_and(|(sensitive, digest)| sensitive && (digest || !cbor_empty(value)))
+                || cbor_secret(value)
+        }),
+        Value::Array(values) => values.iter().any(cbor_secret),
+        Value::Tag(_, value) => cbor_secret(value),
+        _ => false,
+    }
+}
+
+fn prohibited_secret_material(bytes: &[u8]) -> bool {
+    const TOKEN_PREFIXES: &[(&str, usize)] = &[
+        ("bearer ", 16),
+        ("basic ", 16),
+        ("akia", 16),
+        ("asia", 16),
+        ("ghp_", 16),
+        ("gho_", 16),
+        ("ghu_", 16),
+        ("ghs_", 16),
+        ("ghr_", 16),
+        ("github_pat_", 16),
+        ("glpat-", 16),
+        ("xoxb-", 16),
+        ("xoxa-", 16),
+        ("xoxp-", 16),
+        ("xoxr-", 16),
+        ("xoxs-", 16),
+        ("sk_live_", 16),
+        ("sk_test_", 16),
+        ("aiza", 16),
+        ("eyj", 20),
+    ];
+
+    let json = serde_json::from_slice(bytes).is_ok_and(|value| json_secret(&value));
+    let mut cursor = Cursor::new(bytes);
+    let cbor = ciborium::from_reader::<Value, _>(&mut cursor).ok();
+    let complete_cbor = u64::try_from(bytes.len()).is_ok_and(|length| cursor.position() == length);
+    let cbor = complete_cbor && cbor.is_some_and(|value| cbor_secret(&value));
+    let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
+    let text = String::from_utf8_lossy(&lowercase);
+    let private_key = text.contains("-----begin") && text.contains("private key-----");
+    let prefixed = TOKEN_PREFIXES.iter().any(|(prefix, minimum)| {
+        text.match_indices(prefix).any(|(offset, _)| {
+            text[offset + prefix.len()..]
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte))
+                .take(*minimum)
+                .count()
+                == *minimum
+        })
+    });
+    json || cbor || private_key || prefixed
+}
+
 fn ordered_descriptors(descriptors: &[BundleMemberDescriptorV1]) -> bool {
     descriptors.windows(2).all(|pair| pair[0] < pair[1])
 }

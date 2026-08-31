@@ -1308,10 +1308,11 @@ fn assert_profile_round_trip(
 }
 
 #[test]
-fn public_current_cpf1_catalog_round_trips_lifecycle_adapter_mode_and_family_variants(
+fn public_current_cpf1_catalog_round_trips_adapter_mode_and_family_variants(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_profile_round_trip(profile_for_digest())?;
+
     for lifecycle in [
-        pos_conformance::ProfileLifecycleV1::Draft,
         pos_conformance::ProfileLifecycleV1::Candidate,
         pos_conformance::ProfileLifecycleV1::Stable,
         pos_conformance::ProfileLifecycleV1::Retired,
@@ -1319,7 +1320,27 @@ fn public_current_cpf1_catalog_round_trips_lifecycle_adapter_mode_and_family_var
         let mut profile = profile_for_digest();
         profile.lifecycle = lifecycle;
         refresh(&mut profile);
-        assert_profile_round_trip(profile)?;
+        assert_eq!(
+            profile.validate(),
+            Err(ConformanceContractError::ProfileLifecycleInvalid)
+        );
+        assert_eq!(
+            profile.to_canonical_cbor(),
+            Err(ConformanceContractError::ProfileLifecycleInvalid)
+        );
+    }
+
+    for lifecycle_code in 1_u64..=3 {
+        let mut encoded: Value =
+            ciborium::from_reader(profile_for_digest().to_canonical_cbor()?.as_slice())?;
+        let Value::Array(fields) = &mut encoded else {
+            return Err("canonical CPF1 profile must be an array".into());
+        };
+        fields[4] = Value::Integer(lifecycle_code.into());
+        assert_eq!(
+            ConformanceProfileV1::from_canonical_cbor(&fixtures::encode(&encoded)?),
+            Err(ConformanceContractError::ProfileLifecycleInvalid)
+        );
     }
 
     for adapter in [
@@ -1683,6 +1704,16 @@ fn public_profile_requires_all_seven_families_for_each_provider() {
     assert_eq!(
         extra.validate(),
         Err(ConformanceContractError::NonCanonicalOrder)
+    );
+
+    let mut incomplete_replay = profile_for_digest();
+    incomplete_replay.fixtures[0]
+        .modes
+        .push(ExecutionModeV1::Replay);
+    refresh(&mut incomplete_replay);
+    assert_eq!(
+        incomplete_replay.validate(),
+        Err(ConformanceContractError::ExpectedResultMissing)
     );
 }
 

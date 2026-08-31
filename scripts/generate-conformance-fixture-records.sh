@@ -84,7 +84,15 @@ validate_json_fixture_adapter() {
   }
 }
 
-while IFS= read -r -d '' provider_manifest; do
+mapfile -t provider_manifest_paths < <(
+  jq -r '.fixture_providers[].manifest' "${profile_root}"/*/profile.json | sort -u
+)
+for manifest_path in "${provider_manifest_paths[@]}"; do
+  [[ "${manifest_path}" == providers/*/provider.json && "/${manifest_path}/" != *"/../"* ]] || {
+    echo "unsafe provider manifest path: ${manifest_path}" >&2
+    exit 1
+  }
+  provider_manifest="${fixture_root}/${manifest_path}"
   adapter_id="$(jq -er '.fixture_adapter.id | select(type == "string" and length > 0)' "${provider_manifest}")" || {
     echo "provider fixture adapter declaration is missing or invalid: ${provider_manifest#"${fixture_root}/"}" >&2
     exit 1
@@ -107,7 +115,7 @@ while IFS= read -r -d '' provider_manifest; do
       }
       ;;
   esac
-done < <(find "${fixture_root}/providers" -mindepth 2 -maxdepth 2 -type f -name provider.json -print0 | sort -z)
+done
 
 generated_root="$(mktemp -d)"
 trap 'rm -rf "${generated_root}"' EXIT
@@ -157,35 +165,6 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
     echo "missing fixture pair: ${case_id}" >&2
     exit 1
   }
-  jq -e --arg family "${family}" '
-    def supported_schema:
-      type == "object" and
-      ((keys) - ["$schema", "additionalProperties", "const", "maximum", "minLength",
-        "minimum", "pattern", "properties", "required", "type"] | length) == 0 and
-      ((has("type") | not) or
-        (.type == "array" or .type == "boolean" or .type == "integer" or
-         .type == "null" or .type == "number" or .type == "object" or
-         .type == "string")) and
-      ((has("required") | not) or
-        ((.required | type) == "array" and
-         all(.required[]; type == "string") and
-         ((.required | unique | length) == (.required | length)))) and
-      ((has("additionalProperties") | not) or
-        (.additionalProperties | type == "boolean")) and
-      ((has("minimum") | not) or (.minimum | type == "number")) and
-      ((has("maximum") | not) or (.maximum | type == "number")) and
-      ((has("minLength") | not) or
-        (.minLength | type == "number" and . >= 0 and floor == .)) and
-      ((has("pattern") | not) or (.pattern | type == "string")) and
-      ((.properties // {}) | type == "object") and
-      all((.properties // {})[]; supported_schema);
-    supported_schema and
-    .properties.family.const == $family and .additionalProperties == false
-  ' \
-    "${schema_file}" >/dev/null || {
-    echo "fixture schema uses unsupported JSON adapter semantics: ${case_id}" >&2
-    exit 1
-  }
   generated_file="${generated_root}/${expected_path}"
   mkdir -p "$(dirname "${generated_file}")"
   generated_input="${generated_root}/${input_path}"
@@ -219,6 +198,35 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
     generated_count=$((generated_count + 1))
     continue
   fi
+  jq -e --arg family "${family}" '
+    def supported_schema:
+      type == "object" and
+      ((keys) - ["$schema", "additionalProperties", "const", "maximum", "minLength",
+        "minimum", "pattern", "properties", "required", "type"] | length) == 0 and
+      ((has("type") | not) or
+        (.type == "array" or .type == "boolean" or .type == "integer" or
+         .type == "null" or .type == "number" or .type == "object" or
+         .type == "string")) and
+      ((has("required") | not) or
+        ((.required | type) == "array" and
+         all(.required[]; type == "string") and
+         ((.required | unique | length) == (.required | length)))) and
+      ((has("additionalProperties") | not) or
+        (.additionalProperties | type == "boolean")) and
+      ((has("minimum") | not) or (.minimum | type == "number")) and
+      ((has("maximum") | not) or (.maximum | type == "number")) and
+      ((has("minLength") | not) or
+        (.minLength | type == "number" and . >= 0 and floor == .)) and
+      ((has("pattern") | not) or (.pattern | type == "string")) and
+      ((.properties // {}) | type == "object") and
+      all((.properties // {})[]; supported_schema);
+    supported_schema and
+    .properties.family.const == $family and .additionalProperties == false
+  ' \
+    "${schema_file}" >/dev/null || {
+    echo "fixture schema uses unsupported JSON adapter semantics: ${case_id}" >&2
+    exit 1
+  }
   family_metadata="$(jq -ce --arg family "${family}" '.families[] | select(.name == $family)' "${family_contract}")" || {
     echo "profile declares an unknown fixture family: ${case_id}" >&2
     exit 1

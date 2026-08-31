@@ -717,6 +717,9 @@ impl EvaluatorRequestV1 {
 }
 
 fn validate_profile(profile: &ConformanceProfileV1) -> Result<(), ConformanceContractError> {
+    if profile.lifecycle != ProfileLifecycleV1::Draft {
+        return Err(ConformanceContractError::ProfileLifecycleInvalid);
+    }
     if !valid_identifier(&profile.profile_id)
         || !semantic_version(&profile.semantic_version)
         || zero_digest(&profile.normative_spec_digest)
@@ -833,6 +836,12 @@ fn validate_fixture_inventory(
                 return Err(ConformanceContractError::NonCanonicalOrder);
             }
         }
+    }
+    if inventory
+        .values()
+        .any(|families| families != &required_families)
+    {
+        return Err(ConformanceContractError::ExpectedResultMissing);
     }
     let required_modes = [ExecutionModeV1::Local, ExecutionModeV1::AirGapped];
     for provider_key in &profile.fixture_provider_registry.required_provider_keys {
@@ -1059,7 +1068,7 @@ fn validate_independence_requirements(
 }
 
 fn validate_protocol(protocol: &EvaluatorProtocolV1) -> Result<(), ConformanceContractError> {
-    if !bounded_text(&protocol.protocol_id, 128)
+    if !valid_identifier(&protocol.protocol_id)
         || zero_digest(&protocol.protocol_digest)
         || zero_digest(&protocol.request_schema_digest)
         || zero_digest(&protocol.report_schema_digest)
@@ -1419,7 +1428,7 @@ fn valid_media_type(value: &str) -> bool {
 }
 
 fn semantic_version(value: &str) -> bool {
-    crate::semantic_version(value, MAX_STRING_BYTES, Some(MAX_SEMVER_COMPONENT_BYTES))
+    crate::semantic_version(value, 64, Some(MAX_SEMVER_COMPONENT_BYTES))
 }
 
 fn contract_version(value: &str) -> bool {

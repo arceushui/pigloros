@@ -77,7 +77,8 @@ fn signal_process(child: &std::process::Child, signal: &str) -> TestResult {
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn await_staging_directory(parent: &Path, child: &mut std::process::Child) -> TestResult<PathBuf> {
-    for _ in 0..200_000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
+    while std::time::Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             return Err(
                 format!("materializer exited before staging was observable: {status}").into(),
@@ -256,7 +257,11 @@ fn apply_staging_mutation(
         }
         StagingMutation::PreventFutureDirectories => {
             let providers = staging.join("providers");
-            fs::create_dir(&providers)?;
+            match fs::create_dir(&providers) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
             fs::set_permissions(providers, fs::Permissions::from_mode(0o500))?;
         }
         StagingMutation::ReplaceDirectoryWithSymlink => {
@@ -296,7 +301,11 @@ fn apply_staging_mutation(
             }
         }
         StagingMutation::BlockFutureDirectory => {
-            symlink("/dev/null", staging.join("empirical-evaluation"))?;
+            let blocked = staging.join("empirical-evaluation");
+            if blocked.exists() {
+                fs::rename(&blocked, root.join("retained-blocked-directory"))?;
+            }
+            symlink("/dev/null", blocked)?;
         }
     }
     Ok(())
@@ -1571,6 +1580,13 @@ fn archive_descriptor_fields<'a>(
     path: &str,
 ) -> TestResult<&'a mut Vec<Value>> {
     support::archive_descriptor_fields(archive, path)
+}
+
+fn first_array_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::Array(fields) => fields.first().and_then(Value::as_text),
+        _ => None,
+    }
 }
 
 fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[u8]) -> TestResult {
@@ -3419,6 +3435,86 @@ fn typed_bundle_rejects_undeclared_non_provider_member() -> TestResult {
 }
 
 #[test]
+fn typed_bundle_rejects_an_extra_authority_declaration() -> TestResult {
+    let mut bundle = signed_current_bundle(BundleModeV1::Local)?;
+    let member = BundleMemberV1::supporting(
+        "authority/extra-declaration.json",
+        b"{}".to_vec(),
+        BundleMemberRoleV1::AuthorityDeclaration,
+    );
+    bundle.manifest.members.push(BundleMemberDescriptorV1 {
+        path: member.path.clone(),
+        size_bytes: u64::try_from(member.bytes.len())?,
+        digest: member.digest,
+        role: member.role,
+    });
+    bundle.members.push(member);
+    bundle
+        .members
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    bundle.manifest.members.sort();
+    assert_eq!(
+        bundle.validate(),
+        Err(BundleContractErrorV1::UndeclaredMember)
+    );
+    Ok(())
+}
+
+#[test]
+fn signed_archive_rejects_an_extra_authority_declaration_in_both_verifiers() -> TestResult {
+    const ORIGINAL_PATH: &str = "support/draft-execution-authority.json";
+    const EXTRA_PATH: &str = "authority/extra-declaration.json";
+    let extra_bytes = b"{}".to_vec();
+    let archive = mutate_archive(|archive| {
+        let Value::Array(members) = &mut archive[ArchiveField::Members.index()] else {
+            return Err("archive members are not an array".into());
+        };
+        let mut extra_member = members
+            .iter()
+            .find(|member| {
+                matches!(member, Value::Array(fields) if fields.first() == Some(&Value::Text(ORIGINAL_PATH.to_owned())))
+            })
+            .cloned()
+            .ok_or("authority declaration member is absent")?;
+        let Value::Array(fields) = &mut extra_member else {
+            return Err("authority declaration member is not an array".into());
+        };
+        fields[MemberField::Path.index()] = Value::Text(EXTRA_PATH.to_owned());
+        fields[MemberField::Bytes.index()] = Value::Bytes(extra_bytes.clone());
+        members.push(extra_member);
+        members.sort_by(|left, right| first_array_text(left).cmp(&first_array_text(right)));
+
+        let Value::Array(manifest) = &mut archive[ArchiveField::Manifest.index()] else {
+            return Err("manifest is not an array".into());
+        };
+        let Value::Array(descriptors) = &mut manifest[ManifestField::MemberDescriptors.index()]
+        else {
+            return Err("manifest descriptors are not an array".into());
+        };
+        let mut extra_descriptor = descriptors
+            .iter()
+            .find(|descriptor| {
+                matches!(descriptor, Value::Array(fields) if fields.first() == Some(&Value::Text(ORIGINAL_PATH.to_owned())))
+            })
+            .cloned()
+            .ok_or("authority declaration descriptor is absent")?;
+        let Value::Array(fields) = &mut extra_descriptor else {
+            return Err("authority declaration descriptor is not an array".into());
+        };
+        fields[DescriptorField::Path.index()] = Value::Text(EXTRA_PATH.to_owned());
+        fields[DescriptorField::Length.index()] =
+            Value::Integer(u64::try_from(extra_bytes.len())?.into());
+        fields[DescriptorField::Digest.index()] =
+            Value::Bytes(blake3::hash(&extra_bytes).as_bytes().to_vec());
+        descriptors.push(extra_descriptor);
+        descriptors.sort_by(|left, right| first_array_text(left).cmp(&first_array_text(right)));
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(&archive, "extra authority declaration");
+    Ok(())
+}
+
+#[test]
 fn typed_bundle_binds_profile_authority_digests_to_members() -> TestResult {
     let mut bundle = signed_current_bundle(BundleModeV1::Local)?;
     let member = bundle
@@ -3772,7 +3868,7 @@ fn mutate_profile_fields(profile: &mut [Value], mutation: usize) -> TestResult {
         49..=73 => mutate_profile_text_contracts(profile, mutation),
         74..=90 => mutate_profile_nested_contracts(profile, mutation),
         91..=101 => mutate_profile_order_and_shape_contracts(profile, mutation),
-        102..=104 => mutate_profile_authority_shape(profile, mutation),
+        102..=106 => mutate_profile_authority_shape(profile, mutation),
         _ => Err(format!("unsupported profile mutation {mutation}").into()),
     }
 }
@@ -3855,7 +3951,7 @@ fn mutate_profile_order_and_shape_contracts(profile: &mut [Value], mutation: usi
         100 => replace_value(
             profile,
             3,
-            Value::Text("1".repeat(65)),
+            Value::Text(format!("1.0.0+{}a", "a.".repeat(29))),
             "oversized semantic version",
         ),
         101 => replace_value(
@@ -3887,6 +3983,22 @@ fn mutate_profile_authority_shape(profile: &mut [Value], mutation: usize) -> Tes
             "bound normative specification digest",
         ),
         104 => replace_value(profile, 9, Value::Array(Vec::new()), "fixture inventory"),
+        105 => replace_value(
+            array_field(profile, 11, "evaluator protocol")?,
+            0,
+            Value::Text("Invalid Protocol!".to_owned()),
+            "protocol identifier",
+        ),
+        106 => replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                21,
+                "fixture provenance",
+            )?,
+            0,
+            Value::Text("x".repeat(129)),
+            "licence identifier",
+        ),
         _ => Err(format!("unsupported authority shape mutation {mutation}").into()),
     }
 }
@@ -4363,8 +4475,35 @@ fn assert_archive_rejected_by_both(archive: &[u8], label: &str) {
 }
 
 #[test]
+fn signed_archive_rejects_prohibited_secret_material_in_both_verifiers() -> TestResult {
+    const SAMPLES: &[&[u8]] = &[
+        br#"{"api_key":"not-a-real-secret"}"#,
+        br#"{"\u0061pi_key":"not-a-real-secret"}"#,
+        br#"{"api_key":["not-a-real-secret"]}"#,
+        br#"{"api_key_digest":""}"#,
+        b"\xa1\x66secret\x50abcdefghijklmnop",
+        b"-----BEGIN TEST PRIVATE KEY-----\nnot-a-real-secret",
+        b"Authorization: Bearer abcdefghijklmnop",
+    ];
+    for secret in SAMPLES {
+        let archive = mutate_archive(|fields| {
+            replace_archive_member_bytes(fields, "support/limitations.md", secret)
+        })?;
+        assert!(matches!(
+            verify_archive_independently(&archive),
+            Err(BundleContractErrorV1::SecretMaterialDetected)
+        ));
+        assert!(matches!(
+            ConformanceBundleV1::from_canonical_cbor(&archive),
+            Err(BundleContractErrorV1::SecretMaterialDetected)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn independent_verifier_rejects_each_current_profile_contract_mutation() -> TestResult {
-    for mutation in 0..105 {
+    for mutation in 0..107 {
         let archive = mutate_profile_archive(|profile| mutate_profile_fields(profile, mutation))?;
         if mutation == 4 {
             assert_eq!(
@@ -4626,6 +4765,26 @@ fn assert_independent_fixture_inventory_relationships() -> TestResult {
     assert_archive_rejected_by_both(
         &duplicate_coordinate_family,
         "duplicate family in one provider execution mode coordinate",
+    );
+
+    let incomplete_replay = mutate_profile_archive(|profile| {
+        array_field(
+            array_field(profile, ProfileField::Fixtures.index(), "fixtures")?,
+            0,
+            "fixture",
+        )?
+        .get_mut(FixtureField::Modes.index())
+        .and_then(|value| match value {
+            Value::Array(modes) => Some(modes),
+            _ => None,
+        })
+        .ok_or("fixture modes are absent")?
+        .push(Value::Integer(2_u64.into()));
+        Ok(())
+    })?;
+    assert_archive_rejected_by_both(
+        &incomplete_replay,
+        "incomplete Replay fixture-family coordinate",
     );
     Ok(())
 }

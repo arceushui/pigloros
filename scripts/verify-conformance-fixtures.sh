@@ -2,6 +2,7 @@
 set -euo pipefail
 
 fixture_root="${1:-fixtures/conformance}"
+profile_root="${fixture_root}/profiles"
 family_contract="${fixture_root}/support/fixture-family-contract.json"
 
 command -v b3sum >/dev/null || {
@@ -106,9 +107,40 @@ validate_fixture_adapter() {
   esac
 }
 
-while IFS= read -r -d '' provider_manifest; do
+declare -A non_json_provider_artifacts=()
+mapfile -t provider_manifest_paths < <(
+  jq -r '.fixture_providers[].manifest' "${profile_root}"/*/profile.json | sort -u
+)
+provider_manifests=()
+for manifest_path in "${provider_manifest_paths[@]}"; do
+  [[ "${manifest_path}" == providers/*/provider.json && "${manifest_path}" != *".."* ]] || {
+    echo "unsafe provider manifest path: ${manifest_path}" >&2
+    exit 1
+  }
+  provider_manifests+=("${fixture_root}/${manifest_path}")
+done
+for provider_manifest in "${provider_manifests[@]}"; do
   validate_fixture_adapter "${provider_manifest}" || exit 1
-done < <(find "${fixture_root}/providers" -mindepth 2 -maxdepth 2 -type f -name provider.json -print0 | sort -z)
+  IFS=$'\t' read -r schema_media payload_media oracle_media evidence_media < <(
+    jq -r '[.artifact_media_types.schema, .artifact_media_types.payload,
+      .artifact_media_types.oracle, .artifact_media_types.evidence_status] | @tsv' "${provider_manifest}"
+  )
+  while IFS=$'\t' read -r schema input expected oracle; do
+    [[ "${schema_media}" == "application/schema+json" ]] ||
+      non_json_provider_artifacts["${fixture_root}/${schema}"]=1
+    [[ "${payload_media}" == "application/json" ]] ||
+      non_json_provider_artifacts["${fixture_root}/${input}"]=1
+    [[ "${evidence_media}" == "application/json" ]] ||
+      non_json_provider_artifacts["${fixture_root}/${expected}"]=1
+    [[ "${oracle_media}" == "application/json" ]] ||
+      non_json_provider_artifacts["${fixture_root}/${oracle}"]=1
+  done < <(jq -r --arg manifest "${provider_manifest#"${fixture_root}/"}" '
+    . as $profile |
+    .fixture_providers[] | select(.manifest == $manifest).fixture_case_ids[] as $case_id |
+    $profile.fixtures[] | select(.case_id == $case_id) |
+    [.schema, .input, .expected, .oracle] | @tsv
+  ' "${profile_root}"/*/profile.json)
+done
 
 matrix_path="${fixture_root}/matrix/execution-matrix.json"
 authority_path="${fixture_root}/expected-authority/inventory.json"
@@ -246,7 +278,6 @@ if (( ${#inputs[@]} < 49 || ${#inputs[@]} != ${#expected[@]} || ${#inputs[@]} !=
   exit 1
 fi
 
-profile_root="${fixture_root}/profiles"
 mapfile -t profile_layers < <(
   find "${profile_root}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort
 )
@@ -340,7 +371,9 @@ for layer in "${profile_layers[@]}"; do
      (.provider_id | type == "string" and length > 0) and
      (.contract_version | type == "string" and length > 0) and
      (.abi_major | type == "number") and (.abi_minor | type == "number") and
-     (.package_path | type == "string" and length > 0) and
+     (.package_path | type == "string" and test("^[A-Za-z0-9._/-]+$") and
+       startswith("/") == false and
+       (split("/") | all(. != "" and . != "." and . != ".."))) and
      (.package_support | keys | sort) == ([
        "licence", "limitations", "notices", "sbom", "source_provenance"
      ] | sort) and
@@ -529,6 +562,14 @@ if [[ -d "${fixture_root}/published" ]]; then
   publishable_roots+=("${fixture_root}/published")
 fi
 secret_pattern='-----BEGIN[[:space:]]+[A-Z0-9 -]*PRIVATE KEY-----|"(api[_-]?key|apikey|password|credential|credentials|access[_-]?token|refresh[_-]?token|authorization|bearer[_-]?token|client[_-]?secret|subject[_-]?secret|private[_-]?key|privatekey|secret)([_-]?digest)?"[[:space:]]*:[[:space:]]*"[^"[:space:]]+"|(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+/=-]{16,}|(AKIA|ASIA)[0-9A-Z]{16}|(gh[pousr]_|github_pat_|glpat-|xox[baprs]-|sk_(live|test)_|AIza)[A-Za-z0-9._-]{16,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+cbor_secret_args=()
+for sensitive_name in api_key apikey password credential credentials access_token refresh_token \
+  authorization bearer_token client_secret subject_secret private_key privatekey secret token; do
+  for sensitive_key in "${sensitive_name}" "${sensitive_name}_digest"; do
+    printf -v cbor_marker '%b%s' "\\$(printf '%03o' "$((96 + ${#sensitive_key}))")" "${sensitive_key}"
+    cbor_secret_args+=(-e "${cbor_marker}")
+  done
+done
 
 json_secret_query='
   def normalized: ascii_downcase | gsub("-"; "_");
@@ -566,6 +607,7 @@ for root in "${publishable_roots[@]}"; do
   done < <(find -P "${root}" -type l -print0)
 
   while IFS= read -r -d '' json_file; do
+    [[ -n "${non_json_provider_artifacts[${json_file}]+declared}" ]] && continue
     if jq -e "${json_secret_query}" "${json_file}" >/dev/null; then
       echo "forbidden secret material found in JSON fixture: ${json_file}" >&2
       exit 1
@@ -585,7 +627,8 @@ mapfile -d '' publishable_files < <(
   done
 )
 for publishable_file in "${publishable_files[@]}"; do
-  if grep -n -i -I -E -- "${secret_pattern}" "${publishable_file}"; then
+  if grep -n -i -a -E -- "${secret_pattern}" "${publishable_file}" ||
+    grep -a -F -q "${cbor_secret_args[@]}" -- "${publishable_file}"; then
     echo "forbidden secret material found in public conformance fixtures" >&2
     exit 1
   else
@@ -605,8 +648,18 @@ fi
 
 mapfile -t support < <(find "${fixture_root}/support" -type f -print | sort)
 mapfile -t provider_files < <(find "${fixture_root}/providers" -type f -print | sort)
-mapfile -t provider_schemas < <(find "${fixture_root}/providers" -type f -name '*.schema.json' -print | sort)
-mapfile -t provider_manifests < <(find "${fixture_root}/providers" -type f -name 'provider.json' -print | sort)
+mapfile -t provider_schemas < <(
+  for provider_manifest in "${provider_manifests[@]}"; do
+    jq -r --arg root "${fixture_root}" '.schemas[] | "\($root)/\(.)"' "${provider_manifest}"
+  done | sort -u
+)
+mapfile -t expected_provider_files < <(
+  printf '%s\n' "${provider_manifests[@]}" "${provider_schemas[@]}" | sort
+)
+if [[ "${provider_files[*]}" != "${expected_provider_files[*]}" ]]; then
+  echo "public provider artifact inventory has undeclared files" >&2
+  exit 1
+fi
 expected_provider_schemas=$(( ${#provider_manifests[@]} * ${family_count} ))
 if (( ${#provider_schemas[@]} != expected_provider_schemas )); then
   echo "each provider must own exactly ${family_count} family schemas" >&2

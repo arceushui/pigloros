@@ -2,8 +2,10 @@
 set -euo pipefail
 
 source_root="fixtures/conformance"
-temporary_root="$(mktemp -d)"
-trap 'rm -rf -- "${temporary_root}"' EXIT
+temporary_base="$(mktemp -d)"
+temporary_root="${temporary_base}/providers/fixtures"
+mkdir -p "${temporary_root}"
+trap 'rm -rf -- "${temporary_base}"' EXIT
 
 new_fixture_copy() {
   local name="$1"
@@ -19,6 +21,22 @@ replace_json() {
   local replacement="${path}.replacement"
   jq "${filter}" "${path}" >"${replacement}"
   mv "${replacement}" "${path}"
+}
+
+refresh_checksums() {
+  local fixture_root="$1"
+  local path="$2"
+  local relative="${path#"${fixture_root}/"}"
+  local blake3 sha256 sums_sha256
+  blake3="$(b3sum "${path}" | awk '{print $1}')"
+  sha256="$(sha256sum "${path}" | awk '{print $1}')"
+  sed -i -E "s|^[0-9a-f]{64}  ${relative}$|${blake3}  ${relative}|" \
+    "${fixture_root}/BLAKE3SUMS"
+  sed -i -E "s|^[0-9a-f]{64}  ${relative}$|${sha256}  ${relative}|" \
+    "${fixture_root}/SHA256SUMS"
+  sums_sha256="$(sha256sum "${fixture_root}/BLAKE3SUMS" | awk '{print $1}')"
+  sed -i -E "s|^[0-9a-f]{64}  BLAKE3SUMS$|${sums_sha256}  BLAKE3SUMS|" \
+    "${fixture_root}/SHA256SUMS"
 }
 
 expect_rejection() {
@@ -94,6 +112,22 @@ replace_json "${unknown_adapter_root}/providers/artifact-integrity/provider.json
 expect_adapter_rejection "${unknown_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
 expect_rejection "${unknown_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
 
+nested_adapter_root="$(new_fixture_copy nested-unknown-fixture-adapter)"
+mkdir -p "${nested_adapter_root}/providers/nested/artifact-integrity"
+cp "${nested_adapter_root}/providers/artifact-integrity/provider.json" \
+  "${nested_adapter_root}/providers/nested/artifact-integrity/provider.json"
+replace_json "${nested_adapter_root}/providers/nested/artifact-integrity/provider.json" \
+  '.fixture_adapter.id = "future-plugin-v1"'
+replace_json "${nested_adapter_root}/profiles/artifact-integrity/profile.json" \
+  '.fixture_providers[0].manifest = "providers/nested/artifact-integrity/provider.json"'
+expect_adapter_rejection "${nested_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
+expect_rejection "${nested_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
+
+unsafe_package_root="$(new_fixture_copy unsafe-provider-package-path)"
+replace_json "${unsafe_package_root}/providers/artifact-integrity/provider.json" \
+  '.package_path = "../provider.cbor"'
+expect_rejection "${unsafe_package_root}" "invalid provider manifest for artifact-integrity"
+
 opaque_adapter_root="$(new_fixture_copy opaque-provider-adapter)"
 replace_json "${opaque_adapter_root}/providers/artifact-integrity/provider.json" '
   .fixture_adapter.id = "opaque-provider-v1" |
@@ -103,7 +137,14 @@ replace_json "${opaque_adapter_root}/providers/artifact-integrity/provider.json"
     oracle: "application/octet-stream",
     evidence_status: "application/octet-stream"
   }'
+while IFS= read -r schema; do
+  printf 'opaque-schema-v1\n' >"${opaque_adapter_root}/${schema}"
+done < <(jq -r '.schemas[]' "${opaque_adapter_root}/providers/artifact-integrity/provider.json")
 expect_adapter_acceptance "${opaque_adapter_root}"
+opaque_secret_input="${opaque_adapter_root}/${positive_input}"
+printf '\xa1\x66secret\x50abcdefghijklmnop' >"${opaque_secret_input}"
+refresh_checksums "${opaque_adapter_root}" "${opaque_secret_input}"
+expect_rejection "${opaque_adapter_root}" "forbidden secret material found"
 
 unknown_adapter_config_root="$(new_fixture_copy unknown-adapter-config-field)"
 replace_json "${unknown_adapter_config_root}/providers/artifact-integrity/provider.json" \

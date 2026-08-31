@@ -23,13 +23,13 @@ cpf1 = [
 
 provider-registry-binding = [
   registry-artifact: artifact-descriptor,
-  required-provider-keys: [1* provider-key]
+  required-provider-keys: [1*4096 provider-key]
 ]
 
 provider-registry = [
   magic: "FPR1",
   version: 1,
-  providers: [1* provider-entry],
+  providers: [1*4096 provider-entry],
   registry-digest: digest
 ]
 

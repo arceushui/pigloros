@@ -1027,7 +1027,11 @@ fn validate_fixture_provider(
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
         && u16::try_from(json_u64(provider, "abi_minor")?).is_ok_and(|minor| minor < u16::MAX)
-        && !json_text(provider, "package_path")?.is_empty()
+        && relative_components(
+            &json_text(provider, "package_path")?,
+            "provider package path",
+        )
+        .is_ok()
         && valid_media_type(&media_types.schema)
         && valid_media_type(&media_types.payload)
         && valid_media_type(&media_types.oracle)
