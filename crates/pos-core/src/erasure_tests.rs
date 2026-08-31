@@ -4940,6 +4940,69 @@ fn replacement_helpers_reject_each_non_monotonic_dimension() -> Result<(), Erasu
     Ok(())
 }
 
+fn administrative_resolution_for(
+    frozen: &ErasureCoordinatorRecordV1,
+    policy: ErasureReferenceV1,
+) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
+    let scope_commitment = frozen
+        .supporting_records
+        .scope_commitment()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .reference();
+    let trust = frozen
+        .supporting_records
+        .obligation_set()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .trust();
+    ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+        request: frozen.request.reference(),
+        affected_digests: vec![frozen.state.state_digest()],
+        action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+        scope_commitment,
+        policy,
+        trust,
+        principal: reference(88),
+        authorization_provenance: reference(89),
+        reason: reference(90),
+        issue_position: 11,
+        predecessor_resolution: None,
+    })
+}
+
+#[test]
+fn administrative_resolution_validation_rejects_incomplete_bindings() -> Result<(), ErasureErrorV1>
+{
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let frozen = record_after_freeze(vec![target])?;
+    let matching_resolution = administrative_resolution_for(&frozen, frozen.request.policy())?;
+
+    let mut resolution_without_scope = frozen.clone();
+    resolution_without_scope.administrative_resolution_head = Some(matching_resolution.reference());
+    resolution_without_scope
+        .supporting_records
+        .administrative_resolutions
+        .push(matching_resolution);
+    resolution_without_scope.supporting_records.scope_commitment = None;
+    assert_eq!(
+        resolution_without_scope.validate_administrative_resolution_head(),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mismatched_resolution = administrative_resolution_for(&frozen, reference(91))?;
+    let mut resolution_with_wrong_policy = frozen;
+    resolution_with_wrong_policy.administrative_resolution_head =
+        Some(mismatched_resolution.reference());
+    resolution_with_wrong_policy
+        .supporting_records
+        .administrative_resolutions
+        .push(mismatched_resolution);
+    assert_eq!(
+        resolution_with_wrong_policy.validate_administrative_resolution_head(),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
 #[test]
 fn durable_validation_helpers_reject_each_incomplete_evidence_shape() -> Result<(), ErasureErrorV1>
 {
