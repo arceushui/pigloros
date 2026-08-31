@@ -1,7 +1,7 @@
 #[path = "support/coordinator.rs"]
-mod coordinator_support;
+pub mod coordinator_support;
 #[path = "support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use coordinator_support::{PublicCoordinatorPort as PublicPort, PublicCoordinatorPortConfig};
 use pos_core::{

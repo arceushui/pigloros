@@ -1,7 +1,7 @@
 //! Public-interface regressions for coordinator mutation survivors.
 
 #[path = "support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use std::cell::RefCell;
 use std::rc::Rc;

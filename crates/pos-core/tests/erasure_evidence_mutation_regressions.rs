@@ -1,7 +1,7 @@
 //! Public-interface regressions for the ADR-060 erasure evidence contracts.
 
 #[path = "support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use ciborium::value::Value;
 use erasure_support::freeze_evidence_fixture as freeze_evidence;

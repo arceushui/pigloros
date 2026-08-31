@@ -1,9 +1,9 @@
 //! Public-interface regressions for ADR-060 review findings.
 
 #[path = "support/coordinator.rs"]
-mod coordinator_support;
+pub mod coordinator_support;
 #[path = "support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use ciborium::value::Value;
 use coordinator_support::{PublicCoordinatorPort as PublicPort, PublicCoordinatorPortConfig};
