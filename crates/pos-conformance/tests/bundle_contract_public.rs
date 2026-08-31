@@ -1290,8 +1290,8 @@ fn mutate_draft_authority_archive(
     };
     mutate(fields)?;
     if path == "authority/trust-policy-snapshot.tps1" {
-        let unsigned = encode_value(&Value::Array(fields[..12].to_vec()))?;
-        fields[12] = Value::Bytes(
+        let unsigned = encode_value(&Value::Array(fields[..11].to_vec()))?;
+        fields[11] = Value::Bytes(
             SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_KEY)
                 .sign(&unsigned)
                 .to_bytes()
