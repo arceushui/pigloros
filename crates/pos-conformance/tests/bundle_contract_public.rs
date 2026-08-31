@@ -133,6 +133,7 @@ fn staged_nested_directory(staging: &Path, files: &[PathBuf]) -> TestResult<Path
 fn await_staged_regular_files(
     staging: &Path,
     child: &mut std::process::Child,
+    mutation: StagingMutation,
 ) -> TestResult<Vec<PathBuf>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
@@ -143,14 +144,19 @@ fn await_staged_regular_files(
             .into());
         }
         let files = staged_regular_files(staging)?;
-        if files.len() >= 2 {
+        let prerequisite_is_present = if mutation_requires_nested_directory(mutation) {
+            staged_nested_directory(staging, &files).is_ok()
+        } else {
+            !files.is_empty()
+        };
+        if prerequisite_is_present {
             return Ok(files);
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     child.kill()?;
     child.wait()?;
-    Err("materializer staged fewer than two regular files".into())
+    Err(format!("materializer did not stage the prerequisite for {mutation:?}").into())
 }
 
 #[cfg(target_os = "linux")]
@@ -185,6 +191,16 @@ const fn mutation_requires_staged_files(mutation: StagingMutation) -> bool {
             | StagingMutation::ReplaceDirectoryWithSymlink
             | StagingMutation::ReplaceDirectoryWithRegularFile
             | StagingMutation::ReplaceFileWithFifo
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn mutation_requires_nested_directory(mutation: StagingMutation) -> bool {
+    matches!(
+        mutation,
+        StagingMutation::ReplaceDirectoryWithSymlink
+            | StagingMutation::ReplaceDirectoryWithRegularFile
     )
 }
 
@@ -306,7 +322,7 @@ fn mutate_live_staging(
         .spawn()?;
     let staging = await_staging_directory(&root, &mut child)?;
     let staged_files = if mutation_requires_staged_files(mutation) {
-        await_staged_regular_files(&staging, &mut child)?
+        await_staged_regular_files(&staging, &mut child, mutation)?
     } else {
         Vec::new()
     };
@@ -3021,6 +3037,7 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_live_staging_rejections(cases: &[(StagingMutation, &str)]) -> TestResult {
+    let _guard = materializer_process_guard();
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
