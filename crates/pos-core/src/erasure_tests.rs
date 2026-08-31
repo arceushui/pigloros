@@ -3781,6 +3781,9 @@ fn exclusive_supporting_records_reject_every_individual_conflict() -> Result<(),
 #[test]
 fn supporting_records_reject_each_independent_missing_scope_dependency(
 ) -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let frozen = record_after_freeze(vec![target])?;
+    let source = supporting_records_input(frozen.supporting_records());
     let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: reference(1),
         scope_commitment: reference(70),
@@ -3796,6 +3799,10 @@ fn supporting_records_reject_each_independent_missing_scope_dependency(
     })?;
 
     let missing_scope_cases = [
+        ErasureSupportingRecordsInputV1 {
+            obligation_set: source.obligation_set,
+            ..ErasureSupportingRecordsInputV1::default()
+        },
         ErasureSupportingRecordsInputV1 {
             scope_extensions: vec![extension],
             ..ErasureSupportingRecordsInputV1::default()
