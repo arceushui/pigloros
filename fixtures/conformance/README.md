@@ -128,3 +128,7 @@ authority key is a repository test-fixture authority, not a production
 Deployment TrustPolicyRegistry root. The materializer emits only canonical
 CBOR authority members and the independent verifier checks their digests,
 sizes, signatures, and fixture relations.
+EPF1 carries the complete selected execution semantics, including deterministic
+budgets and evaluator compatibility. TPS1 carries a collection of versioned
+trust roots plus revocation and minimum-version policy. Neither record relies
+on an out-of-band singleton key or descriptive profile label.

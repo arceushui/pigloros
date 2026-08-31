@@ -45,6 +45,14 @@ Candidate or executed-evidence claim. CPF1 binds EPF1 and TPS1 by BLAKE3;
 downgrade descriptors bind RAD1 by BLAKE3. Archive verification checks member
 size, digest, canonical encoding, signature, and the profile/snapshot/provider
 relations before accepting a Draft bundle.
+Each EPF1 record binds the architecture and numeric rules, scheduler/driver
+order, tick policy, schema/upcaster policy, artifact policy, capabilities,
+network policy, all eight deterministic ceilings, permitted operational
+differences, and evaluator-version interval. The TPS1 record binds a versioned
+collection of trust roots, revoked key and artifact identities, minimum
+component versions, validity position, predecessor identity, and signature.
+These fields are authority semantics rather than descriptive metadata, so both
+the typed materializer and the independent verifier reject omissions or drift.
 The evaluator hard-cap record digest-binds both the ten structural limits and
 the following eight deterministic ceilings, in budget-field order: 1 GiB
 memory, 1,000,000,000 CPU fuel, 1,000,000 host calls, 1,000,000 Events, 64 MiB

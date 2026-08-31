@@ -551,9 +551,10 @@ jobs:
           name: depgraph
           path: artifacts/depgraph.svg
 
-  # Branch protection should require this single fan-in check instead of a
-  # mutable list of individual jobs. The informational report jobs above are
-  # intentionally excluded from this blocking set.
+  # Branch protection requires this CI fan-in together with the separate
+  # `diff mutation testing` fan-in emitted by mutation.yml. Individual CI jobs
+  # and mutation shards are implementation details, not merge approvals. The
+  # informational report jobs above are intentionally excluded.
   ci-gate:
     name: ci-gate
     if: ${{ always() }}

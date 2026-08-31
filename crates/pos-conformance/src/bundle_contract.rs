@@ -16,8 +16,9 @@ use crate::{
     ArtifactDescriptorV1, ConformanceProfileV1, ExecutionModeV1, FixtureFamilyV1,
     FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryV1, ProfileLifecycleV1,
     DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
-    DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH, DRAFT_AUTHORITY_TRUST_POLICY_EPOCH,
-    DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
+    DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
+    DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
+    DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
     FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 
@@ -85,14 +86,28 @@ pub fn draft_execution_profile_bytes_v1(
                 .map(|code| Value::Integer(code.into()))
                 .collect(),
         ),
-        Value::Bool(declaration.network_allowed),
-        Value::Array(Vec::new()),
-        Value::Text(declaration.scheduler_id.to_owned()),
-        Value::Text(declaration.numeric_policy_id.to_owned()),
-        Value::Text(declaration.schema_policy_id.to_owned()),
-        Value::Text(declaration.artifact_policy_id.to_owned()),
-        Value::Text(declaration.budget_policy_id.to_owned()),
-        Value::Array(Vec::new()),
+        text_array(declaration.architecture_rules),
+        text_array(declaration.numeric_rules),
+        text_array(declaration.scheduler_driver_order),
+        Value::Text(declaration.tick_policy.to_owned()),
+        text_array(declaration.schemas_and_upcasters),
+        text_array(declaration.artifact_rules),
+        Value::Array(vec![
+            Value::Bool(declaration.network_allowed),
+            text_array(declaration.capability_ids),
+        ]),
+        Value::Array(
+            declaration
+                .deterministic_budgets
+                .into_iter()
+                .map(|limit| Value::Integer(limit.into()))
+                .collect(),
+        ),
+        text_array(declaration.allowed_operational_differences),
+        Value::Array(vec![
+            Value::Text(declaration.minimum_evaluator_version.to_owned()),
+            Value::Text(declaration.maximum_evaluator_version.to_owned()),
+        ]),
         Value::Null,
     ];
     encode(&Value::Array(fields.clone())).and_then(|unsigned| {
@@ -102,6 +117,15 @@ pub fn draft_execution_profile_bytes_v1(
         ));
         encode(&Value::Array(signed_fields))
     })
+}
+
+fn text_array(values: &[&str]) -> Value {
+    Value::Array(
+        values
+            .iter()
+            .map(|value| Value::Text((*value).to_owned()))
+            .collect(),
+    )
 }
 
 /// Build the canonical current TPS1 artifact for the repository Draft authority.
@@ -116,11 +140,25 @@ pub fn draft_trust_policy_snapshot_bytes_v1() -> Result<Vec<u8>, BundleContractE
         Value::Text(DRAFT_AUTHORITY_TRUST_POLICY_ID.to_owned()),
         Value::Integer(DRAFT_AUTHORITY_TRUST_POLICY_EPOCH.into()),
         Value::Integer(DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION.into()),
-        Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
-        Value::Bytes(crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES.to_vec()),
+        Value::Array(vec![Value::Array(vec![
+            Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
+            Value::Integer(DRAFT_AUTHORITY_ROOT_VERSION.into()),
+            Value::Text(DRAFT_AUTHORITY_ROOT_ALGORITHM.to_owned()),
+            Value::Bytes(crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES.to_vec()),
+        ])]),
         Value::Array(Vec::new()),
         Value::Array(Vec::new()),
-        Value::Array(Vec::new()),
+        Value::Array(
+            DRAFT_AUTHORITY_MINIMUM_VERSIONS
+                .iter()
+                .map(|(kind, version)| {
+                    Value::Array(vec![
+                        Value::Text((*kind).to_owned()),
+                        Value::Text((*version).to_owned()),
+                    ])
+                })
+                .collect(),
+        ),
         Value::Text(DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH.to_owned()),
         Value::Null,
     ];
@@ -528,7 +566,15 @@ impl ConformanceBundleV1 {
     ///
     /// Returns a closed bundle error when validation or canonical encoding fails.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, BundleContractErrorV1> {
-        self.validate().and_then(|()| encode(&archive_value(self)))
+        self.validate()
+            .and_then(|()| encode(&archive_value(self)))
+            .and_then(|bytes| {
+                if bytes.len() <= MAX_CONFORMANCE_BUNDLE_LEN_V1 {
+                    Ok(bytes)
+                } else {
+                    Err(BundleContractErrorV1::MemberOutOfBounds)
+                }
+            })
     }
     /// Compute the BLAKE3 digest of the complete canonical archive bytes.
     ///
@@ -583,7 +629,10 @@ impl ConformanceBundleV1 {
                         if profile.profile_digest != self.manifest.profile_digest {
                             return Err(BundleContractErrorV1::ProfileInvalid);
                         }
-                        validate_member_descriptors(&self.members, &self.manifest.members)
+                        validate_selected_archive_caps(&profile, &self.members)
+                            .and_then(|()| {
+                                validate_member_descriptors(&self.members, &self.manifest.members)
+                            })
                             .and_then(|()| {
                                 validate_profile_support_members(&profile, &self.members).and_then(
                                     |()| {
@@ -614,6 +663,29 @@ impl ConformanceBundleV1 {
                     })
             },
         )
+    }
+}
+
+fn validate_selected_archive_caps(
+    profile: &ConformanceProfileV1,
+    members: &[BundleMemberV1],
+) -> Result<(), BundleContractErrorV1> {
+    let caps = &profile.evaluator_protocol.hard_caps;
+    if members.len() > usize::try_from(caps.max_bundle_members).unwrap_or(usize::MAX)
+        || members.iter().any(|member| {
+            member.path.len() > usize::from(caps.max_member_path_bytes)
+                || u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) > caps.max_member_bytes
+        })
+    {
+        return Err(BundleContractErrorV1::MemberOutOfBounds);
+    }
+    let total_bytes = members.iter().try_fold(0_u64, |total, member| {
+        total.checked_add(u64::try_from(member.bytes.len()).unwrap_or(u64::MAX))
+    });
+    if total_bytes.is_none_or(|total| total > caps.max_total_bundle_bytes) {
+        Err(BundleContractErrorV1::MemberOutOfBounds)
+    } else {
+        Ok(())
     }
 }
 
@@ -836,7 +908,7 @@ fn validate_execution_profile_member(
     member: &BundleMemberV1,
 ) -> Result<String, BundleContractErrorV1> {
     decode(&member.bytes).and_then(|value| {
-        array(&value, 15)
+        array(&value, 17)
             .and_then(|fields| validate_execution_profile_fields(member.path.as_str(), fields))
     })
 }
@@ -845,69 +917,24 @@ fn validate_execution_profile_fields(
     path: &str,
     fields: &[Value],
 ) -> Result<String, BundleContractErrorV1> {
-    let decoded = (
-        text(&fields[0]),
-        uint(&fields[1]),
-        text(&fields[2]),
-        text(&fields[3]),
-        text(&fields[7]),
-        text(&fields[8]),
-        text(&fields[9]),
-        text(&fields[10]),
-        text(&fields[11]),
-        digest::<32>(&fields[14]),
-    );
-    match decoded {
-        (
-            Ok(magic),
-            Ok(version),
-            Ok(profile_id),
-            Ok(semantic_version),
-            Ok(scheduler),
-            Ok(numeric),
-            Ok(schema),
-            Ok(artifact),
-            Ok(budget),
-            Ok(profile_digest),
-        ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
-            let declaration = DRAFT_EXECUTION_PROFILES
-                .iter()
-                .find(|candidate| candidate.profile_id == profile_id)
-                .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-            let classes = declaration
-                .reproducibility_classes
-                .iter()
-                .copied()
-                .map(|code| Value::Integer(code.into()))
-                .collect::<Vec<_>>();
-            if magic == "EPF1"
-                && version == 1
-                && path == format!("authority/execution-profiles/{profile_id}.epf1")
-                && semantic_version == declaration.semantic_version
-                && fields[4] == Value::Array(classes)
-                && fields[5] == Value::Bool(declaration.network_allowed)
-                && fields[6] == Value::Array(Vec::new())
-                && scheduler == declaration.scheduler_id
-                && numeric == declaration.numeric_policy_id
-                && schema == declaration.schema_policy_id
-                && artifact == declaration.artifact_policy_id
-                && budget == declaration.budget_policy_id
-                && fields[12] == Value::Array(Vec::new())
-                && fields[13] == Value::Null
-                && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
-            {
-                Ok(profile_id.to_owned())
-            } else {
-                Err(BundleContractErrorV1::ProfileInvalid)
-            }
-        }),
+    match (text(&fields[0]), uint(&fields[1]), text(&fields[2])) {
+        (Ok("EPF1"), Ok(1), Ok(profile_id)) => draft_execution_profile_bytes_v1(profile_id)
+            .and_then(|expected| {
+                if path == format!("authority/execution-profiles/{profile_id}.epf1")
+                    && encode(&Value::Array(fields.to_vec())).is_ok_and(|bytes| bytes == expected)
+                {
+                    Ok(profile_id.to_owned())
+                } else {
+                    Err(BundleContractErrorV1::ProfileInvalid)
+                }
+            }),
         _ => Err(BundleContractErrorV1::ProfileInvalid),
     }
 }
 
 fn validate_trust_policy_snapshot(member: &BundleMemberV1) -> Result<(), BundleContractErrorV1> {
     decode(&member.bytes)
-        .and_then(|value| array(&value, 13).and_then(validate_trust_policy_snapshot_fields))
+        .and_then(|value| array(&value, 12).and_then(validate_trust_policy_snapshot_fields))
 }
 
 fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
@@ -917,10 +944,8 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
         text(&fields[2]),
         uint(&fields[3]),
         uint(&fields[4]),
-        text(&fields[5]),
-        digest::<32>(&fields[6]),
-        text(&fields[10]),
-        digest::<64>(&fields[12]),
+        text(&fields[9]),
+        digest::<64>(&fields[11]),
     ) {
         (
             Ok(magic),
@@ -928,12 +953,9 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
             Ok(policy_id),
             Ok(epoch),
             Ok(position),
-            Ok(key_id),
-            Ok(key),
             Ok(expiry),
             Ok(signature),
-        ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
-            let approved_key = crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES;
+        ) => encode(&Value::Array(fields[..11].to_vec())).and_then(|unsigned| {
             draft_authority_verifying_key()
                 .and_then(|verifying_key| {
                     verifying_key
@@ -946,13 +968,29 @@ fn validate_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleC
                         && policy_id == DRAFT_AUTHORITY_TRUST_POLICY_ID
                         && epoch == DRAFT_AUTHORITY_TRUST_POLICY_EPOCH
                         && position == DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION
-                        && key_id == DRAFT_AUTHORITY_KEY_ID
-                        && key == approved_key
+                        && fields[5]
+                            == Value::Array(vec![Value::Array(vec![
+                                Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
+                                Value::Integer(DRAFT_AUTHORITY_ROOT_VERSION.into()),
+                                Value::Text(DRAFT_AUTHORITY_ROOT_ALGORITHM.to_owned()),
+                                Value::Bytes(crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES.to_vec()),
+                            ])])
+                        && fields[6] == Value::Array(Vec::new())
                         && fields[7] == Value::Array(Vec::new())
-                        && fields[8] == Value::Array(Vec::new())
-                        && fields[9] == Value::Array(Vec::new())
+                        && fields[8]
+                            == Value::Array(
+                                DRAFT_AUTHORITY_MINIMUM_VERSIONS
+                                    .iter()
+                                    .map(|(kind, version)| {
+                                        Value::Array(vec![
+                                            Value::Text((*kind).to_owned()),
+                                            Value::Text((*version).to_owned()),
+                                        ])
+                                    })
+                                    .collect(),
+                            )
                         && expiry == DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH
-                        && fields[11] == Value::Null
+                        && fields[10] == Value::Null
                     {
                         Ok(())
                     } else {

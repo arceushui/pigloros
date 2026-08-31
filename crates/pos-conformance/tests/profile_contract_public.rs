@@ -1686,6 +1686,19 @@ fn public_profile_requires_all_seven_families_for_each_provider() {
 }
 
 #[test]
+fn public_profile_rejects_ambiguous_expected_result_identity() {
+    let mut profile = knowledge_non_interference_profile();
+    profile.fixtures[1].case_id = profile.fixtures[0].case_id.clone();
+    profile.fixtures[1].fixture_digest = profile.fixtures[1].digest();
+    profile.profile_digest = profile.digest();
+
+    assert_eq!(
+        profile.validate(),
+        Err(ConformanceContractError::NonCanonicalOrder)
+    );
+}
+
+#[test]
 fn public_profile_matrix_binding_is_explicit_and_fail_closed(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let profile = knowledge_non_interference_profile();

@@ -1042,6 +1042,88 @@ fn signed_current_bundle(mode: BundleModeV1) -> TestResult<ConformanceBundleV1> 
 }
 
 #[test]
+fn public_authority_records_bind_complete_execution_and_trust_policy_shapes() -> TestResult {
+    let execution: Value =
+        ciborium::from_reader(execution_profile_bytes("deterministic-local-v1")?.as_slice())?;
+    let Value::Array(execution_fields) = execution else {
+        return Err("EPF1 must be an array".into());
+    };
+    assert_eq!(execution_fields.len(), 17);
+    for field in [5_usize, 6, 7, 9, 10, 13] {
+        assert!(
+            matches!(execution_fields.get(field), Some(Value::Array(values)) if !values.is_empty())
+        );
+    }
+    assert!(matches!(execution_fields.get(12), Some(Value::Array(values)) if values.len() == 8));
+
+    let snapshot: Value = ciborium::from_reader(trust_policy_snapshot_bytes()?.as_slice())?;
+    let Value::Array(snapshot_fields) = snapshot else {
+        return Err("TPS1 must be an array".into());
+    };
+    assert_eq!(snapshot_fields.len(), 12);
+    assert!(matches!(snapshot_fields.get(5), Some(Value::Array(roots))
+        if matches!(roots.as_slice(), [Value::Array(root)] if root.len() == 4)));
+    assert!(matches!(snapshot_fields.get(8), Some(Value::Array(versions)) if !versions.is_empty()));
+    Ok(())
+}
+
+#[test]
+fn public_bundle_applies_selected_member_caps_to_support_closure() -> TestResult {
+    let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+    let mut declared_paths = std::collections::BTreeSet::new();
+    declared_paths.insert(
+        inputs
+            .profile
+            .fixture_provider_registry
+            .registry_artifact
+            .member_path
+            .clone(),
+    );
+    for fixture in &inputs.profile.fixtures {
+        declared_paths.insert(fixture.schema.member_path.clone());
+        declared_paths.insert(fixture.payload.member_path.clone());
+        declared_paths.extend(
+            fixture
+                .auxiliary
+                .iter()
+                .map(|artifact| artifact.member_path.clone()),
+        );
+        if let Some(output) = &fixture.strict_oracle.output {
+            declared_paths.insert(output.member_path.clone());
+        }
+    }
+    let selected_max = inputs
+        .members
+        .iter()
+        .filter(|member| declared_paths.contains(&member.path))
+        .map(|member| member.bytes.len())
+        .max()
+        .ok_or("selected archive closure is empty")?;
+    let support_max = inputs
+        .members
+        .iter()
+        .filter(|member| !declared_paths.contains(&member.path))
+        .map(|member| member.bytes.len())
+        .max()
+        .ok_or("support archive closure is empty")?;
+    assert!(support_max > selected_max);
+    inputs.profile.evaluator_protocol.hard_caps.max_member_bytes = u64::try_from(selected_max)?;
+    inputs.profile.profile_digest = inputs.profile.digest();
+
+    assert_eq!(
+        ConformanceBundleV1::materialize(
+            &inputs.profile,
+            BundleModeV1::Local,
+            inputs.members,
+            inputs.expected,
+        )
+        .err(),
+        Some(BundleContractErrorV1::MemberOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
 fn bundle_rejects_tampered_execution_authority_artifacts() -> TestResult {
     for role in [
         BundleMemberRoleV1::ExecutionProfile,

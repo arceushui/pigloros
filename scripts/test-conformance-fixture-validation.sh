@@ -51,6 +51,13 @@ expect_adapter_rejection() {
   }
 }
 
+expect_adapter_acceptance() {
+  local fixture_root="$1"
+  bash scripts/generate-conformance-fixture-records.sh "${fixture_root}" --write
+  bash scripts/generate-conformance-fixture-records.sh "${fixture_root}" --check
+  bash scripts/verify-conformance-fixtures.sh "${fixture_root}"
+}
+
 profile="${source_root}/profiles/artifact-integrity/profile.json"
 positive_input="$(jq -r '.fixtures[] | select(.family == "positive") | .input' "${profile}")"
 malformed_input="$(jq -r '.fixtures[] | select(.family == "malformed") | .input' "${profile}")"
@@ -86,6 +93,17 @@ replace_json "${unknown_adapter_root}/providers/artifact-integrity/provider.json
   '.fixture_adapter.id = "future-plugin-v1"'
 expect_adapter_rejection "${unknown_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
 expect_rejection "${unknown_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
+
+opaque_adapter_root="$(new_fixture_copy opaque-provider-adapter)"
+replace_json "${opaque_adapter_root}/providers/artifact-integrity/provider.json" '
+  .fixture_adapter.id = "opaque-provider-v1" |
+  .artifact_media_types = {
+    schema: "application/octet-stream",
+    payload: "application/octet-stream",
+    oracle: "application/octet-stream",
+    evidence_status: "application/octet-stream"
+  }'
+expect_adapter_acceptance "${opaque_adapter_root}"
 
 unknown_adapter_config_root="$(new_fixture_copy unknown-adapter-config-field)"
 replace_json "${unknown_adapter_config_root}/providers/artifact-integrity/provider.json" \

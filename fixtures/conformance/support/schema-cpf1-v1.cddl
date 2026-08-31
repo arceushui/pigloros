@@ -100,22 +100,29 @@ execution-profile = [
   magic: "EPF1", version: 1, profile-id: identifier,
   semantic-version: tstr .size (1..64),
   reproducibility-classes: [1* 0..3],
-  network-allowed: bool, capability-ids: [* identifier],
-  scheduler-policy: identifier, numeric-policy: identifier,
-  schema-policy: identifier, artifact-policy: identifier,
-  deterministic-budget-policy: identifier,
+  architecture-rules: [1* identifier], numeric-rules: [1* identifier],
+  scheduler-driver-order: [1*256 identifier], tick-policy: identifier,
+  schemas-and-upcasters: [1*256 identifier], artifact-rules: [1* identifier],
+  capabilities-and-network: [network-allowed: bool, capability-ids: [* identifier]],
+  deterministic-budgets: [uint .gt 0, uint .gt 0, uint .gt 0, uint .gt 0,
+                          uint .gt 0, uint .gt 0, uint .gt 0, uint .gt 0],
   allowed-operational-differences: [* identifier],
+  compatibility: [minimum-evaluator-version: tstr .size (1..64),
+                  maximum-evaluator-version: tstr .size (1..64)],
   previous-profile-digest: null / digest, profile-digest: digest
 ]
 
 trust-policy-snapshot = [
   magic: "TPS1", version: 1, policy-id: identifier, epoch: uint .gt 0,
-  effective-timeline-position: uint, trust-root-key-id: identifier,
-  trust-root-public-key: bstr .size 32, revoked-key-digests: [* digest],
-  revoked-artifact-digests: [* digest], minimum-versions: [* identifier],
+  effective-timeline-position: uint, trust-roots: [1*64 trust-root],
+  revoked-key-ids: [*4096 identifier], revoked-artifact-digests: [*4096 digest],
+  minimum-versions: [*256 minimum-version],
   offline-valid-through: tstr .size (1..64), previous-digest: null / digest,
   signature: bstr .size 64
 ]
+trust-root = [key-id: identifier, root-version: uint .gt 0,
+              algorithm: "Ed25519", public-key: bstr .size 32]
+minimum-version = [artifact-kind: identifier, semantic-version: tstr .size (1..64)]
 
 release-admission = [
   magic: "RAD1", version: 1, lifecycle: 0, case-id: identifier,

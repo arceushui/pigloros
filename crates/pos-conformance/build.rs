@@ -153,7 +153,7 @@ struct ProviderArtifactMediaTypes {
 #[serde(deny_unknown_fields)]
 struct ProviderFixtureAdapter {
     id: String,
-    config: JsonFixtureAdapterConfig,
+    config: Value,
 }
 
 #[derive(serde::Deserialize)]
@@ -405,7 +405,28 @@ struct DraftAuthorityDeclaration {
     offline_valid_through: String,
     fixture_authority_key_id: String,
     fixture_authority_public_key_hex: String,
+    trust_roots: Vec<DraftTrustRoot>,
+    revoked_key_ids: Vec<String>,
+    revoked_artifact_digests: Vec<String>,
+    minimum_versions: Vec<DraftMinimumVersion>,
+    previous_trust_policy_snapshot_digest: Option<String>,
     execution_profiles: Vec<DraftExecutionProfile>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftTrustRoot {
+    key_id: String,
+    root_version: u64,
+    algorithm: String,
+    public_key_hex: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftMinimumVersion {
+    artifact_kind: String,
+    semantic_version: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -416,11 +437,17 @@ struct DraftExecutionProfile {
     network_allowed: bool,
     capability_ids: Vec<String>,
     reproducibility_classes: Vec<DraftReproducibilityClass>,
-    scheduler_id: String,
-    numeric_policy_id: String,
-    schema_policy_id: String,
-    artifact_policy_id: String,
-    budget_policy_id: String,
+    architecture_rules: Vec<String>,
+    numeric_rules: Vec<String>,
+    scheduler_driver_order: Vec<String>,
+    tick_policy: String,
+    schemas_and_upcasters: Vec<String>,
+    artifact_rules: Vec<String>,
+    deterministic_budgets: [u64; 8],
+    allowed_operational_differences: Vec<String>,
+    minimum_evaluator_version: String,
+    maximum_evaluator_version: String,
+    previous_profile_digest: Option<String>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, serde::Deserialize)]
@@ -970,42 +997,43 @@ fn validate_fixture_provider(
     let family_names = schemas
         .map(|schemas| schemas.keys().cloned().collect::<BTreeSet<_>>())
         .unwrap_or_default();
-    let operation_families = fixture_adapter
-        .config
-        .operations
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let payload_families = fixture_adapter
-        .config
-        .payloads
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let adapter_config_is_valid = fixture_adapter.id == JSON_FIXTURE_ADAPTER_ID
-        && operation_families == family_names
-        && payload_families == family_names
-        && fixture_adapter
-            .config
-            .operations
-            .values()
-            .all(|operation| operation.as_ref().is_none_or(|value| !value.is_empty()))
-        && fixture_adapter.config.payloads.values().all(|payload| {
-            payload.with_operation.is_object()
-                && payload
-                    .without_operation
-                    .as_ref()
-                    .is_none_or(Value::is_object)
-        });
+    let adapter_config_is_valid = if fixture_adapter.id == JSON_FIXTURE_ADAPTER_ID {
+        serde_json::from_value::<JsonFixtureAdapterConfig>(fixture_adapter.config.clone())
+            .is_ok_and(|config| {
+                config.operations.keys().collect::<BTreeSet<_>>()
+                    == family_names.iter().collect::<BTreeSet<_>>()
+                    && config.payloads.keys().collect::<BTreeSet<_>>()
+                        == family_names.iter().collect::<BTreeSet<_>>()
+                    && config
+                        .operations
+                        .values()
+                        .all(|operation| operation.as_ref().is_none_or(|value| !value.is_empty()))
+                    && config.payloads.values().all(|payload| {
+                        payload.with_operation.is_object()
+                            && payload
+                                .without_operation
+                                .as_ref()
+                                .is_none_or(Value::is_object)
+                    })
+            })
+    } else {
+        rust_enum_variant(
+            "FixtureAdapter",
+            &fixture_adapter.id,
+            "provider fixture adapter id",
+        )
+        .is_ok()
+            && fixture_adapter.config.is_object()
+    };
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
         && u16::try_from(json_u64(provider, "abi_minor")?).is_ok_and(|minor| minor < u16::MAX)
         && !json_text(provider, "package_path")?.is_empty()
-        && media_types.schema == "application/schema+json"
-        && media_types.payload == "application/json"
-        && media_types.oracle == "application/json"
-        && media_types.evidence_status == "application/json"
+        && valid_media_type(&media_types.schema)
+        && valid_media_type(&media_types.payload)
+        && valid_media_type(&media_types.oracle)
+        && valid_media_type(&media_types.evidence_status)
         && adapter_config_is_valid
         && support_paths.iter().all(|path| !path.is_empty())
         && support_paths.into_iter().collect::<BTreeSet<_>>().len() == 5
@@ -1885,11 +1913,17 @@ fn draft_authority(
                 && !profile.semantic_version.is_empty()
                 && !profile.network_allowed
                 && profile.capability_ids.is_empty()
-                && !profile.scheduler_id.is_empty()
-                && !profile.numeric_policy_id.is_empty()
-                && !profile.schema_policy_id.is_empty()
-                && !profile.artifact_policy_id.is_empty()
-                && !profile.budget_policy_id.is_empty()
+                && !profile.architecture_rules.is_empty()
+                && !profile.numeric_rules.is_empty()
+                && !profile.scheduler_driver_order.is_empty()
+                && !profile.tick_policy.is_empty()
+                && !profile.schemas_and_upcasters.is_empty()
+                && !profile.artifact_rules.is_empty()
+                && profile.deterministic_budgets.iter().all(|limit| *limit > 0)
+                && profile.allowed_operational_differences.len() <= 64
+                && !profile.minimum_evaluator_version.is_empty()
+                && !profile.maximum_evaluator_version.is_empty()
+                && profile.previous_profile_digest.is_none()
                 && profile.reproducibility_classes
                     == [
                         DraftReproducibilityClass::ProfileRecomputation,
@@ -1905,6 +1939,19 @@ fn draft_authority(
         || declaration.effective_timeline_position != 0
         || declaration.offline_valid_through.is_empty()
         || declaration.fixture_authority_key_id.is_empty()
+        || declaration.trust_roots.len() != 1
+        || declaration.trust_roots[0].key_id != declaration.fixture_authority_key_id
+        || declaration.trust_roots[0].root_version == 0
+        || declaration.trust_roots[0].algorithm != "Ed25519"
+        || declaration.trust_roots[0].public_key_hex != declaration.fixture_authority_public_key_hex
+        || !declaration.revoked_key_ids.is_empty()
+        || !declaration.revoked_artifact_digests.is_empty()
+        || declaration.minimum_versions.is_empty()
+        || declaration
+            .minimum_versions
+            .iter()
+            .any(|minimum| minimum.artifact_kind.is_empty() || minimum.semantic_version.is_empty())
+        || declaration.previous_trust_policy_snapshot_digest.is_some()
         || !profiles_are_valid
     {
         return Err(invalid_data("Draft authority declaration is inconsistent"));
@@ -1952,12 +1999,18 @@ fn emit_draft_authority(
                  profile_id: &'static str,\n\
                  semantic_version: &'static str,\n\
                  network_allowed: bool,\n\
+                 capability_ids: &'static [&'static str],\n\
                  reproducibility_classes: &'static [u64],\n\
-                 scheduler_id: &'static str,\n\
-                 numeric_policy_id: &'static str,\n\
-                 schema_policy_id: &'static str,\n\
-                 artifact_policy_id: &'static str,\n\
-                 budget_policy_id: &'static str,\n\
+                 architecture_rules: &'static [&'static str],\n\
+                 numeric_rules: &'static [&'static str],\n\
+                 scheduler_driver_order: &'static [&'static str],\n\
+                 tick_policy: &'static str,\n\
+                 schemas_and_upcasters: &'static [&'static str],\n\
+                 artifact_rules: &'static [&'static str],\n\
+                 deterministic_budgets: [u64; 8],\n\
+                 allowed_operational_differences: &'static [&'static str],\n\
+                 minimum_evaluator_version: &'static str,\n\
+                 maximum_evaluator_version: &'static str,\n\
              }\n",
         );
     } else {
@@ -1989,21 +2042,54 @@ fn emit_draft_authority(
             .map(|code| code.to_string())
             .collect::<Vec<_>>()
             .join(", ");
+        let strings = |values: &[String]| {
+            values
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         writeln!(
             generated,
-            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, reproducibility_classes: &[{}], scheduler_id: {:?}, numeric_policy_id: {:?}, schema_policy_id: {:?}, artifact_policy_id: {:?}, budget_policy_id: {:?} }},",
+            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: {:?}, allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},",
             profile.profile_id,
             profile.semantic_version,
             profile.network_allowed,
+            strings(&profile.capability_ids),
             classes,
-            profile.scheduler_id,
-            profile.numeric_policy_id,
-            profile.schema_policy_id,
-            profile.artifact_policy_id,
-            profile.budget_policy_id,
+            strings(&profile.architecture_rules),
+            strings(&profile.numeric_rules),
+            strings(&profile.scheduler_driver_order),
+            profile.tick_policy,
+            strings(&profile.schemas_and_upcasters),
+            strings(&profile.artifact_rules),
+            profile.deterministic_budgets,
+            strings(&profile.allowed_operational_differences),
+            profile.minimum_evaluator_version,
+            profile.maximum_evaluator_version,
         )?;
     }
     generated.push_str("];\n");
+    if include_policy_constants {
+        let root = &declaration.trust_roots[0];
+        writeln!(
+            generated,
+            "const DRAFT_AUTHORITY_ROOT_VERSION: u64 = {};\nconst DRAFT_AUTHORITY_ROOT_ALGORITHM: &str = {:?};",
+            root.root_version, root.algorithm
+        )?;
+        writeln!(
+            generated,
+            "const DRAFT_AUTHORITY_MINIMUM_VERSIONS: &[(&str, &str)] = &["
+        )?;
+        for minimum in &declaration.minimum_versions {
+            writeln!(
+                generated,
+                "    ({:?}, {:?}),",
+                minimum.artifact_kind, minimum.semantic_version
+            )?;
+        }
+        generated.push_str("];\n");
+    }
     Ok(generated)
 }
 

@@ -125,6 +125,8 @@ jobs:
           if-no-files-found: ignore
 
   mutation-gate:
+    # Branch protection requires this fan-in together with `ci-gate`; shards
+    # and the baseline must never be configured as independent merge approvals.
     name: diff mutation testing
     if: always()
     needs: [mutation-baseline, mutation]

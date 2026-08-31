@@ -7,8 +7,8 @@ family_contract="${fixture_root}/support/fixture-family-contract.json"
 mode="${2:---check}"
 
 # This command dispatches every provider through its explicitly declared fixture
-# adapter. The current tree supports only the JSON adapter; unknown adapters
-# fail closed until they have their own regeneration implementation.
+# adapter. Adapter implementations are reviewed executable contracts under
+# scripts/conformance-fixture-adapters; undeclared adapters fail closed.
 [[ "${mode}" == "--check" || "${mode}" == "--write" ]] || {
   echo "usage: $0 [fixture-root] [--check|--write]" >&2
   exit 1
@@ -89,11 +89,22 @@ while IFS= read -r -d '' provider_manifest; do
     echo "provider fixture adapter declaration is missing or invalid: ${provider_manifest#"${fixture_root}/"}" >&2
     exit 1
   }
+  [[ "${adapter_id}" =~ ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$ && ${#adapter_id} -le 64 ]] || {
+    echo "provider fixture adapter id must be lowercase kebab-case: ${adapter_id}" >&2
+    exit 1
+  }
   case "${adapter_id}" in
     pigloros-json-v1) validate_json_fixture_adapter "${provider_manifest}" ;;
     *)
-      echo "unsupported provider fixture adapter: ${adapter_id}" >&2
-      exit 1
+      adapter="scripts/conformance-fixture-adapters/${adapter_id}.sh"
+      [[ -f "${adapter}" ]] || {
+        echo "unsupported provider fixture adapter: ${adapter_id}" >&2
+        exit 1
+      }
+      bash "${adapter}" validate "${provider_manifest}" "${family_contract}" || {
+        echo "invalid ${adapter_id} fixture adapter declaration: ${provider_manifest#"${fixture_root}/"}" >&2
+        exit 1
+      }
       ;;
   esac
 done < <(find "${fixture_root}/providers" -mindepth 2 -maxdepth 2 -type f -name provider.json -print0 | sort -z)
@@ -104,7 +115,7 @@ trap 'rm -rf "${generated_root}"' EXIT
 generated_count=0
 declare -A seen_expected_paths=()
 
-while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor schema_media_type payload_media_type oracle_media_type evidence_status_media_type encoded_payload operation; do
+while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor schema_media_type payload_media_type oracle_media_type evidence_status_media_type provider_relative adapter_id encoded_payload operation; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
@@ -181,6 +192,33 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
   mkdir -p "$(dirname "${generated_input}")"
   generated_oracle="${generated_root}/${oracle_path}"
   mkdir -p "$(dirname "${generated_oracle}")"
+  provider_manifest="${fixture_root}/${provider_relative}"
+  if [[ "${adapter_id}" != "pigloros-json-v1" ]]; then
+    adapter="scripts/conformance-fixture-adapters/${adapter_id}.sh"
+    bash "${adapter}" render "${provider_manifest}" "${family_contract}" \
+      "${case_id}" "${claim_layer}" "${family}" "${subject_adapter}" \
+      "${generated_input}" "${generated_oracle}" "${generated_file}"
+    if [[ "${mode}" == "--write" ]]; then
+      install -m 0644 -- "${generated_input}" "${input_file}"
+      install -m 0644 -- "${generated_file}" "${expected_file}"
+      install -m 0644 -- "${generated_oracle}" "${oracle_file}"
+    else
+      cmp -- "${generated_input}" "${input_file}" || {
+        echo "input fixture is not independently reproducible: ${case_id}" >&2
+        exit 1
+      }
+      cmp -- "${generated_file}" "${expected_file}" || {
+        echo "expected fixture record is not independently reproducible: ${case_id}" >&2
+        exit 1
+      }
+      cmp -- "${generated_oracle}" "${oracle_file}" || {
+        echo "oracle fixture is not independently reproducible: ${case_id}" >&2
+        exit 1
+      }
+    fi
+    generated_count=$((generated_count + 1))
+    continue
+  fi
   family_metadata="$(jq -ce --arg family "${family}" '.families[] | select(.name == $family)' "${family_contract}")" || {
     echo "profile declares an unknown fixture family: ${case_id}" >&2
     exit 1
@@ -340,6 +378,7 @@ done < <(
       provider_manifest="${fixture_root}/${provider_relative}"
       jq -r \
         --argjson owned_case_ids "${owned_case_ids}" \
+        --arg provider_relative "${provider_relative}" \
         --slurpfile provider "${provider_manifest}" '
         $provider[0] as $provider |
         .fixtures[] |
@@ -353,6 +392,8 @@ done < <(
           $provider.artifact_media_types.payload,
           $provider.artifact_media_types.oracle,
           $provider.artifact_media_types.evidence_status,
+          $provider_relative,
+          $provider.fixture_adapter.id,
           ($provider.fixture_adapter.config.payloads[.family] | @base64),
           ($provider.fixture_adapter.config.operations[.family] // "")
         ] | @tsv

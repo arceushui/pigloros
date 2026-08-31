@@ -86,11 +86,22 @@ validate_fixture_adapter() {
     echo "provider fixture adapter declaration is missing or invalid: ${provider_manifest#"${fixture_root}/"}" >&2
     return 1
   }
+  [[ "${adapter_id}" =~ ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$ && ${#adapter_id} -le 64 ]] || {
+    echo "provider fixture adapter id must be lowercase kebab-case: ${adapter_id}" >&2
+    return 1
+  }
   case "${adapter_id}" in
     pigloros-json-v1) validate_json_fixture_adapter "${provider_manifest}" ;;
     *)
-      echo "unsupported provider fixture adapter: ${adapter_id}" >&2
-      return 1
+      adapter="scripts/conformance-fixture-adapters/${adapter_id}.sh"
+      [[ -f "${adapter}" ]] || {
+        echo "unsupported provider fixture adapter: ${adapter_id}" >&2
+        return 1
+      }
+      bash "${adapter}" validate "${provider_manifest}" "${family_contract}" || {
+        echo "invalid ${adapter_id} fixture adapter declaration: ${provider_manifest#"${fixture_root}/"}" >&2
+        return 1
+      }
       ;;
   esac
 }
@@ -201,13 +212,17 @@ jq -e '
   (keys | sort) == ([
     "authority_kind", "effective_timeline_position", "execution_profiles",
     "fixture_authority_key_id", "fixture_authority_public_key_hex", "lifecycle",
-    "magic", "offline_valid_through", "trust_policy_epoch", "trust_policy_id", "version"
+    "magic", "minimum_versions", "offline_valid_through",
+    "previous_trust_policy_snapshot_digest", "revoked_artifact_digests",
+    "revoked_key_ids", "trust_policy_epoch", "trust_policy_id", "trust_roots", "version"
   ] | sort) and
   all(.execution_profiles[];
     (keys | sort) == ([
-      "capability_ids", "network_allowed", "profile_id", "reproducibility_classes",
-      "semantic_version", "scheduler_id", "numeric_policy_id", "schema_policy_id",
-      "artifact_policy_id", "budget_policy_id"
+      "allowed_operational_differences", "architecture_rules", "artifact_rules",
+      "capability_ids", "deterministic_budgets", "maximum_evaluator_version",
+      "minimum_evaluator_version", "network_allowed", "numeric_rules",
+      "previous_profile_digest", "profile_id", "reproducibility_classes",
+      "scheduler_driver_order", "schemas_and_upcasters", "semantic_version", "tick_policy"
     ] | sort))
 ' "${draft_authority_path}" >/dev/null || {
   echo "invalid Draft authority declaration fields" >&2
@@ -340,7 +355,7 @@ for layer in "${profile_layers[@]}"; do
      (.subject_adapter | type == "string" and length > 0) and
      (.fixture_adapter | keys | sort) == (["config", "id"] | sort) and
      (.fixture_adapter.id | type == "string" and length > 0 and length <= 64 and
-       test("^[a-z0-9][a-z0-9.-]*$")) and
+       test("^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$")) and
      (.fixture_adapter.config | type == "object") and
      (.schemas | length == $family_count) and
      (.fixture_contracts | keys | sort) == ($family_names | sort) and
@@ -633,16 +648,26 @@ jq -e '
   (.effective_timeline_position | type == "number" and . >= 0 and floor == .) and
   (.fixture_authority_key_id | type == "string" and length > 0) and
   (.fixture_authority_public_key_hex | test("^[0-9a-f]{64}$")) and
+  (.trust_roots | length == 1) and
+  .trust_roots[0].key_id == .fixture_authority_key_id and
+  .trust_roots[0].root_version == 1 and .trust_roots[0].algorithm == "Ed25519" and
+  .trust_roots[0].public_key_hex == .fixture_authority_public_key_hex and
+  .revoked_key_ids == [] and .revoked_artifact_digests == [] and
+  (.minimum_versions | length > 0) and
+  all(.minimum_versions[]; (.artifact_kind | length > 0) and (.semantic_version | length > 0)) and
+  .previous_trust_policy_snapshot_digest == null and
   (.execution_profiles | length == 2) and
   ([.execution_profiles[].profile_id] | sort == ["deterministic-air-gapped-v1", "deterministic-local-v1"]) and
   all(.execution_profiles[];
     .semantic_version == "1.0.0" and .network_allowed == false and
     .capability_ids == [] and
-    .scheduler_id == "fixture-scheduler-v1" and
-    .numeric_policy_id == "fixture-numeric-v1" and
-    .schema_policy_id == "fixture-schema-v1" and
-    .artifact_policy_id == "fixture-artifact-v1" and
-    .budget_policy_id == "fixture-budget-v1" and
+    (.architecture_rules | length > 0) and (.numeric_rules | length > 0) and
+    (.scheduler_driver_order | length > 0) and (.tick_policy | length > 0) and
+    (.schemas_and_upcasters | length > 0) and (.artifact_rules | length > 0) and
+    (.deterministic_budgets | length == 8) and all(.deterministic_budgets[]; . > 0) and
+    (.allowed_operational_differences | length <= 64) and
+    .minimum_evaluator_version == "1.0.0" and .maximum_evaluator_version == "1.0.0" and
+    .previous_profile_digest == null and
     .reproducibility_classes == ["ProfileRecomputation", "CrossProfileConformance"]
   )
 ' "${fixture_root}/support/draft-execution-authority.json" >/dev/null || {

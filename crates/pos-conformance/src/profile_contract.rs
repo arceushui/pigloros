@@ -762,6 +762,19 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
     {
         return Err(ConformanceContractError::NonCanonicalOrder);
     }
+    let mut expected_result_identities = BTreeSet::new();
+    for fixture in &profile.fixtures {
+        for mode in &fixture.modes {
+            if !expected_result_identities.insert((
+                fixture.case_id.as_str(),
+                fixture.claim_layer,
+                fixture.execution_profile_digest,
+                *mode,
+            )) {
+                return Err(ConformanceContractError::NonCanonicalOrder);
+            }
+        }
+    }
     validate_fixture_inventory(profile)?;
     profile.fixtures.iter().try_for_each(|fixture| {
         validate_fixture(fixture, profile)

@@ -9,10 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     array, array_values, bytes, decode, digest, digest_domain, draft_authority_verifying_key,
-    encode, text, uint, BundleContractErrorV1, AUTHORITY_INVENTORY_BYTES_V1,
-    AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH, CONFORMANCE_BUNDLE_MAGIC_V1,
-    DRAFT_AUTHORITY_DECLARATION_BYTES_V1, DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION,
-    DRAFT_AUTHORITY_KEY_ID, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
+    encode, text, uint, BundleContractErrorV1, DraftExecutionProfileSource,
+    AUTHORITY_INVENTORY_BYTES_V1, AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH,
+    CONFORMANCE_BUNDLE_MAGIC_V1, DRAFT_AUTHORITY_DECLARATION_BYTES_V1,
+    DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
+    DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
+    DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
     DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
     EVALUATOR_PROTOCOL_BYTES, EVALUATOR_PROTOCOL_PATH, EVALUATOR_REPORT_SCHEMA_BYTES,
     EVALUATOR_REPORT_SCHEMA_PATH, EVALUATOR_REQUEST_SCHEMA_BYTES, EVALUATOR_REQUEST_SCHEMA_PATH,
@@ -511,23 +513,23 @@ fn raw_archive_profile(
                     raw_value_depth(&profile),
                 )
                 .and_then(|raw_profile| {
-                    if profile_fields[4] != manifest[1] {
-                        return Err(BundleContractErrorV1::LifecycleInvalid);
-                    }
-                    raw_profile_digest(manifest, profile_fields).and_then(|profile_digest| {
-                        raw_profile_support_members(&raw_profile, members).and_then(|()| {
-                            raw_execution_authority_members(&raw_profile, members, mode).and_then(
-                                |authority_paths| {
-                                    raw_registry_and_packages(&raw_profile, members, mode).and_then(
-                                        |registry| {
-                                            raw_expected_results(
-                                                &manifest[5],
-                                                &raw_profile,
-                                                members,
-                                                mode,
-                                            )
-                                            .and_then(
-                                                |expected_results| {
+                    raw_archive_selected_caps(&raw_profile.selected_caps, members).and_then(|()| {
+                        if profile_fields[4] != manifest[1] {
+                            return Err(BundleContractErrorV1::LifecycleInvalid);
+                        }
+                        raw_profile_digest(manifest, profile_fields).and_then(|profile_digest| {
+                            raw_profile_support_members(&raw_profile, members).and_then(|()| {
+                                raw_execution_authority_members(&raw_profile, members, mode)
+                                    .and_then(|authority_paths| {
+                                        raw_registry_and_packages(&raw_profile, members, mode)
+                                            .and_then(|registry| {
+                                                raw_expected_results(
+                                                    &manifest[5],
+                                                    &raw_profile,
+                                                    members,
+                                                    mode,
+                                                )
+                                                .and_then(|expected_results| {
                                                     raw_member_closure(
                                                         &raw_profile.declared_paths,
                                                         &expected_results.member_paths,
@@ -545,12 +547,10 @@ fn raw_archive_profile(
                                                             .required_providers,
                                                         expected_results: expected_results.results,
                                                     })
-                                                },
-                                            )
-                                        },
-                                    )
-                                },
-                            )
+                                                })
+                                            })
+                                    })
+                            })
                         })
                     })
                 })
@@ -740,7 +740,7 @@ fn raw_execution_authority_members(
 
 fn raw_execution_profile(path: &str, bytes: &[u8]) -> Result<String, BundleContractErrorV1> {
     decode(bytes).and_then(|value| {
-        array(&value, 15).and_then(|fields| raw_execution_profile_fields(path, fields))
+        array(&value, 17).and_then(|fields| raw_execution_profile_fields(path, fields))
     })
 }
 
@@ -753,63 +753,106 @@ fn raw_execution_profile_fields(
         uint(&fields[1]),
         text(&fields[2]),
         text(&fields[3]),
-        text(&fields[7]),
-        text(&fields[8]),
-        text(&fields[9]),
-        text(&fields[10]),
-        text(&fields[11]),
-        digest::<32>(&fields[14]),
     );
     match decoded {
-        (
-            Ok(magic),
-            Ok(version),
-            Ok(profile_id),
-            Ok(semantic_version),
-            Ok(scheduler),
-            Ok(numeric),
-            Ok(schema),
-            Ok(artifact),
-            Ok(budget),
-            Ok(profile_digest),
-        ) => encode(&Value::Array(fields[..14].to_vec())).and_then(|unsigned| {
-            let declaration = DRAFT_EXECUTION_PROFILES
-                .iter()
-                .find(|candidate| candidate.profile_id == profile_id)
-                .ok_or(BundleContractErrorV1::ProfileInvalid)?;
-            let classes = declaration
-                .reproducibility_classes
-                .iter()
-                .copied()
-                .map(|code| Value::Integer(code.into()))
-                .collect::<Vec<_>>();
-            if magic == "EPF1"
-                && version == 1
-                && path == format!("authority/execution-profiles/{profile_id}.epf1")
-                && semantic_version == declaration.semantic_version
-                && fields[4] == Value::Array(classes)
-                && fields[5] == Value::Bool(declaration.network_allowed)
-                && fields[6] == Value::Array(Vec::new())
-                && scheduler == declaration.scheduler_id
-                && numeric == declaration.numeric_policy_id
-                && schema == declaration.schema_policy_id
-                && artifact == declaration.artifact_policy_id
-                && budget == declaration.budget_policy_id
-                && fields[12] == Value::Array(Vec::new())
-                && fields[13] == Value::Null
-                && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
-            {
-                Ok(profile_id.to_owned())
-            } else {
-                Err(BundleContractErrorV1::ProfileInvalid)
-            }
-        }),
+        (Ok(magic), Ok(version), Ok(profile_id), Ok(semantic_version)) => {
+            encode(&Value::Array(fields[..16].to_vec())).and_then(|unsigned| {
+                DRAFT_EXECUTION_PROFILES
+                    .iter()
+                    .find(|candidate| candidate.profile_id == profile_id)
+                    .ok_or(BundleContractErrorV1::ProfileInvalid)
+                    .and_then(|declaration| {
+                        if raw_execution_profile_matches(
+                            path,
+                            fields,
+                            magic,
+                            version,
+                            profile_id,
+                            semantic_version,
+                            declaration,
+                            &unsigned,
+                        ) {
+                            Ok(profile_id.to_owned())
+                        } else {
+                            Err(BundleContractErrorV1::ProfileInvalid)
+                        }
+                    })
+            })
+        }
         _ => Err(BundleContractErrorV1::ProfileInvalid),
     }
 }
 
+fn raw_execution_profile_matches(
+    path: &str,
+    fields: &[Value],
+    magic: &str,
+    version: u64,
+    profile_id: &str,
+    semantic_version: &str,
+    declaration: &DraftExecutionProfileSource,
+    unsigned: &[u8],
+) -> bool {
+    let classes = declaration
+        .reproducibility_classes
+        .iter()
+        .copied()
+        .map(|code| Value::Integer(code.into()))
+        .collect::<Vec<_>>();
+    magic == "EPF1"
+        && version == 1
+        && path == format!("authority/execution-profiles/{profile_id}.epf1")
+        && semantic_version == declaration.semantic_version
+        && fields[4] == Value::Array(classes)
+        && raw_text_array_matches(&fields[5], declaration.architecture_rules)
+        && raw_text_array_matches(&fields[6], declaration.numeric_rules)
+        && raw_text_array_matches(&fields[7], declaration.scheduler_driver_order)
+        && fields[8] == Value::Text(declaration.tick_policy.to_owned())
+        && raw_text_array_matches(&fields[9], declaration.schemas_and_upcasters)
+        && raw_text_array_matches(&fields[10], declaration.artifact_rules)
+        && fields[11]
+            == Value::Array(vec![
+                Value::Bool(declaration.network_allowed),
+                Value::Array(
+                    declaration
+                        .capability_ids
+                        .iter()
+                        .map(|id| Value::Text((*id).to_owned()))
+                        .collect(),
+                ),
+            ])
+        && fields[12]
+            == Value::Array(
+                declaration
+                    .deterministic_budgets
+                    .into_iter()
+                    .map(|limit| Value::Integer(limit.into()))
+                    .collect(),
+            )
+        && raw_text_array_matches(&fields[13], declaration.allowed_operational_differences)
+        && fields[14]
+            == Value::Array(vec![
+                Value::Text(declaration.minimum_evaluator_version.to_owned()),
+                Value::Text(declaration.maximum_evaluator_version.to_owned()),
+            ])
+        && fields[15] == Value::Null
+        && digest::<32>(&fields[16]).is_ok_and(|profile_digest| {
+            profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", unsigned)
+        })
+}
+
+fn raw_text_array_matches(value: &Value, expected: &[&str]) -> bool {
+    array_values(value).is_ok_and(|values| {
+        values.len() == expected.len()
+            && values
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| text(actual) == Ok(*expected))
+    })
+}
+
 fn raw_trust_policy_snapshot(bytes: &[u8]) -> Result<(), BundleContractErrorV1> {
-    decode(bytes).and_then(|value| array(&value, 13).and_then(raw_trust_policy_snapshot_fields))
+    decode(bytes).and_then(|value| array(&value, 12).and_then(raw_trust_policy_snapshot_fields))
 }
 
 fn raw_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
@@ -819,10 +862,8 @@ fn raw_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContra
         text(&fields[2]),
         uint(&fields[3]),
         uint(&fields[4]),
-        text(&fields[5]),
-        digest::<32>(&fields[6]),
-        text(&fields[10]),
-        digest::<64>(&fields[12]),
+        text(&fields[9]),
+        digest::<64>(&fields[11]),
     ) {
         (
             Ok(magic),
@@ -830,25 +871,38 @@ fn raw_trust_policy_snapshot_fields(fields: &[Value]) -> Result<(), BundleContra
             Ok(policy_id),
             Ok(epoch),
             Ok(position),
-            Ok(key_id),
-            Ok(key),
             Ok(expiry),
             Ok(signature),
-        ) => encode(&Value::Array(fields[..12].to_vec())).and_then(|unsigned| {
-            let approved_key = crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES;
+        ) => encode(&Value::Array(fields[..11].to_vec())).and_then(|unsigned| {
             raw_fixture_authority_signature(&unsigned, &signature).and_then(|()| {
                 if magic == "TPS1"
                     && version == 1
                     && policy_id == DRAFT_AUTHORITY_TRUST_POLICY_ID
                     && epoch == DRAFT_AUTHORITY_TRUST_POLICY_EPOCH
                     && position == DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION
-                    && key_id == DRAFT_AUTHORITY_KEY_ID
-                    && key == approved_key
+                    && fields[5]
+                        == Value::Array(vec![Value::Array(vec![
+                            Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
+                            Value::Integer(DRAFT_AUTHORITY_ROOT_VERSION.into()),
+                            Value::Text(DRAFT_AUTHORITY_ROOT_ALGORITHM.to_owned()),
+                            Value::Bytes(crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES.to_vec()),
+                        ])])
+                    && fields[6] == Value::Array(Vec::new())
                     && fields[7] == Value::Array(Vec::new())
-                    && fields[8] == Value::Array(Vec::new())
-                    && fields[9] == Value::Array(Vec::new())
+                    && fields[8]
+                        == Value::Array(
+                            DRAFT_AUTHORITY_MINIMUM_VERSIONS
+                                .iter()
+                                .map(|(kind, version)| {
+                                    Value::Array(vec![
+                                        Value::Text((*kind).to_owned()),
+                                        Value::Text((*version).to_owned()),
+                                    ])
+                                })
+                                .collect(),
+                        )
                     && expiry == DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH
-                    && fields[11] == Value::Null
+                    && fields[10] == Value::Null
                 {
                     Ok(())
                 } else {
@@ -1075,6 +1129,7 @@ struct RawCpf1Summary {
     support_digests: [[u8; 32]; 5],
     evaluator_artifact_digests: [[u8; 32]; 3],
     registry: RawArtifact,
+    selected_caps: RawSelectedCaps,
 }
 
 fn raw_cpf1_value(
@@ -1124,6 +1179,7 @@ fn raw_cpf1_value(
                                     support_digests,
                                     evaluator_artifact_digests: protocol.artifact_digests,
                                     registry,
+                                    selected_caps: protocol.selected_caps,
                                 })
                             })
                         })
@@ -1762,6 +1818,7 @@ struct RawEvaluatorProtocol {
     artifact_digests: [[u8; 32]; 3],
 }
 
+#[derive(Clone, Copy)]
 struct RawSelectedCaps {
     profile_bytes: u64,
     cases: u64,
@@ -1771,6 +1828,27 @@ struct RawSelectedCaps {
     total_bundle_bytes: u64,
     structural_nesting: u64,
     coordinate_bytes: u64,
+}
+
+fn raw_archive_selected_caps(
+    caps: &RawSelectedCaps,
+    members: &[RawArchiveMember<'_>],
+) -> Result<(), BundleContractErrorV1> {
+    let member_count = u64::try_from(members.len()).unwrap_or(u64::MAX);
+    let total_bytes = members.iter().try_fold(0_u64, |total, member| {
+        total.checked_add(u64::try_from(member.bytes.len()).unwrap_or(u64::MAX))
+    });
+    if member_count > caps.bundle_members
+        || total_bytes.is_none_or(|total| total > caps.total_bundle_bytes)
+        || members.iter().any(|member| {
+            u64::try_from(member.path.len()).unwrap_or(u64::MAX) > caps.member_path_bytes
+                || u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) > caps.member_bytes
+        })
+    {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(())
+    }
 }
 
 fn raw_protocol(value: &Value) -> Result<RawEvaluatorProtocol, BundleContractErrorV1> {
