@@ -12,6 +12,12 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
+/// Builds mutually bound admission and authorization evidence for a test freeze.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] when the fixture inputs violate an erasure
+/// evidence invariant or canonical encoding fails.
 pub fn freeze_evidence_fixture(
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,
