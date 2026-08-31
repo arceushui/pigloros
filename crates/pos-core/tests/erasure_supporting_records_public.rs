@@ -126,7 +126,7 @@ fn freeze_supporting_input(
         &[required_target()],
         &[obligation],
         10,
-        reference(6).digest(),
+        &reference(6).digest(),
     )?;
     let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request,
@@ -361,7 +361,7 @@ fn supporting_records_require_complete_freeze_commitments() -> Result<(), Erasur
         &[required_target()],
         &[obligation],
         10,
-        reference(6).digest(),
+        &reference(6).digest(),
     )?;
     let mismatched_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request,
@@ -810,7 +810,7 @@ fn complete_supporting_input(
         &[required_target()],
         &[obligation],
         10,
-        reference(6).digest(),
+        &reference(6).digest(),
     )?;
     let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request,
@@ -893,7 +893,7 @@ fn partial_failure_supporting_input(
         &[required_target()],
         &[obligation],
         10,
-        reference(6).digest(),
+        &reference(6).digest(),
     )?;
     let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request,
@@ -1499,7 +1499,7 @@ fn freeze_record_decoders_reject_a_wrong_type_in_every_field() -> Result<(), Era
         &[required_target()],
         &[obligation],
         10,
-        reference(6).digest(),
+        &reference(6).digest(),
     )?;
     assert_each_field_rejects(
         &admission.to_canonical_cbor()?,
