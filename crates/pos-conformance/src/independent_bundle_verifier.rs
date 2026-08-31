@@ -10,19 +10,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     array, array_values, bytes, decode, digest, digest_domain, draft_authority_verifying_key,
     encode, text, uint, BundleContractErrorV1, AUTHORITY_INVENTORY_BYTES_V1,
-    AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH,
-    CONFORMANCE_BUNDLE_MAGIC_V1, DRAFT_AUTHORITY_DECLARATION_BYTES_V1,
-    DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
-    DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
-    DRAFT_AUTHORITY_ROOT_ALGORITHM, DRAFT_AUTHORITY_ROOT_VERSION,
-    DRAFT_AUTHORITY_TRUST_POLICY_EPOCH, DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
-    EVALUATOR_PROTOCOL_BYTES, EVALUATOR_PROTOCOL_PATH, EVALUATOR_REPORT_SCHEMA_BYTES,
-    EVALUATOR_REPORT_SCHEMA_PATH, EVALUATOR_REQUEST_SCHEMA_BYTES, EVALUATOR_REQUEST_SCHEMA_PATH,
-    EXECUTION_MATRIX_BYTES_V1, EXECUTION_MATRIX_PATH, FIXTURE_CONTRACT_POLICY_PATH,
-    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1, LIMITATIONS_PATH, MAX_CONFORMANCE_BUNDLE_LEN_V1,
-    NORMATIVE_SPEC_PATH, NOTICE_PATH, PROFILE_PATH, PROFILE_SCHEMA_PATH, PUBLICATION_REVIEW_PATH,
-    SBOM_PATH, SOURCE_PROVENANCE_PATH, SUPPORT_PACKAGE_MANIFEST_BYTES_V1,
-    SUPPORT_PACKAGE_MANIFEST_PATH, TRUST_POLICY_SNAPSHOT_PATH,
+    AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH, CONFORMANCE_BUNDLE_MAGIC_V1,
+    DRAFT_AUTHORITY_DECLARATION_BYTES_V1, DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION,
+    DRAFT_AUTHORITY_KEY_ID, DRAFT_AUTHORITY_MINIMUM_VERSIONS,
+    DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH, DRAFT_AUTHORITY_ROOT_ALGORITHM,
+    DRAFT_AUTHORITY_ROOT_VERSION, DRAFT_AUTHORITY_TRUST_POLICY_EPOCH,
+    DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES, EVALUATOR_PROTOCOL_BYTES,
+    EVALUATOR_PROTOCOL_PATH, EVALUATOR_REPORT_SCHEMA_BYTES, EVALUATOR_REPORT_SCHEMA_PATH,
+    EVALUATOR_REQUEST_SCHEMA_BYTES, EVALUATOR_REQUEST_SCHEMA_PATH, EXECUTION_MATRIX_BYTES_V1,
+    EXECUTION_MATRIX_PATH, FIXTURE_CONTRACT_POLICY_PATH, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    LIMITATIONS_PATH, MAX_CONFORMANCE_BUNDLE_LEN_V1, NORMATIVE_SPEC_PATH, NOTICE_PATH,
+    PROFILE_PATH, PROFILE_SCHEMA_PATH, PUBLICATION_REVIEW_PATH, SBOM_PATH, SOURCE_PROVENANCE_PATH,
+    SUPPORT_PACKAGE_MANIFEST_BYTES_V1, SUPPORT_PACKAGE_MANIFEST_PATH, TRUST_POLICY_SNAPSHOT_PATH,
 };
 
 /// Independently validate canonical CFB1, CPF1, FPR1, and FPP1 bytes without typed codecs.
@@ -780,10 +779,7 @@ fn raw_execution_profile_fields(
                                 declaration.scheduler_driver_order,
                             )
                             && fields[8] == Value::Text(declaration.tick_policy.to_owned())
-                            && raw_text_array_matches(
-                                &fields[9],
-                                declaration.schemas_and_upcasters,
-                            )
+                            && raw_text_array_matches(&fields[9], declaration.schemas_and_upcasters)
                             && raw_text_array_matches(&fields[10], declaration.artifact_rules)
                             && fields[11]
                                 == Value::Array(vec![
@@ -810,20 +806,13 @@ fn raw_execution_profile_fields(
                             )
                             && fields[14]
                                 == Value::Array(vec![
-                                    Value::Text(
-                                        declaration.minimum_evaluator_version.to_owned(),
-                                    ),
-                                    Value::Text(
-                                        declaration.maximum_evaluator_version.to_owned(),
-                                    ),
+                                    Value::Text(declaration.minimum_evaluator_version.to_owned()),
+                                    Value::Text(declaration.maximum_evaluator_version.to_owned()),
                                 ])
                             && fields[15] == Value::Null
                             && digest::<32>(&fields[16]).is_ok_and(|profile_digest| {
                                 profile_digest
-                                    == digest_domain(
-                                        b"PiglorOS.ExecutionProfile.v1\0",
-                                        &unsigned,
-                                    )
+                                    == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
                             })
                         {
                             Ok(profile_id.to_owned())
