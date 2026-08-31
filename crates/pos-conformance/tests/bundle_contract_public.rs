@@ -144,11 +144,12 @@ fn await_staged_regular_files(
             .into());
         }
         let files = staged_regular_files(staging)?;
-        let prerequisite_is_present = if mutation_requires_nested_directory(mutation) {
-            staged_nested_directory(staging, &files).is_ok()
-        } else {
-            !files.is_empty()
-        };
+        let prerequisite_is_present = !files.is_empty()
+            && (!mutation_requires_nested_directory(mutation)
+                || files
+                    .iter()
+                    .filter_map(|path| path.parent())
+                    .any(|parent| parent != staging));
         if prerequisite_is_present {
             return Ok(files);
         }
