@@ -1236,7 +1236,7 @@ fn coordinator_corrected_submission_persists_and_retries_through_unit_port(
     corrected_input.provenance = correction.reference();
     let corrected = ErasureRequestV1::new(corrected_input)?;
 
-    let submitted = coordinator.submit_corrected(corrected.clone(), correction)?;
+    let submitted = coordinator.submit_corrected(corrected.clone(), correction.clone())?;
     assert_eq!(submitted.lifecycle(), ErasureLifecycleV1::Submitted);
     assert_eq!(
         coordinator.submit_corrected(corrected, correction)?,
