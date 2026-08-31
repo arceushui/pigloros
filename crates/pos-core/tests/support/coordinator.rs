@@ -13,23 +13,23 @@ use pos_core::{
 
 use crate::erasure_support::freeze_evidence_fixture;
 
-pub(super) struct PublicCoordinatorPortConfig {
-    pub(super) targets: Vec<ErasureRequiredTargetV1>,
-    pub(super) fail_commits: bool,
-    pub(super) policy: ErasureReferenceV1,
-    pub(super) trust: ErasureReferenceV1,
-    pub(super) scope_member: ErasureReferenceV1,
-    pub(super) freeze_evidence: ErasureReferenceV1,
+pub struct PublicCoordinatorPortConfig {
+    pub targets: Vec<ErasureRequiredTargetV1>,
+    pub fail_commits: bool,
+    pub policy: ErasureReferenceV1,
+    pub trust: ErasureReferenceV1,
+    pub scope_member: ErasureReferenceV1,
+    pub freeze_evidence: ErasureReferenceV1,
 }
 
-pub(super) struct PublicCoordinatorPort {
+pub struct PublicCoordinatorPort {
     records: Vec<ErasureCoordinatorRecordV1>,
     states: Vec<ErasureStateV1>,
     config: PublicCoordinatorPortConfig,
 }
 
 impl PublicCoordinatorPort {
-    pub(super) const fn new(config: PublicCoordinatorPortConfig) -> Self {
+    pub const fn new(config: PublicCoordinatorPortConfig) -> Self {
         Self {
             records: Vec::new(),
             states: Vec::new(),

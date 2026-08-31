@@ -12,7 +12,7 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
-pub(super) fn freeze_evidence_fixture(
+pub fn freeze_evidence_fixture(
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,
     obligation_set: &ErasureObligationSetV1,
