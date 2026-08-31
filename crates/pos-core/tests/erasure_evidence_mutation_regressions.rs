@@ -772,16 +772,16 @@ fn supporting_records_roundtrip_every_populated_collection() -> Result<(), Erasu
 fn supporting_record_decoder_rejects_each_malformed_nested_collection() -> Result<(), ErasureErrorV1>
 {
     let bytes = ErasureSupportingRecordsV1::default().to_canonical_cbor()?;
-    for index in 0..4 {
+    for index in [0, 1, 2, 3, 4, 5, 6, 8] {
         let changed = replace_cbor_field(&bytes, index, Value::Array(Vec::new()))?;
         assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&changed).is_err());
     }
-    for index in [5, 7, 8, 9, 10, 11, 12, 13, 14] {
+    for index in [7, 9, 10, 11, 12, 13, 14, 15, 16] {
         let wrong_collection = replace_cbor_field(&bytes, index, Value::Null)?;
         assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&wrong_collection).is_err());
     }
 
-    for index in 4..15 {
+    for index in [7, 9, 10, 11, 12, 13, 14, 15, 16] {
         let malformed_entry =
             replace_cbor_field(&bytes, index, Value::Array(vec![Value::Array(Vec::new())]))?;
         assert!(ErasureSupportingRecordsV1::from_canonical_cbor(&malformed_entry).is_err());
@@ -807,14 +807,24 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
         pos_core::erasure::target_closure_digest(&[target]),
         None,
     )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
+        request,
+        scope.reference(),
+        &obligation_set,
+        &[target],
+        &obligations,
+        10,
+    )?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
         request,
         scope.reference(),
         obligation_set.reference(),
-        reference(6),
+        freeze_admission_evidence.reference(),
     ))?;
     let valid = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope.clone()),
+        freeze_admission_evidence: Some(freeze_admission_evidence.clone()),
+        freeze_authorization_evidence: Some(freeze_authorization_evidence.clone()),
         freeze_provenance: Some(freeze),
         obligations: obligations.clone(),
         obligation_set: Some(obligation_set.clone()),
@@ -827,11 +837,13 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
         request,
         scope.reference(),
         reference(99),
-        reference(6),
+        freeze_admission_evidence.reference(),
     ))?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
             scope_commitment: Some(scope.clone()),
+            freeze_admission_evidence: Some(freeze_admission_evidence.clone()),
+            freeze_authorization_evidence: Some(freeze_authorization_evidence.clone()),
             freeze_provenance: Some(mismatched_matrix),
             obligations: obligations.clone(),
             obligation_set: Some(obligation_set.clone()),
@@ -844,11 +856,13 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
         request,
         reference(6),
         obligation_set.reference(),
-        reference(7),
+        freeze_admission_evidence.reference(),
     ))?;
     assert_eq!(
         ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
             scope_commitment: Some(scope.clone()),
+            freeze_admission_evidence: Some(freeze_admission_evidence),
+            freeze_authorization_evidence: Some(freeze_authorization_evidence),
             freeze_provenance: Some(mismatched_scope),
             obligations: obligations.clone(),
             obligation_set: Some(obligation_set.clone()),
@@ -1049,7 +1063,7 @@ fn reverse_acknowledgement_provenance(bytes: &[u8]) -> Result<Vec<u8>, ErasureEr
     let Value::Array(mut fields) = value else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
-    let Some(Value::Array(acknowledgements)) = fields.get_mut(10) else {
+    let Some(Value::Array(acknowledgements)) = fields.get_mut(12) else {
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     acknowledgements.reverse();
@@ -1200,24 +1214,40 @@ fn supporting_records_validate_every_public_request_binding() -> Result<(), Eras
         },
     )?)?;
 
-    let scope = scope_commitment(reference(1), vec![reference(3)], reference(4), None)?;
+    let freeze_request = reference(2);
     let target = required_target();
-    let obligation = obligation(reference(1), target, reference(36))?;
+    let scope = scope_commitment(
+        freeze_request,
+        vec![reference(3)],
+        pos_core::erasure::target_closure_digest(&[target]),
+        None,
+    )?;
+    let obligation = obligation(freeze_request, target, reference(36))?;
     let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
-        request: reference(1),
+        request: freeze_request,
         obligations: vec![obligation.reference()],
         policy: reference(4),
         trust: reference(5),
     })?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
+        freeze_request,
+        scope.reference(),
+        &obligation_set,
+        &[target],
+        &[obligation],
+        10,
+    )?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
-        reference(2),
+        freeze_request,
         scope.reference(),
         obligation_set.reference(),
-        reference(6),
+        freeze_admission_evidence.reference(),
     ))?;
     assert_request_binding_rejected(ErasureSupportingRecordsV1::new(
         ErasureSupportingRecordsInputV1 {
             scope_commitment: Some(scope),
+            freeze_admission_evidence: Some(freeze_admission_evidence),
+            freeze_authorization_evidence: Some(freeze_authorization_evidence),
             freeze_provenance: Some(freeze),
             obligations: vec![obligation],
             obligation_set: Some(obligation_set),

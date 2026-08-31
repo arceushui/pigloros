@@ -2126,6 +2126,18 @@ impl ErasureSupportingRecordsV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
+        if self.freeze_failure.is_some()
+            && (self.scope_commitment.is_some()
+                || self.freeze_admission_evidence.is_some()
+                || self.freeze_authorization_evidence.is_some()
+                || self.freeze_provenance.is_some()
+                || self.obligation_set.is_some()
+                || !self.obligations.is_empty()
+                || !self.scope_extensions.is_empty()
+                || !self.scope_extension_ledgers.is_empty())
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         if let Some(freeze) = self.freeze_provenance {
             let Some(scope) = self.scope_commitment.as_ref() else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
@@ -2155,18 +2167,6 @@ impl ErasureSupportingRecordsV1 {
             || self.freeze_authorization_evidence.is_some()
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        if self.freeze_failure.is_some()
-            && (self.scope_commitment.is_some()
-                || self.freeze_admission_evidence.is_some()
-                || self.freeze_authorization_evidence.is_some()
-                || self.freeze_provenance.is_some()
-                || self.obligation_set.is_some()
-                || !self.obligations.is_empty()
-                || !self.scope_extensions.is_empty()
-                || !self.scope_extension_ledgers.is_empty())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
         }
         if self.scope_commitment.is_none()
             && (self.obligation_set.is_some()
