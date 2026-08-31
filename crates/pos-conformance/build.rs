@@ -2059,9 +2059,15 @@ fn emit_draft_execution_profiles(
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let budgets = profile
+            .deterministic_budgets
+            .into_iter()
+            .map(rust_u64_literal)
+            .collect::<Vec<_>>()
+            .join(", ");
         writeln!(
             generated,
-            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: {:?}, allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},",
+            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}], architecture_rules: &[{}], numeric_rules: &[{}], scheduler_driver_order: &[{}], tick_policy: {:?}, schemas_and_upcasters: &[{}], artifact_rules: &[{}], deterministic_budgets: [{}], allowed_operational_differences: &[{}], minimum_evaluator_version: {:?}, maximum_evaluator_version: {:?} }},",
             profile.profile_id,
             profile.semantic_version,
             profile.network_allowed,
@@ -2073,7 +2079,7 @@ fn emit_draft_execution_profiles(
             profile.tick_policy,
             strings(&profile.schemas_and_upcasters),
             strings(&profile.artifact_rules),
-            profile.deterministic_budgets,
+            budgets,
             strings(&profile.allowed_operational_differences),
             profile.minimum_evaluator_version,
             profile.maximum_evaluator_version,
