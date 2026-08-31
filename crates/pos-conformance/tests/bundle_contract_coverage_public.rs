@@ -7,10 +7,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{BundleContractErrorV1, BundleMemberRoleV1, ConformanceBundleV1};
 use support::{
     array_field, array_mut, assert_independent_rejects, current_archive as materialized_archive,
-    encode_value as encode, member_bytes, member_path_by_role, mutate_archive,
-    mutate_draft_evidence, mutate_member, mutate_profile, mutate_release_admission,
-    mutate_selected_fixture, replace_archive_member_bytes as replace_member_bytes,
-    update_typed_member,
+    encode_value as encode, member_bytes, member_path_by_role, mutate_archive, mutate_member,
+    mutate_profile, mutate_release_admission, mutate_selected_fixture,
+    replace_archive_member_bytes as replace_member_bytes, update_typed_member,
 };
 use support::{
     ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField,
@@ -20,66 +19,6 @@ use support::{
 
 fn current_archive() -> TestResult<Vec<u8>> {
     materialized_archive("bundle-contract-coverage")
-}
-
-#[derive(Clone, Copy)]
-enum DraftEvidenceMutation {
-    WrongCase,
-    WrongLayer,
-    WrongFamily,
-    WrongInputDigest,
-    ExecutedResult,
-    UndeclaredField,
-    MissingField,
-}
-
-#[test]
-fn public_verifiers_reject_non_pending_or_unbound_draft_evidence() -> TestResult {
-    let archive = current_archive()?;
-    for mutation in [
-        DraftEvidenceMutation::WrongCase,
-        DraftEvidenceMutation::WrongLayer,
-        DraftEvidenceMutation::WrongFamily,
-        DraftEvidenceMutation::WrongInputDigest,
-        DraftEvidenceMutation::ExecutedResult,
-        DraftEvidenceMutation::UndeclaredField,
-        DraftEvidenceMutation::MissingField,
-    ] {
-        let malformed = mutate_draft_evidence(&archive, |evidence| {
-            match mutation {
-                DraftEvidenceMutation::WrongCase => {
-                    evidence.insert("case_id".to_owned(), serde_json::json!("wrong-case"));
-                }
-                DraftEvidenceMutation::WrongLayer => {
-                    evidence.insert("claim_layer".to_owned(), serde_json::json!("wrong-layer"));
-                }
-                DraftEvidenceMutation::WrongFamily => {
-                    evidence.insert("family".to_owned(), serde_json::json!("wrong-family"));
-                }
-                DraftEvidenceMutation::WrongInputDigest => {
-                    evidence.insert("input_blake3_digest".to_owned(), serde_json::json!("00"));
-                }
-                DraftEvidenceMutation::ExecutedResult => {
-                    evidence.insert("status".to_owned(), serde_json::json!("executed"));
-                    evidence.insert("execution_result".to_owned(), serde_json::json!({}));
-                    evidence.insert("executed_at".to_owned(), serde_json::json!("now"));
-                }
-                DraftEvidenceMutation::UndeclaredField => {
-                    evidence.insert("result".to_owned(), serde_json::Value::Null);
-                }
-                DraftEvidenceMutation::MissingField => {
-                    evidence.remove("executed_at");
-                }
-            }
-            Ok(())
-        })?;
-        assert_eq!(
-            ConformanceBundleV1::from_canonical_cbor(&malformed),
-            Err(BundleContractErrorV1::ExpectedResultMismatch)
-        );
-        assert_independent_rejects(&malformed, "invalid Draft evidence")?;
-    }
-    Ok(())
 }
 
 #[test]

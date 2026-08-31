@@ -68,6 +68,12 @@ unsupported_schema_root="$(new_fixture_copy unsupported-schema-keyword)"
 replace_json "${unsupported_schema_root}/${positive_schema}" '.oneOf = []'
 expect_adapter_rejection "${unsupported_schema_root}" "unsupported JSON adapter semantics"
 
+non_json_evidence_root="$(new_fixture_copy non-json-evidence-status)"
+replace_json "${non_json_evidence_root}/providers/artifact-integrity/provider.json" \
+  '.artifact_media_types.evidence_status = "application/cbor"'
+expect_adapter_rejection "${non_json_evidence_root}" \
+  "current JSON provider adapter requires JSON evidence status"
+
 unknown_authority_root="$(new_fixture_copy unknown-authority-field)"
 replace_json "${unknown_authority_root}/support/draft-execution-authority.json" \
   '.undeclared_authority = true'

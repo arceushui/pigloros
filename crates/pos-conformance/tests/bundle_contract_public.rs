@@ -417,7 +417,7 @@ fn fixture_from_schema(
     );
     let evidence_bytes = draft_evidence_bytes(&case_id, family_name)?;
     let evidence_path = format!(
-        "evidence/{case_id}/{}.json",
+        "evidence/{case_id}/{}",
         pos_conformance::hex_digest(&execution)
     );
     let mut fixture = FixtureDescriptorV1 {
@@ -4962,6 +4962,20 @@ fn independent_verifier_matches_typed_fixture_caps_and_schema_binding() -> TestR
         )
     })?;
     assert_archive_rejected_by_both(&wrong_family_schema, "wrong provider family schema");
+
+    let wrong_schema_media_type = mutate_profile_archive(|profile| {
+        replace_value(
+            array_field(
+                array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?,
+                8,
+                "fixture schema descriptor",
+            )?,
+            1,
+            Value::Text("application/octet-stream".to_owned()),
+            "fixture schema media type",
+        )
+    })?;
+    assert_archive_rejected_by_both(&wrong_schema_media_type, "wrong schema media type");
     Ok(())
 }
 
@@ -5387,8 +5401,7 @@ fn member_constructors_hash_exact_raw_bytes_and_assign_current_roles() {
     let input = BundleMemberV1::fixture_input("fixtures/positive/input.json", b"input".to_vec());
     let expected =
         BundleMemberV1::expected_result("fixtures/positive/result.json", b"result".to_vec());
-    let evidence =
-        BundleMemberV1::evidence_status("evidence/positive/status.json", b"pending".to_vec());
+    let evidence = BundleMemberV1::evidence_status("evidence/positive/status", b"pending".to_vec());
     let registry = BundleMemberV1::fixture_provider_registry(b"registry".to_vec());
     let package =
         BundleMemberV1::fixture_provider_package("providers/example.fpp1", b"package".to_vec());

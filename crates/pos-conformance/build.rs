@@ -135,6 +135,7 @@ struct FixtureProvider {
     schema_media_type: String,
     payload_media_type: String,
     oracle_media_type: String,
+    evidence_status_media_type: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -143,6 +144,7 @@ struct ProviderArtifactMediaTypes {
     schema: String,
     payload: String,
     oracle: String,
+    evidence_status: String,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -256,18 +258,6 @@ impl CatalogRedactionState {
 enum FixtureFamilyOracle {
     CanonicalOutput,
     NamespacedFailure { code_id: String },
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvidenceStatusRecord {
-    case_id: String,
-    claim_layer: String,
-    family: String,
-    input_blake3_digest: String,
-    status: String,
-    execution_result: serde_json::Value,
-    executed_at: serde_json::Value,
 }
 
 #[derive(serde::Deserialize)]
@@ -846,6 +836,7 @@ fn validate_fixture_provider(
         && valid_media_type(&media_types.schema)
         && valid_media_type(&media_types.payload)
         && valid_media_type(&media_types.oracle)
+        && valid_media_type(&media_types.evidence_status)
         && json_text(provider, "claim_layer")? == claim_layer
         && json_text(provider, "subject_adapter")? == subject_adapter
         && contracts_match_families;
@@ -867,42 +858,6 @@ fn valid_media_type(value: &str) -> bool {
         && value.split_once('/').is_some_and(|(kind, subtype)| {
             !kind.is_empty() && !subtype.is_empty() && !subtype.contains('/')
         })
-}
-
-fn validate_evidence_status(
-    fixture: &Value,
-    input_bytes: &[u8],
-    expected_bytes: &[u8],
-    claim_layer: &str,
-) -> Result<(), io::Error> {
-    let case_id = json_text(fixture, "case_id")?;
-    let family = json_text(fixture, "family")?;
-    if json_text(fixture, "claim_layer")? != claim_layer {
-        return Err(invalid_data(format!(
-            "fixture {case_id} claim layer does not match its profile"
-        )));
-    }
-    let evidence: EvidenceStatusRecord =
-        serde_json::from_slice(expected_bytes).map_err(|error| {
-            invalid_data(format!(
-                "fixture {case_id} evidence status is invalid: {error}"
-            ))
-        })?;
-    let input_digest = blake3::hash(input_bytes).to_hex().to_string();
-    let identity_matches = evidence.case_id == case_id
-        && evidence.claim_layer == claim_layer
-        && evidence.family == family
-        && evidence.input_blake3_digest == input_digest
-        && evidence.status == "pending"
-        && evidence.execution_result == Value::Null
-        && evidence.executed_at == Value::Null;
-    if identity_matches {
-        Ok(())
-    } else {
-        Err(invalid_data(format!(
-            "fixture {case_id} evidence status does not match its profile identity"
-        )))
-    }
 }
 
 fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyCatalog, io::Error> {
@@ -993,6 +948,7 @@ fn fixture_provider(provider: &Value) -> Result<FixtureProvider, io::Error> {
         schema_media_type: media_types.schema,
         payload_media_type: media_types.payload,
         oracle_media_type: media_types.oracle,
+        evidence_status_media_type: media_types.evidence_status,
     })
 }
 
@@ -1022,6 +978,11 @@ fn profile_fixtures(
         .map(|(fixture, expected_family)| {
             let case_id = json_text(fixture, "case_id")?;
             let family = json_text(fixture, "family")?;
+            if json_text(fixture, "claim_layer")? != claim_layer {
+                return Err(invalid_data(format!(
+                    "fixture {case_id} claim layer does not match its profile"
+                )));
+            }
             if family != expected_family.as_str() {
                 return Err(invalid_data(format!(
                     "profile fixture {case_id} is not in canonical family order"
@@ -1045,7 +1006,6 @@ fn profile_fixtures(
             let input = relative_asset(snapshots, fixture, "input")?;
             let expected = relative_asset(snapshots, fixture, "expected")?;
             let oracle = relative_asset(snapshots, fixture, "oracle")?;
-            validate_evidence_status(fixture, &input.bytes, &expected.bytes, claim_layer)?;
             let family_declaration = family_contract
                 .declarations
                 .get(&family)
@@ -1628,6 +1588,11 @@ fn emit_profile(
             "                            oracle_media_type: {:?},",
             entry.provider.oracle_media_type
         )?;
+        writeln!(
+            generated,
+            "                            evidence_status_media_type: {:?},",
+            entry.provider.evidence_status_media_type
+        )?;
         writeln!(generated, "                        }},")?;
         writeln!(generated, "                        fixtures: vec![")?;
         for current_index in fixture_index..fixture_index + entry.fixtures.len() {
@@ -1936,23 +1901,11 @@ fn emit_materialization_assets(
         )?;
     }
     generated.push_str("];\n");
-    let provider_paths = [
-        "support/LICENSE",
-        "support/NOTICE",
-        "support/sbom.json",
-        "support/source-provenance.json",
-        "support/limitations.md",
-    ];
-    let provider_support = provider_paths
+    let provider_support = support
+        .artifacts
         .iter()
-        .map(|path| {
-            support
-                .artifacts
-                .iter()
-                .find(|artifact| artifact.provider_package && artifact.path == *path)
-                .ok_or_else(|| invalid_data("provider package descriptor support is incomplete"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter(|artifact| artifact.provider_package)
+        .collect::<Vec<_>>();
     writeln!(
         generated,
         "const MATERIALIZATION_PROVIDER_PACKAGE_SUPPORT: [MaterializationSupportArtifact; {}] = [",

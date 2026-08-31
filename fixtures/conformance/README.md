@@ -20,9 +20,11 @@ second fixture or layer inventory in source code.
 `support/fixture-family-contract.json` is the shared source only for family
 requirements and oracle kinds. Each provider manifest owns its exact public-adapter
 payload templates, provider ID, contract version, ABI, subject adapter, operation
-mapping, and artifact media types. CPF1 treats provider schema, payload, and oracle
-bytes as opaque artifacts and binds their exact bytes and declared media types. The
-current provider adapter happens to generate JSON and validates its JSON schemas in
+mapping, and artifact media types. CPF1 treats provider schema, payload, oracle,
+and evidence-status bytes as opaque artifacts and binds their exact bytes and
+declared media types. Evidence-status paths are extensionless, so the member name
+does not impose a representation. The current provider adapter happens to generate
+JSON and validates its JSON schemas in
 `generate-conformance-fixture-records.sh`; neither the Rust catalog builder nor the
 independent CPF1 verifier interprets those provider-owned bytes. A future provider
 adapter may use another representation without changing the CPF1 verifier. No script

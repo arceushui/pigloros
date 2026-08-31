@@ -532,37 +532,6 @@ pub fn replace_archive_member_bytes(archive: &mut [Value], path: &str, bytes: &[
     )
 }
 
-fn rebuild_archive_descriptors(archive: &mut [Value]) -> TestResult {
-    let descriptors = array_field(archive, ArchiveField::Members.index(), "archive members")?
-        .iter()
-        .map(|member| {
-            let Value::Array(fields) = member else {
-                return Err("archive member is not an array".into());
-            };
-            let path = fields
-                .get(MemberField::Path.index())
-                .ok_or("archive member path is absent")?
-                .clone();
-            let Some(Value::Bytes(bytes)) = fields.get(MemberField::Bytes.index()) else {
-                return Err("archive member bytes are absent".into());
-            };
-            let role = fields
-                .get(MemberField::Role.index())
-                .ok_or("archive member role is absent")?
-                .clone();
-            Ok(Value::Array(vec![
-                path,
-                Value::Integer(u64::try_from(bytes.len())?.into()),
-                Value::Bytes(blake3::hash(bytes).as_bytes().to_vec()),
-                role,
-            ]))
-        })
-        .collect::<TestResult<Vec<_>>>()?;
-    let manifest = array_field(archive, ArchiveField::Manifest.index(), "manifest")?;
-    manifest[ManifestField::MemberDescriptors.index()] = Value::Array(descriptors);
-    Ok(())
-}
-
 /// Re-signs an archive after a public-boundary mutation.
 ///
 /// # Errors
@@ -746,100 +715,6 @@ pub fn mutate_release_admission(
         PROFILE_MEMBER_PATH,
         &updated_profile,
     )?;
-    let manifest = array_field(
-        array_mut(&mut archive, "archive")?,
-        ArchiveField::Manifest.index(),
-        "manifest",
-    )?;
-    manifest[ManifestField::ProfileDigest.index()] = Value::Bytes(profile_digest);
-    resign_archive(&mut archive)?;
-    encode_value(&archive)
-}
-
-/// Mutates draft evidence and refreshes the bound archive and profile digests.
-///
-/// # Errors
-///
-/// Returns an error when evidence, archive, or profile data is malformed or cannot be re-signed.
-pub fn mutate_draft_evidence(
-    original: &[u8],
-    mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> TestResult,
-) -> TestResult<Vec<u8>> {
-    let mut archive: Value = ciborium::from_reader(original)?;
-    let mode = archive_mode(&archive)?;
-    let profile_bytes = member_bytes(&archive, PROFILE_MEMBER_PATH)?;
-    let mut profile: Value = ciborium::from_reader(profile_bytes.as_slice())?;
-    let evidence_path = {
-        let profile_fields = array_mut(&mut profile, "profile")?;
-        let fixture_fields = selected_fixture_fields(profile_fields, &mode)?;
-        let auxiliary = array_field(
-            fixture_fields,
-            FixtureField::Auxiliary.index(),
-            "fixture auxiliary artifacts",
-        )?;
-        let descriptor = auxiliary
-            .iter_mut()
-            .find(|descriptor| {
-                matches!(descriptor, Value::Array(fields) if matches!(fields.get(ArtifactDescriptorField::Path.index()), Some(Value::Text(path)) if path.starts_with("evidence/")))
-            })
-            .ok_or("fixture evidence descriptor is absent")?;
-        let descriptor_fields = array_mut(descriptor, "evidence descriptor")?;
-        match &descriptor_fields[ArtifactDescriptorField::Path.index()] {
-            Value::Text(path) => path.clone(),
-            _ => return Err("evidence path is not text".into()),
-        }
-    };
-    let evidence_bytes = member_bytes(&archive, &evidence_path)?;
-    let mut evidence: serde_json::Value = serde_json::from_slice(&evidence_bytes)?;
-    mutate(
-        evidence
-            .as_object_mut()
-            .ok_or("evidence status is not a JSON object")?,
-    )?;
-    let updated_evidence = serde_json::to_vec(&evidence)?;
-    let profile_digest = {
-        let profile_fields = array_mut(&mut profile, "profile")?;
-        let fixture_fields = selected_fixture_fields(profile_fields, &mode)?;
-        let auxiliary = array_field(
-            fixture_fields,
-            FixtureField::Auxiliary.index(),
-            "fixture auxiliary artifacts",
-        )?;
-        let descriptor = auxiliary
-            .iter_mut()
-            .find(|descriptor| {
-                matches!(descriptor, Value::Array(fields) if fields.get(ArtifactDescriptorField::Path.index()) == Some(&Value::Text(evidence_path.clone())))
-            })
-            .ok_or("fixture evidence descriptor is absent")?;
-        let descriptor_fields = array_mut(descriptor, "evidence descriptor")?;
-        descriptor_fields[ArtifactDescriptorField::Length.index()] =
-            Value::Integer(u64::try_from(updated_evidence.len())?.into());
-        descriptor_fields[ArtifactDescriptorField::Digest.index()] =
-            Value::Bytes(blake3::hash(&updated_evidence).as_bytes().to_vec());
-        refresh_fixture_digests(profile_fields)?;
-        profile_fields[ProfileField::Digest.index()] = Value::Bytes(
-            contract_digest(
-                b"PiglorOS.ConformanceProfile.v1",
-                &profile_fields[..ProfileField::Digest.index()],
-            )?
-            .to_vec(),
-        );
-        match &profile_fields[ProfileField::Digest.index()] {
-            Value::Bytes(digest) => digest.clone(),
-            _ => return Err("profile digest is not bytes".into()),
-        }
-    };
-    replace_archive_member_bytes(
-        array_mut(&mut archive, "archive")?,
-        &evidence_path,
-        &updated_evidence,
-    )?;
-    replace_archive_member_bytes(
-        array_mut(&mut archive, "archive")?,
-        PROFILE_MEMBER_PATH,
-        &encode_value(&profile)?,
-    )?;
-    rebuild_archive_descriptors(array_mut(&mut archive, "archive")?)?;
     let manifest = array_field(
         array_mut(&mut archive, "archive")?,
         ArchiveField::Manifest.index(),

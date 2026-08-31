@@ -260,6 +260,7 @@ struct FixtureProvider {
     schema_media_type: &'static str,
     payload_media_type: &'static str,
     oracle_media_type: &'static str,
+    evidence_status_media_type: &'static str,
 }
 
 impl FixtureProvider {
@@ -363,7 +364,12 @@ struct ProviderPackage {
 struct ProviderCatalog {
     registry: PublicArtifact,
     packages: Vec<ProviderPackage>,
-    package_support: [PublicArtifact; 5],
+    package_support: Vec<ProviderPackageSupportArtifact>,
+}
+
+struct ProviderPackageSupportArtifact {
+    artifact: PublicArtifact,
+    role: BundleMemberRoleV1,
 }
 
 impl ProviderCatalog {
@@ -381,7 +387,7 @@ impl ProviderCatalog {
         self.packages
             .iter()
             .flat_map(|package| &package.schemas)
-            .chain(&self.package_support)
+            .chain(self.package_support.iter().map(|support| &support.artifact))
             .chain(self.packages.iter().map(|package| &package.artifact))
             .chain(std::iter::once(&self.registry))
             .map(PublicArtifact::materialized_file)
@@ -397,9 +403,14 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
     }
 }
 
-fn package_support_artifacts() -> [PublicArtifact; 5] {
+fn package_support_artifacts() -> Vec<ProviderPackageSupportArtifact> {
     MATERIALIZATION_PROVIDER_PACKAGE_SUPPORT
-        .map(|artifact| public_artifact(artifact.path, artifact.media_type, artifact.bytes))
+        .into_iter()
+        .map(|artifact| ProviderPackageSupportArtifact {
+            artifact: public_artifact(artifact.path, artifact.media_type, artifact.bytes),
+            role: artifact.role,
+        })
+        .collect()
 }
 
 fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
@@ -479,11 +490,24 @@ fn provider_package(
     claim_layer: ClaimLayerV1,
     subject_adapter: SubjectAdapterKindV1,
     catalog_provider: &CatalogFixtureProvider,
-    package_support: &[PublicArtifact; 5],
+    package_support: &[ProviderPackageSupportArtifact],
 ) -> Result<ProviderPackage, Box<dyn Error>> {
     let provider_key = catalog_provider.provider.key();
     let schemas = provider_schema_artifacts(catalog_provider);
-    let [licence, notices, sbom, source_provenance, limitations] = package_support;
+    let support_descriptor = |role| {
+        let mut matching = package_support
+            .iter()
+            .filter(|support| support.role == role);
+        let descriptor = matching
+            .next()
+            .map(|support| support.artifact.descriptor())
+            .ok_or("provider package descriptor support is incomplete")?;
+        if matching.next().is_none() {
+            Ok(descriptor)
+        } else {
+            Err("provider package descriptor support is ambiguous")
+        }
+    };
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
         claim_layer,
@@ -501,11 +525,11 @@ fn provider_package(
                 schema_descriptor: schema.descriptor(),
             })
             .collect(),
-        licence_descriptor: licence.descriptor(),
-        notices_descriptor: notices.descriptor(),
-        sbom_descriptor: sbom.descriptor(),
-        source_provenance_descriptor: source_provenance.descriptor(),
-        limitations_descriptor: limitations.descriptor(),
+        licence_descriptor: support_descriptor(BundleMemberRoleV1::Licence)?,
+        notices_descriptor: support_descriptor(BundleMemberRoleV1::Notice)?,
+        sbom_descriptor: support_descriptor(BundleMemberRoleV1::Sbom)?,
+        source_provenance_descriptor: support_descriptor(BundleMemberRoleV1::Provenance)?,
+        limitations_descriptor: support_descriptor(BundleMemberRoleV1::Limitations)?,
         package_digest: [0; 32],
     };
     package
@@ -1041,7 +1065,11 @@ fn fixture_descriptor_from_record(
         context.claim_layer,
         &execution_profile_digest,
     );
-    let evidence = artifact_descriptor(&evidence_path, "application/json", fixture.expected);
+    let evidence = artifact_descriptor(
+        &evidence_path,
+        catalog_provider.provider.evidence_status_media_type,
+        fixture.expected,
+    );
     let oracle_output = artifact_descriptor(
         &oracle_output_path,
         catalog_provider.provider.oracle_media_type,
@@ -1203,7 +1231,7 @@ fn fixture_payload_member_path(case_id: &str, execution_profile_digest: &[u8; 32
 
 fn evidence_status_member_path(case_id: &str, execution_profile_digest: &[u8; 32]) -> String {
     format!(
-        "evidence/{case_id}/{}.json",
+        "evidence/{case_id}/{}",
         pos_conformance::hex_digest(execution_profile_digest)
     )
 }

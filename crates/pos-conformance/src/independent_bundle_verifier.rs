@@ -218,19 +218,6 @@ impl RawClaimLayer {
             Err(BundleContractErrorV1::ProfileInvalid)
         }
     }
-
-    fn catalog_name(self) -> &'static str {
-        const NAMES: [&str; 7] = [
-            "artifact-integrity",
-            "replay-conformance",
-            "knowledge-non-interference",
-            "gateway-client-conformance",
-            "plugin-conformance",
-            "metric-conformance",
-            "empirical-evaluation",
-        ];
-        NAMES[usize::from(self.0)]
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -267,18 +254,6 @@ impl RawFixtureFamily {
             Self::DeletionRedaction => 4,
             Self::Downgrade => 5,
             Self::IndependentEvaluation => 6,
-        }
-    }
-
-    const fn catalog_name(self) -> &'static str {
-        match self {
-            Self::Positive => "positive",
-            Self::Denied => "denied",
-            Self::Malformed => "malformed",
-            Self::ResourceExhaustion => "resource-exhaustion",
-            Self::DeletionRedaction => "deletion-redaction",
-            Self::Downgrade => "downgrade",
-            Self::IndependentEvaluation => "independent-evaluation",
         }
     }
 }
@@ -1958,11 +1933,8 @@ fn raw_fixture_provider_bindings(
                 .and_then(|provider| raw_fixture_schema_binding(fixture, provider))
                 .and_then(|()| {
                     raw_member(members, &fixture.payload.path, RawMemberRole::FixtureInput)
-                        .and_then(|payload| {
-                            raw_artifact_matches_member(&fixture.payload, payload).and_then(|()| {
-                                raw_validate_draft_evidence(fixture, payload, members)
-                            })
-                        })
+                        .and_then(|payload| raw_artifact_matches_member(&fixture.payload, payload))
+                        .and_then(|()| raw_validate_draft_evidence(fixture, members))
                 })
                 .and_then(|()| {
                     fixture
@@ -1979,7 +1951,6 @@ fn raw_fixture_provider_bindings(
 
 fn raw_validate_draft_evidence(
     fixture: &RawFixtureSummary,
-    payload: &RawArchiveMember<'_>,
     members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
     let evidence = fixture
@@ -1991,72 +1962,15 @@ fn raw_validate_draft_evidence(
         return Err(BundleContractErrorV1::ExpectedResultMismatch);
     }
     let expected_path = format!(
-        "evidence/{}/{}.json",
+        "evidence/{}/{}",
         fixture.case_id,
         crate::hex_digest(&fixture.execution)
     );
     if evidence[0].path != expected_path {
         return Err(BundleContractErrorV1::ExpectedResultMismatch);
     }
-    raw_member(members, &evidence[0].path, RawMemberRole::EvidenceStatus).and_then(|member| {
-        raw_artifact_matches_member(evidence[0], member).and_then(|()| {
-            raw_validate_draft_evidence_json(
-                member.bytes,
-                &fixture.case_id,
-                fixture.claim_layer.catalog_name(),
-                fixture.family.catalog_name(),
-                *blake3::hash(payload.bytes).as_bytes(),
-            )
-        })
-    })
-}
-
-fn raw_validate_draft_evidence_json(
-    bytes: &[u8],
-    case_id: &str,
-    claim_layer: &str,
-    family: &str,
-    input_digest: [u8; 32],
-) -> Result<(), BundleContractErrorV1> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|_| BundleContractErrorV1::ExpectedResultMismatch)?;
-    let object = value
-        .as_object()
-        .ok_or(BundleContractErrorV1::ExpectedResultMismatch)?;
-    let required = [
-        "case_id",
-        "claim_layer",
-        "executed_at",
-        "execution_result",
-        "family",
-        "input_blake3_digest",
-        "status",
-    ];
-    let input_digest = crate::hex_digest(&input_digest);
-    let valid = object.len() == required.len()
-        && required.iter().all(|key| object.contains_key(*key))
-        && object.get("case_id").and_then(serde_json::Value::as_str) == Some(case_id)
-        && object
-            .get("claim_layer")
-            .and_then(serde_json::Value::as_str)
-            == Some(claim_layer)
-        && object.get("family").and_then(serde_json::Value::as_str) == Some(family)
-        && object
-            .get("input_blake3_digest")
-            .and_then(serde_json::Value::as_str)
-            == Some(input_digest.as_str())
-        && object.get("status").and_then(serde_json::Value::as_str) == Some("pending")
-        && object
-            .get("execution_result")
-            .is_some_and(serde_json::Value::is_null)
-        && object
-            .get("executed_at")
-            .is_some_and(serde_json::Value::is_null);
-    if valid {
-        Ok(())
-    } else {
-        Err(BundleContractErrorV1::ExpectedResultMismatch)
-    }
+    raw_member(members, &evidence[0].path, RawMemberRole::EvidenceStatus)
+        .and_then(|member| raw_artifact_matches_member(evidence[0], member))
 }
 
 fn raw_fixture_schema_binding(
@@ -2065,6 +1979,7 @@ fn raw_fixture_schema_binding(
 ) -> Result<(), BundleContractErrorV1> {
     let schema = &provider.schemas[fixture.family.index()];
     if schema.path == fixture.schema.path
+        && schema.media_type == fixture.schema.media_type
         && schema.size == fixture.schema.size
         && schema.digest == fixture.schema.digest
     {
@@ -2657,6 +2572,7 @@ fn raw_artifact(value: &Value) -> Result<RawArtifact, BundleContractErrorV1> {
     {
         Ok(RawArtifact {
             path: member_path.to_owned(),
+            media_type: media_type.to_owned(),
             size: byte_length,
             digest,
         })
@@ -2750,6 +2666,7 @@ fn raw_semver_identifiers(value: &str, no_leading_zero: bool) -> bool {
 #[derive(Clone)]
 struct RawArtifact {
     path: String,
+    media_type: String,
     size: u64,
     digest: [u8; 32],
 }

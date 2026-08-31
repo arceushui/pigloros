@@ -62,7 +62,7 @@ trap 'rm -rf "${generated_root}"' EXIT
 
 generated_count=0
 declare -A seen_expected_paths=()
-while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor encoded_payload operation; do
+while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor evidence_status_media_type encoded_payload operation; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
@@ -77,6 +77,10 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
   }
   [[ "${input_path}" != *".."* && "${expected_path}" != *".."* ]] || {
     echo "unsafe fixture path: ${case_id}" >&2
+    exit 1
+  }
+  [[ "${evidence_status_media_type}" == "application/json" ]] || {
+    echo "the current JSON provider adapter requires JSON evidence status: ${case_id}" >&2
     exit 1
   }
   expected_from_input="expected/${input_path#inputs/}"
@@ -260,6 +264,19 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
     --arg input_blake3_digest "${input_blake3_digest}" \
     '{claim_layer: $claim_layer, case_id: $case_id, family: $family, input_blake3_digest: $input_blake3_digest, status: "pending", execution_result: null, executed_at: null}' \
     > "${generated_file}"
+  jq -e \
+    --arg case_id "${case_id}" \
+    --arg claim_layer "${claim_layer}" \
+    --arg family "${family}" \
+    --arg input_blake3_digest "${input_blake3_digest}" \
+    '.case_id == $case_id and .claim_layer == $claim_layer and
+     .family == $family and .input_blake3_digest == $input_blake3_digest and
+     .status == "pending" and .execution_result == null and .executed_at == null and
+     (keys | sort) == (["case_id", "claim_layer", "executed_at", "execution_result", "family", "input_blake3_digest", "status"] | sort)' \
+    "${generated_file}" >/dev/null || {
+    echo "generated evidence-status record is invalid: ${case_id}" >&2
+    exit 1
+  }
   if [[ "${mode}" == "--write" ]]; then
     install -m 0644 -- "${generated_input}" "${input_file}"
     install -m 0644 -- "${generated_file}" "${expected_file}"
@@ -294,6 +311,7 @@ done < <(
           .input, .expected, .oracle,
           $provider.subject_adapter, $provider.provider_id, $provider.contract_version,
           ($provider.abi_major | tostring), ($provider.abi_minor | tostring),
+          $provider.artifact_media_types.evidence_status,
           ($provider.fixture_payloads[.family] | @base64),
           ($provider.fixture_operations[.family] // "")
         ] | @tsv

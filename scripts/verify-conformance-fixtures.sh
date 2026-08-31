@@ -244,7 +244,6 @@ for layer in "${profile_layers[@]}"; do
       all(.fixtures[];
         (keys | sort) == (["case_id", "claim_layer", "expected", "family", "input", "oracle", "schema"] | sort)) and
       all(.fixtures[]; .claim_layer == $layer) and
-      all(.fixtures[]; .schema == ("providers/" + $layer + "/schemas/" + .family + ".schema.json")) and
       all(.fixture_providers[];
         . as $provider |
         [$provider.fixture_case_ids[] as $case_id | $profile.fixtures[] | select(.case_id == $case_id) | .family] == $family_names) and
@@ -282,7 +281,7 @@ for layer in "${profile_layers[@]}"; do
      (.contract_version | type == "string" and length > 0) and
      (.abi_major | type == "number") and (.abi_minor | type == "number") and
      (.package_path | type == "string" and length > 0) and
-     (.artifact_media_types | keys | sort) == (["oracle", "payload", "schema"] | sort) and
+     (.artifact_media_types | keys | sort) == (["evidence_status", "oracle", "payload", "schema"] | sort) and
      all(.artifact_media_types[];
        type == "string" and length > 2 and length <= 127 and
        test("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")) and
@@ -341,25 +340,8 @@ for layer in "${profile_layers[@]}"; do
         exit 1
       }
     done
-    # Provider schema, payload, and oracle bytes are opaque to CPF1. The
-    # provider-specific generator validates the current JSON adapter.
-    input_blake3_digest="$(b3sum "${fixture_root}/${input_path}" | awk '{print $1}')"
-    jq -e \
-      --arg case_id "${case_id}" \
-      --arg fixture_layer "${fixture_layer}" \
-      --arg family "${family}" \
-      --arg input_blake3_digest "${input_blake3_digest}" \
-      '.case_id == $case_id and .claim_layer == $fixture_layer and
-       .family == $family and
-       .input_blake3_digest == $input_blake3_digest and
-       .status == "pending" and
-       .execution_result == null and .executed_at == null and
-       (has("result") | not) and (has("draft_expected_result") | not) and
-       (keys | sort) == (["case_id", "claim_layer", "executed_at", "execution_result", "family", "input_blake3_digest", "status"] | sort)' \
-      "${fixture_root}/${expected_path}" >/dev/null || {
-      echo "invalid pending evidence-status record for ${layer}: ${expected_path}" >&2
-      exit 1
-    }
+    # Provider-owned bytes are opaque here. The current JSON provider adapter
+    # validates their representation while generating the fixture records.
   done < <(jq -r '.fixtures[] | [.case_id, .claim_layer, .family, .schema, .input, .expected, .oracle] | @tsv' "${profile}")
 done
 for wire_code in {0..6}; do
