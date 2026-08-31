@@ -4676,7 +4676,7 @@ fn replacement_validation_rejects_each_non_monotonic_record_dimension() -> Resul
     changed_dispatch.dispatch_provenance = Some(reference(80));
     assert_eq!(
         submitted.validate_replacement(&changed_dispatch),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let mut premature_ledger = submitted.clone();
@@ -4693,7 +4693,7 @@ fn replacement_validation_rejects_each_non_monotonic_record_dimension() -> Resul
     )];
     assert_eq!(
         frozen.validate_replacement(&premature_acknowledgement),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
 
     let authorized_state = submitted.state().transition(change(
