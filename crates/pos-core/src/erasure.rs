@@ -4956,8 +4956,8 @@ impl ErasureAtomicFreezeAdmissionV1 {
         input: ErasureAtomicFreezeAdmissionInputV1,
         scope: &ErasureScopeCommitmentV1,
     ) -> Result<Self, ErasureErrorV1> {
-        let evidence = &input.freeze_admission_evidence;
-        let authorization = &input.freeze_authorization_evidence;
+        let evidence = input.freeze_admission_evidence.clone();
+        let authorization = input.freeze_authorization_evidence.clone();
         evidence
             .authorization_body_digest()
             .and_then(|body_digest| {
@@ -7076,9 +7076,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         admission: &ErasureRetryAdmissionV1,
         lifecycle: ErasureLifecycleV1,
     ) -> Result<(ErasureCoordinatorRecordV1, ErasureReceiptV1), ErasureErrorV1> {
-        let obligations = record.supporting_records.obligations();
+        let obligations = record.supporting_records.obligations().to_vec();
         let (pending_owners, failed_owners) =
-            derived_outcome_owners_for_obligations(obligations, &record.acknowledgements);
+            derived_outcome_owners_for_obligations(&obligations, &record.acknowledgements);
         let replay_claim = weakest_inventory_claim(&input.inventories);
         let freeze_position = record.state.freeze_position();
         Self::attempt_outcome(record, admission, lifecycle, input.issue_position).and_then(
@@ -7128,7 +7128,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                             .and_then(|()| ErasureReceiptV1::new(normalized.clone()))
                             .and_then(|receipt| {
                                 receipt
-                                    .validate_frozen_obligations(obligations)
+                                    .validate_frozen_obligations(&obligations)
                                     .map(|()| receipt)
                             })
                             .map(|receipt| (normalized, receipt_provenance, receipt))
