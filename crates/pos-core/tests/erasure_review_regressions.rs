@@ -20,8 +20,8 @@ use pos_core::{
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
     ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeV1, ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
     ErasureSupportingRecordsV1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
 };
 
