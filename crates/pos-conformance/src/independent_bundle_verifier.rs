@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     array, array_values, bytes, decode, digest, digest_domain, draft_authority_verifying_key,
-    encode, text, uint, BundleContractErrorV1, DraftExecutionProfileSource,
-    AUTHORITY_INVENTORY_BYTES_V1, AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH,
+    encode, text, uint, BundleContractErrorV1, AUTHORITY_INVENTORY_BYTES_V1,
+    AUTHORITY_INVENTORY_PATH, BUILD_PROVENANCE_PATH,
     CONFORMANCE_BUNDLE_MAGIC_V1, DRAFT_AUTHORITY_DECLARATION_BYTES_V1,
     DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
     DRAFT_AUTHORITY_MINIMUM_VERSIONS, DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH,
@@ -762,16 +762,70 @@ fn raw_execution_profile_fields(
                     .find(|candidate| candidate.profile_id == profile_id)
                     .ok_or(BundleContractErrorV1::ProfileInvalid)
                     .and_then(|declaration| {
-                        if raw_execution_profile_matches(
-                            path,
-                            fields,
-                            magic,
-                            version,
-                            profile_id,
-                            semantic_version,
-                            declaration,
-                            &unsigned,
-                        ) {
+                        let classes = declaration
+                            .reproducibility_classes
+                            .iter()
+                            .copied()
+                            .map(|code| Value::Integer(code.into()))
+                            .collect::<Vec<_>>();
+                        if magic == "EPF1"
+                            && version == 1
+                            && path == format!("authority/execution-profiles/{profile_id}.epf1")
+                            && semantic_version == declaration.semantic_version
+                            && fields[4] == Value::Array(classes)
+                            && raw_text_array_matches(&fields[5], declaration.architecture_rules)
+                            && raw_text_array_matches(&fields[6], declaration.numeric_rules)
+                            && raw_text_array_matches(
+                                &fields[7],
+                                declaration.scheduler_driver_order,
+                            )
+                            && fields[8] == Value::Text(declaration.tick_policy.to_owned())
+                            && raw_text_array_matches(
+                                &fields[9],
+                                declaration.schemas_and_upcasters,
+                            )
+                            && raw_text_array_matches(&fields[10], declaration.artifact_rules)
+                            && fields[11]
+                                == Value::Array(vec![
+                                    Value::Bool(declaration.network_allowed),
+                                    Value::Array(
+                                        declaration
+                                            .capability_ids
+                                            .iter()
+                                            .map(|id| Value::Text((*id).to_owned()))
+                                            .collect(),
+                                    ),
+                                ])
+                            && fields[12]
+                                == Value::Array(
+                                    declaration
+                                        .deterministic_budgets
+                                        .into_iter()
+                                        .map(|limit| Value::Integer(limit.into()))
+                                        .collect(),
+                                )
+                            && raw_text_array_matches(
+                                &fields[13],
+                                declaration.allowed_operational_differences,
+                            )
+                            && fields[14]
+                                == Value::Array(vec![
+                                    Value::Text(
+                                        declaration.minimum_evaluator_version.to_owned(),
+                                    ),
+                                    Value::Text(
+                                        declaration.maximum_evaluator_version.to_owned(),
+                                    ),
+                                ])
+                            && fields[15] == Value::Null
+                            && digest::<32>(&fields[16]).is_ok_and(|profile_digest| {
+                                profile_digest
+                                    == digest_domain(
+                                        b"PiglorOS.ExecutionProfile.v1\0",
+                                        &unsigned,
+                                    )
+                            })
+                        {
                             Ok(profile_id.to_owned())
                         } else {
                             Err(BundleContractErrorV1::ProfileInvalid)
@@ -781,64 +835,6 @@ fn raw_execution_profile_fields(
         }
         _ => Err(BundleContractErrorV1::ProfileInvalid),
     }
-}
-
-fn raw_execution_profile_matches(
-    path: &str,
-    fields: &[Value],
-    magic: &str,
-    version: u64,
-    profile_id: &str,
-    semantic_version: &str,
-    declaration: &DraftExecutionProfileSource,
-    unsigned: &[u8],
-) -> bool {
-    let classes = declaration
-        .reproducibility_classes
-        .iter()
-        .copied()
-        .map(|code| Value::Integer(code.into()))
-        .collect::<Vec<_>>();
-    magic == "EPF1"
-        && version == 1
-        && path == format!("authority/execution-profiles/{profile_id}.epf1")
-        && semantic_version == declaration.semantic_version
-        && fields[4] == Value::Array(classes)
-        && raw_text_array_matches(&fields[5], declaration.architecture_rules)
-        && raw_text_array_matches(&fields[6], declaration.numeric_rules)
-        && raw_text_array_matches(&fields[7], declaration.scheduler_driver_order)
-        && fields[8] == Value::Text(declaration.tick_policy.to_owned())
-        && raw_text_array_matches(&fields[9], declaration.schemas_and_upcasters)
-        && raw_text_array_matches(&fields[10], declaration.artifact_rules)
-        && fields[11]
-            == Value::Array(vec![
-                Value::Bool(declaration.network_allowed),
-                Value::Array(
-                    declaration
-                        .capability_ids
-                        .iter()
-                        .map(|id| Value::Text((*id).to_owned()))
-                        .collect(),
-                ),
-            ])
-        && fields[12]
-            == Value::Array(
-                declaration
-                    .deterministic_budgets
-                    .into_iter()
-                    .map(|limit| Value::Integer(limit.into()))
-                    .collect(),
-            )
-        && raw_text_array_matches(&fields[13], declaration.allowed_operational_differences)
-        && fields[14]
-            == Value::Array(vec![
-                Value::Text(declaration.minimum_evaluator_version.to_owned()),
-                Value::Text(declaration.maximum_evaluator_version.to_owned()),
-            ])
-        && fields[15] == Value::Null
-        && digest::<32>(&fields[16]).is_ok_and(|profile_digest| {
-            profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", unsigned)
-        })
 }
 
 fn raw_text_array_matches(value: &Value, expected: &[&str]) -> bool {

@@ -986,6 +986,10 @@ fn validate_fixture_provider(
         json_field(provider, "fixture_adapter")?.clone(),
     )
     .map_err(|error| invalid_data(format!("provider fixture adapter is invalid: {error}")))?;
+    let ProviderFixtureAdapter {
+        id: adapter_id,
+        config: adapter_config,
+    } = fixture_adapter;
     let support: ProviderPackageSupportPaths = serde_json::from_value(
         json_field(provider, "package_support")?.clone(),
     )
@@ -997,33 +1001,27 @@ fn validate_fixture_provider(
     let family_names = schemas
         .map(|schemas| schemas.keys().cloned().collect::<BTreeSet<_>>())
         .unwrap_or_default();
-    let adapter_config_is_valid = if fixture_adapter.id == JSON_FIXTURE_ADAPTER_ID {
-        serde_json::from_value::<JsonFixtureAdapterConfig>(fixture_adapter.config.clone())
-            .is_ok_and(|config| {
-                config.operations.keys().collect::<BTreeSet<_>>()
+    let adapter_config_is_valid = if adapter_id == JSON_FIXTURE_ADAPTER_ID {
+        serde_json::from_value::<JsonFixtureAdapterConfig>(adapter_config).is_ok_and(|config| {
+            config.operations.keys().collect::<BTreeSet<_>>()
+                == family_names.iter().collect::<BTreeSet<_>>()
+                && config.payloads.keys().collect::<BTreeSet<_>>()
                     == family_names.iter().collect::<BTreeSet<_>>()
-                    && config.payloads.keys().collect::<BTreeSet<_>>()
-                        == family_names.iter().collect::<BTreeSet<_>>()
-                    && config
-                        .operations
-                        .values()
-                        .all(|operation| operation.as_ref().is_none_or(|value| !value.is_empty()))
-                    && config.payloads.values().all(|payload| {
-                        payload.with_operation.is_object()
-                            && payload
-                                .without_operation
-                                .as_ref()
-                                .is_none_or(Value::is_object)
-                    })
-            })
+                && config
+                    .operations
+                    .values()
+                    .all(|operation| operation.as_ref().is_none_or(|value| !value.is_empty()))
+                && config.payloads.values().all(|payload| {
+                    payload.with_operation.is_object()
+                        && payload
+                            .without_operation
+                            .as_ref()
+                            .is_none_or(Value::is_object)
+                })
+        })
     } else {
-        rust_enum_variant(
-            "FixtureAdapter",
-            &fixture_adapter.id,
-            "provider fixture adapter id",
-        )
-        .is_ok()
-            && fixture_adapter.config.is_object()
+        rust_enum_variant("FixtureAdapter", &adapter_id, "provider fixture adapter id").is_ok()
+            && adapter_config.is_object()
     };
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
@@ -1993,6 +1991,18 @@ fn emit_draft_authority(
             declaration.fixture_authority_key_id,
         )?;
     }
+    emit_draft_execution_profiles(&mut generated, declaration, include_policy_constants)?;
+    if include_policy_constants {
+        emit_draft_trust_policy_constants(&mut generated, declaration)?;
+    }
+    Ok(generated)
+}
+
+fn emit_draft_execution_profiles(
+    generated: &mut String,
+    declaration: &DraftAuthorityDeclaration,
+    include_policy_constants: bool,
+) -> Result<(), std::fmt::Error> {
     if include_policy_constants {
         generated.push_str(
             "struct DraftExecutionProfileSource {\n\
@@ -2070,27 +2080,32 @@ fn emit_draft_authority(
         )?;
     }
     generated.push_str("];\n");
-    if include_policy_constants {
-        let root = &declaration.trust_roots[0];
+    Ok(())
+}
+
+fn emit_draft_trust_policy_constants(
+    generated: &mut String,
+    declaration: &DraftAuthorityDeclaration,
+) -> Result<(), std::fmt::Error> {
+    let root = &declaration.trust_roots[0];
+    writeln!(
+        generated,
+        "const DRAFT_AUTHORITY_ROOT_VERSION: u64 = {};\nconst DRAFT_AUTHORITY_ROOT_ALGORITHM: &str = {:?};",
+        root.root_version, root.algorithm
+    )?;
+    writeln!(
+        generated,
+        "const DRAFT_AUTHORITY_MINIMUM_VERSIONS: &[(&str, &str)] = &["
+    )?;
+    for minimum in &declaration.minimum_versions {
         writeln!(
             generated,
-            "const DRAFT_AUTHORITY_ROOT_VERSION: u64 = {};\nconst DRAFT_AUTHORITY_ROOT_ALGORITHM: &str = {:?};",
-            root.root_version, root.algorithm
+            "    ({:?}, {:?}),",
+            minimum.artifact_kind, minimum.semantic_version
         )?;
-        writeln!(
-            generated,
-            "const DRAFT_AUTHORITY_MINIMUM_VERSIONS: &[(&str, &str)] = &["
-        )?;
-        for minimum in &declaration.minimum_versions {
-            writeln!(
-                generated,
-                "    ({:?}, {:?}),",
-                minimum.artifact_kind, minimum.semantic_version
-            )?;
-        }
-        generated.push_str("];\n");
     }
-    Ok(generated)
+    generated.push_str("];\n");
+    Ok(())
 }
 
 fn emit_byte_constant(
