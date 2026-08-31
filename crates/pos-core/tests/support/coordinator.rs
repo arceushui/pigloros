@@ -29,6 +29,7 @@ pub struct PublicCoordinatorPort {
 }
 
 impl PublicCoordinatorPort {
+    #[must_use]
     pub const fn new(config: PublicCoordinatorPortConfig) -> Self {
         Self {
             records: Vec::new(),
