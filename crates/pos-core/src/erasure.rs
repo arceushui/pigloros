@@ -4948,7 +4948,10 @@ impl ErasureAtomicFreezeAdmissionV1 {
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let scope = ErasureScopeCommitmentV1::new(input.scope.clone())?;
+        let scope = match ErasureScopeCommitmentV1::new(input.scope.clone()) {
+            Ok(scope) => scope,
+            Err(error) => return Err(error),
+        };
         let evidence = &input.freeze_admission_evidence;
         let authorization = &input.freeze_authorization_evidence;
         if (
@@ -4970,7 +4973,10 @@ impl ErasureAtomicFreezeAdmissionV1 {
             input.obligation_set.policy(),
             input.obligation_set.trust(),
             authorization.reference(),
-            evidence.authorization_body_digest()?,
+            match evidence.authorization_body_digest() {
+                Ok(digest) => digest,
+                Err(error) => return Err(error),
+            },
             input.obligation_set.policy(),
             input.obligation_set.trust(),
         ) {
@@ -5007,11 +5013,13 @@ impl ErasureAtomicFreezeAdmissionV1 {
         if category_targets.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        validate_applicability_obligations(
+        if let Err(error) = validate_applicability_obligations(
             evidence.applicability_matrix(),
             &input.targets,
             &input.obligations,
-        )?;
+        ) {
+            return Err(error);
+        }
         let mut command_owners = input
             .obligations
             .iter()
@@ -5086,11 +5094,13 @@ fn validate_applicability_obligations(
     }
     let mut applicable = 0_usize;
     for row in matrix {
-        let target_index =
-            usize::try_from(row.target_index()).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
-        let target = targets
-            .get(target_index)
-            .ok_or(ErasureErrorV1::ScopeInvalid)?;
+        let target_index = match usize::try_from(row.target_index()) {
+            Ok(target_index) => target_index,
+            Err(_) => return Err(ErasureErrorV1::ScopeInvalid),
+        };
+        let Some(target) = targets.get(target_index) else {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        };
         let obligation = by_category_target.get(&(row.category(), *target));
         match (row.decision(), row.owner(), obligation) {
             (ErasureApplicabilityDecisionV1::Inapplicable, None, None) => {}
@@ -5456,41 +5466,43 @@ impl ErasureCoordinatorRecordV1 {
         &self,
         predecessor: &Self,
     ) -> Result<(), ErasureErrorV1> {
-        let correction = self
-            .supporting_records
+        self.supporting_records
             .correction_provenance()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let predecessor_matches = (
-            predecessor.request.reference(),
-            predecessor.state.lifecycle(),
-            predecessor.state.state_digest(),
-        ) == (
-            correction.rejected_request(),
-            ErasureLifecycleV1::Rejected,
-            correction.rejected_terminal_state(),
-        );
-        if !predecessor_matches {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        predecessor.validate(predecessor.state.coordinator())?;
-        let rejection_matches =
-            predecessor
-                .supporting_records
-                .freeze_failure()
-                .is_some_and(|failure| {
-                    failure.request() == predecessor.request.reference()
-                        && failure.reference() == predecessor.state.provenance()
-                })
-                || predecessor
-                    .supporting_records
-                    .authorization_rejection()
-                    .is_some_and(|rejection| {
-                        rejection.request() == predecessor.request.reference()
-                            && rejection.reference() == predecessor.state.provenance()
-                    });
-        rejection_matches
-            .then_some(())
             .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|correction| {
+                let predecessor_matches = (
+                    predecessor.request.reference(),
+                    predecessor.state.lifecycle(),
+                    predecessor.state.state_digest(),
+                ) == (
+                    correction.rejected_request(),
+                    ErasureLifecycleV1::Rejected,
+                    correction.rejected_terminal_state(),
+                );
+                predecessor_matches
+                    .then_some(())
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+            .and_then(|()| predecessor.validate(predecessor.state.coordinator()))
+            .and_then(|()| {
+                let rejection_matches = predecessor
+                    .supporting_records
+                    .freeze_failure()
+                    .is_some_and(|failure| {
+                        failure.request() == predecessor.request.reference()
+                            && failure.reference() == predecessor.state.provenance()
+                    })
+                    || predecessor
+                        .supporting_records
+                        .authorization_rejection()
+                        .is_some_and(|rejection| {
+                            rejection.request() == predecessor.request.reference()
+                                && rejection.reference() == predecessor.state.provenance()
+                        });
+                rejection_matches
+                    .then_some(())
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
     }
 
     fn validate_scope(&self) -> Result<(), ErasureErrorV1> {
@@ -5647,20 +5659,24 @@ impl ErasureCoordinatorRecordV1 {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
-            validate_applicability_obligations(
+            return validate_applicability_obligations(
                 admission.applicability_matrix(),
                 &self.targets,
                 self.supporting_records.obligations(),
-            )?;
-            let expected_ledger = scope.lineage_rule().and_then(|_| {
-                self.supporting_records
-                    .scope_extension_ledgers()
-                    .last()
-                    .map(ErasureScopeExtensionLedgerV1::reference)
+            )
+            .and_then(|()| {
+                let expected_ledger = scope.lineage_rule().and_then(|_| {
+                    self.supporting_records
+                        .scope_extension_ledgers()
+                        .last()
+                        .map(ErasureScopeExtensionLedgerV1::reference)
+                });
+                if self.scope_extension_ledger == expected_ledger {
+                    Ok(())
+                } else {
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                }
             });
-            if self.scope_extension_ledger != expected_ledger {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
         }
         Ok(())
     }
@@ -5752,67 +5768,71 @@ impl ErasureCoordinatorRecordV1 {
         else {
             return Err(ErasureErrorV1::ProvenanceMissing);
         };
-        let reconstructed = ErasureReceiptV1::new(receipt_input.clone())?;
         let mut acknowledgements = self.acknowledgements.clone();
         acknowledgements.sort_unstable();
-        if (
-            receipt,
-            receipt.terminal_state(),
-            receipt.lifecycle(),
-            receipt.coordinator(),
-            receipt.replay_claim(),
-            receipt.0.request,
-            receipt.frozen_targets(),
-        ) != (
-            &reconstructed,
-            self.state.state_digest(),
-            lifecycle,
-            coordinator,
-            self.state.replay_claim(),
-            self.request.reference(),
-            self.targets.as_slice(),
-        ) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if receipt.acknowledgements().ne(acknowledgements.as_slice()) {
-            let active_retry = self.supporting_records.retry_admissions.len()
-                == self
-                    .supporting_records
-                    .attempt_outcomes
-                    .len()
-                    .saturating_add(1);
-            if !active_retry {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-        }
-        receipt.validate_frozen_obligations(self.supporting_records.obligations())?;
-        let (pending, failed) = derived_outcome_owners_for_obligations(
-            self.supporting_records.obligations(),
-            receipt.acknowledgements(),
-        );
-        if (self.state.pending_owners(), self.state.failed_owners())
-            != (pending.as_slice(), failed.as_slice())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let (Some(outcome), Some(provenance)) = (
-            self.supporting_records.attempt_outcomes().last(),
-            self.supporting_records.receipt_provenance().last(),
-        ) else {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        };
-        if (
-            self.state.provenance(),
-            receipt.provenance(),
-            provenance.terminal_state(),
-        ) != (
-            outcome.reference(),
-            provenance.reference(),
-            self.state.state_digest(),
-        ) {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        Ok(())
+        ErasureReceiptV1::new(receipt_input.clone())
+            .and_then(|reconstructed| {
+                if (
+                    receipt,
+                    receipt.terminal_state(),
+                    receipt.lifecycle(),
+                    receipt.coordinator(),
+                    receipt.replay_claim(),
+                    receipt.0.request,
+                    receipt.frozen_targets(),
+                ) != (
+                    &reconstructed,
+                    self.state.state_digest(),
+                    lifecycle,
+                    coordinator,
+                    self.state.replay_claim(),
+                    self.request.reference(),
+                    self.targets.as_slice(),
+                ) {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
+                if receipt.acknowledgements().ne(acknowledgements.as_slice()) {
+                    let active_retry = self.supporting_records.retry_admissions.len()
+                        == self
+                            .supporting_records
+                            .attempt_outcomes
+                            .len()
+                            .saturating_add(1);
+                    if !active_retry {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                }
+                receipt.validate_frozen_obligations(self.supporting_records.obligations())
+            })
+            .and_then(|()| {
+                let (pending, failed) = derived_outcome_owners_for_obligations(
+                    self.supporting_records.obligations(),
+                    receipt.acknowledgements(),
+                );
+                if (self.state.pending_owners(), self.state.failed_owners())
+                    != (pending.as_slice(), failed.as_slice())
+                {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
+                let (Some(outcome), Some(provenance)) = (
+                    self.supporting_records.attempt_outcomes().last(),
+                    self.supporting_records.receipt_provenance().last(),
+                ) else {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                };
+                if (
+                    self.state.provenance(),
+                    receipt.provenance(),
+                    provenance.terminal_state(),
+                ) != (
+                    outcome.reference(),
+                    provenance.reference(),
+                    self.state.state_digest(),
+                ) {
+                    return Err(ErasureErrorV1::ProvenanceMissing);
+                }
+                Ok(())
+            })
     }
 
     fn validate(&self, coordinator: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
@@ -5821,43 +5841,50 @@ impl ErasureCoordinatorRecordV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        self.supporting_records.validate()?;
-        self.supporting_records
-            .validates_request(self.request.reference())?;
-        if self
-            .supporting_records
-            .correction_provenance()
-            .is_some_and(|correction| self.request.provenance() != correction.reference())
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
         let lifecycle = self.state.lifecycle();
-        self.validate_supporting_lifecycle(lifecycle)?;
-        self.validate_scope()?;
-        self.validate_lifecycle_shape(lifecycle)?;
-        self.validate_frozen_evidence(lifecycle)?;
-        self.validate_provenance(lifecycle)?;
-        self.validate_administrative_resolution_head()?;
-        self.validate_terminal(lifecycle, coordinator)?;
-        Ok(())
+        self.supporting_records
+            .validate()
+            .and_then(|()| {
+                self.supporting_records
+                    .validates_request(self.request.reference())
+            })
+            .and_then(|()| {
+                if self
+                    .supporting_records
+                    .correction_provenance()
+                    .is_some_and(|correction| self.request.provenance() != correction.reference())
+                {
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                } else {
+                    Ok(())
+                }
+            })
+            .and_then(|()| self.validate_supporting_lifecycle(lifecycle))
+            .and_then(|()| self.validate_scope())
+            .and_then(|()| self.validate_lifecycle_shape(lifecycle))
+            .and_then(|()| self.validate_frozen_evidence(lifecycle))
+            .and_then(|()| self.validate_provenance(lifecycle))
+            .and_then(|()| self.validate_administrative_resolution_head())
+            .and_then(|()| self.validate_terminal(lifecycle, coordinator))
     }
 
     fn validate_supporting_lifecycle(
         &self,
         lifecycle: ErasureLifecycleV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.validate_supporting_evidence_shape(lifecycle)?;
-        self.validate_attempt_evidence_shape(lifecycle)?;
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
-        ) {
-            let latest_receipt = self.supporting_records.receipts().last();
-            if latest_receipt != self.receipt.as_ref() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-        }
-        Ok(())
+        self.validate_supporting_evidence_shape(lifecycle)
+            .and_then(|()| self.validate_attempt_evidence_shape(lifecycle))
+            .and_then(|()| {
+                if matches!(
+                    lifecycle,
+                    ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
+                ) && self.supporting_records.receipts().last() != self.receipt.as_ref()
+                {
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                } else {
+                    Ok(())
+                }
+            })
     }
 
     fn validate_supporting_evidence_shape(
@@ -5888,9 +5915,9 @@ impl ErasureCoordinatorRecordV1 {
             }
             ErasureLifecycleV1::Rejected => {
                 if let Some(failure) = failure {
-                    let authorization = self
-                        .authorize_provenance
-                        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                    let Some(authorization) = self.authorize_provenance else {
+                        return Err(ErasureErrorV1::ProvenanceMissing);
+                    };
                     if (
                         scope.is_some(),
                         admission.is_some(),
@@ -5994,11 +6021,9 @@ impl ErasureCoordinatorRecordV1 {
             ErasureLifecycleV1::DestructionDispatched
                 | ErasureLifecycleV1::AwaitingAcknowledgements
         ) {
-            let admission = self
-                .supporting_records
-                .retry_admissions()
-                .last()
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let Some(admission) = self.supporting_records.retry_admissions().last() else {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            };
             if self.state.provenance() != admission.reference()
                 || self.dispatch_provenance != Some(admission.reference())
             {
@@ -6161,53 +6186,66 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         match self.port.load_record(request.reference()) {
-            Ok(Some(record)) => {
-                record.validate(self.coordinator)?;
-                verify_predecessor_chain(record.state.clone(), &self.port)?;
-                if record.request != request
-                    || record.supporting_records.correction_provenance() != Some(&correction)
-                {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
-                let state = record.state.clone();
-                self.cache(record);
-                Ok(state)
-            }
-            Ok(None) => {
-                let predecessor = self
-                    .port
-                    .load_record(correction.rejected_request())?
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-                predecessor.validate(self.coordinator)?;
-                verify_predecessor_chain(predecessor.state.clone(), &self.port)?;
-                self.port.authenticate(&request)?;
-                self.port
-                    .admit_corrected_submission(&request, &correction)?;
-                let state = ErasureStateV1::submitted(
-                    request.reference(),
-                    self.coordinator,
-                    request.provenance(),
-                )?;
-                let record = ErasureCoordinatorRecordV1 {
-                    request,
-                    state: state.clone(),
-                    targets: Vec::new(),
-                    acknowledgements: Vec::new(),
-                    receipt: None,
-                    receipt_input: None,
-                    authorize_provenance: None,
-                    freeze_provenance: None,
-                    dispatch_provenance: None,
-                    scope_extension_ledger: None,
-                    administrative_resolution_head: None,
-                    supporting_records: ErasureSupportingRecordsV1 {
-                        correction_provenance: Some(correction),
-                        ..ErasureSupportingRecordsV1::default()
-                    },
-                };
-                record.validate_correction_predecessor(&predecessor)?;
-                self.commit(record).map(|()| state)
-            }
+            Ok(Some(record)) => record
+                .validate(self.coordinator)
+                .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
+                .and_then(|()| {
+                    if record.request != request
+                        || record.supporting_records.correction_provenance() != Some(&correction)
+                    {
+                        Err(ErasureErrorV1::PolicyConflict)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map(|()| {
+                    let state = record.state.clone();
+                    self.cache(record);
+                    state
+                }),
+            Ok(None) => self
+                .port
+                .load_record(correction.rejected_request())
+                .and_then(|predecessor| predecessor.ok_or(ErasureErrorV1::ProvenanceMissing))
+                .and_then(|predecessor| {
+                    predecessor
+                        .validate(self.coordinator)
+                        .and_then(|()| {
+                            verify_predecessor_chain(predecessor.state.clone(), &self.port)
+                        })
+                        .and_then(|()| self.port.authenticate(&request))
+                        .and_then(|()| self.port.admit_corrected_submission(&request, &correction))
+                        .and_then(|()| {
+                            ErasureStateV1::submitted(
+                                request.reference(),
+                                self.coordinator,
+                                request.provenance(),
+                            )
+                        })
+                        .and_then(|state| {
+                            let record = ErasureCoordinatorRecordV1 {
+                                request,
+                                state: state.clone(),
+                                targets: Vec::new(),
+                                acknowledgements: Vec::new(),
+                                receipt: None,
+                                receipt_input: None,
+                                authorize_provenance: None,
+                                freeze_provenance: None,
+                                dispatch_provenance: None,
+                                scope_extension_ledger: None,
+                                administrative_resolution_head: None,
+                                supporting_records: ErasureSupportingRecordsV1 {
+                                    correction_provenance: Some(correction),
+                                    ..ErasureSupportingRecordsV1::default()
+                                },
+                            };
+                            record
+                                .validate_correction_predecessor(&predecessor)
+                                .and_then(|()| self.commit(record))
+                                .map(|()| state)
+                        })
+                }),
             Err(error) => Err(error),
         }
     }
@@ -6237,22 +6275,23 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     Err(ErasureErrorV1::PolicyConflict)
                 };
             }
-            self.port.admit_authorization(
-                request,
-                provenance,
-                ErasureAuthorizationDecisionV1::Authorized,
-            )?;
             let replay_claim = record.state.replay_claim();
-            record
-                .state
-                .transition(ErasureStateTransitionV1 {
-                    lifecycle: ErasureLifecycleV1::Authorized,
-                    freeze_position: None,
-                    pending_owners: Vec::new(),
-                    failed_owners: Vec::new(),
-                    acknowledged_targets: Vec::new(),
-                    replay_claim,
+            self.port
+                .admit_authorization(
+                    request,
                     provenance,
+                    ErasureAuthorizationDecisionV1::Authorized,
+                )
+                .and_then(|()| {
+                    record.state.transition(ErasureStateTransitionV1 {
+                        lifecycle: ErasureLifecycleV1::Authorized,
+                        freeze_position: None,
+                        pending_owners: Vec::new(),
+                        failed_owners: Vec::new(),
+                        acknowledged_targets: Vec::new(),
+                        replay_claim,
+                        provenance,
+                    })
                 })
                 .and_then(|state| {
                     record.state = state;
@@ -6282,29 +6321,34 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .filter(|rejection| rejection.authorization_provenance() == provenance)
                     .map_or(Err(ErasureErrorV1::PolicyConflict), |_| Ok(record.state));
             }
-            self.port.admit_authorization(
-                request,
-                provenance,
-                ErasureAuthorizationDecisionV1::Rejected,
-            )?;
-            let rejection =
-                ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
-                    request,
-                    authorization_provenance: provenance,
-                })?;
             let replay_claim = record.state.replay_claim();
-            record
-                .state
-                .transition(ErasureStateTransitionV1 {
-                    lifecycle: ErasureLifecycleV1::Rejected,
-                    freeze_position: None,
-                    pending_owners: Vec::new(),
-                    failed_owners: Vec::new(),
-                    acknowledged_targets: Vec::new(),
-                    replay_claim,
-                    provenance: rejection.reference(),
+            self.port
+                .admit_authorization(
+                    request,
+                    provenance,
+                    ErasureAuthorizationDecisionV1::Rejected,
+                )
+                .and_then(|()| {
+                    ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+                        request,
+                        authorization_provenance: provenance,
+                    })
                 })
-                .and_then(|state| {
+                .and_then(|rejection| {
+                    record
+                        .state
+                        .transition(ErasureStateTransitionV1 {
+                            lifecycle: ErasureLifecycleV1::Rejected,
+                            freeze_position: None,
+                            pending_owners: Vec::new(),
+                            failed_owners: Vec::new(),
+                            acknowledged_targets: Vec::new(),
+                            replay_claim,
+                            provenance: rejection.reference(),
+                        })
+                        .map(|state| (rejection, state))
+                })
+                .and_then(|(rejection, state)| {
                     record.state = state;
                     record.supporting_records.authorization_rejection = Some(rejection);
                     let state = record.state.clone();
@@ -6363,14 +6407,16 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             ) {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
-            match self.port.admit_atomic_freeze(request, &transition)? {
-                ErasureAtomicFreezeResultV1::Rejected(failure) => {
-                    self.persist_freeze_rejection(&mut record, failure)
-                }
-                ErasureAtomicFreezeResultV1::Admitted(admission) => {
-                    self.persist_atomic_freeze(&mut record, &admission)
-                }
-            }
+            self.port
+                .admit_atomic_freeze(request, &transition)
+                .and_then(|result| match result {
+                    ErasureAtomicFreezeResultV1::Rejected(failure) => {
+                        self.persist_freeze_rejection(&mut record, failure)
+                    }
+                    ErasureAtomicFreezeResultV1::Admitted(admission) => {
+                        self.persist_atomic_freeze(&mut record, &admission)
+                    }
+                })
         })
     }
 
@@ -6386,54 +6432,68 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        self.port.validate_freeze_authorization(
-            admission.freeze_admission_evidence(),
-            admission.freeze_authorization_evidence(),
-        )?;
-        let scope = ErasureScopeCommitmentV1::new(admission.scope().clone())?;
-        let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
-            request,
-            scope_commitment: scope.reference(),
-            obligation_set: admission.obligation_set().reference(),
-            freeze_position: admission.freeze_position(),
-            host_evidence: admission.freeze_admission_evidence().reference(),
-        })?;
-        let ledger = scope
-            .lineage_rule()
-            .map(|_| {
-                ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        self.port
+            .validate_freeze_authorization(
+                admission.freeze_admission_evidence(),
+                admission.freeze_authorization_evidence(),
+            )
+            .and_then(|()| ErasureScopeCommitmentV1::new(admission.scope().clone()))
+            .and_then(|scope| {
+                ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+                    request,
                     scope_commitment: scope.reference(),
-                    extensions: Vec::new(),
-                    head: None,
+                    obligation_set: admission.obligation_set().reference(),
+                    freeze_position: admission.freeze_position(),
+                    host_evidence: admission.freeze_admission_evidence().reference(),
                 })
+                .map(|freeze| (scope, freeze))
             })
-            .transpose()?;
-        let replay_claim = record.state.replay_claim();
-        let state = record.state.transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::AccessFrozen,
-            freeze_position: Some(admission.freeze_position()),
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim,
-            provenance: freeze.reference(),
-        })?;
-        record.state = state.clone();
-        record.targets = admission.targets().to_vec();
-        record.freeze_provenance = Some(freeze.reference());
-        record.scope_extension_ledger = ledger
-            .as_ref()
-            .map(ErasureScopeExtensionLedgerV1::reference);
-        record.supporting_records.scope_commitment = Some(scope);
-        record.supporting_records.freeze_admission_evidence =
-            Some(admission.freeze_admission_evidence().clone());
-        record.supporting_records.freeze_authorization_evidence =
-            Some(admission.freeze_authorization_evidence().clone());
-        record.supporting_records.freeze_provenance = Some(freeze);
-        record.supporting_records.obligations = admission.obligations().to_vec();
-        record.supporting_records.obligation_set = Some(admission.obligation_set().clone());
-        record.supporting_records.scope_extension_ledgers = ledger.into_iter().collect();
-        self.commit(record.clone()).map(|()| state)
+            .and_then(|(scope, freeze)| {
+                scope
+                    .lineage_rule()
+                    .map(|_| {
+                        ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+                            scope_commitment: scope.reference(),
+                            extensions: Vec::new(),
+                            head: None,
+                        })
+                    })
+                    .transpose()
+                    .map(|ledger| (scope, freeze, ledger))
+            })
+            .and_then(|(scope, freeze, ledger)| {
+                let replay_claim = record.state.replay_claim();
+                record
+                    .state
+                    .transition(ErasureStateTransitionV1 {
+                        lifecycle: ErasureLifecycleV1::AccessFrozen,
+                        freeze_position: Some(admission.freeze_position()),
+                        pending_owners: Vec::new(),
+                        failed_owners: Vec::new(),
+                        acknowledged_targets: Vec::new(),
+                        replay_claim,
+                        provenance: freeze.reference(),
+                    })
+                    .map(|state| (scope, freeze, ledger, state))
+            })
+            .and_then(|(scope, freeze, ledger, state)| {
+                record.state = state.clone();
+                record.targets = admission.targets().to_vec();
+                record.freeze_provenance = Some(freeze.reference());
+                record.scope_extension_ledger = ledger
+                    .as_ref()
+                    .map(ErasureScopeExtensionLedgerV1::reference);
+                record.supporting_records.scope_commitment = Some(scope);
+                record.supporting_records.freeze_admission_evidence =
+                    Some(admission.freeze_admission_evidence().clone());
+                record.supporting_records.freeze_authorization_evidence =
+                    Some(admission.freeze_authorization_evidence().clone());
+                record.supporting_records.freeze_provenance = Some(freeze);
+                record.supporting_records.obligations = admission.obligations().to_vec();
+                record.supporting_records.obligation_set = Some(admission.obligation_set().clone());
+                record.supporting_records.scope_extension_ledgers = ledger.into_iter().collect();
+                self.commit(record.clone()).map(|()| state)
+            })
     }
 
     fn persist_freeze_rejection(
@@ -6447,18 +6507,22 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let replay_claim = record.state.replay_claim();
-        let state = record.state.transition(ErasureStateTransitionV1 {
-            lifecycle: ErasureLifecycleV1::Rejected,
-            freeze_position: None,
-            pending_owners: Vec::new(),
-            failed_owners: Vec::new(),
-            acknowledged_targets: Vec::new(),
-            replay_claim,
-            provenance: failure.reference(),
-        })?;
-        record.state = state.clone();
-        record.supporting_records.freeze_failure = Some(failure);
-        self.commit(record.clone()).map(|()| state)
+        record
+            .state
+            .transition(ErasureStateTransitionV1 {
+                lifecycle: ErasureLifecycleV1::Rejected,
+                freeze_position: None,
+                pending_owners: Vec::new(),
+                failed_owners: Vec::new(),
+                acknowledged_targets: Vec::new(),
+                replay_claim,
+                provenance: failure.reference(),
+            })
+            .and_then(|state| {
+                record.state = state.clone();
+                record.supporting_records.freeze_failure = Some(failure);
+                self.commit(record.clone()).map(|()| state)
+            })
     }
     /// Dispatch the frozen closure through the host-owned idempotent port.
     ///
@@ -6483,74 +6547,95 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 return Ok(record.state);
             }
             let ordinal_index = record.supporting_records.attempt_outcomes.len();
-            let ordinal =
-                u64::try_from(ordinal_index).map_err(|_| ErasureErrorV1::PolicyConflict)?;
             let source_receipt = record
                 .supporting_records
                 .receipts
                 .last()
                 .map(ErasureReceiptV1::receipt_digest);
-            if admission.request() != request
-                || admission.attempt_ordinal() != ordinal
-                || admission.source_receipt() != source_receipt
-                || !matches!(
-                    record.state.lifecycle(),
-                    ErasureLifecycleV1::AccessFrozen | ErasureLifecycleV1::PartialFailure
-                )
-            {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-            let expected_obligations = Self::unresolved_obligation_references(&record);
-            if admission.unresolved_obligations() != expected_obligations.as_slice() {
-                return Err(ErasureErrorV1::ScopeInvalid);
-            }
-            let commands = Self::commands_for_admission(&record, admission)?;
-            let already_admitted = record
-                .supporting_records
-                .retry_admissions
-                .get(ordinal_index)
-                == Some(admission);
-            if !already_admitted {
-                self.port.admit_attempt(admission)?;
-                record
-                    .supporting_records
-                    .retry_admissions
-                    .push(admission.clone());
-                record.acknowledgements = record
-                    .supporting_records
-                    .effective_acknowledgements(admission);
-                if ordinal == 0 {
-                    record.dispatch_provenance = Some(admission.reference());
-                }
-                self.commit(record.clone())?;
-            }
-            self.port.dispatch_destruction(request, &commands)?;
-            if ordinal == 0 {
-                let freeze_position = record.state.freeze_position();
-                let replay_claim = record.state.replay_claim();
-                let dispatched = record.state.transition(ErasureStateTransitionV1 {
-                    lifecycle: ErasureLifecycleV1::DestructionDispatched,
-                    freeze_position,
-                    pending_owners: Vec::new(),
-                    failed_owners: Vec::new(),
-                    acknowledged_targets: Vec::new(),
-                    replay_claim,
-                    provenance: admission.reference(),
-                })?;
-                record.state = dispatched;
-                let dispatched_record = record.clone();
-                record.state = record.state.transition(ErasureStateTransitionV1 {
-                    lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
-                    freeze_position,
-                    pending_owners: Vec::new(),
-                    failed_owners: Vec::new(),
-                    acknowledged_targets: Vec::new(),
-                    replay_claim,
-                    provenance: admission.reference(),
-                })?;
-                self.commit_records(&[dispatched_record, record.clone()])?;
-            }
-            Ok(record.state)
+            u64::try_from(ordinal_index)
+                .map_err(|_| ErasureErrorV1::PolicyConflict)
+                .and_then(|ordinal| {
+                    if admission.request() != request
+                        || admission.attempt_ordinal() != ordinal
+                        || admission.source_receipt() != source_receipt
+                        || !matches!(
+                            record.state.lifecycle(),
+                            ErasureLifecycleV1::AccessFrozen | ErasureLifecycleV1::PartialFailure
+                        )
+                    {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                    let expected_obligations = Self::unresolved_obligation_references(&record);
+                    if admission.unresolved_obligations() != expected_obligations.as_slice() {
+                        return Err(ErasureErrorV1::ScopeInvalid);
+                    }
+                    Self::commands_for_admission(&record, admission).and_then(|commands| {
+                        let already_admitted = record
+                            .supporting_records
+                            .retry_admissions
+                            .get(ordinal_index)
+                            == Some(admission);
+                        let persist_admission = if already_admitted {
+                            Ok(())
+                        } else {
+                            self.port.admit_attempt(admission).and_then(|()| {
+                                record
+                                    .supporting_records
+                                    .retry_admissions
+                                    .push(admission.clone());
+                                record.acknowledgements = record
+                                    .supporting_records
+                                    .effective_acknowledgements(admission);
+                                if ordinal == 0 {
+                                    record.dispatch_provenance = Some(admission.reference());
+                                }
+                                self.commit(record.clone())
+                            })
+                        };
+                        persist_admission
+                            .and_then(|()| self.port.dispatch_destruction(request, &commands))
+                            .and_then(|()| {
+                                if ordinal != 0 {
+                                    return Ok(record.state);
+                                }
+                                let freeze_position = record.state.freeze_position();
+                                let replay_claim = record.state.replay_claim();
+                                record
+                                    .state
+                                    .transition(ErasureStateTransitionV1 {
+                                        lifecycle: ErasureLifecycleV1::DestructionDispatched,
+                                        freeze_position,
+                                        pending_owners: Vec::new(),
+                                        failed_owners: Vec::new(),
+                                        acknowledged_targets: Vec::new(),
+                                        replay_claim,
+                                        provenance: admission.reference(),
+                                    })
+                                    .and_then(|dispatched| {
+                                        record.state = dispatched;
+                                        let dispatched_record = record.clone();
+                                        record
+                                            .state
+                                            .transition(ErasureStateTransitionV1 {
+                                                lifecycle:
+                                                    ErasureLifecycleV1::AwaitingAcknowledgements,
+                                                freeze_position,
+                                                pending_owners: Vec::new(),
+                                                failed_owners: Vec::new(),
+                                                acknowledged_targets: Vec::new(),
+                                                replay_claim,
+                                                provenance: admission.reference(),
+                                            })
+                                            .map(|awaiting| (dispatched_record, awaiting))
+                                    })
+                                    .and_then(|(dispatched_record, awaiting)| {
+                                        record.state = awaiting;
+                                        self.commit_records(&[dispatched_record, record.clone()])
+                                            .map(|()| record.state.clone())
+                                    })
+                            })
+                    })
+                })
         })
     }
 
@@ -6575,34 +6660,40 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         record: &ErasureCoordinatorRecordV1,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<Vec<ErasureDestructionCommandV1>, ErasureErrorV1> {
-        let mut commands = Vec::new();
-        for (obligation_reference, command) in admission
+        admission
             .unresolved_obligations()
             .iter()
             .zip(admission.command_identities())
-        {
-            let obligation = record
-                .supporting_records
-                .obligations()
-                .iter()
-                .find(|candidate| candidate.reference() == *obligation_reference)
-                .ok_or(ErasureErrorV1::ScopeInvalid)?;
-            if obligation.command_identity() != *command {
-                return Err(ErasureErrorV1::ScopeInvalid);
-            }
-            let candidate = ErasureDestructionCommandV1::new(
-                admission.request(),
-                obligation.target(),
-                admission.reference(),
-            );
-            if !commands
-                .iter()
-                .any(|existing: &ErasureDestructionCommandV1| existing.command == candidate.command)
-            {
-                commands.push(candidate);
-            }
-        }
-        Ok(commands)
+            .try_fold(
+                Vec::new(),
+                |mut commands, (obligation_reference, command)| {
+                    record
+                        .supporting_records
+                        .obligations()
+                        .iter()
+                        .find(|candidate| candidate.reference() == *obligation_reference)
+                        .ok_or(ErasureErrorV1::ScopeInvalid)
+                        .and_then(|obligation| {
+                            if obligation.command_identity() != *command {
+                                return Err(ErasureErrorV1::ScopeInvalid);
+                            }
+                            let candidate = ErasureDestructionCommandV1::new(
+                                admission.request(),
+                                obligation.target(),
+                                admission.reference(),
+                            );
+                            if !commands
+                                .iter()
+                                .any(|existing: &ErasureDestructionCommandV1| {
+                                    existing.command == candidate.command
+                                })
+                            {
+                                commands.push(candidate);
+                            }
+                            Ok(commands)
+                        })
+                },
+            )
     }
 
     /// Dispatch the initial attempt using request-pinned policy and host provenance.
@@ -6617,52 +6708,60 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let record = self.record(request)?;
-        if record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements {
-            let admission = record
-                .supporting_records
-                .retry_admissions()
-                .last()
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            if admission.authorization_provenance() != provenance {
+        self.record(request).and_then(|record| {
+            if record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements {
+                return record
+                    .supporting_records
+                    .retry_admissions()
+                    .last()
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+                    .and_then(|admission| {
+                        if admission.authorization_provenance() == provenance {
+                            Ok(record.state)
+                        } else {
+                            Err(ErasureErrorV1::PolicyConflict)
+                        }
+                    });
+            }
+            if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
-            return Ok(record.state);
-        }
-        if record.state.lifecycle() != ErasureLifecycleV1::AccessFrozen {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let obligations = Self::unresolved_obligation_references(&record);
-        let command_identities = obligations
-            .iter()
-            .map(|reference| {
-                record
-                    .supporting_records
-                    .obligations()
-                    .iter()
-                    .find(|obligation| obligation.reference() == *reference)
-                    .map(ErasureObligationV1::command_identity)
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let trust = record
-            .supporting_records
-            .obligation_set()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?
-            .trust();
-        ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
-            request,
-            attempt_ordinal: 0,
-            source_receipt: None,
-            unresolved_obligations: obligations,
-            command_identities,
-            policy: record.request.policy(),
-            trust,
-            admitted_position: record.request.request_position(),
-            deadline_position: record.request.horizon_position(),
-            authorization_provenance: provenance,
+            let obligations = Self::unresolved_obligation_references(&record);
+            obligations
+                .iter()
+                .map(|reference| {
+                    record
+                        .supporting_records
+                        .obligations()
+                        .iter()
+                        .find(|obligation| obligation.reference() == *reference)
+                        .map(ErasureObligationV1::command_identity)
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|command_identities| {
+                    record
+                        .supporting_records
+                        .obligation_set()
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        .map(|obligation_set| (command_identities, obligation_set.trust()))
+                })
+                .and_then(|(command_identities, trust)| {
+                    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+                        request,
+                        attempt_ordinal: 0,
+                        source_receipt: None,
+                        unresolved_obligations: obligations,
+                        command_identities,
+                        policy: record.request.policy(),
+                        trust,
+                        admitted_position: record.request.request_position(),
+                        deadline_position: record.request.horizon_position(),
+                        authorization_provenance: provenance,
+                    })
+                })
+                .and_then(|admission| self.dispatch_attempt(request, &admission))
         })
-        .and_then(|admission| self.dispatch_attempt(request, &admission))
     }
     /// Persist one frozen-closure acknowledgement; an exact retry is idempotent.
     ///
@@ -6687,73 +6786,92 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             if !record.targets.contains(&acknowledgement.target) {
                 return Err(ErasureErrorV1::Unauthorized);
             }
-            let obligation = record
+            record
                 .supporting_records
                 .obligations()
                 .iter()
                 .find(|candidate| candidate.reference() == acknowledgement.obligation)
-                .ok_or(ErasureErrorV1::Unauthorized)?;
-            if (obligation.target(), obligation.owner())
-                != (acknowledgement.target, acknowledgement.owner)
-            {
-                return Err(ErasureErrorV1::Unauthorized);
-            }
-            if record.acknowledgements.iter().any(|existing| {
-                existing.obligation == acknowledgement.obligation
-                    && existing.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged
-                    && acknowledgement.outcome != ErasureAcknowledgementOutcomeV1::Acknowledged
-            }) {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-            let admission = record
-                .supporting_records
-                .retry_admissions
-                .last()
-                .cloned()
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let command = obligation.command_identity();
-            let pair_is_admitted = admission
-                .unresolved_obligations()
-                .iter()
-                .zip(admission.command_identities())
-                .any(|(obligation, admitted_command)| {
-                    *obligation == acknowledgement.obligation && *admitted_command == command
-                });
-            if !pair_is_admitted {
-                return Err(ErasureErrorV1::Unauthorized);
-            }
-            let scope = record
-                .supporting_records
-                .scope_commitment()
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let acknowledgement_provenance =
-                ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
-                    request,
-                    command,
-                    attempt: admission.reference(),
-                    obligation: acknowledgement.obligation,
-                    owner: acknowledgement.owner,
-                    scope: scope.reference(),
-                    outcome: acknowledgement.outcome,
-                    evidence: acknowledgement.evidence,
-                    policy: admission.policy(),
-                    trust: admission.trust(),
-                })?;
-            self.port
-                .admit_acknowledgement(&acknowledgement_provenance)?;
-            record
-                .supporting_records
-                .acknowledgement_provenance
-                .push(acknowledgement_provenance);
-            record
-                .supporting_records
-                .acknowledgement_provenance
-                .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
-            record.acknowledgements = record
-                .supporting_records
-                .effective_acknowledgements(&admission);
-            let state = record.state.clone();
-            self.commit(record).map(|()| state)
+                .ok_or(ErasureErrorV1::Unauthorized)
+                .and_then(|obligation| {
+                    if (obligation.target(), obligation.owner())
+                        != (acknowledgement.target, acknowledgement.owner)
+                    {
+                        Err(ErasureErrorV1::Unauthorized)
+                    } else {
+                        Ok(obligation.command_identity())
+                    }
+                })
+                .and_then(|command| {
+                    if record.acknowledgements.iter().any(|existing| {
+                        existing.obligation == acknowledgement.obligation
+                            && existing.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged
+                            && acknowledgement.outcome
+                                != ErasureAcknowledgementOutcomeV1::Acknowledged
+                    }) {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                    record
+                        .supporting_records
+                        .retry_admissions
+                        .last()
+                        .cloned()
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        .map(|admission| (command, admission))
+                })
+                .and_then(|(command, admission)| {
+                    let pair_is_admitted = admission
+                        .unresolved_obligations()
+                        .iter()
+                        .zip(admission.command_identities())
+                        .any(|(obligation, admitted_command)| {
+                            *obligation == acknowledgement.obligation
+                                && *admitted_command == command
+                        });
+                    if !pair_is_admitted {
+                        return Err(ErasureErrorV1::Unauthorized);
+                    }
+                    record
+                        .supporting_records
+                        .scope_commitment()
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        .map(|scope| (command, admission, scope.reference()))
+                })
+                .and_then(|(command, admission, scope)| {
+                    ErasureAcknowledgementProvenanceV1::new(
+                        ErasureAcknowledgementProvenanceInputV1 {
+                            request,
+                            command,
+                            attempt: admission.reference(),
+                            obligation: acknowledgement.obligation,
+                            owner: acknowledgement.owner,
+                            scope,
+                            outcome: acknowledgement.outcome,
+                            evidence: acknowledgement.evidence,
+                            policy: admission.policy(),
+                            trust: admission.trust(),
+                        },
+                    )
+                    .map(|provenance| (admission, provenance))
+                })
+                .and_then(|(admission, acknowledgement_provenance)| {
+                    self.port
+                        .admit_acknowledgement(&acknowledgement_provenance)
+                        .and_then(|()| {
+                            record
+                                .supporting_records
+                                .acknowledgement_provenance
+                                .push(acknowledgement_provenance);
+                            record
+                                .supporting_records
+                                .acknowledgement_provenance
+                                .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
+                            record.acknowledgements = record
+                                .supporting_records
+                                .effective_acknowledgements(&admission);
+                            let state = record.state.clone();
+                            self.commit(record).map(|()| state)
+                        })
+                })
         })
     }
     /// Commit a receipt after normalizing core-derived fields against this record.
@@ -6900,12 +7018,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let admission = record
-            .supporting_records
-            .retry_admissions
-            .last()
-            .cloned()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let Some(admission) = record.supporting_records.retry_admissions.last().cloned() else {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        };
         if record.supporting_records.retry_admissions.len()
             != record
                 .supporting_records
@@ -6947,8 +7062,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         let replay_claim = weakest_inventory_claim(&input.inventories);
         let freeze_position = record.state.freeze_position();
         let (outcome, acknowledgement_references) =
-            Self::attempt_outcome(record, &admission, lifecycle, input.issue_position)?;
-        let (terminal, receipt_provenance) = record
+            match Self::attempt_outcome(record, &admission, lifecycle, input.issue_position) {
+                Ok(outcome) => outcome,
+                Err(error) => return Err(error),
+            };
+        let transition = record
             .state
             .transition(ErasureStateTransitionV1 {
                 lifecycle,
@@ -6971,16 +7089,30 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     input.issue_position,
                 )
                 .map(|provenance| (terminal, provenance))
-            })?;
+            });
+        let (terminal, receipt_provenance) = match transition {
+            Ok(transition) => transition,
+            Err(error) => return Err(error),
+        };
         record.state = terminal;
         let mut normalized =
-            Self::normalize_receipt_input(request, self.coordinator, record, input.clone())?;
+            match Self::normalize_receipt_input(request, self.coordinator, record, input.clone()) {
+                Ok(normalized) => normalized,
+                Err(error) => return Err(error),
+            };
         normalized.policy = admission.policy();
         normalized.trust = admission.trust();
         normalized.provenance = receipt_provenance.reference();
-        self.port.admit_receipt(&normalized)?;
-        let receipt = ErasureReceiptV1::new(normalized.clone())?;
-        receipt.validate_frozen_obligations(obligations)?;
+        if let Err(error) = self.port.admit_receipt(&normalized) {
+            return Err(error);
+        }
+        let receipt = match ErasureReceiptV1::new(normalized.clone()) {
+            Ok(receipt) => receipt,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = receipt.validate_frozen_obligations(obligations) {
+            return Err(error);
+        }
         record.receipt_input = Some(normalized);
         record.receipt = Some(receipt.clone());
         record.supporting_records.attempt_outcomes.push(outcome);
@@ -7002,53 +7134,76 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         extension: ErasureScopeExtensionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let record = self.record(request)?;
-        let scope = record
-            .supporting_records
-            .scope_commitment()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let lineage_rule = scope.lineage_rule().ok_or(ErasureErrorV1::PolicyConflict)?;
-        let current_reference = record
-            .scope_extension_ledger
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let current = record
-            .supporting_records
-            .scope_extension_ledgers()
-            .iter()
-            .find(|ledger| ledger.reference() == current_reference)
-            .cloned()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if current.head() == Some(extension.reference()) {
-            return Ok(record.state);
-        }
-        if (
-            extension.request(),
-            extension.scope_commitment(),
-            extension.lineage_rule(),
-            extension.predecessor_extension(),
-        ) != (request, scope.reference(), lineage_rule, current.head())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.port.admit_scope_extension(&extension)?;
-        let mut extensions = current.extensions().to_vec();
-        extensions.push(extension.reference());
-        let successor = ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
-            scope_commitment: scope.reference(),
-            extensions,
-            head: Some(extension.reference()),
-        })?;
-        let mut next = record;
-        next.scope_extension_ledger = Some(successor.reference());
-        next.supporting_records.scope_extensions.push(extension);
-        next.supporting_records
-            .scope_extension_ledgers
-            .push(successor);
-        let state = next.state.clone();
-        self.port
-            .compare_and_swap_scope_extension(request, current_reference, next.clone())?;
-        self.cache(next);
-        Ok(state)
+        self.record(request).and_then(|record| {
+            record
+                .supporting_records
+                .scope_commitment()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+                .and_then(|scope| {
+                    scope
+                        .lineage_rule()
+                        .ok_or(ErasureErrorV1::PolicyConflict)
+                        .map(|lineage_rule| (scope, lineage_rule))
+                })
+                .and_then(|(scope, lineage_rule)| {
+                    record
+                        .scope_extension_ledger
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        .map(|current_reference| (scope, lineage_rule, current_reference))
+                })
+                .and_then(|(scope, lineage_rule, current_reference)| {
+                    record
+                        .supporting_records
+                        .scope_extension_ledgers()
+                        .iter()
+                        .find(|ledger| ledger.reference() == current_reference)
+                        .cloned()
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        .map(|current| (scope, lineage_rule, current_reference, current))
+                })
+                .and_then(|(scope, lineage_rule, current_reference, current)| {
+                    if current.head() == Some(extension.reference()) {
+                        return Ok(record.state);
+                    }
+                    if (
+                        extension.request(),
+                        extension.scope_commitment(),
+                        extension.lineage_rule(),
+                        extension.predecessor_extension(),
+                    ) != (request, scope.reference(), lineage_rule, current.head())
+                    {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                    self.port.admit_scope_extension(&extension).and_then(|()| {
+                        let mut extensions = current.extensions().to_vec();
+                        extensions.push(extension.reference());
+                        ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+                            scope_commitment: scope.reference(),
+                            extensions,
+                            head: Some(extension.reference()),
+                        })
+                        .and_then(|successor| {
+                            let mut next = record;
+                            next.scope_extension_ledger = Some(successor.reference());
+                            next.supporting_records.scope_extensions.push(extension);
+                            next.supporting_records
+                                .scope_extension_ledgers
+                                .push(successor);
+                            let state = next.state.clone();
+                            self.port
+                                .compare_and_swap_scope_extension(
+                                    request,
+                                    current_reference,
+                                    next.clone(),
+                                )
+                                .map(|()| {
+                                    self.cache(next);
+                                    state
+                                })
+                        })
+                    })
+                })
+        })
     }
 
     /// Append one host-admitted administrative resolution through the CAS seam.
@@ -7061,48 +7216,60 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         resolution: ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let record = self.record(request)?;
-        let scope = record
-            .supporting_records
-            .scope_commitment()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let obligation_set = record
-            .supporting_records
-            .obligation_set()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let expected_head = record.administrative_resolution_head;
-        if expected_head == Some(resolution.reference()) {
-            return Ok(record.state);
-        }
-        if (
-            resolution.request(),
-            resolution.scope_commitment(),
-            resolution.policy(),
-            resolution.trust(),
-            resolution.predecessor_resolution(),
-        ) != (
-            request,
-            scope.reference(),
-            record.request.policy(),
-            obligation_set.trust(),
-            expected_head,
-        ) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.port.admit_administrative_resolution(&resolution)?;
-        let mut next = record;
-        next.administrative_resolution_head = Some(resolution.reference());
-        next.supporting_records
-            .administrative_resolutions
-            .push(resolution);
-        let state = next.state.clone();
-        self.port.compare_and_swap_administrative_resolution(
-            request,
-            expected_head,
-            next.clone(),
-        )?;
-        self.cache(next);
-        Ok(state)
+        self.record(request).and_then(|record| {
+            record
+                .supporting_records
+                .scope_commitment()
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+                .and_then(|scope| {
+                    record
+                        .supporting_records
+                        .obligation_set()
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                        .map(|obligation_set| (scope, obligation_set))
+                })
+                .and_then(|(scope, obligation_set)| {
+                    let expected_head = record.administrative_resolution_head;
+                    if expected_head == Some(resolution.reference()) {
+                        return Ok(record.state);
+                    }
+                    if (
+                        resolution.request(),
+                        resolution.scope_commitment(),
+                        resolution.policy(),
+                        resolution.trust(),
+                        resolution.predecessor_resolution(),
+                    ) != (
+                        request,
+                        scope.reference(),
+                        record.request.policy(),
+                        obligation_set.trust(),
+                        expected_head,
+                    ) {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                    self.port
+                        .admit_administrative_resolution(&resolution)
+                        .and_then(|()| {
+                            let mut next = record;
+                            next.administrative_resolution_head = Some(resolution.reference());
+                            next.supporting_records
+                                .administrative_resolutions
+                                .push(resolution);
+                            let state = next.state.clone();
+                            self.port
+                                .compare_and_swap_administrative_resolution(
+                                    request,
+                                    expected_head,
+                                    next.clone(),
+                                )
+                                .map(|()| {
+                                    self.cache(next);
+                                    state
+                                })
+                        })
+                })
+        })
     }
 }
 
