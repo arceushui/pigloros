@@ -5289,43 +5289,50 @@ fn selected_schema_cap_violation() -> TestResult<Vec<u8>> {
 fn selected_output_cap_violation() -> TestResult<Vec<u8>> {
     mutate_profile_archive(|profile| {
         let registry_size = select_registry_member_cap(profile)?;
-        let fixtures = array_field(profile, 9, "fixtures")?;
-        for fixture in fixtures {
-            let Value::Array(fields) = fixture else {
-                return Err("fixture is not an array".into());
-            };
-            for descriptor_index in [8, 9] {
-                replace_value(
-                    array_field(fields, descriptor_index, "fixture artifact")?,
-                    2,
-                    Value::Integer(1_u64.into()),
-                    "fixture artifact size",
-                )?;
-            }
-            for auxiliary in array_field(fields, 10, "auxiliary artifacts")? {
-                let Value::Array(descriptor) = auxiliary else {
-                    return Err("auxiliary descriptor is not an array".into());
-                };
-                replace_value(
-                    descriptor,
-                    2,
-                    Value::Integer(1_u64.into()),
-                    "auxiliary artifact size",
-                )?;
-            }
-            let oracle = array_field(fields, 11, "strict oracle")?;
-            if matches!(oracle.first(), Some(Value::Integer(kind)) if u64::try_from(*kind) == Ok(0))
-            {
-                replace_value(
-                    array_field(oracle, 1, "expected output")?,
-                    2,
-                    Value::Integer(registry_size.saturating_add(1).into()),
-                    "expected output size",
-                )?;
-                return Ok(());
-            }
+        let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
+        for descriptor_index in [8, 9] {
+            replace_value(
+                array_field(fixture, descriptor_index, "fixture artifact")?,
+                2,
+                Value::Integer(1_u64.into()),
+                "fixture artifact size",
+            )?;
         }
-        Err("output oracle is absent".into())
+        for auxiliary in array_field(fixture, 10, "auxiliary artifacts")? {
+            let Value::Array(descriptor) = auxiliary else {
+                return Err("auxiliary descriptor is not an array".into());
+            };
+            replace_value(
+                descriptor,
+                2,
+                Value::Integer(1_u64.into()),
+                "auxiliary artifact size",
+            )?;
+        }
+        let mut output = array_field(fixture, 8, "fixture schema")?.clone();
+        replace_value(
+            &mut output,
+            0,
+            Value::Text("expected/selected-cap-output.bin".to_owned()),
+            "expected output path",
+        )?;
+        replace_value(
+            &mut output,
+            2,
+            Value::Integer(registry_size.saturating_add(1).into()),
+            "expected output size",
+        )?;
+        replace_value(
+            fixture,
+            11,
+            Value::Array(vec![
+                Value::Integer(0_u64.into()),
+                Value::Array(output),
+                Value::Null,
+                Value::Null,
+            ]),
+            "strict output oracle",
+        )
     })
 }
 
