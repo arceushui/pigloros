@@ -178,17 +178,16 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         let freeze_position = self
             .admitted_freeze_position
             .unwrap_or_else(|| requested.freeze_position.unwrap_or(10));
-        let (freeze_admission_evidence, freeze_authorization_evidence) =
-            freeze_evidence_fixture(
-                request,
-                scope_reference,
-                &obligation_set,
-                &targets,
-                &obligations,
-                freeze_position,
-                self.admitted_freeze_provenance
-                    .unwrap_or(requested.provenance),
-            )?;
+        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
+            request,
+            scope_reference,
+            &obligation_set,
+            &targets,
+            &obligations,
+            freeze_position,
+            self.admitted_freeze_provenance
+                .unwrap_or(requested.provenance),
+        )?;
         let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: targets.clone(),
             scope,
@@ -431,8 +430,8 @@ fn freeze_evidence_fixture(
             )?);
         }
     }
-    let provisional = ErasureFreezeAdmissionEvidenceV1::new(
-        ErasureFreezeAdmissionEvidenceInputV1 {
+    let provisional =
+        ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
             request,
             scope_commitment,
             obligation_set: obligation_set.reference(),
@@ -441,22 +440,18 @@ fn freeze_evidence_fixture(
             policy: obligation_set.policy(),
             trust: obligation_set.trust(),
             authorization_provenance: reference_zero(),
-        },
-    )?;
-    let authorization = ErasureFreezeAuthorizationEvidenceV1::new(
-        ErasureFreezeAuthorizationEvidenceInputV1 {
+        })?;
+    let authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
             admission_body_digest: provisional.authorization_body_digest()?,
             policy: obligation_set.policy(),
             trust: obligation_set.trust(),
             evidence: proof.digest().to_vec(),
-        },
-    )?;
-    let admission = ErasureFreezeAdmissionEvidenceV1::new(
-        ErasureFreezeAdmissionEvidenceInputV1 {
-            authorization_provenance: authorization.reference(),
-            ..provisional.input
-        },
-    )?;
+        })?;
+    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        authorization_provenance: authorization.reference(),
+        ..provisional.input
+    })?;
     Ok((admission, authorization))
 }
 fn indexed_reference(index: usize) -> ErasureReferenceV1 {

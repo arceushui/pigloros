@@ -672,9 +672,7 @@ impl ErasureFreezeAuthorizationEvidenceV1 {
     /// # Errors
     ///
     /// Returns a closed error for empty or oversized proof material.
-    pub fn new(
-        input: ErasureFreezeAuthorizationEvidenceInputV1,
-    ) -> Result<Self, ErasureErrorV1> {
+    pub fn new(input: ErasureFreezeAuthorizationEvidenceInputV1) -> Result<Self, ErasureErrorV1> {
         if input.evidence.is_empty() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -917,7 +915,10 @@ impl ErasureFreezeAdmissionEvidenceV1 {
 fn validate_applicability_matrix(
     matrix: &[ErasureFreezeApplicabilityRowV1],
 ) -> Result<(), ErasureErrorV1> {
-    if matrix.is_empty() || matrix.len() > ERASURE_MAX_OBLIGATIONS || matrix.len() % 4 != 0 {
+    if matrix.is_empty()
+        || matrix.len() > ERASURE_MAX_OBLIGATIONS
+        || !matrix.len().is_multiple_of(4)
+    {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     let target_count = matrix.len() / 4;
@@ -2144,7 +2145,12 @@ impl ErasureSupportingRecordsV1 {
             if !freeze_matches_scope {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            self.validate_freeze_admission_bindings(scope, obligation_set, admission, authorization)?;
+            self.validate_freeze_admission_bindings(
+                scope,
+                obligation_set,
+                admission,
+                authorization,
+            )?;
         } else if self.freeze_admission_evidence.is_some()
             || self.freeze_authorization_evidence.is_some()
         {
@@ -5056,9 +5062,7 @@ impl ErasureAtomicFreezeAdmissionV1 {
 
     /// Return retained #187-owned authorization evidence.
     #[must_use]
-    pub const fn freeze_authorization_evidence(
-        &self,
-    ) -> &ErasureFreezeAuthorizationEvidenceV1 {
+    pub const fn freeze_authorization_evidence(&self) -> &ErasureFreezeAuthorizationEvidenceV1 {
         &self.input.freeze_authorization_evidence
     }
 }
@@ -5082,8 +5086,10 @@ fn validate_applicability_obligations(
     }
     let mut applicable = 0_usize;
     for row in matrix {
+        let target_index =
+            usize::try_from(row.target_index()).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
         let target = targets
-            .get(row.target_index() as usize)
+            .get(target_index)
             .ok_or(ErasureErrorV1::ScopeInvalid)?;
         let obligation = by_category_target.get(&(row.category(), *target));
         match (row.decision(), row.owner(), obligation) {
@@ -5892,8 +5898,14 @@ impl ErasureCoordinatorRecordV1 {
                         freeze.is_some(),
                         failure.authorization_provenance(),
                         self.state.provenance(),
-                    ) != (false, false, false, false, authorization, failure.reference())
-                        || authorization_rejection.is_some()
+                    ) != (
+                        false,
+                        false,
+                        false,
+                        false,
+                        authorization,
+                        failure.reference(),
+                    ) || authorization_rejection.is_some()
                         || obligation_set.is_some()
                     {
                         return Err(ErasureErrorV1::ProvenanceMissing);
@@ -7181,22 +7193,22 @@ use codec::{
     administrative_resolution_value, attempt_outcome_from_fields, attempt_outcome_value,
     authorization_rejection_from_fields, authorization_rejection_value,
     correction_provenance_from_fields, correction_provenance_value, decode_limited, domain_digest,
-    encode_canonical, encode_limited, exact_array, freeze_failure_from_fields,
-    freeze_admission_authorization_value, freeze_admission_evidence_from_fields,
-    freeze_admission_evidence_value, freeze_authorization_evidence_from_fields,
-    freeze_authorization_evidence_value, freeze_failure_value, freeze_is_monotonic,
-    freeze_provenance_from_fields, freeze_provenance_value, has_duplicate,
-    has_duplicate_by_target, invalid_owner_sets,
-    inventories_exceed_bound, inventories_have_duplicate_targets, inventories_match_closure,
-    inventory_categories_match, inventory_transitions_preserve_or_weaken, obligation_from_fields,
-    obligation_set_from_fields, obligation_set_value, obligation_value, receipt_core_value,
-    receipt_from_fields, receipt_provenance_from_fields, receipt_provenance_value, receipt_value,
-    record_from_fields, record_value, reference_zero, request_from_fields, request_value,
-    retry_admission_from_fields, retry_admission_value, scope_commitment_from_fields,
-    scope_commitment_value, scope_extension_from_fields, scope_extension_ledger_from_fields,
-    scope_extension_ledger_value, scope_extension_value, sort_inventories, state_core_value,
-    state_from_fields, state_value, strictly_increasing, supporting_records_from_value,
-    supporting_records_value, weakest_inventory_claim,
+    encode_canonical, encode_limited, exact_array, freeze_admission_authorization_value,
+    freeze_admission_evidence_from_fields, freeze_admission_evidence_value,
+    freeze_authorization_evidence_from_fields, freeze_authorization_evidence_value,
+    freeze_failure_from_fields, freeze_failure_value, freeze_is_monotonic,
+    freeze_provenance_from_fields, freeze_provenance_value, has_duplicate, has_duplicate_by_target,
+    invalid_owner_sets, inventories_exceed_bound, inventories_have_duplicate_targets,
+    inventories_match_closure, inventory_categories_match,
+    inventory_transitions_preserve_or_weaken, obligation_from_fields, obligation_set_from_fields,
+    obligation_set_value, obligation_value, receipt_core_value, receipt_from_fields,
+    receipt_provenance_from_fields, receipt_provenance_value, receipt_value, record_from_fields,
+    record_value, reference_zero, request_from_fields, request_value, retry_admission_from_fields,
+    retry_admission_value, scope_commitment_from_fields, scope_commitment_value,
+    scope_extension_from_fields, scope_extension_ledger_from_fields, scope_extension_ledger_value,
+    scope_extension_value, sort_inventories, state_core_value, state_from_fields, state_value,
+    strictly_increasing, supporting_records_from_value, supporting_records_value,
+    weakest_inventory_claim,
 };
 
 #[cfg(test)]
