@@ -1629,12 +1629,21 @@ fn assert_complete_trait_record(
         .supporting_records()
         .freeze_provenance()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let freeze_admission = persisted
+        .supporting_records()
+        .freeze_admission_evidence()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let freeze_authorization = persisted
+        .supporting_records()
+        .freeze_authorization_evidence()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let admission = persisted
         .supporting_records()
         .retry_admissions()
         .first()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    assert_eq!(freeze.host_evidence(), reference(9));
+    assert_eq!(freeze.host_evidence(), freeze_admission.reference());
+    assert_eq!(freeze_authorization.evidence(), reference(9).digest());
     assert_eq!(persisted.freeze_provenance(), Some(freeze.reference()));
     assert_eq!(admission.authorization_provenance(), reference(9));
     assert_eq!(admission.trust(), reference(9));
