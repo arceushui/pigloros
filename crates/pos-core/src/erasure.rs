@@ -7138,6 +7138,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             record
                 .supporting_records
                 .scope_commitment()
+                .cloned()
                 .ok_or(ErasureErrorV1::ProvenanceMissing)
                 .and_then(|scope| {
                     scope
@@ -7220,11 +7221,13 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             record
                 .supporting_records
                 .scope_commitment()
+                .cloned()
                 .ok_or(ErasureErrorV1::ProvenanceMissing)
                 .and_then(|scope| {
                     record
                         .supporting_records
                         .obligation_set()
+                        .cloned()
                         .ok_or(ErasureErrorV1::ProvenanceMissing)
                         .map(|obligation_set| (scope, obligation_set))
                 })
