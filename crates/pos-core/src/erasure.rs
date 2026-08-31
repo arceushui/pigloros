@@ -48,6 +48,10 @@ pub const ERASURE_MAX_ATTEMPT_OUTCOMES: usize = 4_096;
 /// Maximum number of administrative resolutions per ERQ1.
 pub const ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS: usize = 4_096;
 
+const fn target_count_is_bounded(count: usize) -> bool {
+    count <= ERASURE_MAX_TARGETS
+}
+
 /// Domain tag for correction-provenance records.
 pub const ERASURE_CORRECTION_PROVENANCE_TAG_V1: &str = "ERCP1";
 /// Domain tag for retry-admission records.
@@ -4947,7 +4951,7 @@ impl ErasureAtomicFreezeAdmissionV1 {
     /// describe one internally consistent freeze.
     pub fn new(input: ErasureAtomicFreezeAdmissionInputV1) -> Result<Self, ErasureErrorV1> {
         if input.targets.is_empty()
-            || input.targets.len() > ERASURE_MAX_TARGETS
+            || !target_count_is_bounded(input.targets.len())
             || !strictly_increasing(&input.targets)
             || input.obligations.len() > ERASURE_MAX_OBLIGATIONS
             || input.scope.target_closure != target_closure_digest(&input.targets)
@@ -5522,7 +5526,7 @@ impl ErasureCoordinatorRecordV1 {
     }
 
     fn validate_scope(&self) -> Result<(), ErasureErrorV1> {
-        if self.targets.len() > ERASURE_MAX_TARGETS {
+        if !target_count_is_bounded(self.targets.len()) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         if !strictly_increasing(&self.targets) {

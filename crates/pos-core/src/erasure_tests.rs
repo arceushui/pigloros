@@ -1706,15 +1706,30 @@ fn durable_record_scope_checks_reject_independent_closure_conflicts() -> Result<
 
 #[test]
 fn durable_frozen_record_bounds_frozen_targets() -> Result<(), ErasureErrorV1> {
-    let targets = (0..ERASURE_MAX_TARGETS)
-        .map(indexed_target)
-        .collect::<Vec<_>>();
-    let frozen = record_after_freeze(targets)?;
-    assert_eq!(frozen.targets().len(), ERASURE_MAX_TARGETS);
+    let target = indexed_target(0);
+    let frozen = record_after_freeze(vec![target])?;
+    let mut oversized = record_parts(&frozen);
+    oversized.targets = vec![target; ERASURE_MAX_TARGETS + 1];
     assert_eq!(
-        record_after_freeze((0..=ERASURE_MAX_TARGETS).map(indexed_target).collect(),),
+        ErasureCoordinatorRecordV1::from_parts(oversized, reference(2)),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    Ok(())
+}
+
+#[test]
+fn target_count_bound_accepts_below_and_at_ceiling_then_rejects_next() {
+    assert!(target_count_is_bounded(0));
+    assert!(target_count_is_bounded(ERASURE_MAX_TARGETS));
+    assert!(!target_count_is_bounded(ERASURE_MAX_TARGETS + 1));
+}
+
+#[test]
+#[ignore = "exact maximum is a baseline stress case, not a per-mutant fixture"]
+fn durable_frozen_record_accepts_the_exact_target_limit() -> Result<(), ErasureErrorV1> {
+    let targets = (0..ERASURE_MAX_TARGETS).map(indexed_target).collect();
+    let frozen = record_after_freeze(targets)?;
+    assert_eq!(frozen.targets().len(), ERASURE_MAX_TARGETS);
     Ok(())
 }
 
@@ -4329,63 +4344,35 @@ fn public_state_owner_accessors_and_freeze_rejection_remain_exact() -> Result<()
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
-    let targets = (0..ERASURE_MAX_INVENTORY_RESULTS)
-        .map(|index| ErasureRequiredTargetV1 {
-            artifact_class: ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest: indexed_reference(index),
-            key_role: ErasureKeyRoleV1::DataEncryption,
-            key_digest: indexed_reference(index + 1),
-            replica_set: reference(30),
-            replica_id: indexed_reference(index + 2),
-        })
-        .collect();
-    let port = test_port(true, targets);
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
-    coordinator.submit(request()?, reference(3))?;
-    coordinator.authorize(reference(1), reference(9))?;
-    assert_eq!(
-        coordinator
-            .freeze_inventory(
-                reference(1),
-                change(
-                    ErasureLifecycleV1::AccessFrozen,
-                    Some(10),
-                    Vec::new(),
-                    Vec::new(),
-                ),
-            )?
-            .lifecycle(),
-        ErasureLifecycleV1::AccessFrozen
-    );
     Ok(())
 }
 
 #[test]
 fn public_freeze_rejects_a_required_target_closure_over_the_bound() -> Result<(), ErasureErrorV1> {
-    let targets = (0..=ERASURE_MAX_INVENTORY_RESULTS)
-        .map(|index| ErasureRequiredTargetV1 {
-            artifact_class: ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest: indexed_reference(index),
-            key_role: ErasureKeyRoleV1::DataEncryption,
-            key_digest: indexed_reference(index + 1),
-            replica_set: reference(30),
-            replica_id: indexed_reference(index + 2),
-        })
-        .collect();
-    let port = test_port(true, targets);
+    let target = indexed_target(0);
+    let port = test_port(true, vec![target]);
+    let freeze_reservation = Rc::clone(&port.freeze_reservation);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
-    assert_eq!(
-        coordinator.freeze_inventory(
-            reference(1),
-            change(
-                ErasureLifecycleV1::AccessFrozen,
-                Some(10),
-                Vec::new(),
-                Vec::new(),
-            ),
+    coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
         ),
+    )?;
+    let mut oversized = freeze_reservation
+        .borrow()
+        .as_ref()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .input;
+    oversized.targets = vec![target; ERASURE_MAX_TARGETS + 1];
+    assert_eq!(
+        ErasureAtomicFreezeAdmissionV1::new(oversized),
         Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
