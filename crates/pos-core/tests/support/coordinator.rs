@@ -6,8 +6,8 @@ use pos_core::{
     ErasureAtomicFreezeResultV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1,
     ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReferenceV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
 };
 
@@ -185,7 +185,7 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
             &self.config.targets,
             &obligations,
             10,
-            self.config.freeze_evidence.digest(),
+            &self.config.freeze_evidence.digest(),
         )?;
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: self.config.targets.clone(),
