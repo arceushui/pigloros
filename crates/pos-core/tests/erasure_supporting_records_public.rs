@@ -7,17 +7,20 @@ use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionInputV1,
-    ErasureAuthorizationRejectionV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
+    ErasureAdministrativeResolutionV1, ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
+    ErasureArtifactTransitionV1, ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1,
+    ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1,
+    ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
     ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureFreezeFailureInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
-    ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
-    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
-    ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeFailureInputV1, ErasureFreezeFailureV1,
+    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionLedgerInputV1,
     ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
@@ -98,6 +101,110 @@ fn scope_commitment(
         scope_members: vec![reference(2)],
         target_closure: pos_core::erasure::target_closure_digest(&[required_target()]),
         lineage_rule: None,
+    })
+}
+
+fn freeze_evidence_fixture(
+    request: ErasureReferenceV1,
+    scope: &ErasureScopeCommitmentV1,
+    obligation_set: &ErasureObligationSetV1,
+    targets: &[ErasureRequiredTargetV1],
+    obligations: &[ErasureObligationV1],
+    freeze_position: u64,
+    proof: ErasureReferenceV1,
+) -> Result<
+    (
+        ErasureFreezeAdmissionEvidenceV1,
+        ErasureFreezeAuthorizationEvidenceV1,
+    ),
+    ErasureErrorV1,
+> {
+    let mut applicability_matrix = Vec::with_capacity(targets.len().saturating_mul(4));
+    for category in [
+        ErasureInventoryCategoryV1::Artifact,
+        ErasureInventoryCategoryV1::Key,
+        ErasureInventoryCategoryV1::Replica,
+        ErasureInventoryCategoryV1::Backup,
+    ] {
+        for (target_index, target) in targets.iter().enumerate() {
+            let owner = obligations
+                .iter()
+                .find(|obligation| {
+                    obligation.category() == category && obligation.target() == *target
+                })
+                .map(ErasureObligationV1::owner);
+            applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
+                category,
+                target_index as u64,
+                if owner.is_some() {
+                    ErasureApplicabilityDecisionV1::Applicable
+                } else {
+                    ErasureApplicabilityDecisionV1::Inapplicable
+                },
+                owner,
+            )?);
+        }
+    }
+    let input = ErasureFreezeAdmissionEvidenceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: obligation_set.reference(),
+        applicability_matrix,
+        freeze_position,
+        policy: obligation_set.policy(),
+        trust: obligation_set.trust(),
+        authorization_provenance: reference(0),
+    };
+    let provisional = ErasureFreezeAdmissionEvidenceV1::new(input.clone())?;
+    let authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: provisional.authorization_body_digest()?,
+            policy: obligation_set.policy(),
+            trust: obligation_set.trust(),
+            evidence: proof.digest().to_vec(),
+        })?;
+    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        authorization_provenance: authorization.reference(),
+        ..input
+    })?;
+    Ok((admission, authorization))
+}
+
+fn freeze_supporting_input(
+    request: ErasureReferenceV1,
+) -> Result<ErasureSupportingRecordsInputV1, ErasureErrorV1> {
+    let scope = scope_commitment(request)?;
+    let obligation = obligation(request)?;
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
+        request,
+        &scope,
+        &obligation_set,
+        &[required_target()],
+        &[obligation],
+        10,
+        reference(6),
+    )?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: obligation_set.reference(),
+        freeze_position: 10,
+        host_evidence: freeze_admission_evidence.reference(),
+    })?;
+    Ok(ErasureSupportingRecordsInputV1 {
+        scope_commitment: Some(scope),
+        freeze_admission_evidence: Some(freeze_admission_evidence),
+        freeze_authorization_evidence: Some(freeze_authorization_evidence),
+        freeze_provenance: Some(freeze),
+        obligations: vec![obligation],
+        obligation_set: Some(obligation_set),
+        ..ErasureSupportingRecordsInputV1::default()
     })
 }
 
@@ -309,15 +416,26 @@ fn supporting_records_require_complete_freeze_commitments() -> Result<(), Erasur
         ErasureSupportingRecordsV1::new(freeze_without_obligation_set),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    let (admission, authorization) = freeze_evidence_fixture(
+        request,
+        &scope,
+        &obligation_set,
+        &[required_target()],
+        &[obligation],
+        10,
+        reference(6),
+    )?;
     let mismatched_freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request,
         scope_commitment: reference(99),
         obligation_set: obligation_set.reference(),
         freeze_position: 10,
-        host_evidence: reference(6),
+        host_evidence: admission.reference(),
     })?;
     let mismatched_freeze = ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope),
+        freeze_admission_evidence: Some(admission),
+        freeze_authorization_evidence: Some(authorization),
         freeze_provenance: Some(mismatched_freeze),
         obligations: vec![obligation],
         obligation_set: Some(obligation_set),
@@ -747,6 +865,22 @@ fn complete_supporting_input(
         policy: reference(4),
         trust: reference(5),
     })?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
+        request,
+        &scope,
+        &obligation_set,
+        &[required_target()],
+        &[obligation],
+        10,
+        reference(6),
+    )?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: obligation_set.reference(),
+        freeze_position: 10,
+        host_evidence: freeze_admission_evidence.reference(),
+    })?;
     let admission = initial_admission(request)?;
     let attempt = admission.reference();
     let acknowledgement_provenance = ErasureAcknowledgementProvenanceV1::new(
@@ -768,6 +902,9 @@ fn complete_supporting_input(
     Ok(ErasureSupportingRecordsInputV1 {
         correction_provenance: Some(correction),
         scope_commitment: Some(scope.clone()),
+        freeze_admission_evidence: Some(freeze_admission_evidence),
+        freeze_authorization_evidence: Some(freeze_authorization_evidence),
+        freeze_provenance: Some(freeze),
         obligations: vec![obligation],
         obligation_set: Some(obligation_set),
         retry_admissions: vec![admission],
@@ -811,6 +948,22 @@ fn partial_failure_supporting_input(
         policy: reference(4),
         trust: reference(5),
     })?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
+        request,
+        &scope,
+        &obligation_set,
+        &[required_target()],
+        &[obligation],
+        10,
+        reference(6),
+    )?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        obligation_set: obligation_set.reference(),
+        freeze_position: 10,
+        host_evidence: freeze_admission_evidence.reference(),
+    })?;
     let admission = initial_admission(request)?;
     let attempt = admission.reference();
     let receipt_provenance = ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
@@ -850,6 +1003,9 @@ fn partial_failure_supporting_input(
     })?;
     Ok(ErasureSupportingRecordsInputV1 {
         scope_commitment: Some(scope),
+        freeze_admission_evidence: Some(freeze_admission_evidence),
+        freeze_authorization_evidence: Some(freeze_authorization_evidence),
+        freeze_provenance: Some(freeze),
         obligations: vec![obligation],
         obligation_set: Some(obligation_set),
         retry_admissions: vec![admission],
@@ -1398,12 +1554,29 @@ fn freeze_record_decoders_reject_a_wrong_type_in_every_field() -> Result<(), Era
         policy: reference(4),
         trust: reference(5),
     })?;
+    let (admission, authorization) = freeze_evidence_fixture(
+        request,
+        &scope,
+        &obligation_set,
+        &[required_target()],
+        &[obligation],
+        10,
+        reference(6),
+    )?;
+    assert_each_field_rejects(
+        &admission.to_canonical_cbor()?,
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor,
+    )?;
+    assert_each_field_rejects(
+        &authorization.to_canonical_cbor()?,
+        ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor,
+    )?;
     let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request,
         scope_commitment: scope.reference(),
         obligation_set: obligation_set.reference(),
         freeze_position: 10,
-        host_evidence: reference(6),
+        host_evidence: admission.reference(),
     })?;
     assert_each_field_rejects(
         &freeze.to_canonical_cbor()?,
@@ -1420,6 +1593,231 @@ fn freeze_record_decoders_reject_a_wrong_type_in_every_field() -> Result<(), Era
         &failure.to_canonical_cbor()?,
         ErasureFreezeFailureV1::from_canonical_cbor,
     )?;
+    Ok(())
+}
+
+#[test]
+fn freeze_admission_and_authorization_roundtrip_through_public_codecs() -> Result<(), ErasureErrorV1>
+{
+    let input = freeze_supporting_input(reference(1))?;
+    let admission = input
+        .freeze_admission_evidence
+        .clone()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let authorization = input
+        .freeze_authorization_evidence
+        .clone()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let scope_reference = input
+        .scope_commitment
+        .as_ref()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .reference();
+    let obligation_set_reference = input
+        .obligation_set
+        .as_ref()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .reference();
+
+    let decoded_admission = roundtrip(
+        &admission,
+        ErasureFreezeAdmissionEvidenceV1::to_canonical_cbor,
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor,
+    )?;
+    assert_eq!(decoded_admission.request(), reference(1));
+    assert_eq!(decoded_admission.scope_commitment(), scope_reference);
+    assert_eq!(decoded_admission.obligation_set(), obligation_set_reference);
+    assert_eq!(decoded_admission.applicability_matrix().len(), 4);
+    assert_eq!(
+        decoded_admission.applicability_matrix()[0].decision(),
+        ErasureApplicabilityDecisionV1::Applicable
+    );
+    for row in &decoded_admission.applicability_matrix()[1..] {
+        assert_eq!(row.decision(), ErasureApplicabilityDecisionV1::Inapplicable);
+        assert_eq!(row.owner(), None);
+    }
+    assert_eq!(decoded_admission.freeze_position(), 10);
+    assert_eq!(decoded_admission.policy(), reference(4));
+    assert_eq!(decoded_admission.trust(), reference(5));
+    assert_eq!(
+        decoded_admission.authorization_provenance(),
+        authorization.reference()
+    );
+    assert_eq!(decoded_admission.reference(), admission.reference());
+
+    let decoded_authorization = roundtrip(
+        &authorization,
+        ErasureFreezeAuthorizationEvidenceV1::to_canonical_cbor,
+        ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor,
+    )?;
+    assert_eq!(
+        decoded_authorization.admission_body_digest(),
+        admission.authorization_body_digest()?
+    );
+    assert_eq!(decoded_authorization.policy(), reference(4));
+    assert_eq!(decoded_authorization.trust(), reference(5));
+    assert_eq!(decoded_authorization.evidence(), &[6; 32]);
+    assert_eq!(decoded_authorization.reference(), authorization.reference());
+    Ok(())
+}
+
+#[test]
+fn freeze_admission_codec_rejects_incomplete_and_noncanonical_matrix() -> Result<(), ErasureErrorV1>
+{
+    let input = freeze_supporting_input(reference(1))?;
+    let admission = input
+        .freeze_admission_evidence
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let bytes = admission.to_canonical_cbor()?;
+
+    let omitted_row = changed_array(&bytes, |fields| {
+        if let Value::Array(matrix) = &mut fields[5] {
+            matrix.pop();
+        }
+    });
+    assert_eq!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&omitted_row),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let reordered_row = changed_array(&bytes, |fields| {
+        if let Value::Array(matrix) = &mut fields[5] {
+            matrix.swap(0, 1);
+        }
+    });
+    assert_eq!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&reordered_row),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let wrong_decision_owner_form = changed_array(&bytes, |fields| {
+        if let Value::Array(matrix) = &mut fields[5] {
+            let Value::Array(row) = &mut matrix[0] else {
+                return;
+            };
+            row[2] = Value::Integer(0.into());
+        }
+    });
+    assert_eq!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&wrong_decision_owner_form),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn freeze_supporting_records_bind_erfa1_and_erfaa1_content() -> Result<(), ErasureErrorV1> {
+    let input = freeze_supporting_input(reference(1))?;
+    let admission = input
+        .freeze_admission_evidence
+        .clone()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let authorization = input
+        .freeze_authorization_evidence
+        .clone()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let records = ErasureSupportingRecordsV1::new(input.clone())?;
+    assert_eq!(records.freeze_admission_evidence(), Some(&admission));
+    assert_eq!(
+        records.freeze_authorization_evidence(),
+        Some(&authorization)
+    );
+    assert_eq!(
+        records
+            .freeze_provenance()
+            .map(|freeze| freeze.host_evidence()),
+        Some(admission.reference())
+    );
+
+    let mut wrong_body_digest = input.clone();
+    wrong_body_digest.freeze_authorization_evidence = Some(
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: reference(99),
+            policy: authorization.policy(),
+            trust: authorization.trust(),
+            evidence: authorization.evidence().to_vec(),
+        })?,
+    );
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_body_digest),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_policy = input.clone();
+    wrong_policy.freeze_authorization_evidence = Some(ErasureFreezeAuthorizationEvidenceV1::new(
+        ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: authorization.admission_body_digest(),
+            policy: reference(98),
+            trust: authorization.trust(),
+            evidence: authorization.evidence().to_vec(),
+        },
+    )?);
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_policy),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_trust = input.clone();
+    wrong_trust.freeze_authorization_evidence = Some(ErasureFreezeAuthorizationEvidenceV1::new(
+        ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: authorization.admission_body_digest(),
+            policy: authorization.policy(),
+            trust: reference(97),
+            evidence: authorization.evidence().to_vec(),
+        },
+    )?);
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_trust),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_admission_reference = input.clone();
+    let mismatched_admission =
+        ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+            request: admission.request(),
+            scope_commitment: admission.scope_commitment(),
+            obligation_set: admission.obligation_set(),
+            applicability_matrix: admission.applicability_matrix().to_vec(),
+            freeze_position: admission.freeze_position(),
+            policy: admission.policy(),
+            trust: admission.trust(),
+            authorization_provenance: reference(96),
+        })?;
+    let mismatched_freeze = wrong_admission_reference
+        .freeze_provenance
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    wrong_admission_reference.freeze_admission_evidence = Some(mismatched_admission.clone());
+    wrong_admission_reference.freeze_provenance = Some(ErasureFreezeProvenanceV1::new(
+        ErasureFreezeProvenanceInputV1 {
+            request: mismatched_freeze.request(),
+            scope_commitment: mismatched_freeze.scope_commitment(),
+            obligation_set: mismatched_freeze.obligation_set(),
+            freeze_position: mismatched_freeze.freeze_position(),
+            host_evidence: mismatched_admission.reference(),
+        },
+    )?);
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_admission_reference),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_host_evidence = input;
+    let freeze = wrong_host_evidence
+        .freeze_provenance
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    wrong_host_evidence.freeze_provenance = Some(ErasureFreezeProvenanceV1::new(
+        ErasureFreezeProvenanceInputV1 {
+            request: freeze.request(),
+            scope_commitment: freeze.scope_commitment(),
+            obligation_set: freeze.obligation_set(),
+            freeze_position: freeze.freeze_position(),
+            host_evidence: reference(95),
+        },
+    )?);
+    assert_eq!(
+        ErasureSupportingRecordsV1::new(wrong_host_evidence),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
 
@@ -1501,28 +1899,7 @@ fn supporting_decoder_rehydrates_each_optional_freeze_record() -> Result<(), Era
         );
     }
 
-    let scope = scope_commitment(request)?;
-    let obligation = obligation(request)?;
-    let set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
-        request,
-        obligations: vec![obligation.reference()],
-        policy: reference(4),
-        trust: reference(5),
-    })?;
-    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
-        request,
-        scope_commitment: scope.reference(),
-        obligation_set: set.reference(),
-        freeze_position: 10,
-        host_evidence: reference(6),
-    })?;
-    let records = ErasureSupportingRecordsV1::new(ErasureSupportingRecordsInputV1 {
-        scope_commitment: Some(scope),
-        freeze_provenance: Some(freeze),
-        obligations: vec![obligation],
-        obligation_set: Some(set),
-        ..ErasureSupportingRecordsInputV1::default()
-    })?;
+    let records = ErasureSupportingRecordsV1::new(freeze_supporting_input(request)?)?;
     assert_eq!(
         roundtrip(
             &records,

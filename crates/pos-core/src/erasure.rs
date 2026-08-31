@@ -4,7 +4,7 @@
 //! artifact work, backup inventory, and replay evaluation. Those operations
 //! belong to the adapters and follow-up tickets named by ADR-060.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
@@ -30,12 +30,14 @@ pub const ERASURE_MAX_OBLIGATIONS_PER_CATEGORY: usize = 65_536;
 pub const ERASURE_MAX_OBLIGATIONS: usize = 262_144;
 /// Largest number of immutable scope extensions retained for one ERQ1.
 pub const ERASURE_MAX_SCOPE_EXTENSIONS: usize = 65_536;
-/// Largest encoded portable supporting record, except retry admissions.
+/// Largest encoded portable supporting record, except explicitly bounded large ledgers.
 pub const ERASURE_PORTABLE_RECORD_MAX_BYTES: usize = 1024 * 1024;
 /// Largest encoded immutable scope commitment or scope-extension ledger.
 pub const ERASURE_SCOPE_LEDGER_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Largest encoded immutable obligation-set record.
 pub const ERASURE_OBLIGATION_SET_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Largest encoded freeze-admission or authorization-evidence record.
+pub const ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Largest encoded retry-admission record.
 pub const ERASURE_RETRY_ADMISSION_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Independent ordinal ceiling for attempt outcomes or ERC1 receipts.
@@ -62,6 +64,12 @@ pub const ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1: &str = "ERAR1";
 pub const ERASURE_SCOPE_COMMITMENT_TAG_V1: &str = "ERSC1";
 /// Domain tag for immutable access-freeze provenance records.
 pub const ERASURE_FREEZE_PROVENANCE_TAG_V1: &str = "ERFP1";
+/// Domain tag for canonical freeze-admission applicability evidence.
+pub const ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1: &str = "ERFA1";
+/// Domain tag for the exact freeze-admission authorization preimage.
+pub const ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1: &str = "ERFA1-AUTH";
+/// Domain tag for retained host authorization evidence.
+pub const ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1: &str = "ERFAA1";
 /// Domain tag for immutable access-freeze failure records.
 pub const ERASURE_FREEZE_FAILURE_TAG_V1: &str = "ERFF1";
 /// Domain tag for a pre-authorization rejection record.
@@ -548,6 +556,385 @@ impl ErasureScopeCommitmentV1 {
             ..self
         })
     }
+}
+
+/// Closed policy-applicability decision for one category and target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureApplicabilityDecisionV1 {
+    /// Policy determined that no obligation applies.
+    Inapplicable,
+    /// Policy admitted one category-scoped owner obligation.
+    Applicable,
+}
+
+impl ErasureApplicabilityDecisionV1 {
+    const fn code(self) -> u64 {
+        match self {
+            Self::Inapplicable => 0,
+            Self::Applicable => 1,
+        }
+    }
+
+    const fn from_code(code: u64) -> Result<Self, ErasureErrorV1> {
+        match code {
+            0 => Ok(Self::Inapplicable),
+            1 => Ok(Self::Applicable),
+            _ => Err(ErasureErrorV1::InvalidEncoding),
+        }
+    }
+}
+
+/// One canonical row in the complete category-by-target applicability matrix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureFreezeApplicabilityRowV1 {
+    category: ErasureInventoryCategoryV1,
+    target_index: u64,
+    decision: ErasureApplicabilityDecisionV1,
+    owner: Option<ErasureReferenceV1>,
+}
+
+impl ErasureFreezeApplicabilityRowV1 {
+    /// Construct one exact applicability row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a scope error unless owner presence exactly matches the decision.
+    pub const fn new(
+        category: ErasureInventoryCategoryV1,
+        target_index: u64,
+        decision: ErasureApplicabilityDecisionV1,
+        owner: Option<ErasureReferenceV1>,
+    ) -> Result<Self, ErasureErrorV1> {
+        if matches!(
+            (decision, owner),
+            (ErasureApplicabilityDecisionV1::Applicable, Some(_))
+                | (ErasureApplicabilityDecisionV1::Inapplicable, None)
+        ) {
+            Ok(Self {
+                category,
+                target_index,
+                decision,
+                owner,
+            })
+        } else {
+            Err(ErasureErrorV1::ScopeInvalid)
+        }
+    }
+
+    /// Return the closed obligation category.
+    #[must_use]
+    pub const fn category(self) -> ErasureInventoryCategoryV1 {
+        self.category
+    }
+
+    /// Return the index into the canonical target closure.
+    #[must_use]
+    pub const fn target_index(self) -> u64 {
+        self.target_index
+    }
+
+    /// Return the policy-applicability decision.
+    #[must_use]
+    pub const fn decision(self) -> ErasureApplicabilityDecisionV1 {
+        self.decision
+    }
+
+    /// Return the category-scoped owner for an applicable row.
+    #[must_use]
+    pub const fn owner(self) -> Option<ErasureReferenceV1> {
+        self.owner
+    }
+}
+
+/// Construction fields for retained #187-owned authorization evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureFreezeAuthorizationEvidenceInputV1 {
+    /// Digest of the exact domain-separated ERFA1 authorization preimage.
+    pub admission_body_digest: ErasureReferenceV1,
+    /// Policy revision under which the evidence was admitted.
+    pub policy: ErasureReferenceV1,
+    /// Trust revision under which the evidence was admitted.
+    pub trust: ErasureReferenceV1,
+    /// Canonical proof or signature material interpreted by #187.
+    pub evidence: Vec<u8>,
+}
+
+/// Retained canonical evidence authenticating one freeze-admission body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureFreezeAuthorizationEvidenceV1 {
+    input: ErasureFreezeAuthorizationEvidenceInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureFreezeAuthorizationEvidenceV1 {
+    /// Construct and content-address retained host authorization evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for empty or oversized proof material.
+    pub fn new(
+        input: ErasureFreezeAuthorizationEvidenceInputV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        if input.evidence.is_empty() {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the authenticated ERFA1 authorization-body digest.
+    #[must_use]
+    pub const fn admission_body_digest(&self) -> ErasureReferenceV1 {
+        self.input.admission_body_digest
+    }
+
+    /// Return the pinned policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+
+    /// Return the opaque canonical #187 evidence bytes.
+    #[must_use]
+    pub fn evidence(&self) -> &[u8] {
+        &self.input.evidence
+    }
+
+    /// Return this evidence object's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+
+    /// Encode the exact retained authorization-evidence object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when serialization exceeds 16 MiB.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &freeze_authorization_evidence_value(self),
+            ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
+        )
+    }
+
+    /// Decode one exact retained authorization-evidence object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or oversized bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
+            ERASURE_MAX_OBLIGATIONS,
+        )
+        .and_then(|value| {
+            exact_array(&value, 6).and_then(freeze_authorization_evidence_from_fields)
+        })
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &freeze_authorization_evidence_value(&self),
+            ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+/// Construction fields for the canonical freeze-admission applicability object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureFreezeAdmissionEvidenceInputV1 {
+    /// ERQ1 digest.
+    pub request: ErasureReferenceV1,
+    /// Resolved scope-commitment address.
+    pub scope_commitment: ErasureReferenceV1,
+    /// Frozen obligation-set address.
+    pub obligation_set: ErasureReferenceV1,
+    /// Complete category-major applicability matrix.
+    pub applicability_matrix: Vec<ErasureFreezeApplicabilityRowV1>,
+    /// Authoritative Tick Boundary position.
+    pub freeze_position: u64,
+    /// Pinned policy revision.
+    pub policy: ErasureReferenceV1,
+    /// Pinned trust revision.
+    pub trust: ErasureReferenceV1,
+    /// Retained authorization-evidence content address.
+    pub authorization_provenance: ErasureReferenceV1,
+}
+
+/// Complete, content-addressed freeze-admission applicability evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureFreezeAdmissionEvidenceV1 {
+    input: ErasureFreezeAdmissionEvidenceInputV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureFreezeAdmissionEvidenceV1 {
+    /// Construct and validate one exact `ERFA1` object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a scope error unless the matrix is complete and category-major.
+    pub fn new(input: ErasureFreezeAdmissionEvidenceInputV1) -> Result<Self, ErasureErrorV1> {
+        validate_applicability_matrix(&input.applicability_matrix)?;
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 digest.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.input.request
+    }
+
+    /// Return the resolved scope commitment.
+    #[must_use]
+    pub const fn scope_commitment(&self) -> ErasureReferenceV1 {
+        self.input.scope_commitment
+    }
+
+    /// Return the frozen obligation set.
+    #[must_use]
+    pub const fn obligation_set(&self) -> ErasureReferenceV1 {
+        self.input.obligation_set
+    }
+
+    /// Return the complete category-major applicability matrix.
+    #[must_use]
+    pub fn applicability_matrix(&self) -> &[ErasureFreezeApplicabilityRowV1] {
+        &self.input.applicability_matrix
+    }
+
+    /// Return the authoritative freeze position.
+    #[must_use]
+    pub const fn freeze_position(&self) -> u64 {
+        self.input.freeze_position
+    }
+
+    /// Return the pinned policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+
+    /// Return the retained authorization-evidence address.
+    #[must_use]
+    pub const fn authorization_provenance(&self) -> ErasureReferenceV1 {
+        self.input.authorization_provenance
+    }
+
+    /// Return the exact domain-separated authorization-body digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error if the canonical preimage exceeds 16 MiB.
+    pub fn authorization_body_digest(&self) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        encode_limited(
+            &freeze_admission_authorization_value(self),
+            ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
+        )
+        .map(|bytes| {
+            ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
+                &bytes,
+            ))
+        })
+    }
+
+    /// Return this admission object's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+
+    /// Encode the exact `ERFA1` object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when serialization exceeds 16 MiB.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &freeze_admission_evidence_value(self),
+            ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
+        )
+    }
+
+    /// Decode one exact `ERFA1` object.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or oversized bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
+            ERASURE_MAX_OBLIGATIONS,
+        )
+        .and_then(|value| exact_array(&value, 10).and_then(freeze_admission_evidence_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &freeze_admission_evidence_value(&self),
+            ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
+
+fn validate_applicability_matrix(
+    matrix: &[ErasureFreezeApplicabilityRowV1],
+) -> Result<(), ErasureErrorV1> {
+    if matrix.is_empty() || matrix.len() > ERASURE_MAX_OBLIGATIONS || matrix.len() % 4 != 0 {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let target_count = matrix.len() / 4;
+    for category in [
+        ErasureInventoryCategoryV1::Artifact,
+        ErasureInventoryCategoryV1::Key,
+        ErasureInventoryCategoryV1::Replica,
+        ErasureInventoryCategoryV1::Backup,
+    ] {
+        let offset = category.index() * target_count;
+        for (target_index, row) in matrix[offset..offset + target_count].iter().enumerate() {
+            if row.category() != category || row.target_index() != target_index as u64 {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Construction fields for immutable access-freeze provenance.
@@ -1495,6 +1882,8 @@ pub struct ErasureSupportingRecordsV1 {
     correction_provenance: Option<ErasureCorrectionProvenanceV1>,
     authorization_rejection: Option<ErasureAuthorizationRejectionV1>,
     scope_commitment: Option<ErasureScopeCommitmentV1>,
+    freeze_admission_evidence: Option<ErasureFreezeAdmissionEvidenceV1>,
+    freeze_authorization_evidence: Option<ErasureFreezeAuthorizationEvidenceV1>,
     freeze_provenance: Option<ErasureFreezeProvenanceV1>,
     freeze_failure: Option<ErasureFreezeFailureV1>,
     obligations: Vec<ErasureObligationV1>,
@@ -1518,13 +1907,17 @@ pub struct ErasureSupportingRecordsInputV1 {
     pub authorization_rejection: Option<ErasureAuthorizationRejectionV1>,
     /// Immutable resolved scope, once freeze resolution succeeds.
     pub scope_commitment: Option<ErasureScopeCommitmentV1>,
+    /// Complete canonical category-by-target freeze-admission evidence.
+    pub freeze_admission_evidence: Option<ErasureFreezeAdmissionEvidenceV1>,
+    /// Retained #187-owned authorization proof for the admission body.
+    pub freeze_authorization_evidence: Option<ErasureFreezeAuthorizationEvidenceV1>,
     /// Immutable successful freeze evidence.
     pub freeze_provenance: Option<ErasureFreezeProvenanceV1>,
     /// Immutable scope/freeze failure evidence for an authorized rejection.
     pub freeze_failure: Option<ErasureFreezeFailureV1>,
     /// Immutable policy-selected category/target/owner obligations.
     pub obligations: Vec<ErasureObligationV1>,
-    /// Immutable obligation applicability matrix referencing `obligations`.
+    /// Immutable set of policy-admitted obligation references.
     pub obligation_set: Option<ErasureObligationSetV1>,
     /// Append-only future-Fork scope-extension objects.
     pub scope_extensions: Vec<ErasureScopeExtensionV1>,
@@ -1588,6 +1981,8 @@ impl ErasureSupportingRecordsV1 {
             correction_provenance: input.correction_provenance,
             authorization_rejection: input.authorization_rejection,
             scope_commitment: input.scope_commitment,
+            freeze_admission_evidence: input.freeze_admission_evidence,
+            freeze_authorization_evidence: input.freeze_authorization_evidence,
             freeze_provenance: input.freeze_provenance,
             freeze_failure: input.freeze_failure,
             obligations: input.obligations,
@@ -1628,6 +2023,20 @@ impl ErasureSupportingRecordsV1 {
         self.scope_commitment.as_ref()
     }
 
+    /// Return complete freeze-admission applicability evidence.
+    #[must_use]
+    pub const fn freeze_admission_evidence(&self) -> Option<&ErasureFreezeAdmissionEvidenceV1> {
+        self.freeze_admission_evidence.as_ref()
+    }
+
+    /// Return retained host authorization evidence for the freeze admission.
+    #[must_use]
+    pub const fn freeze_authorization_evidence(
+        &self,
+    ) -> Option<&ErasureFreezeAuthorizationEvidenceV1> {
+        self.freeze_authorization_evidence.as_ref()
+    }
+
     /// Return immutable successful freeze evidence.
     #[must_use]
     pub const fn freeze_provenance(&self) -> Option<ErasureFreezeProvenanceV1> {
@@ -1646,7 +2055,7 @@ impl ErasureSupportingRecordsV1 {
         &self.obligations
     }
 
-    /// Return the frozen obligation applicability matrix, when access froze.
+    /// Return the frozen obligation-reference set, when access froze.
     #[must_use]
     pub const fn obligation_set(&self) -> Option<&ErasureObligationSetV1> {
         self.obligation_set.as_ref()
@@ -1706,6 +2115,8 @@ impl ErasureSupportingRecordsV1 {
         }
         if self.authorization_rejection.is_some()
             && (self.scope_commitment.is_some()
+                || self.freeze_admission_evidence.is_some()
+                || self.freeze_authorization_evidence.is_some()
                 || self.freeze_provenance.is_some()
                 || self.obligation_set.is_some()
                 || !self.obligations.is_empty()
@@ -1721,14 +2132,28 @@ impl ErasureSupportingRecordsV1 {
             let Some(obligation_set) = self.obligation_set.as_ref() else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
+            let Some(admission) = self.freeze_admission_evidence.as_ref() else {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            };
+            let Some(authorization) = self.freeze_authorization_evidence.as_ref() else {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            };
             let freeze_matches_scope = freeze.scope_commitment() == scope.reference()
-                && freeze.obligation_set() == obligation_set.reference();
+                && freeze.obligation_set() == obligation_set.reference()
+                && freeze.host_evidence() == admission.reference();
             if !freeze_matches_scope {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
+            self.validate_freeze_admission_bindings(scope, obligation_set, admission, authorization)?;
+        } else if self.freeze_admission_evidence.is_some()
+            || self.freeze_authorization_evidence.is_some()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if self.freeze_failure.is_some()
             && (self.scope_commitment.is_some()
+                || self.freeze_admission_evidence.is_some()
+                || self.freeze_authorization_evidence.is_some()
                 || self.freeze_provenance.is_some()
                 || self.obligation_set.is_some()
                 || !self.obligations.is_empty()
@@ -1739,6 +2164,8 @@ impl ErasureSupportingRecordsV1 {
         }
         if self.scope_commitment.is_none()
             && (self.obligation_set.is_some()
+                || self.freeze_admission_evidence.is_some()
+                || self.freeze_authorization_evidence.is_some()
                 || !self.obligations.is_empty()
                 || !self.scope_extensions.is_empty()
                 || !self.scope_extension_ledgers.is_empty())
@@ -1779,6 +2206,44 @@ impl ErasureSupportingRecordsV1 {
         self.validate_acknowledgements()?;
         self.validate_attempt_chain()?;
         self.validate_resolution_chain()
+    }
+
+    fn validate_freeze_admission_bindings(
+        &self,
+        scope: &ErasureScopeCommitmentV1,
+        obligation_set: &ErasureObligationSetV1,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let freeze = self
+            .freeze_provenance
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if (
+            admission.request(),
+            admission.scope_commitment(),
+            admission.obligation_set(),
+            admission.freeze_position(),
+            admission.policy(),
+            admission.trust(),
+            admission.authorization_provenance(),
+            authorization.admission_body_digest(),
+            authorization.policy(),
+            authorization.trust(),
+        ) != (
+            scope.request(),
+            scope.reference(),
+            obligation_set.reference(),
+            freeze.freeze_position(),
+            obligation_set.policy(),
+            obligation_set.trust(),
+            authorization.reference(),
+            admission.authorization_body_digest()?,
+            obligation_set.policy(),
+            obligation_set.trust(),
+        ) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(())
     }
 
     fn validate_obligation_evidence(&self) -> Result<(), ErasureErrorV1> {
@@ -2103,6 +2568,10 @@ impl ErasureSupportingRecordsV1 {
                 .as_ref()
                 .is_none_or(|record| record.request() == request)
             && self
+                .freeze_admission_evidence
+                .as_ref()
+                .is_none_or(|record| record.request() == request)
+            && self
                 .freeze_provenance
                 .is_none_or(|record| record.request() == request)
             && self
@@ -2160,6 +2629,14 @@ impl ErasureSupportingRecordsV1 {
             option_is_unchanged(
                 self.scope_commitment.as_ref(),
                 next.scope_commitment.as_ref(),
+            ),
+            option_is_unchanged(
+                self.freeze_admission_evidence.as_ref(),
+                next.freeze_admission_evidence.as_ref(),
+            ),
+            option_is_unchanged(
+                self.freeze_authorization_evidence.as_ref(),
+                next.freeze_authorization_evidence.as_ref(),
             ),
             option_is_unchanged(
                 self.freeze_provenance.as_ref(),
@@ -2877,7 +3354,7 @@ pub struct ErasureObligationSetInputV1 {
     pub trust: ErasureReferenceV1,
 }
 
-/// Content-addressed frozen applicability matrix for an ERQ1.
+/// Content-addressed frozen set of admitted obligations for an ERQ1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasureObligationSetV1 {
     input: ErasureObligationSetInputV1,
@@ -4331,6 +4808,22 @@ pub trait ErasureCoordinatorPortV1: ErasurePersistencePortV1 {
         request: ErasureReferenceV1,
         requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1>;
+    /// Verify retained #187-owned authorization proof for one exact ERFA1 body.
+    ///
+    /// This check is mandatory both before freeze persistence and whenever a
+    /// recovered frozen record is returned. Core validates all structural and
+    /// content-address bindings; the host validates proof semantics under the
+    /// pinned policy and trust revisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization, policy, or trust error when the proof
+    /// does not authenticate the supplied admission body.
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1>;
     /// Authenticate one future-Fork scope extension before its CAS append.
     ///
     /// # Errors
@@ -4415,12 +4908,14 @@ pub struct ErasureAtomicFreezeAdmissionInputV1 {
     pub scope: ErasureScopeCommitmentInputV1,
     /// Exact category/target/owner obligations admitted by host policy.
     pub obligations: Vec<ErasureObligationV1>,
-    /// Content-addressed applicability matrix for `obligations`.
+    /// Content-addressed set referencing `obligations`.
     pub obligation_set: ErasureObligationSetV1,
     /// Authoritative Tick Boundary position.
     pub freeze_position: u64,
-    /// Host-authenticated freeze evidence.
-    pub host_evidence: ErasureReferenceV1,
+    /// Complete canonical applicability and freeze-admission evidence.
+    pub freeze_admission_evidence: ErasureFreezeAdmissionEvidenceV1,
+    /// Retained #187-owned proof authenticating the admission body.
+    pub freeze_authorization_evidence: ErasureFreezeAuthorizationEvidenceV1,
 }
 
 /// Typed successful result of the one atomic host freeze operation.
@@ -4447,7 +4942,34 @@ impl ErasureAtomicFreezeAdmissionV1 {
         {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let _scope = ErasureScopeCommitmentV1::new(input.scope.clone())?;
+        let scope = ErasureScopeCommitmentV1::new(input.scope.clone())?;
+        let evidence = &input.freeze_admission_evidence;
+        let authorization = &input.freeze_authorization_evidence;
+        if (
+            evidence.request(),
+            evidence.scope_commitment(),
+            evidence.obligation_set(),
+            evidence.freeze_position(),
+            evidence.policy(),
+            evidence.trust(),
+            evidence.authorization_provenance(),
+            authorization.admission_body_digest(),
+            authorization.policy(),
+            authorization.trust(),
+        ) != (
+            input.scope.request,
+            scope.reference(),
+            input.obligation_set.reference(),
+            input.freeze_position,
+            input.obligation_set.policy(),
+            input.obligation_set.trust(),
+            authorization.reference(),
+            evidence.authorization_body_digest()?,
+            input.obligation_set.policy(),
+            input.obligation_set.trust(),
+        ) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         let obligation_references = input
             .obligations
             .iter()
@@ -4479,6 +5001,11 @@ impl ErasureAtomicFreezeAdmissionV1 {
         if category_targets.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
+        validate_applicability_obligations(
+            evidence.applicability_matrix(),
+            &input.targets,
+            &input.obligations,
+        )?;
         let mut command_owners = input
             .obligations
             .iter()
@@ -4509,7 +5036,7 @@ impl ErasureAtomicFreezeAdmissionV1 {
         &self.input.obligations
     }
 
-    /// Return the frozen applicability matrix.
+    /// Return the frozen obligation-reference set.
     #[must_use]
     pub const fn obligation_set(&self) -> &ErasureObligationSetV1 {
         &self.input.obligation_set
@@ -4521,10 +5048,58 @@ impl ErasureAtomicFreezeAdmissionV1 {
         self.input.freeze_position
     }
 
-    /// Return host-authenticated freeze evidence.
+    /// Return complete canonical freeze-admission evidence.
     #[must_use]
-    pub const fn host_evidence(&self) -> ErasureReferenceV1 {
-        self.input.host_evidence
+    pub const fn freeze_admission_evidence(&self) -> &ErasureFreezeAdmissionEvidenceV1 {
+        &self.input.freeze_admission_evidence
+    }
+
+    /// Return retained #187-owned authorization evidence.
+    #[must_use]
+    pub const fn freeze_authorization_evidence(
+        &self,
+    ) -> &ErasureFreezeAuthorizationEvidenceV1 {
+        &self.input.freeze_authorization_evidence
+    }
+}
+
+fn validate_applicability_obligations(
+    matrix: &[ErasureFreezeApplicabilityRowV1],
+    targets: &[ErasureRequiredTargetV1],
+    obligations: &[ErasureObligationV1],
+) -> Result<(), ErasureErrorV1> {
+    if matrix.len() != targets.len().saturating_mul(4) {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let mut by_category_target = BTreeMap::new();
+    for obligation in obligations {
+        if by_category_target
+            .insert((obligation.category(), obligation.target()), obligation)
+            .is_some()
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+    }
+    let mut applicable = 0_usize;
+    for row in matrix {
+        let target = targets
+            .get(row.target_index() as usize)
+            .ok_or(ErasureErrorV1::ScopeInvalid)?;
+        let obligation = by_category_target.get(&(row.category(), *target));
+        match (row.decision(), row.owner(), obligation) {
+            (ErasureApplicabilityDecisionV1::Inapplicable, None, None) => {}
+            (ErasureApplicabilityDecisionV1::Applicable, Some(owner), Some(obligation))
+                if obligation.owner() == owner =>
+            {
+                applicable = applicable.saturating_add(1);
+            }
+            _ => return Err(ErasureErrorV1::ScopeInvalid),
+        }
+    }
+    if applicable == obligations.len() {
+        Ok(())
+    } else {
+        Err(ErasureErrorV1::ScopeInvalid)
     }
 }
 
@@ -5016,10 +5591,11 @@ impl ErasureCoordinatorRecordV1 {
                 | ErasureLifecycleV1::Complete
                 | ErasureLifecycleV1::PartialFailure
         ) {
-            let (Some(scope), Some(freeze), Some(obligation_set)) = (
+            let (Some(scope), Some(freeze), Some(obligation_set), Some(admission)) = (
                 self.supporting_records.scope_commitment(),
                 self.supporting_records.freeze_provenance(),
                 self.supporting_records.obligation_set(),
+                self.supporting_records.freeze_admission_evidence(),
             ) else {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             };
@@ -5034,6 +5610,7 @@ impl ErasureCoordinatorRecordV1 {
                 freeze.request(),
                 freeze.scope_commitment(),
                 freeze.obligation_set(),
+                freeze.host_evidence(),
                 self.freeze_provenance,
                 self.state.freeze_position(),
                 freeze.freeze_position(),
@@ -5045,6 +5622,7 @@ impl ErasureCoordinatorRecordV1 {
                 self.request.reference(),
                 scope.reference(),
                 obligation_set.reference(),
+                admission.reference(),
                 Some(freeze.reference()),
                 Some(freeze.freeze_position()),
                 freeze.freeze_position(),
@@ -5063,6 +5641,11 @@ impl ErasureCoordinatorRecordV1 {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
             }
+            validate_applicability_obligations(
+                admission.applicability_matrix(),
+                &self.targets,
+                self.supporting_records.obligations(),
+            )?;
             let expected_ledger = scope.lineage_rule().and_then(|_| {
                 self.supporting_records
                     .scope_extension_ledgers()
@@ -5276,6 +5859,8 @@ impl ErasureCoordinatorRecordV1 {
         lifecycle: ErasureLifecycleV1,
     ) -> Result<(), ErasureErrorV1> {
         let scope = self.supporting_records.scope_commitment();
+        let admission = self.supporting_records.freeze_admission_evidence();
+        let freeze_authorization = self.supporting_records.freeze_authorization_evidence();
         let freeze = self.supporting_records.freeze_provenance();
         let failure = self.supporting_records.freeze_failure();
         let authorization_rejection = self.supporting_records.authorization_rejection();
@@ -5284,11 +5869,13 @@ impl ErasureCoordinatorRecordV1 {
             ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => {
                 if (
                     scope.is_some(),
+                    admission.is_some(),
+                    freeze_authorization.is_some(),
                     freeze.is_some(),
                     failure.is_some(),
                     authorization_rejection.is_some(),
                     obligation_set.is_some(),
-                ) != (false, false, false, false, false)
+                ) != (false, false, false, false, false, false, false)
                 {
                     return Err(ErasureErrorV1::PolicyConflict);
                 }
@@ -5300,10 +5887,12 @@ impl ErasureCoordinatorRecordV1 {
                         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
                     if (
                         scope.is_some(),
+                        admission.is_some(),
+                        freeze_authorization.is_some(),
                         freeze.is_some(),
                         failure.authorization_provenance(),
                         self.state.provenance(),
-                    ) != (false, false, authorization, failure.reference())
+                    ) != (false, false, false, false, authorization, failure.reference())
                         || authorization_rejection.is_some()
                         || obligation_set.is_some()
                     {
@@ -5312,12 +5901,16 @@ impl ErasureCoordinatorRecordV1 {
                 } else if let Some(rejection) = authorization_rejection {
                     if (
                         scope.is_some(),
+                        admission.is_some(),
+                        freeze_authorization.is_some(),
                         freeze.is_some(),
                         obligation_set.is_some(),
                         self.authorize_provenance,
                         rejection.request(),
                         self.state.provenance(),
                     ) != (
+                        false,
+                        false,
                         false,
                         false,
                         false,
@@ -5338,11 +5931,13 @@ impl ErasureCoordinatorRecordV1 {
             | ErasureLifecycleV1::PartialFailure => {
                 if (
                     scope.is_some(),
+                    admission.is_some(),
+                    freeze_authorization.is_some(),
                     freeze.is_some(),
                     failure.is_some(),
                     authorization_rejection.is_some(),
                     obligation_set.is_some(),
-                ) != (true, true, false, false, true)
+                ) != (true, true, true, true, false, false, true)
                 {
                     return Err(ErasureErrorV1::ProvenanceMissing);
                 }
@@ -5438,12 +6033,29 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             Ok(Some(record)) => record
                 .validate(self.coordinator)
                 .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
+                .and_then(|()| self.validate_recovered_freeze_authorization(&record))
                 .map(|()| {
                     self.cache(record.clone());
                     record
                 }),
             Ok(None) => Err(ErasureErrorV1::ProvenanceMissing),
             Err(error) => Err(error),
+        }
+    }
+
+    fn validate_recovered_freeze_authorization(
+        &self,
+        record: &ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        match (
+            record.supporting_records.freeze_admission_evidence(),
+            record.supporting_records.freeze_authorization_evidence(),
+        ) {
+            (Some(admission), Some(authorization)) => self
+                .port
+                .validate_freeze_authorization(admission, authorization),
+            (None, None) => Ok(()),
+            _ => Err(ErasureErrorV1::ProvenanceMissing),
         }
     }
     fn commit(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
@@ -5762,13 +6374,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
+        self.port.validate_freeze_authorization(
+            admission.freeze_admission_evidence(),
+            admission.freeze_authorization_evidence(),
+        )?;
         let scope = ErasureScopeCommitmentV1::new(admission.scope().clone())?;
         let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
             request,
             scope_commitment: scope.reference(),
             obligation_set: admission.obligation_set().reference(),
             freeze_position: admission.freeze_position(),
-            host_evidence: admission.host_evidence(),
+            host_evidence: admission.freeze_admission_evidence().reference(),
         })?;
         let ledger = scope
             .lineage_rule()
@@ -5797,6 +6413,10 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .as_ref()
             .map(ErasureScopeExtensionLedgerV1::reference);
         record.supporting_records.scope_commitment = Some(scope);
+        record.supporting_records.freeze_admission_evidence =
+            Some(admission.freeze_admission_evidence().clone());
+        record.supporting_records.freeze_authorization_evidence =
+            Some(admission.freeze_authorization_evidence().clone());
         record.supporting_records.freeze_provenance = Some(freeze);
         record.supporting_records.obligations = admission.obligations().to_vec();
         record.supporting_records.obligation_set = Some(admission.obligation_set().clone());
@@ -6562,8 +7182,11 @@ use codec::{
     authorization_rejection_from_fields, authorization_rejection_value,
     correction_provenance_from_fields, correction_provenance_value, decode_limited, domain_digest,
     encode_canonical, encode_limited, exact_array, freeze_failure_from_fields,
-    freeze_failure_value, freeze_is_monotonic, freeze_provenance_from_fields,
-    freeze_provenance_value, has_duplicate, has_duplicate_by_target, invalid_owner_sets,
+    freeze_admission_authorization_value, freeze_admission_evidence_from_fields,
+    freeze_admission_evidence_value, freeze_authorization_evidence_from_fields,
+    freeze_authorization_evidence_value, freeze_failure_value, freeze_is_monotonic,
+    freeze_provenance_from_fields, freeze_provenance_value, has_duplicate,
+    has_duplicate_by_target, invalid_owner_sets,
     inventories_exceed_bound, inventories_have_duplicate_targets, inventories_match_closure,
     inventory_categories_match, inventory_transitions_preserve_or_weaken, obligation_from_fields,
     obligation_set_from_fields, obligation_set_value, obligation_value, receipt_core_value,

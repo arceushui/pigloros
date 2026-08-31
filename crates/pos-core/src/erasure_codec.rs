@@ -1,12 +1,16 @@
 use super::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
+    ErasureApplicabilityDecisionV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
     ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionInputV1,
     ErasureAuthorizationRejectionV1, ErasureCorrectionProvenanceInputV1,
     ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeFailureInputV1,
-    ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
+    ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeFailureV1,
+    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
     ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
     ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
@@ -19,8 +23,10 @@ use super::{
     ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
     ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
-    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS,
-    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1, ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
+    ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_REFERENCES,
+    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_OBLIGATION_SET_TAG_V1,
     ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1,
     ERASURE_SCOPE_EXTENSION_TAG_V1, ERC1, ERCR1, ERQ1, ERS1, VERSION,
@@ -160,6 +166,117 @@ pub(super) fn freeze_provenance_from_fields(
         obligation_set: bytes32(&fields[4])?,
         freeze_position: unsigned(&fields[5])?,
         host_evidence: bytes32(&fields[6])?,
+    })
+}
+
+fn applicability_row_value(row: ErasureFreezeApplicabilityRowV1) -> Value {
+    Value::Array(vec![
+        uint(row.category().code()),
+        uint(row.target_index()),
+        uint(row.decision().code()),
+        optional_digest(row.owner()),
+    ])
+}
+
+fn applicability_row_from_value(
+    value: &Value,
+) -> Result<ErasureFreezeApplicabilityRowV1, ErasureErrorV1> {
+    let fields = exact_array(value, 4)?;
+    ErasureFreezeApplicabilityRowV1::new(
+        ErasureInventoryCategoryV1::from_code(unsigned(&fields[0])?)?,
+        unsigned(&fields[1])?,
+        ErasureApplicabilityDecisionV1::from_code(unsigned(&fields[2])?)?,
+        optional_bytes32(&fields[3])?,
+    )
+}
+
+fn applicability_matrix_value(rows: &[ErasureFreezeApplicabilityRowV1]) -> Value {
+    Value::Array(rows.iter().copied().map(applicability_row_value).collect())
+}
+
+fn applicability_matrix_from_value(
+    value: &Value,
+) -> Result<Vec<ErasureFreezeApplicabilityRowV1>, ErasureErrorV1> {
+    array(value, ERASURE_MAX_OBLIGATIONS)?
+        .iter()
+        .map(applicability_row_from_value)
+        .collect()
+}
+
+pub(super) fn freeze_admission_authorization_value(
+    evidence: &ErasureFreezeAdmissionEvidenceV1,
+) -> Value {
+    Value::Array(vec![
+        text(ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1),
+        uint(VERSION),
+        digest(evidence.input.request),
+        digest(evidence.input.scope_commitment),
+        digest(evidence.input.obligation_set),
+        applicability_matrix_value(&evidence.input.applicability_matrix),
+        uint(evidence.input.freeze_position),
+        digest(evidence.input.policy),
+        digest(evidence.input.trust),
+    ])
+}
+
+pub(super) fn freeze_admission_evidence_value(
+    evidence: &ErasureFreezeAdmissionEvidenceV1,
+) -> Value {
+    Value::Array(vec![
+        text(ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1),
+        uint(VERSION),
+        digest(evidence.input.request),
+        digest(evidence.input.scope_commitment),
+        digest(evidence.input.obligation_set),
+        applicability_matrix_value(&evidence.input.applicability_matrix),
+        uint(evidence.input.freeze_position),
+        digest(evidence.input.policy),
+        digest(evidence.input.trust),
+        digest(evidence.input.authorization_provenance),
+    ])
+}
+
+pub(super) fn freeze_admission_evidence_from_fields(
+    fields: &[Value],
+) -> Result<ErasureFreezeAdmissionEvidenceV1, ErasureErrorV1> {
+    header(fields, ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1)?;
+    ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        request: bytes32(&fields[2])?,
+        scope_commitment: bytes32(&fields[3])?,
+        obligation_set: bytes32(&fields[4])?,
+        applicability_matrix: applicability_matrix_from_value(&fields[5])?,
+        freeze_position: unsigned(&fields[6])?,
+        policy: bytes32(&fields[7])?,
+        trust: bytes32(&fields[8])?,
+        authorization_provenance: bytes32(&fields[9])?,
+    })
+}
+
+pub(super) fn freeze_authorization_evidence_value(
+    evidence: &ErasureFreezeAuthorizationEvidenceV1,
+) -> Value {
+    Value::Array(vec![
+        text(ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1),
+        uint(VERSION),
+        digest(evidence.input.admission_body_digest),
+        digest(evidence.input.policy),
+        digest(evidence.input.trust),
+        Value::Bytes(evidence.input.evidence.clone()),
+    ])
+}
+
+pub(super) fn freeze_authorization_evidence_from_fields(
+    fields: &[Value],
+) -> Result<ErasureFreezeAuthorizationEvidenceV1, ErasureErrorV1> {
+    header(fields, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1)?;
+    let Value::Bytes(evidence) = &fields[5] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+        admission_body_digest: bytes32(&fields[2])?,
+        policy: bytes32(&fields[3])?,
+        trust: bytes32(&fields[4])?,
+        evidence: evidence.clone(),
     })
 }
 
@@ -755,6 +872,14 @@ pub(super) fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> 
             .as_ref()
             .map_or(Value::Null, scope_commitment_value),
         records
+            .freeze_admission_evidence
+            .as_ref()
+            .map_or(Value::Null, freeze_admission_evidence_value),
+        records
+            .freeze_authorization_evidence
+            .as_ref()
+            .map_or(Value::Null, freeze_authorization_evidence_value),
+        records
             .freeze_provenance
             .as_ref()
             .map_or(Value::Null, freeze_provenance_value),
@@ -829,7 +954,7 @@ pub(super) fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> 
 pub(super) fn supporting_records_from_value(
     value: &Value,
 ) -> Result<ErasureSupportingRecordsV1, ErasureErrorV1> {
-    let fields = exact_array(value, 15)?;
+    let fields = exact_array(value, 17)?;
     let correction_provenance = match &fields[0] {
         Value::Null => None,
         value => Some(correction_provenance_from_fields(exact_array(value, 6)?)?),
@@ -842,53 +967,61 @@ pub(super) fn supporting_records_from_value(
         Value::Null => None,
         value => Some(scope_commitment_from_fields(exact_array(value, 6)?)?),
     };
-    let freeze_provenance = match &fields[3] {
+    let freeze_admission_evidence = match &fields[3] {
+        Value::Null => None,
+        value => Some(freeze_admission_evidence_from_fields(exact_array(value, 10)?)?),
+    };
+    let freeze_authorization_evidence = match &fields[4] {
+        Value::Null => None,
+        value => Some(freeze_authorization_evidence_from_fields(exact_array(value, 6)?)?),
+    };
+    let freeze_provenance = match &fields[5] {
         Value::Null => None,
         value => Some(freeze_provenance_from_fields(exact_array(value, 7)?)?),
     };
-    let freeze_failure = match &fields[4] {
+    let freeze_failure = match &fields[6] {
         Value::Null => None,
         value => Some(freeze_failure_from_fields(exact_array(value, 6)?)?),
     };
-    let obligations = array(&fields[5], ERASURE_MAX_OBLIGATIONS)?
+    let obligations = array(&fields[7], ERASURE_MAX_OBLIGATIONS)?
         .iter()
         .map(|value| obligation_from_fields(exact_array(value, 6)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let obligation_set = match &fields[6] {
+    let obligation_set = match &fields[8] {
         Value::Null => None,
         value => Some(obligation_set_from_fields(exact_array(value, 6)?)?),
     };
-    let scope_extensions = array(&fields[7], ERASURE_MAX_SCOPE_EXTENSIONS)?
+    let scope_extensions = array(&fields[9], ERASURE_MAX_SCOPE_EXTENSIONS)?
         .iter()
         .map(|value| scope_extension_from_fields(exact_array(value, 8)?))
         .collect::<Result<Vec<_>, _>>()?;
     let scope_extension_ledgers =
-        array(&fields[8], ERASURE_MAX_SCOPE_EXTENSIONS.saturating_add(1))?
+        array(&fields[10], ERASURE_MAX_SCOPE_EXTENSIONS.saturating_add(1))?
             .iter()
             .map(|value| scope_extension_ledger_from_fields(exact_array(value, 5)?))
             .collect::<Result<Vec<_>, _>>()?;
-    let retry_admissions = array(&fields[9], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let retry_admissions = array(&fields[11], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| retry_admission_from_fields(exact_array(value, 12)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let acknowledgement_provenance = array(&fields[10], ERASURE_MAX_OBLIGATIONS)?
+    let acknowledgement_provenance = array(&fields[12], ERASURE_MAX_OBLIGATIONS)?
         .iter()
         .map(|value| acknowledgement_provenance_from_fields(exact_array(value, 12)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let attempt_outcomes = array(&fields[11], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let attempt_outcomes = array(&fields[13], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| attempt_outcome_from_fields(exact_array(value, 11)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let receipts = array(&fields[12], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let receipts = array(&fields[14], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| receipt_from_fields(exact_array(value, 19)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let receipt_provenance = array(&fields[13], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
+    let receipt_provenance = array(&fields[15], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| receipt_provenance_from_fields(exact_array(value, 11)?))
         .collect::<Result<Vec<_>, _>>()?;
     let administrative_resolutions =
-        array(&fields[14], super::ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)?
+        array(&fields[16], super::ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)?
             .iter()
             .map(|value| administrative_resolution_from_fields(exact_array(value, 13)?))
             .collect::<Result<Vec<_>, _>>()?;
@@ -896,6 +1029,8 @@ pub(super) fn supporting_records_from_value(
         correction_provenance,
         authorization_rejection,
         scope_commitment,
+        freeze_admission_evidence,
+        freeze_authorization_evidence,
         freeze_provenance,
         freeze_failure,
         obligations,
