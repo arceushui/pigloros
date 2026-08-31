@@ -505,7 +505,12 @@ fn raw_archive_profile(
     raw_member(members, PROFILE_PATH, RawMemberRole::Profile).and_then(|profile_member| {
         decode(profile_member.bytes).and_then(|profile| {
             array(&profile, 18).and_then(|profile_fields| {
-                raw_cpf1_value(profile_fields).and_then(|raw_profile| {
+                raw_cpf1_value(
+                    profile_fields,
+                    profile_member.bytes.len(),
+                    raw_value_depth(&profile),
+                )
+                .and_then(|raw_profile| {
                     if profile_fields[4] != manifest[1] {
                         return Err(BundleContractErrorV1::LifecycleInvalid);
                     }
@@ -785,11 +790,11 @@ fn raw_execution_profile_fields(
                 && fields[4] == Value::Array(classes)
                 && fields[5] == Value::Bool(declaration.network_allowed)
                 && fields[6] == Value::Array(Vec::new())
-                && scheduler == "fixture-scheduler-v1"
-                && numeric == "fixture-numeric-v1"
-                && schema == "fixture-schema-v1"
-                && artifact == "fixture-artifact-v1"
-                && budget == "fixture-budget-v1"
+                && scheduler == declaration.scheduler_id
+                && numeric == declaration.numeric_policy_id
+                && schema == declaration.schema_policy_id
+                && artifact == declaration.artifact_policy_id
+                && budget == declaration.budget_policy_id
                 && fields[12] == Value::Array(Vec::new())
                 && fields[13] == Value::Null
                 && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
@@ -1072,47 +1077,57 @@ struct RawCpf1Summary {
     registry: RawArtifact,
 }
 
-fn raw_cpf1_value(profile_fields: &[Value]) -> Result<RawCpf1Summary, BundleContractErrorV1> {
+fn raw_cpf1_value(
+    profile_fields: &[Value],
+    encoded_len: usize,
+    structural_depth: usize,
+) -> Result<RawCpf1Summary, BundleContractErrorV1> {
     raw_cpf1_header(profile_fields).and_then(|support_digests| {
         raw_execution_digests(&profile_fields[7]).and_then(|executions| {
             raw_provider_binding(&profile_fields[8]).and_then(|(registry, required_providers)| {
                 raw_protocol(&profile_fields[11]).and_then(|protocol| {
-                    raw_fixtures(&profile_fields[9], &protocol.deterministic_caps).and_then(
-                        |mut fixture_collection| {
-                            let claim_layer = fixture_collection.fixtures[0].claim_layer;
-                            fixture_collection
-                                .declared_paths
-                                .insert(registry.path.clone());
-                            raw_allowed_divergences(&profile_fields[10]).and_then(|allowed| {
-                                raw_profile_fixture_relationships(
-                                    &required_providers,
-                                    &executions,
-                                    &fixture_collection.fixtures,
-                                    &allowed,
-                                    claim_layer,
-                                )
-                                .and_then(|()| raw_independence(&profile_fields[12]))
-                                .and_then(
-                                    |trust_policy_snapshot_digest| {
-                                        raw_nullable_digest(&profile_fields[16]).map(|()| {
-                                            RawCpf1Summary {
-                                                claim_layer,
-                                                declared_paths: fixture_collection.declared_paths,
-                                                required_providers,
-                                                fixtures: fixture_collection.fixtures,
-                                                execution_digests: executions,
-                                                trust_policy_snapshot_digest,
-                                                support_digests,
-                                                evaluator_artifact_digests: protocol
-                                                    .artifact_digests,
-                                                registry,
-                                            }
-                                        })
-                                    },
-                                )
-                            })
-                        },
+                    raw_fixtures(
+                        &profile_fields[9],
+                        protocol.selected_caps.cases,
+                        &protocol.deterministic_caps,
                     )
+                    .and_then(|mut fixture_collection| {
+                        let claim_layer = fixture_collection.fixtures[0].claim_layer;
+                        fixture_collection
+                            .declared_paths
+                            .insert(registry.path.clone());
+                        raw_allowed_divergences(&profile_fields[10]).and_then(|allowed| {
+                            raw_selected_caps(
+                                &protocol.selected_caps,
+                                encoded_len,
+                                structural_depth,
+                                &registry,
+                                &fixture_collection.fixtures,
+                                &allowed,
+                            )?;
+                            raw_profile_fixture_relationships(
+                                &required_providers,
+                                &executions,
+                                &fixture_collection.fixtures,
+                                &allowed,
+                                claim_layer,
+                            )
+                            .and_then(|()| raw_independence(&profile_fields[12]))
+                            .and_then(|trust_policy_snapshot_digest| {
+                                raw_nullable_digest(&profile_fields[16]).map(|()| RawCpf1Summary {
+                                    claim_layer,
+                                    declared_paths: fixture_collection.declared_paths,
+                                    required_providers,
+                                    fixtures: fixture_collection.fixtures,
+                                    execution_digests: executions,
+                                    trust_policy_snapshot_digest,
+                                    support_digests,
+                                    evaluator_artifact_digests: protocol.artifact_digests,
+                                    registry,
+                                })
+                            })
+                        })
+                    })
                 })
             })
         })
@@ -1162,6 +1177,16 @@ fn raw_profile_fixture_relationships(
             })
         })
         .and_then(|()| {
+            let declared = fixtures
+                .iter()
+                .filter_map(|fixture| match &fixture.oracle {
+                    RawOracle::Divergence(divergence) => Some(divergence.clone()),
+                    RawOracle::Output(_) | RawOracle::Failure(_) => None,
+                })
+                .collect::<BTreeSet<_>>();
+            if &declared != allowed {
+                return Err(BundleContractErrorV1::ProfileInvalid);
+            }
             if fixtures
                 .iter()
                 .all(|fixture| fixture.claim_layer == claim_layer)
@@ -1278,10 +1303,21 @@ fn raw_fixture_downgrade_relationship(
         && fixture
             .release_admission
             .is_some_and(|value| value != [0; 32])
-        && fixture
-            .transition
-            .as_ref()
-            .is_some_and(|transition| transition.from != transition.to)
+        && fixture.transition.as_ref().is_some_and(|transition| {
+            let targets_fixture_provider = transition.to == fixture.provider;
+            let preserves_provider_contract = (
+                &transition.from.provider_id,
+                &transition.from.contract_version,
+                transition.from.abi_major,
+            ) == (
+                &transition.to.provider_id,
+                &transition.to.contract_version,
+                transition.to.abi_major,
+            );
+            targets_fixture_provider
+                && preserves_provider_contract
+                && transition.from.abi_minor > transition.to.abi_minor
+        })
     {
         Ok(())
     } else {
@@ -1319,7 +1355,7 @@ fn raw_cpf1_header(fields: &[Value]) -> Result<[[u8; 32]; 5], BundleContractErro
     if magic == "CPF1"
         && version == 1
         && raw_identifier(profile_id, 128)
-        && raw_semver(semantic_version)
+        && raw_semver(semantic_version, Some(10))
         && lifecycle <= 3
         && normative_spec != [0; 32]
         && execution_matrix != [0; 32]
@@ -1374,11 +1410,15 @@ fn raw_provider_binding(
 
 fn raw_fixtures(
     value: &Value,
+    max_cases: u64,
     deterministic_caps: &[u64; 8],
 ) -> Result<RawFixtureCollection, BundleContractErrorV1> {
     array_values(value).and_then(|fixtures| {
         raw_fixture_ordered(fixtures).and_then(|ordered| {
-            if fixtures.is_empty() || fixtures.len() > 65_536 || !ordered {
+            if fixtures.is_empty()
+                || u64::try_from(fixtures.len()).unwrap_or(u64::MAX) > max_cases
+                || !ordered
+            {
                 return Err(BundleContractErrorV1::ProfileInvalid);
             }
             fixtures.iter().try_fold(
@@ -1632,7 +1672,13 @@ fn raw_fixture_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
 }
 
 fn raw_nullable_digest(value: &Value) -> Result<(), BundleContractErrorV1> {
-    raw_optional_digest(value).map(|_| ())
+    raw_optional_digest(value).and_then(|digest| {
+        if digest.is_some_and(|digest| digest == [0; 32]) {
+            Err(BundleContractErrorV1::ProfileInvalid)
+        } else {
+            Ok(())
+        }
+    })
 }
 
 fn raw_optional_digest(value: &Value) -> Result<Option<[u8; 32]>, BundleContractErrorV1> {
@@ -1656,7 +1702,10 @@ fn raw_failure(value: &Value) -> Result<RawFailure, BundleContractErrorV1> {
         text(&fields[0]).and_then(|owner| {
             text(&fields[1]).and_then(|version| {
                 text(&fields[2]).and_then(|code| {
-                    if owner.is_empty() || version.is_empty() || code.is_empty() {
+                    if !raw_identifier(owner, 128)
+                        || !raw_semver(version, None)
+                        || !raw_identifier(code, 128)
+                    {
                         Err(BundleContractErrorV1::ProfileInvalid)
                     } else {
                         Ok(RawFailure {
@@ -1708,8 +1757,20 @@ fn raw_optional_transition(
     })
 }
 struct RawEvaluatorProtocol {
+    selected_caps: RawSelectedCaps,
     deterministic_caps: [u64; 8],
     artifact_digests: [[u8; 32]; 3],
+}
+
+struct RawSelectedCaps {
+    profile_bytes: u64,
+    cases: u64,
+    bundle_members: u64,
+    member_path_bytes: u64,
+    member_bytes: u64,
+    total_bundle_bytes: u64,
+    structural_nesting: u64,
+    coordinate_bytes: u64,
 }
 
 fn raw_protocol(value: &Value) -> Result<RawEvaluatorProtocol, BundleContractErrorV1> {
@@ -1766,6 +1827,16 @@ fn raw_protocol(value: &Value) -> Result<RawEvaluatorProtocol, BundleContractErr
                                 return Err(BundleContractErrorV1::ProfileInvalid);
                             }
                             Ok(RawEvaluatorProtocol {
+                                selected_caps: RawSelectedCaps {
+                                    profile_bytes: values[0],
+                                    cases: values[1],
+                                    bundle_members: values[2],
+                                    member_path_bytes: values[3],
+                                    member_bytes: values[4],
+                                    total_bundle_bytes: values[5],
+                                    structural_nesting: values[7],
+                                    coordinate_bytes: values[8],
+                                },
                                 deterministic_caps: [
                                     values[10], values[11], values[12], values[13], values[14],
                                     values[15], values[16], values[17],
@@ -1777,6 +1848,72 @@ fn raw_protocol(value: &Value) -> Result<RawEvaluatorProtocol, BundleContractErr
             }
         })
     })
+}
+
+fn raw_selected_caps(
+    caps: &RawSelectedCaps,
+    encoded_len: usize,
+    structural_depth: usize,
+    registry: &RawArtifact,
+    fixtures: &[RawFixtureSummary],
+    allowed: &BTreeSet<RawDivergence>,
+) -> Result<(), BundleContractErrorV1> {
+    if u64::try_from(encoded_len).unwrap_or(u64::MAX) > caps.profile_bytes
+        || u64::try_from(structural_depth).unwrap_or(u64::MAX) > caps.structural_nesting
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    let mut member_count = 1_u64;
+    let mut bundle_bytes = registry.size;
+    if u64::try_from(registry.path.len()).unwrap_or(u64::MAX) > caps.member_path_bytes
+        || registry.size > caps.member_bytes
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    for fixture in fixtures {
+        for artifact in [&fixture.schema, &fixture.payload]
+            .into_iter()
+            .chain(&fixture.auxiliary)
+        {
+            raw_selected_artifact_caps(caps, artifact, &mut member_count, &mut bundle_bytes)?;
+        }
+        if let RawOracle::Output(output) = &fixture.oracle {
+            raw_selected_artifact_caps(caps, output, &mut member_count, &mut bundle_bytes)?;
+        }
+    }
+    if member_count > caps.bundle_members
+        || bundle_bytes > caps.total_bundle_bytes
+        || allowed.iter().any(|divergence| {
+            u64::try_from(divergence.coordinate.len()).unwrap_or(u64::MAX) > caps.coordinate_bytes
+        })
+    {
+        return Err(BundleContractErrorV1::ProfileInvalid);
+    }
+    Ok(())
+}
+
+fn raw_selected_artifact_caps(
+    caps: &RawSelectedCaps,
+    artifact: &RawArtifact,
+    member_count: &mut u64,
+    bundle_bytes: &mut u64,
+) -> Result<(), BundleContractErrorV1> {
+    *member_count = member_count.saturating_add(1);
+    *bundle_bytes = bundle_bytes.saturating_add(artifact.size);
+    if u64::try_from(artifact.path.len()).unwrap_or(u64::MAX) > caps.member_path_bytes
+        || artifact.size > caps.member_bytes
+    {
+        Err(BundleContractErrorV1::ProfileInvalid)
+    } else {
+        Ok(())
+    }
+}
+
+fn raw_value_depth(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => 1 + values.iter().map(raw_value_depth).max().unwrap_or_default(),
+        _ => 1,
+    }
 }
 fn raw_independence(value: &Value) -> Result<[u8; 32], BundleContractErrorV1> {
     array(value, 5).and_then(|fields| {
@@ -1808,6 +1945,17 @@ fn raw_member<'a, 'member>(
         .ok_or(BundleContractErrorV1::MemberMissing)
 }
 
+fn raw_member_with_roles<'a, 'member>(
+    members: &'a [RawArchiveMember<'member>],
+    path: &str,
+    roles: &[RawMemberRole],
+) -> Result<&'a RawArchiveMember<'member>, BundleContractErrorV1> {
+    members
+        .iter()
+        .find(|member| member.path == path && roles.contains(&member.role))
+        .ok_or(BundleContractErrorV1::MemberMissing)
+}
+
 struct RawRegistrySummary {
     bytes: Vec<u8>,
     providers: BTreeSet<RawProviderKey>,
@@ -1834,7 +1982,9 @@ fn raw_registry_and_packages(
     members: &[RawArchiveMember<'_>],
     mode: RawArchiveMode,
 ) -> Result<RawRegistrySummary, BundleContractErrorV1> {
-    if profile.registry.path != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
+    if profile.registry.path != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1
+        || profile.registry.media_type != "application/cbor"
+    {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     raw_member(
@@ -1877,7 +2027,12 @@ fn raw_registry_fields(
                                     .iter()
                                     .map(|provider| provider.key.clone())
                                     .collect::<BTreeSet<_>>();
-                                if !profile.required_providers.is_subset(&provider_keys) {
+                                let layer_keys = provider_summaries
+                                    .iter()
+                                    .filter(|provider| provider.claim_layer == profile.claim_layer)
+                                    .map(|provider| provider.key.clone())
+                                    .collect::<BTreeSet<_>>();
+                                if profile.required_providers != layer_keys {
                                     return Err(BundleContractErrorV1::ProfileInvalid);
                                 }
                                 raw_declared_packages(members, &provider_summaries)
@@ -1943,7 +2098,9 @@ fn raw_fixture_provider_bindings(
                         .try_for_each(|artifact| raw_bound_raw_artifact_any(artifact, members))
                 })
                 .and_then(|()| match &fixture.oracle {
-                    RawOracle::Output(output) => raw_bound_raw_artifact_any(output, members),
+                    RawOracle::Output(output) => {
+                        raw_bound_raw_artifact(output, members, RawMemberRole::ExpectedResult)
+                    }
                     RawOracle::Failure(_) | RawOracle::Divergence(_) => Ok(()),
                 })
         })
@@ -1953,24 +2110,20 @@ fn raw_validate_draft_evidence(
     fixture: &RawFixtureSummary,
     members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
-    let evidence = fixture
-        .auxiliary
-        .iter()
-        .filter(|artifact| artifact.path.starts_with("evidence/"))
-        .collect::<Vec<_>>();
-    if evidence.len() != 1 {
+    let evidence = fixture.auxiliary.iter().filter(|artifact| {
+        members.iter().any(|member| {
+            member.path == artifact.path && member.role == RawMemberRole::EvidenceStatus
+        })
+    });
+    let mut evidence = evidence.take(2);
+    let Some(descriptor) = evidence.next() else {
+        return Err(BundleContractErrorV1::ExpectedResultMismatch);
+    };
+    if evidence.next().is_some() {
         return Err(BundleContractErrorV1::ExpectedResultMismatch);
     }
-    let expected_path = format!(
-        "evidence/{}/{}",
-        fixture.case_id,
-        crate::hex_digest(&fixture.execution)
-    );
-    if evidence[0].path != expected_path {
-        return Err(BundleContractErrorV1::ExpectedResultMismatch);
-    }
-    raw_member(members, &evidence[0].path, RawMemberRole::EvidenceStatus)
-        .and_then(|member| raw_artifact_matches_member(evidence[0], member))
+    raw_member(members, &descriptor.path, RawMemberRole::EvidenceStatus)
+        .and_then(|member| raw_artifact_matches_member(descriptor, member))
 }
 
 fn raw_fixture_schema_binding(
@@ -1993,12 +2146,16 @@ fn raw_bound_raw_artifact_any(
     artifact: &RawArtifact,
     members: &[RawArchiveMember<'_>],
 ) -> Result<(), BundleContractErrorV1> {
-    let role = if artifact.path.starts_with("evidence/") {
-        RawMemberRole::EvidenceStatus
-    } else {
-        RawMemberRole::ExpectedResult
-    };
-    raw_bound_raw_artifact(artifact, members, role)
+    raw_member_with_roles(
+        members,
+        &artifact.path,
+        &[
+            RawMemberRole::FixtureInput,
+            RawMemberRole::ExpectedResult,
+            RawMemberRole::EvidenceStatus,
+        ],
+    )
+    .and_then(|member| raw_artifact_matches_member(artifact, member))
 }
 
 fn raw_bound_raw_artifact(
@@ -2061,6 +2218,9 @@ fn raw_provider_package(
             RawClaimLayer::from_value(&entry[4]).and_then(|claim_layer| {
                 RawSubjectAdapter::from_value(&entry[5]).and_then(|adapter| {
                     raw_artifact(&entry[6]).and_then(|package| {
+                        if package.media_type != "application/cbor" {
+                            return Err(BundleContractErrorV1::ProfileInvalid);
+                        }
                         raw_member(
                             members,
                             &package.path,
@@ -2195,15 +2355,10 @@ fn raw_fpp1_support(
     ]
     .into_iter()
     .zip(values)
-    .try_for_each(|(role, descriptor)| raw_bound_artifact(descriptor, members, role))
-}
-
-fn raw_bound_artifact(
-    value: &Value,
-    members: &[RawArchiveMember<'_>],
-    role: RawMemberRole,
-) -> Result<(), BundleContractErrorV1> {
-    raw_artifact(value).and_then(|artifact| raw_bound_raw_artifact(&artifact, members, role))
+    .try_for_each(|(role, descriptor)| {
+        raw_artifact(descriptor)
+            .and_then(|artifact| raw_bound_raw_artifact(&artifact, members, role))
+    })
 }
 
 fn raw_fpp1_digest(fields: &[Value]) -> Result<(), BundleContractErrorV1> {
@@ -2538,7 +2693,7 @@ fn raw_provider_key(value: &Value) -> Result<RawProviderKey, BundleContractError
         return Err(BundleContractErrorV1::ArchiveEncodingInvalid);
     };
     if raw_identifier(provider_id, 128)
-        && raw_semver(contract_version)
+        && raw_semver(contract_version, None)
         && u16::try_from(abi_major).is_ok()
         && u16::try_from(abi_minor).is_ok()
     {
@@ -2622,7 +2777,7 @@ fn raw_media_type(value: &str) -> bool {
                 )
         })
 }
-fn raw_semver(value: &str) -> bool {
+fn raw_semver(value: &str, maximum_numeric_component_bytes: Option<usize>) -> bool {
     if value.is_empty() || value.len() > 64 || !value.is_ascii() {
         return false;
     }
@@ -2632,25 +2787,35 @@ fn raw_semver(value: &str) -> bool {
         None => (value, ""),
     };
     let (core, pre) = match core_pre.split_once('-') {
-        Some((left, right)) if !right.is_empty() && !right.contains('-') => (left, right),
+        Some((left, right)) if !right.is_empty() => (left, right),
         Some(_) => return false,
         None => (core_pre, ""),
     };
     let mut parts = core.split('.');
-    parts.next().is_some_and(raw_numeric_semver)
-        && parts.next().is_some_and(raw_numeric_semver)
-        && parts.next().is_some_and(raw_numeric_semver)
+    parts
+        .next()
+        .is_some_and(|part| raw_numeric_semver(part, maximum_numeric_component_bytes))
+        && parts
+            .next()
+            .is_some_and(|part| raw_numeric_semver(part, maximum_numeric_component_bytes))
+        && parts
+            .next()
+            .is_some_and(|part| raw_numeric_semver(part, maximum_numeric_component_bytes))
         && parts.next().is_none()
-        && raw_semver_identifiers(pre, true)
-        && raw_semver_identifiers(build, false)
+        && raw_semver_identifiers(pre, true, maximum_numeric_component_bytes)
+        && raw_semver_identifiers(build, false, maximum_numeric_component_bytes)
 }
-fn raw_numeric_semver(value: &str) -> bool {
+fn raw_numeric_semver(value: &str, maximum_bytes: Option<usize>) -> bool {
     !value.is_empty()
-        && value.len() <= 10
+        && maximum_bytes.is_none_or(|maximum| value.len() <= maximum)
         && (value == "0" || !value.starts_with('0'))
         && value.bytes().all(|byte| byte.is_ascii_digit())
 }
-fn raw_semver_identifiers(value: &str, no_leading_zero: bool) -> bool {
+fn raw_semver_identifiers(
+    value: &str,
+    no_leading_zero: bool,
+    maximum_numeric_component_bytes: Option<usize>,
+) -> bool {
     value.is_empty()
         || value.split('.').all(|item| {
             !item.is_empty()
@@ -2659,7 +2824,7 @@ fn raw_semver_identifiers(value: &str, no_leading_zero: bool) -> bool {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
                 && (!no_leading_zero
                     || !item.bytes().all(|byte| byte.is_ascii_digit())
-                    || raw_numeric_semver(item))
+                    || raw_numeric_semver(item, maximum_numeric_component_bytes))
         })
 }
 

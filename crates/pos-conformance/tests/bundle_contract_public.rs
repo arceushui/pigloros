@@ -7,6 +7,9 @@ pub mod support;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
+    draft_execution_profile_bytes_v1 as execution_profile_bytes,
+    draft_release_admission_bytes_v1 as release_admission_bytes,
+    draft_trust_policy_snapshot_bytes_v1 as trust_policy_snapshot_bytes,
     expected_result_member_path, fixture_input_member_path, verify_archive_independently,
     verify_archive_release_filename, verify_release_tree_independently, ArtifactDescriptorV1,
     BundleContractErrorV1, BundleExpectedResultV1, BundleMemberDescriptorV1, BundleMemberRoleV1,
@@ -38,14 +41,22 @@ fn materializer_process_guard() -> MutexGuard<'static, ()> {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum StagingMutation {
     ReplaceIdentity,
     RelaxPermissions,
     RelaxRetainedPermissions,
     CorruptFiles,
+    CorruptFileAtSameLength,
+    RemoveFile,
+    PreventFutureDirectories,
+    ReplaceDirectoryWithSymlink,
+    ReplaceDirectoryWithRegularFile,
+    InjectRegularFile,
+    InjectDirectory,
     InjectSymlink,
     InjectFifo,
+    ReplaceFileWithFifo,
     BlockFutureDirectory,
 }
 
@@ -108,6 +119,17 @@ fn staged_regular_files(directory: &Path) -> TestResult<Vec<PathBuf>> {
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn staged_nested_directory(staging: &Path, files: &[PathBuf]) -> TestResult<PathBuf> {
+    files
+        .iter()
+        .filter_map(|path| path.parent())
+        .find(|parent| *parent != staging)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "no staged nested directory is available for replacement".into())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn await_staged_regular_files(
     staging: &Path,
     child: &mut std::process::Child,
@@ -154,12 +176,122 @@ fn await_stopped_process(child: &mut std::process::Child) -> TestResult {
 
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
+const fn mutation_requires_staged_files(mutation: StagingMutation) -> bool {
+    matches!(
+        mutation,
+        StagingMutation::CorruptFiles
+            | StagingMutation::CorruptFileAtSameLength
+            | StagingMutation::RemoveFile
+            | StagingMutation::ReplaceDirectoryWithSymlink
+            | StagingMutation::ReplaceDirectoryWithRegularFile
+            | StagingMutation::ReplaceFileWithFifo
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn apply_staging_mutation(
+    root: &Path,
+    staging: &Path,
+    staged_files: &[PathBuf],
+    mutation: StagingMutation,
+) -> TestResult {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    match mutation {
+        StagingMutation::ReplaceIdentity => {
+            let retained = root.join("retained-staging");
+            fs::rename(staging, retained)
+                .and_then(|()| fs::create_dir(staging))
+                .and_then(|()| fs::set_permissions(staging, fs::Permissions::from_mode(0o700)))?;
+        }
+        StagingMutation::RelaxPermissions => {
+            fs::set_permissions(staging, fs::Permissions::from_mode(0o755))?;
+        }
+        StagingMutation::RelaxRetainedPermissions => {
+            let retained = root.join("retained-staging");
+            fs::rename(staging, &retained)
+                .and_then(|()| fs::set_permissions(&retained, fs::Permissions::from_mode(0o755)))
+                .and_then(|()| fs::create_dir(staging))
+                .and_then(|()| fs::set_permissions(staging, fs::Permissions::from_mode(0o700)))?;
+        }
+        StagingMutation::CorruptFiles => {
+            staged_files
+                .iter()
+                .try_for_each(|path| fs::write(path, b"corrupted staged bytes"))?;
+        }
+        StagingMutation::CorruptFileAtSameLength => {
+            let path = staged_files
+                .first()
+                .ok_or("no staged regular file is available for corruption")?;
+            let mut bytes = fs::read(path)?;
+            let first = bytes
+                .first_mut()
+                .ok_or("staged regular file is unexpectedly empty")?;
+            *first ^= 0xff;
+            fs::write(path, bytes)?;
+        }
+        StagingMutation::RemoveFile => {
+            let path = staged_files
+                .first()
+                .ok_or("no staged regular file is available for removal")?;
+            fs::remove_file(path)?;
+        }
+        StagingMutation::PreventFutureDirectories => {
+            let providers = staging.join("providers");
+            fs::create_dir(&providers)?;
+            fs::set_permissions(providers, fs::Permissions::from_mode(0o500))?;
+        }
+        StagingMutation::ReplaceDirectoryWithSymlink => {
+            let directory = staged_nested_directory(staging, staged_files)?;
+            fs::rename(&directory, root.join("retained-expected-directory"))?;
+            symlink("/dev/null", directory)?;
+        }
+        StagingMutation::ReplaceDirectoryWithRegularFile => {
+            let directory = staged_nested_directory(staging, staged_files)?;
+            fs::rename(&directory, root.join("retained-expected-directory"))?;
+            fs::write(directory, b"not a directory")?;
+        }
+        StagingMutation::InjectRegularFile => {
+            fs::write(staging.join("injected-regular"), b"undeclared")?;
+        }
+        StagingMutation::InjectDirectory => {
+            fs::create_dir(staging.join("injected-directory"))?;
+        }
+        StagingMutation::InjectSymlink => {
+            symlink("/dev/null", staging.join("injected-link"))?;
+        }
+        StagingMutation::InjectFifo => {
+            let status = Command::new("mkfifo")
+                .arg(staging.join("injected-fifo"))
+                .status()?;
+            if !status.success() {
+                return Err("mkfifo could not create the staged special file".into());
+            }
+        }
+        StagingMutation::ReplaceFileWithFifo => {
+            let path = staged_files
+                .first()
+                .ok_or("no staged regular file is available for replacement")?;
+            fs::remove_file(path)?;
+            if !Command::new("mkfifo").arg(path).status()?.success() {
+                return Err("mkfifo could not replace the staged regular file".into());
+            }
+        }
+        StagingMutation::BlockFutureDirectory => {
+            symlink("/dev/null", staging.join("empirical-evaluation"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn mutate_live_staging(
     materializer: &std::ffi::OsStr,
     key: &str,
     mutation: StagingMutation,
 ) -> TestResult<String> {
-    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::process::Stdio;
 
     let root = temporary_root("materializer-staging-mutation")?;
@@ -173,7 +305,7 @@ fn mutate_live_staging(
         .stderr(Stdio::piped())
         .spawn()?;
     let staging = await_staging_directory(&root, &mut child)?;
-    let staged_files = if matches!(mutation, StagingMutation::CorruptFiles) {
+    let staged_files = if mutation_requires_staged_files(mutation) {
         await_staged_regular_files(&staging, &mut child)?
     } else {
         Vec::new()
@@ -181,46 +313,12 @@ fn mutate_live_staging(
     signal_process(&child, "STOP")?;
     await_stopped_process(&mut child)?;
 
-    let mutation_result = match mutation {
-        StagingMutation::ReplaceIdentity => {
-            let retained = root.join("retained-staging");
-            fs::rename(&staging, retained)
-                .and_then(|()| fs::create_dir(&staging))
-                .and_then(|()| fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)))
-        }
-        StagingMutation::RelaxPermissions => {
-            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))
-        }
-        StagingMutation::RelaxRetainedPermissions => {
-            let retained = root.join("retained-staging");
-            fs::rename(&staging, &retained)
-                .and_then(|()| fs::set_permissions(&retained, fs::Permissions::from_mode(0o755)))
-                .and_then(|()| fs::create_dir(&staging))
-                .and_then(|()| fs::set_permissions(&staging, fs::Permissions::from_mode(0o700)))
-        }
-        StagingMutation::CorruptFiles => staged_files
-            .iter()
-            .try_for_each(|path| fs::write(path, b"corrupted staged bytes")),
-        StagingMutation::InjectSymlink => symlink("/dev/null", staging.join("injected-link"))
-            .and_then(|()| fs::create_dir(&destination)),
-        StagingMutation::InjectFifo => {
-            let status = Command::new("mkfifo")
-                .arg(staging.join("injected-fifo"))
-                .status()?;
-            if !status.success() {
-                return Err("mkfifo could not create the staged special file".into());
-            }
-            fs::create_dir(&destination)
-        }
-        StagingMutation::BlockFutureDirectory => {
-            symlink("/dev/null", staging.join("empirical-evaluation"))
-        }
-    };
+    let mutation_result = apply_staging_mutation(&root, &staging, &staged_files, mutation);
     let resume_result = signal_process(&child, "CONT");
     if let Err(error) = mutation_result {
         child.kill()?;
         child.wait()?;
-        return Err(error.into());
+        return Err(error);
     }
     if let Err(error) = resume_result {
         child.kill()?;
@@ -229,7 +327,28 @@ fn mutate_live_staging(
     }
 
     let output = child.wait_with_output()?;
-    assert!(!output.status.success());
+    assert!(
+        !output.status.success(),
+        "materializer accepted the staged {mutation:?} mutation"
+    );
+    if matches!(
+        mutation,
+        StagingMutation::InjectRegularFile
+            | StagingMutation::InjectDirectory
+            | StagingMutation::InjectSymlink
+            | StagingMutation::InjectFifo
+            | StagingMutation::CorruptFileAtSameLength
+            | StagingMutation::RemoveFile
+            | StagingMutation::PreventFutureDirectories
+            | StagingMutation::ReplaceDirectoryWithSymlink
+            | StagingMutation::ReplaceDirectoryWithRegularFile
+            | StagingMutation::ReplaceFileWithFifo
+    ) {
+        assert!(
+            !destination.exists(),
+            "contaminated staging tree must not be published"
+        );
+    }
     Ok(String::from_utf8(output.stderr)?)
 }
 
@@ -244,13 +363,17 @@ const CURRENT_SCHEMA_BYTES: [&[u8]; 7] = [
     b"downgrade-schema",
     b"independent-schema",
 ];
-const LICENCE_BYTES: &[u8] = b"MIT\n";
-const NOTICE_BYTES: &[u8] = b"public notice\n";
-const SBOM_BYTES: &[u8] = br#"{"bomFormat":"CycloneDX"}"#;
-const SOURCE_PROVENANCE_BYTES: &[u8] = br#"{"source":"public"}"#;
-const BUILD_PROVENANCE_BYTES: &[u8] = br#"{"builder":"public"}"#;
-const PUBLICATION_REVIEW_BYTES: &[u8] = br#"{"review_status":"pending"}"#;
-const LIMITATIONS_BYTES: &[u8] = b"# Limitations\n";
+const LICENCE_BYTES: &[u8] = include_bytes!("../../../fixtures/conformance/support/LICENSE");
+const NOTICE_BYTES: &[u8] = include_bytes!("../../../fixtures/conformance/support/NOTICE");
+const SBOM_BYTES: &[u8] = include_bytes!("../../../fixtures/conformance/support/sbom.json");
+const SOURCE_PROVENANCE_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/source-provenance.json");
+const BUILD_PROVENANCE_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/build-provenance.json");
+const PUBLICATION_REVIEW_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/publication-review.json");
+const LIMITATIONS_BYTES: &[u8] =
+    include_bytes!("../../../fixtures/conformance/support/limitations.md");
 const NORMATIVE_BYTES: &[u8] = b"normative contract";
 const MATRIX_BYTES: &[u8] =
     include_bytes!("../../../fixtures/conformance/matrix/execution-matrix.json");
@@ -272,10 +395,6 @@ const SUPPORT_PACKAGE_MANIFEST_BYTES: &[u8] =
 const EXPECTED_BYTES: &[u8] = br#"{"status":"pending"}"#;
 const PAYLOAD_BYTES: &[u8] = b"public fixture payload";
 const DRAFT_FIXTURE_AUTHORITY_KEY: [u8; 32] = [7; 32];
-const DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY: [u8; 32] = [
-    0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e, 0xc5, 0xf9,
-    0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69, 0x14, 0x46, 0xd2, 0x2c,
-];
 
 const fn digest(seed: u8) -> [u8; 32] {
     [seed; 32]
@@ -291,9 +410,13 @@ fn artifact(path: &str, media_type: &str, bytes: &[u8]) -> TestResult<ArtifactDe
 }
 
 fn provider_key() -> FixtureProviderKeyV1 {
+    provider_key_with_version("1.0.0")
+}
+
+fn provider_key_with_version(contract_version: &str) -> FixtureProviderKeyV1 {
     FixtureProviderKeyV1 {
         provider_id: "pigloros.fixture.example".to_owned(),
-        contract_version: "1.0.0".to_owned(),
+        contract_version: contract_version.to_owned(),
         abi_major: 1,
         abi_minor: 0,
     }
@@ -312,7 +435,9 @@ struct ProviderContractInputs {
     registry_bytes: Vec<u8>,
 }
 
-fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
+fn current_provider_contract_inputs_for_key(
+    provider_key: &FixtureProviderKeyV1,
+) -> TestResult<ProviderContractInputs> {
     let families = [
         FixtureFamilyV1::Positive,
         FixtureFamilyV1::Denied,
@@ -339,7 +464,7 @@ fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
         .collect::<TestResult<Vec<_>>>()?;
 
     let mut package = FixtureProviderPackageV1 {
-        provider_key: provider_key(),
+        provider_key: provider_key.clone(),
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         family_schemas: family_schemas.clone(),
@@ -364,7 +489,7 @@ fn current_provider_contract_inputs() -> TestResult<ProviderContractInputs> {
     let package_descriptor = artifact(package_path, "application/cbor", &package_bytes)?;
 
     let entry = FixtureProviderEntryV1 {
-        provider_key: provider_key(),
+        provider_key: provider_key.clone(),
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         provider_package_descriptor: package_descriptor,
@@ -399,6 +524,7 @@ const fn fixture_family_name(family: FixtureFamilyV1) -> &'static str {
 fn fixture_from_schema(
     family_schema: &ProviderFamilySchemaV1,
     execution: [u8; 32],
+    provider_key: &FixtureProviderKeyV1,
 ) -> TestResult<FixtureDescriptorV1> {
     let failure = NamespacedFailureV1 {
         owner_id: "pigloros.core".to_owned(),
@@ -425,7 +551,7 @@ fn fixture_from_schema(
         mandatory: true,
         claim_layer: ClaimLayerV1::ArtifactIntegrity,
         family: family_schema.family,
-        provider_key: provider_key(),
+        provider_key: provider_key.clone(),
         subject_adapter: SubjectAdapterKindV1::ExportedArtifact,
         execution_profile_digest: execution,
         modes: vec![ExecutionModeV1::Local, ExecutionModeV1::AirGapped],
@@ -493,15 +619,16 @@ fn draft_evidence_bytes(case_id: &str, family: &str) -> TestResult<Vec<u8>> {
 fn bind_downgrade_authority(
     fixture: &mut FixtureDescriptorV1,
     trust_policy_snapshot_digest: [u8; 32],
+    provider_key: &FixtureProviderKeyV1,
 ) -> TestResult {
     if fixture.family != FixtureFamilyV1::Downgrade {
         return Ok(());
     }
-    let mut next_provider = provider_key();
-    next_provider.abi_minor = 1;
+    let mut previous_provider = provider_key.clone();
+    previous_provider.abi_minor = 1;
     let transition = pos_conformance::FixtureContractTransitionV1 {
-        from: provider_key(),
-        to: next_provider,
+        from: previous_provider,
+        to: provider_key.clone(),
     };
     fixture.trust_policy_snapshot_digest = Some(trust_policy_snapshot_digest);
     fixture.release_admission_digest = Some(
@@ -523,13 +650,14 @@ fn current_fixtures(
     family_schemas: &[ProviderFamilySchemaV1],
     execution_profiles: &[[u8; 32]],
     trust_policy_snapshot_digest: [u8; 32],
+    provider_key: &FixtureProviderKeyV1,
 ) -> TestResult<Vec<FixtureDescriptorV1>> {
     let mut fixtures = execution_profiles
         .iter()
         .flat_map(|execution| {
             family_schemas.iter().map(move |family_schema| {
-                let mut fixture = fixture_from_schema(family_schema, *execution)?;
-                bind_downgrade_authority(&mut fixture, trust_policy_snapshot_digest)?;
+                let mut fixture = fixture_from_schema(family_schema, *execution, provider_key)?;
+                bind_downgrade_authority(&mut fixture, trust_policy_snapshot_digest, provider_key)?;
                 Ok(fixture)
             })
         })
@@ -551,6 +679,7 @@ fn current_profile(
     registry_bytes: &[u8],
     execution_profile_digests: Vec<[u8; 32]>,
     trust_policy_snapshot_digest: [u8; 32],
+    provider_key: &FixtureProviderKeyV1,
 ) -> TestResult<ConformanceProfileV1> {
     let mut profile = ConformanceProfileV1 {
         profile_id: "pigloros.current.example".to_owned(),
@@ -565,7 +694,7 @@ fn current_profile(
                 "application/cbor",
                 registry_bytes,
             )?,
-            required_provider_keys: vec![provider_key()],
+            required_provider_keys: vec![provider_key.clone()],
         },
         fixtures,
         allowed_divergences: Vec::new(),
@@ -850,12 +979,19 @@ fn current_bundle_members(
 }
 
 fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> {
+    current_bundle_inputs_for_key(mode, &provider_key())
+}
+
+fn current_bundle_inputs_for_key(
+    mode: BundleModeV1,
+    provider_key: &FixtureProviderKeyV1,
+) -> TestResult<CurrentBundleInputs> {
     let ProviderContractInputs {
         family_schemas,
         package_path,
         package_bytes,
         registry_bytes,
-    } = current_provider_contract_inputs()?;
+    } = current_provider_contract_inputs_for_key(provider_key)?;
 
     let execution_profiles = [
         execution_profile_bytes("deterministic-local-v1")?,
@@ -872,6 +1008,7 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         &family_schemas,
         &execution_profile_digests,
         trust_policy_snapshot_digest,
+        provider_key,
     )?;
     let expected = expected_results(&fixtures, mode)?;
     let profile = current_profile(
@@ -879,6 +1016,7 @@ fn current_bundle_inputs(mode: BundleModeV1) -> TestResult<CurrentBundleInputs> 
         &registry_bytes,
         execution_profile_digests,
         trust_policy_snapshot_digest,
+        provider_key,
     )?;
     let members = current_bundle_members(
         &family_schemas,
@@ -1091,6 +1229,19 @@ fn assert_authority_archive_rejected_by_both(archive: &[u8]) {
 
 #[test]
 fn authority_members_reject_closed_contract_mutations() -> TestResult {
+    let unknown_execution_profile = mutate_draft_authority_archive(
+        "authority/execution-profiles/deterministic-local-v1.epf1",
+        |fields| {
+            replace_value(
+                fields,
+                2,
+                Value::Text("undeclared-profile".to_owned()),
+                "execution profile identifier",
+            )
+        },
+    )?;
+    assert_authority_archive_rejected_by_both(&unknown_execution_profile);
+
     let changed_scheduler = mutate_draft_authority_archive(
         "authority/execution-profiles/deterministic-local-v1.epf1",
         |fields| {
@@ -1139,110 +1290,16 @@ fn authority_members_reject_closed_contract_mutations() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn draft_execution_profile_builder_rejects_undeclared_profile() {
+    assert_eq!(
+        execution_profile_bytes("undeclared-profile"),
+        Err(BundleContractErrorV1::ProfileInvalid)
+    );
+}
+
 fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
     support::encode_value(value)
-}
-
-fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {
-    let mut preimage = Vec::with_capacity(label.len() + 1 + bytes.len());
-    preimage.extend_from_slice(label.as_bytes());
-    preimage.push(0);
-    preimage.extend_from_slice(bytes);
-    *blake3::hash(&preimage).as_bytes()
-}
-
-fn execution_profile_bytes(profile_id: &str) -> TestResult<Vec<u8>> {
-    let fields = vec![
-        Value::Text("EPF1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Text(profile_id.to_owned()),
-        Value::Text("1.0.0".to_owned()),
-        Value::Array(vec![
-            Value::Integer(1_u64.into()),
-            Value::Integer(2_u64.into()),
-        ]),
-        Value::Bool(false),
-        Value::Array(Vec::new()),
-        Value::Text("fixture-scheduler-v1".to_owned()),
-        Value::Text("fixture-numeric-v1".to_owned()),
-        Value::Text("fixture-schema-v1".to_owned()),
-        Value::Text("fixture-artifact-v1".to_owned()),
-        Value::Text("fixture-budget-v1".to_owned()),
-        Value::Array(Vec::new()),
-        Value::Null,
-    ];
-    let mut encoded = fields.clone();
-    encoded.push(Value::Bytes(
-        labeled_digest(
-            "PiglorOS.ExecutionProfile.v1",
-            &encode_value(&Value::Array(fields))?,
-        )
-        .to_vec(),
-    ));
-    encode_value(&Value::Array(encoded))
-}
-
-fn trust_policy_snapshot_bytes() -> TestResult<Vec<u8>> {
-    let fields = vec![
-        Value::Text("TPS1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Text("pigloros.fixture.conformance-draft".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Integer(0_u64.into()),
-        Value::Text("pigloros.fixture.conformance-authority".to_owned()),
-        Value::Bytes(DRAFT_FIXTURE_AUTHORITY_PUBLIC_KEY.to_vec()),
-        Value::Array(Vec::new()),
-        Value::Array(Vec::new()),
-        Value::Array(Vec::new()),
-        Value::Text("2030-01-01T00:00:00Z".to_owned()),
-        Value::Null,
-    ];
-    let mut signed = fields.clone();
-    signed.push(Value::Bytes(
-        SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_KEY)
-            .sign(&encode_value(&Value::Array(fields))?)
-            .to_bytes()
-            .to_vec(),
-    ));
-    encode_value(&Value::Array(signed))
-}
-
-fn provider_key_value(key: &FixtureProviderKeyV1) -> Value {
-    Value::Array(vec![
-        Value::Text(key.provider_id.clone()),
-        Value::Text(key.contract_version.clone()),
-        Value::Integer(u64::from(key.abi_major).into()),
-        Value::Integer(u64::from(key.abi_minor).into()),
-    ])
-}
-
-fn release_admission_bytes(
-    case_id: &str,
-    execution_profile_digest: [u8; 32],
-    trust_policy_snapshot_digest: [u8; 32],
-    from: &FixtureProviderKeyV1,
-    to: &FixtureProviderKeyV1,
-) -> TestResult<Vec<u8>> {
-    let fields = vec![
-        Value::Text("RAD1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Integer(0_u64.into()),
-        Value::Text(case_id.to_owned()),
-        Value::Bytes(execution_profile_digest.to_vec()),
-        Value::Bytes(trust_policy_snapshot_digest.to_vec()),
-        provider_key_value(from),
-        provider_key_value(to),
-        Value::Bool(false),
-        Value::Text("pigloros.fixture.conformance-authority".to_owned()),
-    ];
-    let mut signed = fields.clone();
-    signed.push(Value::Bytes(
-        SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_KEY)
-            .sign(&encode_value(&Value::Array(fields))?)
-            .to_bytes()
-            .to_vec(),
-    ));
-    encode_value(&Value::Array(signed))
 }
 
 fn contract_digest(domain: &[u8], fields: &[Value]) -> TestResult<[u8; 32]> {
@@ -1583,6 +1640,7 @@ enum ProviderPackageField {
     FamilySchemas,
     LicenceDescriptor,
     NoticesDescriptor,
+    SourceProvenanceDescriptor,
     Digest,
 }
 
@@ -1597,6 +1655,7 @@ impl ProviderPackageField {
             Self::FamilySchemas => 5,
             Self::LicenceDescriptor => 6,
             Self::NoticesDescriptor => 7,
+            Self::SourceProvenanceDescriptor => 9,
             Self::Digest => 11,
         }
     }
@@ -1975,7 +2034,7 @@ fn mutate_provider_registry_fields(
             replace_registry_package_field(
                 fields,
                 ArtifactDescriptorField::MediaType,
-                Value::Text("INVALID".to_owned()),
+                Value::Text("application/json".to_owned()),
             )
         }
         ProviderRegistryMutation::InvalidProviderPackageLength => replace_registry_package_field(
@@ -2489,6 +2548,72 @@ fn current_signed_bundle_round_trips_through_typed_and_independent_verifiers() -
 }
 
 #[test]
+fn provider_semver_forms_accepted_by_fpp1_pass_both_archive_verifiers() -> TestResult {
+    for version in ["1.0.0-alpha-beta", "12345678901.0.0"] {
+        let key = provider_key_with_version(version);
+        let inputs = current_bundle_inputs_for_key(BundleModeV1::Local, &key)?;
+        let bundle = ConformanceBundleV1::materialize(
+            &inputs.profile,
+            BundleModeV1::Local,
+            inputs.members,
+            inputs.expected,
+        )?
+        .sign(&SigningKey::from_bytes(&[7; 32]))?;
+        let archive = bundle.to_canonical_cbor()?;
+        ConformanceBundleV1::from_canonical_cbor(&archive)?;
+        verify_archive_independently(&archive)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn plugin_owned_evidence_path_is_bound_by_manifest_role() -> TestResult {
+    let mut inputs = current_bundle_inputs(BundleModeV1::Local)?;
+    let evidence_member = inputs
+        .members
+        .iter_mut()
+        .find(|member| member.role == BundleMemberRoleV1::EvidenceStatus)
+        .ok_or("evidence-status member is absent")?;
+    let old_path = evidence_member.path.clone();
+    let new_path = "providers/example/status/plugin-owned.json".to_owned();
+    evidence_member.path.clone_from(&new_path);
+    let fixture = inputs
+        .profile
+        .fixtures
+        .iter_mut()
+        .find(|fixture| {
+            fixture
+                .auxiliary
+                .iter()
+                .any(|descriptor| descriptor.member_path == old_path)
+        })
+        .ok_or("fixture does not bind the evidence-status member")?;
+    let descriptor = fixture
+        .auxiliary
+        .iter_mut()
+        .find(|descriptor| descriptor.member_path == old_path)
+        .ok_or("evidence-status descriptor is absent")?;
+    descriptor.member_path = new_path;
+    fixture
+        .auxiliary
+        .sort_by(|left, right| left.member_path.cmp(&right.member_path));
+    fixture.fixture_digest = fixture.digest();
+    inputs.profile.profile_digest = inputs.profile.digest();
+
+    let bundle = ConformanceBundleV1::materialize(
+        &inputs.profile,
+        BundleModeV1::Local,
+        inputs.members,
+        inputs.expected,
+    )?
+    .sign(&SigningKey::from_bytes(&[7; 32]))?;
+    let archive = bundle.to_canonical_cbor()?;
+    ConformanceBundleV1::from_canonical_cbor(&archive)?;
+    verify_archive_independently(&archive)?;
+    Ok(())
+}
+
+#[test]
 fn current_bundle_pair_requires_profile_parity() -> TestResult {
     let local = signed_current_bundle(BundleModeV1::Local)?;
     let air_gapped = signed_current_bundle(BundleModeV1::AirGapped)?;
@@ -2812,43 +2937,76 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn public_materializer_rejects_live_staging_replacement_and_contamination() -> TestResult {
-    let _guard = materializer_process_guard();
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_live_staging_rejections(cases: &[(StagingMutation, &str)]) -> TestResult {
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
-
-    for mutation in [
-        StagingMutation::ReplaceIdentity,
-        StagingMutation::RelaxPermissions,
-        StagingMutation::RelaxRetainedPermissions,
-    ] {
+    for &(mutation, expected_error) in cases {
         let stderr = mutate_live_staging(materializer.as_os_str(), key, mutation)?;
-        assert!(stderr.contains("UntrustedOutputDirectory"));
+        assert!(stderr.contains(expected_error));
     }
-
-    let stderr = mutate_live_staging(materializer.as_os_str(), key, StagingMutation::CorruptFiles)?;
-    assert!(stderr.contains("ArchiveDigestMismatch"));
-
-    let stderr = mutate_live_staging(
-        materializer.as_os_str(),
-        key,
-        StagingMutation::InjectSymlink,
-    )?;
-    assert!(stderr.contains("SymlinkDetected"));
-
-    let stderr = mutate_live_staging(materializer.as_os_str(), key, StagingMutation::InjectFifo)?;
-    assert!(stderr.contains("UntrustedOutputDirectory"));
-
-    let stderr = mutate_live_staging(
-        materializer.as_os_str(),
-        key,
-        StagingMutation::BlockFutureDirectory,
-    )?;
-    assert!(stderr.contains("SymlinkDetected"));
-
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_materializer_rejects_live_staging_identity_replacement() -> TestResult {
+    assert_live_staging_rejections(&[
+        (StagingMutation::ReplaceIdentity, "UntrustedOutputDirectory"),
+        (
+            StagingMutation::RelaxPermissions,
+            "UntrustedOutputDirectory",
+        ),
+        (
+            StagingMutation::RelaxRetainedPermissions,
+            "UntrustedOutputDirectory",
+        ),
+    ])
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_materializer_rejects_unexpected_staging_entries() -> TestResult {
+    assert_live_staging_rejections(&[
+        (StagingMutation::CorruptFiles, "ArchiveDigestMismatch"),
+        (
+            StagingMutation::InjectRegularFile,
+            "UntrustedOutputDirectory",
+        ),
+        (StagingMutation::InjectDirectory, "UntrustedOutputDirectory"),
+        (StagingMutation::InjectSymlink, "SymlinkDetected"),
+        (StagingMutation::InjectFifo, "UntrustedOutputDirectory"),
+    ])
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_materializer_rejects_expected_staging_entry_mutations() -> TestResult {
+    assert_live_staging_rejections(&[
+        (
+            StagingMutation::CorruptFileAtSameLength,
+            "ArchiveDigestMismatch",
+        ),
+        (StagingMutation::RemoveFile, "UntrustedOutputDirectory"),
+        (
+            StagingMutation::PreventFutureDirectories,
+            "UntrustedOutputDirectory",
+        ),
+        (
+            StagingMutation::ReplaceDirectoryWithSymlink,
+            "SymlinkDetected",
+        ),
+        (
+            StagingMutation::ReplaceDirectoryWithRegularFile,
+            "UntrustedOutputDirectory",
+        ),
+        (
+            StagingMutation::ReplaceFileWithFifo,
+            "UntrustedOutputDirectory",
+        ),
+        (StagingMutation::BlockFutureDirectory, "SymlinkDetected"),
+    ])
 }
 
 #[cfg(unix)]
@@ -4319,6 +4477,29 @@ fn independent_verifier_exercises_active_provider_transitions() -> TestResult {
         })?;
         assert_archive_rejected_by_both(&invalid, "malformed provider transition");
     }
+
+    let non_decreasing = mutate_profile_archive(|profile| {
+        let fixture = fixture_with_family(array_field(profile, 9, "fixtures")?, 5)?;
+        let provider = fixture.get(4).ok_or("fixture provider is absent")?.clone();
+        let transition = array_field(fixture, 22, "provider transition")?;
+        replace_value(transition, 0, provider, "previous provider contract")
+    })?;
+    assert_archive_rejected_by_both(&non_decreasing, "non-decreasing provider transition");
+
+    let unrelated = mutate_profile_archive(|profile| {
+        let transition = array_field(
+            fixture_with_family(array_field(profile, 9, "fixtures")?, 5)?,
+            22,
+            "provider transition",
+        )?;
+        replace_value(
+            array_field(transition, 0, "previous provider contract")?,
+            0,
+            Value::Text("other.provider".to_owned()),
+            "previous provider identifier",
+        )
+    })?;
+    assert_archive_rejected_by_both(&unrelated, "unrelated provider transition");
     Ok(())
 }
 
@@ -4436,10 +4617,69 @@ fn assert_independent_fixture_semantic_relationships() -> TestResult {
     Ok(())
 }
 
+fn assert_independent_allowlist_failure_and_lineage_relationships() -> TestResult {
+    let unused_divergence = mutate_profile_archive(|profile| {
+        replace_value(
+            profile,
+            10,
+            Value::Array(vec![Value::Array(vec![
+                Value::Integer(5_u64.into()),
+                Value::Bytes(vec![1]),
+            ])]),
+            "unused allowed divergence",
+        )
+    })?;
+    assert_archive_rejected_by_both(&unused_divergence, "unused allowed divergence");
+
+    for (field, value, label) in [
+        (
+            0,
+            Value::Text("Invalid.Owner".to_owned()),
+            "invalid failure owner",
+        ),
+        (
+            1,
+            Value::Text("01.0.0".to_owned()),
+            "invalid failure version",
+        ),
+        (
+            2,
+            Value::Text("Invalid.Code".to_owned()),
+            "invalid failure code",
+        ),
+    ] {
+        let invalid_failure = mutate_profile_archive(|profile| {
+            let fixture = fixture_with_family(array_field(profile, 9, "fixtures")?, 1)?;
+            for failure_field in [11, 13] {
+                let failure = if failure_field == 11 {
+                    array_field(array_field(fixture, failure_field, "oracle")?, 2, "failure")?
+                } else {
+                    array_field(fixture, failure_field, "failure")?
+                };
+                replace_value(failure, field, value.clone(), "failure field")?;
+            }
+            Ok(())
+        })?;
+        assert_archive_rejected_by_both(&invalid_failure, label);
+    }
+
+    let zero_previous_profile = mutate_profile_archive(|profile| {
+        replace_value(
+            profile,
+            16,
+            Value::Bytes(vec![0; 32]),
+            "previous profile digest",
+        )
+    })?;
+    assert_archive_rejected_by_both(&zero_previous_profile, "zero previous profile digest");
+    Ok(())
+}
+
 #[test]
 fn independent_verifier_matches_typed_fixture_relationship_validation() -> TestResult {
     assert_independent_fixture_inventory_relationships()?;
-    assert_independent_fixture_semantic_relationships()
+    assert_independent_fixture_semantic_relationships()?;
+    assert_independent_allowlist_failure_and_lineage_relationships()
 }
 
 fn assert_deep_raw_profile_rejections() -> TestResult {
@@ -4479,6 +4719,12 @@ fn assert_deep_raw_profile_rejections() -> TestResult {
     assert_archive_rejected_by_both(
         &execution_without_fixtures,
         "execution profile without fixture modes",
+    );
+
+    let duplicate_family_coordinate = duplicate_fixture_family_coordinate_archive()?;
+    assert_archive_rejected_by_both(
+        &duplicate_family_coordinate,
+        "duplicate fixture family coordinate",
     );
 
     let noncanonical_divergences = mutate_profile_archive(|profile| {
@@ -4530,6 +4776,27 @@ fn assert_deep_raw_profile_rejections() -> TestResult {
     })?;
     assert_archive_rejected_by_both(&missing_bound_member, "unbound fixture payload");
     Ok(())
+}
+
+fn duplicate_fixture_family_coordinate_archive() -> TestResult<Vec<u8>> {
+    mutate_profile_archive(|profile| {
+        let fixtures = array_field(profile, 9, "fixtures")?;
+        let mut duplicate = fixtures
+            .first()
+            .ok_or("fixture inventory is empty")?
+            .clone();
+        let Value::Array(fields) = &mut duplicate else {
+            return Err("fixture is not an array".into());
+        };
+        let Value::Text(case_id) = &mut fields[0] else {
+            return Err("fixture case ID must be text".into());
+        };
+        case_id.push_str("-duplicate");
+        *fixtures
+            .get_mut(1)
+            .ok_or("fixture inventory has no duplicate candidate")? = duplicate;
+        Ok(())
+    })
 }
 
 fn assert_deep_raw_archive_rejections() -> TestResult {
@@ -4903,8 +5170,50 @@ fn both_verifiers_accept_all_current_fixture_execution_modes() -> TestResult {
     Ok(())
 }
 
+fn assert_independent_selected_caps() -> TestResult {
+    for cap_index in [0, 1, 2, 3, 4, 5, 7] {
+        let selected_cap_violation = mutate_profile_archive(|profile| {
+            replace_value(
+                array_field(
+                    array_field(profile, 11, "evaluator protocol")?,
+                    4,
+                    "hard caps",
+                )?,
+                cap_index,
+                Value::Integer(1_u64.into()),
+                "selected hard cap",
+            )
+        })?;
+        assert_archive_rejected_by_both(
+            &selected_cap_violation,
+            &format!("selected hard cap {cap_index}"),
+        );
+    }
+
+    let coordinate_cap_violation = mutate_profile_archive(|profile| {
+        set_raw_divergence_fixture(
+            profile,
+            Value::Integer(5_u64.into()),
+            Value::Bytes(vec![1, 2]),
+        )?;
+        replace_value(
+            array_field(
+                array_field(profile, 11, "evaluator protocol")?,
+                4,
+                "hard caps",
+            )?,
+            8,
+            Value::Integer(1_u64.into()),
+            "coordinate hard cap",
+        )
+    })?;
+    assert_archive_rejected_by_both(&coordinate_cap_violation, "coordinate hard cap");
+    Ok(())
+}
+
 #[test]
 fn independent_verifier_matches_typed_fixture_caps_and_schema_binding() -> TestResult {
+    assert_independent_selected_caps()?;
     let excessive_auxiliary = mutate_profile_archive(|profile| {
         let fixture = array_field(array_field(profile, 9, "fixtures")?, 0, "fixture")?;
         let template = array_field(fixture, 10, "auxiliary descriptors")?
@@ -5042,11 +5351,82 @@ fn independent_verifier_rejects_each_current_provider_registry_mutation() -> Tes
 }
 
 #[test]
+fn profile_required_providers_equal_the_registry_claim_layer_subset() -> TestResult {
+    let archive = mutate_provider_registry_archive_with(|fields| {
+        let providers = array_field(
+            fields,
+            ProviderRegistryField::Providers.index(),
+            "registry providers",
+        )?;
+        let mut extra = providers
+            .first()
+            .cloned()
+            .ok_or("provider registry is empty")?;
+        let Value::Array(entry) = &mut extra else {
+            return Err("provider entry is not an array".into());
+        };
+        replace_value(
+            entry,
+            ProviderKeyCborField::Identifier.index(),
+            Value::Text("pigloros.fixture.unrequired".to_owned()),
+            "unrequired provider identifier",
+        )?;
+        providers.push(extra);
+        Ok(true)
+    })?;
+    assert_archive_rejected_by_both(&archive, "unrequired same-layer provider");
+    Ok(())
+}
+
+#[test]
 fn independent_verifier_rejects_each_current_provider_package_mutation() -> TestResult {
     for mutation in PROVIDER_PACKAGE_MUTATIONS {
         let archive = mutate_provider_package_archive(mutation)?;
         assert_archive_rejected_by_both(&archive, mutation.label());
     }
+    Ok(())
+}
+
+#[test]
+fn provider_record_descriptors_require_cbor_media_type() -> TestResult {
+    let registry_archive = mutate_profile_archive(|profile| {
+        replace_nested_profile_value(
+            profile,
+            &[8, 0, 1],
+            Value::Text("application/json".to_owned()),
+        )
+    })?;
+    assert_archive_rejected_by_both(&registry_archive, "FPR1 media type");
+
+    let package_archive = mutate_provider_registry_archive_with(|registry| {
+        replace_registry_package_field(
+            registry,
+            ArtifactDescriptorField::MediaType,
+            Value::Text("application/json".to_owned()),
+        )
+    })?;
+    assert_archive_rejected_by_both(&package_archive, "FPP1 media type");
+    Ok(())
+}
+
+#[test]
+fn provider_support_descriptors_accept_provider_owned_provenance() -> TestResult {
+    let archive = mutate_provider_package_archive_with(|package| {
+        replace_package_field(
+            package,
+            ProviderPackageField::SourceProvenanceDescriptor,
+            Value::Array(vec![
+                Value::Text("support/build-provenance.json".to_owned()),
+                Value::Text("application/json".to_owned()),
+                Value::Integer(u64::try_from(BUILD_PROVENANCE_BYTES.len())?.into()),
+                Value::Bytes(blake3::hash(BUILD_PROVENANCE_BYTES).as_bytes().to_vec()),
+            ]),
+            "provider source provenance descriptor",
+            true,
+        )
+    })?;
+    ConformanceBundleV1::from_canonical_cbor(&archive)?;
+    verify_archive_independently(&archive)?;
     Ok(())
 }
 
@@ -5065,7 +5445,7 @@ fn independent_verifier_rejects_wrong_types_across_provider_records() -> TestRes
         }
     }
 
-    let mut package_paths = (0..11).map(|field| vec![field]).collect::<Vec<_>>();
+    let mut package_paths = (0..12).map(|field| vec![field]).collect::<Vec<_>>();
     package_paths.extend((0..4).map(|field| vec![2, field]));
     package_paths.extend((0..2).map(|field| vec![5, 0, field]));
     package_paths.extend((0..4).map(|field| vec![5, 0, 1, field]));
@@ -5076,7 +5456,7 @@ fn independent_verifier_rejects_wrong_types_across_provider_records() -> TestRes
         for replacement in [Value::Null, Value::Map(Vec::new())] {
             let archive = mutate_provider_package_archive_with(|package| {
                 replace_nested_profile_value(package, &path, replacement)?;
-                Ok(true)
+                Ok(path.as_slice() != [ProviderPackageField::Digest.index()])
             })?;
             assert_archive_rejected_by_both(&archive, &format!("raw package path {path:?}"));
         }

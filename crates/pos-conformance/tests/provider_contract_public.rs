@@ -628,6 +628,22 @@ fn registry_binding_rejects_wrong_artifact_path_and_invalid_required_key() -> Te
         Err(ProviderContractErrorV1::InvalidMemberPath)
     );
 
+    let mut wrong_registry_media_type = registry_binding(&registry_bytes)?;
+    wrong_registry_media_type.registry_artifact.media_type = "application/json".to_owned();
+    assert_eq!(
+        wrong_registry_media_type.validate(),
+        Err(ProviderContractErrorV1::InvalidMediaType)
+    );
+
+    let mut wrong_package_media_type = registry(&package_bytes)?;
+    wrong_package_media_type.providers[0]
+        .provider_package_descriptor
+        .media_type = "application/json".to_owned();
+    assert_eq!(
+        wrong_package_media_type.validate(),
+        Err(ProviderContractErrorV1::InvalidMediaType)
+    );
+
     let mut invalid_key = registry_binding(&registry_bytes)?;
     invalid_key.required_provider_keys[0].provider_id.clear();
     assert_eq!(

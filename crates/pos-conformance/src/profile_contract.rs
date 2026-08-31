@@ -770,12 +770,40 @@ fn validate_fixtures(profile: &ConformanceProfileV1) -> Result<(), ConformanceCo
             })
             .and_then(|()| validate_fixture_verification_outcome(fixture))
             .and_then(|()| validate_fixture_claim(fixture))
-    })
+    })?;
+    let declared = profile
+        .fixtures
+        .iter()
+        .filter_map(|fixture| fixture.strict_oracle.divergence.as_ref())
+        .map(divergence_key)
+        .collect::<BTreeSet<_>>();
+    let allowed = profile
+        .allowed_divergences
+        .iter()
+        .map(divergence_key)
+        .collect::<BTreeSet<_>>();
+    if declared == allowed {
+        Ok(())
+    } else {
+        Err(ConformanceContractError::DivergenceClassificationMismatch)
+    }
 }
 
 fn validate_fixture_inventory(
     profile: &ConformanceProfileV1,
 ) -> Result<(), ConformanceContractError> {
+    let claim_layer = profile
+        .fixtures
+        .first()
+        .map(|fixture| fixture.claim_layer)
+        .ok_or(ConformanceContractError::ExpectedResultMissing)?;
+    if profile
+        .fixtures
+        .iter()
+        .any(|fixture| fixture.claim_layer != claim_layer)
+    {
+        return Err(ConformanceContractError::FieldOutOfBounds);
+    }
     let required_families = FixtureFamilyV1::ALL.into_iter().collect::<BTreeSet<_>>();
     let mut inventory = BTreeMap::<
         (&FixtureProviderKeyV1, [u8; 32], ExecutionModeV1),
@@ -1286,9 +1314,21 @@ fn validate_fixture_downgrade(
     {
         return Err(ConformanceContractError::ProvenanceMissing);
     }
+    let targets_fixture_provider = transition.to == fixture.provider_key;
+    let preserves_provider_contract = (
+        &transition.from.provider_id,
+        &transition.from.contract_version,
+        transition.from.abi_major,
+    ) == (
+        &transition.to.provider_id,
+        &transition.to.contract_version,
+        transition.to.abi_major,
+    );
     if !valid_fixture_provider_key(&transition.from)
         || !valid_fixture_provider_key(&transition.to)
-        || transition.from == transition.to
+        || !targets_fixture_provider
+        || !preserves_provider_contract
+        || transition.from.abi_minor <= transition.to.abi_minor
     {
         Err(ConformanceContractError::ProfileLifecycleInvalid)
     } else {
@@ -1370,7 +1410,7 @@ fn semantic_version(value: &str) -> bool {
 }
 
 fn contract_version(value: &str) -> bool {
-    value.len() <= 64 && semantic_version(value)
+    crate::semantic_version(value, 64, None)
 }
 
 fn zero_digest(value: &[u8; 32]) -> bool {

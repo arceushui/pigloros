@@ -2,7 +2,9 @@ use rustix::fs::{self, AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, Resolv
 #[cfg(target_os = "linux")]
 use rustix::io::Errno;
 #[cfg(target_os = "linux")]
-use std::ffi::{CStr, CString};
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(target_os = "linux")]
+use std::ffi::{CStr, CString, OsStr};
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
@@ -11,8 +13,6 @@ use std::io::Read as _;
 use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(target_os = "linux")]
-use std::path::Component;
 #[cfg(target_os = "linux")]
 struct AtomicPublication {
     parent: OwnedFd,
@@ -32,13 +32,40 @@ struct DirectoryIdentity {
 }
 
 #[cfg(target_os = "linux")]
-struct RelativeFilePath {
-    directories: Vec<CString>,
-    file_name: CString,
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
 }
 
 #[cfg(target_os = "linux")]
-struct VerifiedPublication(AtomicPublication);
+struct RelativeFilePath {
+    components: Vec<OsString>,
+}
+
+#[cfg(target_os = "linux")]
+impl RelativeFilePath {
+    fn directories(&self) -> &[OsString] {
+        &self.components[..self.components.len() - 1]
+    }
+
+    fn file_name(&self) -> &OsStr {
+        &self.components[self.components.len() - 1]
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ExpectedDirectory<'a> {
+    directories: BTreeMap<Vec<u8>, Self>,
+    files: BTreeMap<Vec<u8>, &'a MaterializedFile>,
+}
+
+#[cfg(target_os = "linux")]
+struct VerifiedPublication<'a> {
+    publication: AtomicPublication,
+    files: &'a [MaterializedFile],
+}
 
 #[cfg(target_os = "linux")]
 impl AtomicPublication {
@@ -67,32 +94,31 @@ impl AtomicPublication {
     }
 
     fn write_file(&self, relative_path: &str, bytes: &[u8]) -> Result<(), MaterializationError> {
-        relative_file_path(Path::new(relative_path)).and_then(|path| {
-            self.write_parent(&path.directories).and_then(|directory| {
-                let flags = OFlags::WRONLY
-                    .union(OFlags::CREATE)
-                    .union(OFlags::EXCL)
-                    .union(OFlags::CLOEXEC)
-                    .union(OFlags::NOFOLLOW);
-                open_at2(
-                    &directory,
-                    &path.file_name,
-                    flags,
-                    Mode::from_raw_mode(0o600),
-                    ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS),
-                )
-                .and_then(|fd| {
-                    let mut file: File = fd.into();
-                    file.write_all(bytes)
-                        .map_err(|_| MaterializationError::DurabilitySyncFailed)
-                        .and_then(|()| sync_fd(&file))
-                        .and_then(|()| sync_fd(&directory))
-                })
+        let path = relative_file_path(Path::new(relative_path));
+        self.write_parent(path.directories()).and_then(|directory| {
+            let flags = OFlags::WRONLY
+                .union(OFlags::CREATE)
+                .union(OFlags::EXCL)
+                .union(OFlags::CLOEXEC)
+                .union(OFlags::NOFOLLOW);
+            open_at2(
+                &directory,
+                path.file_name(),
+                flags,
+                Mode::from_raw_mode(0o600),
+                ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS),
+            )
+            .and_then(|fd| {
+                let mut file: File = fd.into();
+                file.write_all(bytes)
+                    .map_err(|_| MaterializationError::DurabilitySyncFailed)
+                    .and_then(|()| sync_fd(&file))
+                    .and_then(|()| sync_fd(&directory))
             })
         })
     }
 
-    fn write_parent(&self, directories: &[CString]) -> Result<OwnedFd, MaterializationError> {
+    fn write_parent(&self, directories: &[OsString]) -> Result<OwnedFd, MaterializationError> {
         duplicate_fd(&self.staging).and_then(|directory| {
             directories.iter().try_fold(directory, |directory, name| {
                 open_or_create_directory(&directory, name)
@@ -101,21 +127,7 @@ impl AtomicPublication {
     }
 
     fn verify_and_sync(&self, files: &[MaterializedFile]) -> Result<(), MaterializationError> {
-        files
-            .iter()
-            .try_for_each(|file| {
-                self.read_file(&file.relative_path).and_then(|bytes| {
-                    if bytes != file.bytes {
-                        return Err(MaterializationError::ArchiveDigestMismatch);
-                    }
-                    file.archive_release_filename
-                        .as_deref()
-                        .map_or(Ok(()), |release_filename| {
-                            verify_public_archive(&bytes, release_filename)
-                                .map_err(|_| MaterializationError::ArchiveDigestMismatch)
-                        })
-                })
-            })
+        verify_directory_closure(&self.staging, &ExpectedDirectory::from_files(files))
             .and_then(|()| sync_fd(&self.staging))
     }
 
@@ -133,57 +145,33 @@ impl AtomicPublication {
         self.staging_present = false;
         Ok(())
     }
-
-    fn read_file(&self, relative_path: &str) -> Result<Vec<u8>, MaterializationError> {
-        relative_file_path(Path::new(relative_path)).and_then(|path| {
-            self.read_parent(&path.directories).and_then(|directory| {
-                open_at2(
-                    &directory,
-                    &path.file_name,
-                    OFlags::RDONLY
-                        .union(OFlags::CLOEXEC)
-                        .union(OFlags::NOFOLLOW),
-                    Mode::empty(),
-                    ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS),
-                )
-                .and_then(|fd| {
-                    let mut file: File = fd.into();
-                    let mut bytes = Vec::new();
-                    file.read_to_end(&mut bytes)
-                        .map_err(|_| MaterializationError::ArchiveDigestMismatch)
-                        .map(|_| bytes)
-                })
-            })
-        })
-    }
-
-    fn read_parent(&self, directories: &[CString]) -> Result<OwnedFd, MaterializationError> {
-        duplicate_fd(&self.staging).and_then(|directory| {
-            directories.iter().try_fold(directory, |directory, name| {
-                open_directory(&directory, name)
-            })
-        })
-    }
 }
 
 #[cfg(target_os = "linux")]
-impl VerifiedPublication {
+impl VerifiedPublication<'_> {
     fn publish(self) -> Result<(), MaterializationError> {
-        let mut publication = self.0;
-        let result = publication.revalidate_for_publish().and_then(|()| {
-            fs::renameat_with(
-                &publication.parent,
-                publication.staging_name.as_c_str(),
-                &publication.parent,
-                publication.destination_name.as_c_str(),
-                RenameFlags::NOREPLACE,
-            )
-            .map_err(map_publish_error)
+        let Self {
+            mut publication,
+            files,
+        } = self;
+        let result = publication
+            .revalidate_for_publish()
+            .and_then(|()| publication.verify_and_sync(files))
+            .and_then(|()| publication.revalidate_for_publish())
             .and_then(|()| {
-                publication.staging_present = false;
-                sync_fd(&publication.parent)
-            })
-        });
+                fs::renameat_with(
+                    &publication.parent,
+                    publication.staging_name.as_c_str(),
+                    &publication.parent,
+                    publication.destination_name.as_c_str(),
+                    RenameFlags::NOREPLACE,
+                )
+                .map_err(map_publish_error)
+                .and_then(|()| {
+                    publication.staging_present = false;
+                    sync_fd(&publication.parent)
+                })
+            });
         match result {
             Ok(()) => Ok(()),
             Err(error) => publication.abort().and(Err(error)),
@@ -205,10 +193,9 @@ fn publish_materialized_tree(
 ) -> Result<(), MaterializationError> {
     let result = files
         .iter()
-        .try_for_each(|file| publication.write_file(&file.relative_path, &file.bytes))
-        .and_then(|()| publication.verify_and_sync(files));
+        .try_for_each(|file| publication.write_file(&file.relative_path, &file.bytes));
     match result {
-        Ok(()) => VerifiedPublication(publication).publish(),
+        Ok(()) => VerifiedPublication { publication, files }.publish(),
         Err(error) => publication.abort().and(Err(error)),
     }
 }
@@ -303,31 +290,278 @@ fn random_staging_name() -> Result<CString, MaterializationError> {
 }
 
 #[cfg(target_os = "linux")]
-fn relative_file_path(path: &Path) -> Result<RelativeFilePath, MaterializationError> {
-    path.components()
-        .map(|component| match component {
-            Component::Normal(name) => CString::new(name.as_bytes())
-                .map_err(|_| MaterializationError::UntrustedOutputDirectory),
-            _ => Err(MaterializationError::UntrustedOutputDirectory),
+fn relative_file_path(path: &Path) -> RelativeFilePath {
+    // MaterializedFile is private, and every constructor emits a non-empty
+    // relative path from build-validated catalog identifiers or fixed names.
+    RelativeFilePath {
+        components: path.iter().map(OsStr::to_os_string).collect(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<'a> ExpectedDirectory<'a> {
+    fn from_files(files: &'a [MaterializedFile]) -> Self {
+        files.iter().fold(Self::default(), |mut expected, file| {
+            expected.insert(&relative_file_path(Path::new(&file.relative_path)), file);
+            expected
         })
-        .collect::<Result<Vec<_>, _>>()
-        .and_then(|mut components| {
-            components
-                .pop()
-                .map(|file_name| RelativeFilePath {
-                    directories: components,
-                    file_name,
+    }
+
+    fn insert(&mut self, path: &RelativeFilePath, file: &'a MaterializedFile) {
+        self.insert_components(path.directories(), path.file_name(), file);
+    }
+
+    fn insert_components(
+        &mut self,
+        directories: &[OsString],
+        file_name: &OsStr,
+        file: &'a MaterializedFile,
+    ) {
+        let Some((directory, remaining)) = directories.split_first() else {
+            self.files.insert(file_name.as_bytes().to_vec(), file);
+            return;
+        };
+        self.directories
+            .entry(directory.as_bytes().to_vec())
+            .or_default()
+            .insert_components(remaining, file_name, file);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn verify_directory_closure(
+    directory: &OwnedFd,
+    expected: &ExpectedDirectory<'_>,
+) -> Result<(), MaterializationError> {
+    Dir::read_from(directory)
+        .map_err(map_open_error)
+        .and_then(|mut entries| {
+            let mut seen = BTreeSet::new();
+            entries
+                .try_for_each(|entry| {
+                    entry.map_err(map_open_error).and_then(|entry| {
+                        let name = entry.file_name();
+                        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                            return Ok(());
+                        }
+                        let name_bytes = name.to_bytes();
+                        seen.insert(name_bytes.to_vec());
+                        expected.directories.get(name_bytes).map_or_else(
+                            || {
+                                expected.files.get(name_bytes).map_or_else(
+                                    || reject_unexpected_entry(directory, name),
+                                    |file| verify_expected_file(directory, name, file),
+                                )
+                            },
+                            |child| verify_expected_directory(directory, name, child),
+                        )
+                    })
                 })
-                .ok_or(MaterializationError::UntrustedOutputDirectory)
+                .and_then(|()| verify_all_expected_entries_seen(expected, &seen))
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn verify_all_expected_entries_seen(
+    expected: &ExpectedDirectory<'_>,
+    seen: &BTreeSet<Vec<u8>>,
+) -> Result<(), MaterializationError> {
+    let expected_count = expected.directories.len() + expected.files.len();
+    let all_directories_seen = expected
+        .directories
+        .keys()
+        .all(|name| seen.contains(name.as_slice()));
+    let all_files_seen = expected
+        .files
+        .keys()
+        .all(|name| seen.contains(name.as_slice()));
+    if seen.len() == expected_count && all_directories_seen && all_files_seen {
+        Ok(())
+    } else {
+        Err(MaterializationError::UntrustedOutputDirectory)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reject_unexpected_entry(directory: &OwnedFd, name: &CStr) -> Result<(), MaterializationError> {
+    fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(map_open_error)
+        .and_then(|metadata| {
+            if FileType::from_raw_mode(metadata.st_mode) == FileType::Symlink {
+                Err(MaterializationError::SymlinkDetected)
+            } else {
+                Err(MaterializationError::UntrustedOutputDirectory)
+            }
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn verify_expected_directory(
+    parent: &OwnedFd,
+    name: &CStr,
+    expected: &ExpectedDirectory<'_>,
+) -> Result<(), MaterializationError> {
+    named_directory_identity(parent, name).and_then(|named_identity| {
+        open_directory(parent, name).and_then(|directory| {
+            descriptor_directory_identity(&directory)
+                .and_then(|opened_identity| {
+                    require_unchanged_identity(&opened_identity, &named_identity)
+                        .and_then(|()| verify_directory_closure(&directory, expected))
+                })
+                .and_then(|()| named_directory_identity(parent, name))
+                .and_then(|current_named_identity| {
+                    descriptor_directory_identity(&directory).and_then(|current_opened_identity| {
+                        require_unchanged_identity(&current_named_identity, &named_identity)
+                            .and_then(|()| {
+                                require_unchanged_identity(
+                                    &current_opened_identity,
+                                    &named_identity,
+                                )
+                            })
+                    })
+                })
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn require_unchanged_identity<Identity: Eq>(
+    actual: &Identity,
+    expected: &Identity,
+) -> Result<(), MaterializationError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(MaterializationError::UntrustedOutputDirectory)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn named_directory_identity(
+    parent: &OwnedFd,
+    name: &CStr,
+) -> Result<DirectoryIdentity, MaterializationError> {
+    fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(map_open_error)
+        .and_then(directory_entry_identity)
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_directory_identity(
+    directory: &OwnedFd,
+) -> Result<DirectoryIdentity, MaterializationError> {
+    fs::fstat(directory)
+        .map_err(map_open_error)
+        .and_then(directory_entry_identity)
+}
+
+#[cfg(target_os = "linux")]
+const fn directory_entry_identity(
+    metadata: rustix::fs::Stat,
+) -> Result<DirectoryIdentity, MaterializationError> {
+    match FileType::from_raw_mode(metadata.st_mode) {
+        FileType::Directory => Ok(directory_identity(metadata)),
+        FileType::Symlink => Err(MaterializationError::SymlinkDetected),
+        _ => Err(MaterializationError::UntrustedOutputDirectory),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn verify_expected_file(
+    parent: &OwnedFd,
+    name: &CStr,
+    expected: &MaterializedFile,
+) -> Result<(), MaterializationError> {
+    i64::try_from(expected.bytes.len())
+        .map_err(|_| MaterializationError::ArchiveDigestMismatch)
+        .and_then(|expected_size| {
+            open_at2(
+                parent,
+                name,
+                OFlags::RDONLY
+                    .union(OFlags::CLOEXEC)
+                    .union(OFlags::NOFOLLOW)
+                    .union(OFlags::NONBLOCK),
+                Mode::empty(),
+                ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS),
+            )
+            .and_then(|fd| {
+                let mut file: File = fd.into();
+                verified_file_identity(parent, name, &file, expected_size).and_then(|identity| {
+                    let mut bytes = vec![0; expected.bytes.len()];
+                    file.read_exact(&mut bytes)
+                        .map_err(|_| MaterializationError::ArchiveDigestMismatch)
+                        .and_then(|()| verified_file_identity(parent, name, &file, expected_size))
+                        .and_then(|current_identity| {
+                            require_unchanged_identity(&current_identity, &identity)
+                                .and_then(|()| verify_materialized_bytes(expected, &bytes))
+                        })
+                })
+            })
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn verified_file_identity<Fd: std::os::fd::AsFd>(
+    parent: &OwnedFd,
+    name: &CStr,
+    file: Fd,
+    expected_size: i64,
+) -> Result<FileIdentity, MaterializationError> {
+    fs::fstat(file)
+        .map_err(map_open_error)
+        .and_then(|metadata| regular_file_identity(metadata, expected_size))
+        .and_then(|descriptor_identity| {
+            fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(map_open_error)
+                .and_then(|metadata| regular_file_identity(metadata, expected_size))
+                .and_then(|named_identity| {
+                    require_unchanged_identity(&descriptor_identity, &named_identity)
+                        .map(|()| descriptor_identity)
+                })
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn regular_file_identity(
+    metadata: rustix::fs::Stat,
+    expected_size: i64,
+) -> Result<FileIdentity, MaterializationError> {
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+        return Err(MaterializationError::UntrustedOutputDirectory);
+    }
+    if metadata.st_size != expected_size {
+        return Err(MaterializationError::ArchiveDigestMismatch);
+    }
+    Ok(FileIdentity {
+        device: metadata.st_dev,
+        inode: metadata.st_ino,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn verify_materialized_bytes(
+    expected: &MaterializedFile,
+    bytes: &[u8],
+) -> Result<(), MaterializationError> {
+    if bytes != expected.bytes {
+        return Err(MaterializationError::ArchiveDigestMismatch);
+    }
+    expected
+        .archive_release_filename
+        .as_deref()
+        .map_or(Ok(()), |release_filename| {
+            verify_public_archive(bytes, release_filename)
+                .map_err(|_| MaterializationError::ArchiveDigestMismatch)
         })
 }
 
 #[cfg(target_os = "linux")]
 fn open_or_create_directory(
     parent: &OwnedFd,
-    name: &CString,
+    name: &OsStr,
 ) -> Result<OwnedFd, MaterializationError> {
-    match fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
+    match fs::mkdirat(parent, name, Mode::from_raw_mode(0o700)) {
         Ok(()) | Err(Errno::EXIST) => {}
         Err(error) => return Err(map_open_error(error)),
     }
@@ -335,7 +569,10 @@ fn open_or_create_directory(
 }
 
 #[cfg(target_os = "linux")]
-fn open_directory(parent: &OwnedFd, name: &CStr) -> Result<OwnedFd, MaterializationError> {
+fn open_directory<PathArg: rustix::path::Arg>(
+    parent: &OwnedFd,
+    name: PathArg,
+) -> Result<OwnedFd, MaterializationError> {
     open_at2(
         parent,
         name,
@@ -353,9 +590,9 @@ fn duplicate_fd(fd: &OwnedFd) -> Result<OwnedFd, MaterializationError> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_at2<Fd: std::os::fd::AsFd>(
+fn open_at2<Fd: std::os::fd::AsFd, PathArg: rustix::path::Arg>(
     directory_fd: Fd,
-    path: &CStr,
+    path: PathArg,
     flags: OFlags,
     mode: Mode,
     resolve: ResolveFlags,

@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     ArtifactDescriptorV1, ConformanceProfileV1, ExecutionModeV1, FixtureFamilyV1,
-    FixtureProviderPackageV1, FixtureProviderRegistryV1, ProfileLifecycleV1,
+    FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryV1, ProfileLifecycleV1,
     DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION, DRAFT_AUTHORITY_KEY_ID,
     DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH, DRAFT_AUTHORITY_TRUST_POLICY_EPOCH,
     DRAFT_AUTHORITY_TRUST_POLICY_ID, DRAFT_EXECUTION_PROFILES,
@@ -52,6 +52,134 @@ const SUPPORT_PACKAGE_MANIFEST_PATH: &str = "support/package-manifest.json";
 const NOTICE_PATH: &str = "support/NOTICE";
 const SBOM_PATH: &str = "support/sbom.json";
 include!(concat!(env!("OUT_DIR"), "/bundle_contract_assets.rs"));
+
+const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
+
+fn draft_fixture_authority_signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES)
+}
+
+/// Build the canonical current EPF1 artifact declared by the repository Draft authority.
+///
+/// # Errors
+///
+/// Returns [`BundleContractErrorV1::ProfileInvalid`] for an undeclared profile, or
+/// [`BundleContractErrorV1::EncodingFailed`] if canonical CBOR encoding fails.
+pub fn draft_execution_profile_bytes_v1(
+    profile_id: &str,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let declaration = DRAFT_EXECUTION_PROFILES
+        .iter()
+        .find(|candidate| candidate.profile_id == profile_id)
+        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    let fields = vec![
+        Value::Text("EPF1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text(declaration.profile_id.to_owned()),
+        Value::Text(declaration.semantic_version.to_owned()),
+        Value::Array(
+            declaration
+                .reproducibility_classes
+                .iter()
+                .copied()
+                .map(|code| Value::Integer(code.into()))
+                .collect(),
+        ),
+        Value::Bool(declaration.network_allowed),
+        Value::Array(Vec::new()),
+        Value::Text(declaration.scheduler_id.to_owned()),
+        Value::Text(declaration.numeric_policy_id.to_owned()),
+        Value::Text(declaration.schema_policy_id.to_owned()),
+        Value::Text(declaration.artifact_policy_id.to_owned()),
+        Value::Text(declaration.budget_policy_id.to_owned()),
+        Value::Array(Vec::new()),
+        Value::Null,
+    ];
+    encode(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(
+            digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned).to_vec(),
+        ));
+        encode(&Value::Array(signed_fields))
+    })
+}
+
+/// Build the canonical current TPS1 artifact for the repository Draft authority.
+///
+/// # Errors
+///
+/// Returns [`BundleContractErrorV1::EncodingFailed`] if canonical CBOR encoding fails.
+pub fn draft_trust_policy_snapshot_bytes_v1() -> Result<Vec<u8>, BundleContractErrorV1> {
+    let fields = vec![
+        Value::Text("TPS1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Text(DRAFT_AUTHORITY_TRUST_POLICY_ID.to_owned()),
+        Value::Integer(DRAFT_AUTHORITY_TRUST_POLICY_EPOCH.into()),
+        Value::Integer(DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION.into()),
+        Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
+        Value::Bytes(crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES.to_vec()),
+        Value::Array(Vec::new()),
+        Value::Array(Vec::new()),
+        Value::Array(Vec::new()),
+        Value::Text(DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH.to_owned()),
+        Value::Null,
+    ];
+    encode(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(
+            draft_fixture_authority_signing_key()
+                .sign(&unsigned)
+                .to_bytes()
+                .to_vec(),
+        ));
+        encode(&Value::Array(signed_fields))
+    })
+}
+
+fn fixture_provider_key_value(key: &FixtureProviderKeyV1) -> Value {
+    Value::Array(vec![
+        Value::Text(key.provider_id.clone()),
+        Value::Text(key.contract_version.clone()),
+        Value::Integer(u64::from(key.abi_major).into()),
+        Value::Integer(u64::from(key.abi_minor).into()),
+    ])
+}
+
+/// Build a canonical current RAD1 artifact signed by the repository Draft authority.
+///
+/// # Errors
+///
+/// Returns [`BundleContractErrorV1::EncodingFailed`] if canonical CBOR encoding fails.
+pub fn draft_release_admission_bytes_v1(
+    case_id: &str,
+    execution_profile_digest: [u8; 32],
+    trust_policy_snapshot_digest: [u8; 32],
+    from: &FixtureProviderKeyV1,
+    to: &FixtureProviderKeyV1,
+) -> Result<Vec<u8>, BundleContractErrorV1> {
+    let fields = vec![
+        Value::Text("RAD1".to_owned()),
+        Value::Integer(1_u64.into()),
+        Value::Integer(0_u64.into()),
+        Value::Text(case_id.to_owned()),
+        Value::Bytes(execution_profile_digest.to_vec()),
+        Value::Bytes(trust_policy_snapshot_digest.to_vec()),
+        fixture_provider_key_value(from),
+        fixture_provider_key_value(to),
+        Value::Bool(false),
+        Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
+    ];
+    encode(&Value::Array(fields.clone())).and_then(|unsigned| {
+        let mut signed_fields = fields;
+        signed_fields.push(Value::Bytes(
+            draft_fixture_authority_signing_key()
+                .sign(&unsigned)
+                .to_bytes()
+                .to_vec(),
+        ));
+        encode(&Value::Array(signed_fields))
+    })
+}
 
 fn draft_authority_verifying_key() -> Result<ed25519_dalek::VerifyingKey, BundleContractErrorV1> {
     ed25519_dalek::VerifyingKey::from_bytes(&crate::DRAFT_AUTHORITY_PUBLIC_KEY_BYTES)
@@ -752,23 +880,18 @@ fn validate_execution_profile_fields(
                 .copied()
                 .map(|code| Value::Integer(code.into()))
                 .collect::<Vec<_>>();
-            let capabilities = declaration
-                .capability_ids
-                .iter()
-                .map(|capability| Value::Text((*capability).to_owned()))
-                .collect::<Vec<_>>();
             if magic == "EPF1"
                 && version == 1
                 && path == format!("authority/execution-profiles/{profile_id}.epf1")
                 && semantic_version == declaration.semantic_version
                 && fields[4] == Value::Array(classes)
                 && fields[5] == Value::Bool(declaration.network_allowed)
-                && fields[6] == Value::Array(capabilities)
-                && scheduler == "fixture-scheduler-v1"
-                && numeric == "fixture-numeric-v1"
-                && schema == "fixture-schema-v1"
-                && artifact == "fixture-artifact-v1"
-                && budget == "fixture-budget-v1"
+                && fields[6] == Value::Array(Vec::new())
+                && scheduler == declaration.scheduler_id
+                && numeric == declaration.numeric_policy_id
+                && schema == declaration.schema_policy_id
+                && artifact == declaration.artifact_policy_id
+                && budget == declaration.budget_policy_id
                 && fields[12] == Value::Array(Vec::new())
                 && fields[13] == Value::Null
                 && profile_digest == digest_domain(b"PiglorOS.ExecutionProfile.v1\0", &unsigned)
@@ -1156,16 +1279,22 @@ fn validate_provider_registry(
     {
         return Err(BundleContractErrorV1::UndeclaredMember);
     }
-    let registry_keys = registry
+    let claim_layer = profile
+        .fixtures
+        .first()
+        .map(|fixture| fixture.claim_layer)
+        .ok_or(BundleContractErrorV1::ProfileInvalid)?;
+    let layer_keys = registry
         .providers
         .iter()
+        .filter(|entry| entry.claim_layer == claim_layer)
         .map(|entry| &entry.provider_key)
         .collect::<BTreeSet<_>>();
-    if binding
+    let required_keys = binding
         .required_provider_keys
         .iter()
-        .any(|key| !registry_keys.contains(key))
-    {
+        .collect::<BTreeSet<_>>();
+    if required_keys != layer_keys {
         return Err(BundleContractErrorV1::ProfileInvalid);
     }
     registry
@@ -1245,40 +1374,23 @@ fn validate_provider_support_members(
             .map(|_| ())
         })
         .and_then(|()| {
-            descriptor_member(
-                members,
-                &package.licence_descriptor,
-                BundleMemberRoleV1::Licence,
-            )
-            .map(|_| ())
-        })
-        .and_then(|()| {
-            descriptor_member(
-                members,
-                &package.notices_descriptor,
-                BundleMemberRoleV1::Notice,
-            )
-            .map(|_| ())
-        })
-        .and_then(|()| {
-            descriptor_member(members, &package.sbom_descriptor, BundleMemberRoleV1::Sbom)
-                .map(|_| ())
-        })
-        .and_then(|()| {
-            descriptor_member(
-                members,
-                &package.source_provenance_descriptor,
-                BundleMemberRoleV1::Provenance,
-            )
-            .map(|_| ())
-        })
-        .and_then(|()| {
-            descriptor_member(
-                members,
-                &package.limitations_descriptor,
-                BundleMemberRoleV1::Limitations,
-            )
-            .map(|_| ())
+            [
+                (&package.licence_descriptor, BundleMemberRoleV1::Licence),
+                (&package.notices_descriptor, BundleMemberRoleV1::Notice),
+                (&package.sbom_descriptor, BundleMemberRoleV1::Sbom),
+                (
+                    &package.source_provenance_descriptor,
+                    BundleMemberRoleV1::Provenance,
+                ),
+                (
+                    &package.limitations_descriptor,
+                    BundleMemberRoleV1::Limitations,
+                ),
+            ]
+            .into_iter()
+            .try_for_each(|(descriptor, role)| {
+                descriptor_member(members, descriptor, role).map(|_| ())
+            })
         })
 }
 
@@ -1300,12 +1412,16 @@ fn validate_fixture_members(
                 .and_then(|_| validate_draft_evidence(fixture, members))
                 .and_then(|()| {
                     fixture.auxiliary.iter().try_for_each(|artifact| {
-                        let role = if artifact.member_path.starts_with("evidence/") {
-                            BundleMemberRoleV1::EvidenceStatus
-                        } else {
-                            BundleMemberRoleV1::ExpectedResult
-                        };
-                        descriptor_member(members, artifact, role).map(|_| ())
+                        descriptor_member_with_roles(
+                            members,
+                            artifact,
+                            &[
+                                BundleMemberRoleV1::FixtureInput,
+                                BundleMemberRoleV1::ExpectedResult,
+                                BundleMemberRoleV1::EvidenceStatus,
+                            ],
+                        )
+                        .map(|_| ())
                     })
                 })
                 .and_then(|()| {
@@ -1366,23 +1482,19 @@ fn validate_draft_evidence(
     fixture: &crate::FixtureDescriptorV1,
     members: &[BundleMemberV1],
 ) -> Result<(), BundleContractErrorV1> {
-    let evidence = fixture
-        .auxiliary
-        .iter()
-        .filter(|artifact| artifact.member_path.starts_with("evidence/"))
-        .collect::<Vec<_>>();
-    if evidence.len() != 1 {
+    let evidence = fixture.auxiliary.iter().filter(|artifact| {
+        members.iter().any(|member| {
+            member.path == artifact.member_path && member.role == BundleMemberRoleV1::EvidenceStatus
+        })
+    });
+    let mut evidence = evidence.take(2);
+    let Some(descriptor) = evidence.next() else {
+        return Err(BundleContractErrorV1::ExpectedResultMismatch);
+    };
+    if evidence.next().is_some() {
         return Err(BundleContractErrorV1::ExpectedResultMismatch);
     }
-    let expected_path = format!(
-        "evidence/{}/{}",
-        fixture.case_id,
-        crate::hex_digest(&fixture.execution_profile_digest)
-    );
-    if evidence[0].member_path != expected_path {
-        return Err(BundleContractErrorV1::ExpectedResultMismatch);
-    }
-    descriptor_member(members, evidence[0], BundleMemberRoleV1::EvidenceStatus).map(|_| ())
+    descriptor_member(members, descriptor, BundleMemberRoleV1::EvidenceStatus).map(|_| ())
 }
 
 fn member_by_role_and_path<'a>(
@@ -1414,6 +1526,26 @@ fn descriptor_member<'a>(
             Err(BundleContractErrorV1::MemberDigestMismatch)
         }
     })
+}
+
+fn descriptor_member_with_roles<'a>(
+    members: &'a [BundleMemberV1],
+    descriptor: &ArtifactDescriptorV1,
+    roles: &[BundleMemberRoleV1],
+) -> Result<&'a BundleMemberV1, BundleContractErrorV1> {
+    members
+        .iter()
+        .find(|member| member.path == descriptor.member_path && roles.contains(&member.role))
+        .ok_or(BundleContractErrorV1::MemberMissing)
+        .and_then(|member| {
+            if member.digest == descriptor.blake3_digest
+                && u64::try_from(member.bytes.len()).unwrap_or(u64::MAX) == descriptor.byte_length
+            {
+                Ok(member)
+            } else {
+                Err(BundleContractErrorV1::MemberDigestMismatch)
+            }
+        })
 }
 fn decode_manifest(value: &Value) -> Result<BundleManifestV1, BundleContractErrorV1> {
     let Ok(fields) = array(value, 6) else {

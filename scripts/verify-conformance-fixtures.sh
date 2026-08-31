@@ -54,6 +54,51 @@ jq -e '
 family_names="$(jq -c '[.families[].name]' "${family_contract}")"
 family_count="$(jq '.families | length' "${family_contract}")"
 
+validate_json_fixture_adapter() {
+  local provider_manifest="$1"
+  jq -e --argjson family_names "${family_names}" '
+    .fixture_adapter.id == "pigloros-json-v1" and
+    (.fixture_adapter.config | keys | sort) == (["operations", "payloads"] | sort) and
+    (.fixture_adapter.config.operations | keys | sort) == ($family_names | sort) and
+    all(.fixture_adapter.config.operations[];
+      . == null or (type == "string" and length > 0)) and
+    (.fixture_adapter.config.payloads | keys | sort) == ($family_names | sort) and
+    all(.fixture_adapter.config.payloads[];
+      (keys - ["with_operation", "without_operation"] | length) == 0 and
+      (.with_operation | type == "object") and
+      ((has("without_operation") | not) or (.without_operation | type == "object"))) and
+    .artifact_media_types == {
+      schema: "application/schema+json",
+      payload: "application/json",
+      oracle: "application/json",
+      evidence_status: "application/json"
+    }
+  ' "${provider_manifest}" >/dev/null || {
+    echo "invalid pigloros-json-v1 fixture adapter declaration: ${provider_manifest#"${fixture_root}/"}" >&2
+    return 1
+  }
+}
+
+validate_fixture_adapter() {
+  local provider_manifest="$1"
+  local adapter_id
+  adapter_id="$(jq -er '.fixture_adapter.id | select(type == "string" and length > 0)' "${provider_manifest}")" || {
+    echo "provider fixture adapter declaration is missing or invalid: ${provider_manifest#"${fixture_root}/"}" >&2
+    return 1
+  }
+  case "${adapter_id}" in
+    pigloros-json-v1) validate_json_fixture_adapter "${provider_manifest}" ;;
+    *)
+      echo "unsupported provider fixture adapter: ${adapter_id}" >&2
+      return 1
+      ;;
+  esac
+}
+
+while IFS= read -r -d '' provider_manifest; do
+  validate_fixture_adapter "${provider_manifest}" || exit 1
+done < <(find "${fixture_root}/providers" -mindepth 2 -maxdepth 2 -type f -name provider.json -print0 | sort -z)
+
 matrix_path="${fixture_root}/matrix/execution-matrix.json"
 authority_path="${fixture_root}/expected-authority/inventory.json"
 draft_authority_path="${fixture_root}/support/draft-execution-authority.json"
@@ -161,7 +206,8 @@ jq -e '
   all(.execution_profiles[];
     (keys | sort) == ([
       "capability_ids", "network_allowed", "profile_id", "reproducibility_classes",
-      "semantic_version"
+      "semantic_version", "scheduler_id", "numeric_policy_id", "schema_policy_id",
+      "artifact_policy_id", "budget_policy_id"
     ] | sort))
 ' "${draft_authority_path}" >/dev/null || {
   echo "invalid Draft authority declaration fields" >&2
@@ -180,8 +226,8 @@ mapfile -t inputs < <(find "${fixture_root}/inputs" -type f -print | sort)
 mapfile -t expected < <(find "${fixture_root}/expected" -type f -print | sort)
 mapfile -t oracles < <(find "${fixture_root}/oracles" -type f -print | sort)
 
-if (( ${#inputs[@]} != 49 || ${#expected[@]} != 49 || ${#oracles[@]} != 49 )); then
-  echo "expected exactly 49 layer-specific input, evidence-status, and oracle records" >&2
+if (( ${#inputs[@]} < 49 || ${#inputs[@]} != ${#expected[@]} || ${#inputs[@]} != ${#oracles[@]} )); then
+  echo "expected at least the 49 mandatory fixture triples with complete input/status/oracle parity" >&2
   exit 1
 fi
 
@@ -273,30 +319,40 @@ for layer in "${profile_layers[@]}"; do
     jq -e --arg layer "${layer}" --argjson family_names "${family_names}" --argjson family_count "${family_count}" \
     '(keys | sort) == ([
        "abi_major", "abi_minor", "artifact_media_types", "claim_layer", "contract_version", "fixture_contracts",
-       "fixture_operations", "fixture_payloads", "package_path", "provider_id", "schemas",
-       "subject_adapter"
+       "fixture_adapter", "package_path", "package_support", "provider_id", "schemas", "subject_adapter"
      ] | sort) and
      .claim_layer == $layer and
      (.provider_id | type == "string" and length > 0) and
      (.contract_version | type == "string" and length > 0) and
      (.abi_major | type == "number") and (.abi_minor | type == "number") and
      (.package_path | type == "string" and length > 0) and
+     (.package_support | keys | sort) == ([
+       "licence", "limitations", "notices", "sbom", "source_provenance"
+     ] | sort) and
+     all(.package_support[];
+       type == "string" and test("^[A-Za-z0-9._/-]+$") and
+       ((contains("..")) | not)) and
+     ([.package_support[]] | unique | length) == 5 and
      (.artifact_media_types | keys | sort) == (["evidence_status", "oracle", "payload", "schema"] | sort) and
      all(.artifact_media_types[];
        type == "string" and length > 2 and length <= 127 and
        test("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")) and
      (.subject_adapter | type == "string" and length > 0) and
-     (.fixture_operations | keys | sort) == ($family_names | sort) and
-     all(.fixture_operations[]; . == null or (type == "string" and length > 0)) and
-     (.fixture_payloads | keys | sort) == ($family_names | sort) and
-     all(.fixture_payloads[];
-       (.with_operation | type == "object") and
-       ((has("without_operation") | not) or (.without_operation | type == "object"))
-     ) and
+     (.fixture_adapter | keys | sort) == (["config", "id"] | sort) and
+     (.fixture_adapter.id | type == "string" and length > 0 and length <= 64 and
+       test("^[a-z0-9][a-z0-9.-]*$")) and
+     (.fixture_adapter.config | type == "object") and
      (.schemas | length == $family_count) and
      (.fixture_contracts | keys | sort) == ($family_names | sort) and
      all(.fixture_contracts[];
-       (keys | sort) == (["deterministic_budget", "minimum_capability_ids", "network_allowed", "watchdog_ms"] | sort) and
+       ((keys - ["allowed_divergence"]) | sort) == (["deterministic_budget", "minimum_capability_ids", "network_allowed", "watchdog_ms"] | sort) and
+       ((has("allowed_divergence") | not) or
+         ((.allowed_divergence | keys | sort) == ["classification", "first_coordinate"] and
+          (.allowed_divergence.classification | IN(
+            "event-identity", "event-order", "canonical-bytes", "projection-checkpoint",
+            "typed-failure", "artifact", "schema-or-upcaster"
+          )) and
+          (.allowed_divergence.first_coordinate | type == "string" and length > 0 and length <= 128))) and
        (.deterministic_budget | keys | sort) == ([
          "memory_bytes", "cpu_fuel", "host_calls", "event_count",
          "output_bytes", "storage_bytes", "execution_steps", "simulation_time_ns"
@@ -366,8 +422,8 @@ mapfile -t declared_oracles < <(
     jq -r '.fixtures[].oracle' "${profile}"
   done | sort -u
 )
-if (( ${#declared_inputs[@]} != 49 || ${#declared_expected[@]} != 49 || ${#declared_oracles[@]} != 49 )); then
-  echo "expected every layer-specific fixture triple to be declared exactly once" >&2
+if (( ${#declared_inputs[@]} < 49 || ${#declared_inputs[@]} != ${#declared_expected[@]} || ${#declared_inputs[@]} != ${#declared_oracles[@]} )); then
+  echo "expected every mandatory and additional fixture triple to be declared exactly once" >&2
   exit 1
 fi
 
@@ -536,12 +592,13 @@ mapfile -t support < <(find "${fixture_root}/support" -type f -print | sort)
 mapfile -t provider_files < <(find "${fixture_root}/providers" -type f -print | sort)
 mapfile -t provider_schemas < <(find "${fixture_root}/providers" -type f -name '*.schema.json' -print | sort)
 mapfile -t provider_manifests < <(find "${fixture_root}/providers" -type f -name 'provider.json' -print | sort)
-if (( ${#provider_schemas[@]} != 49 )); then
-  echo "expected exactly 49 provider-owned family schemas" >&2
+expected_provider_schemas=$(( ${#provider_manifests[@]} * ${family_count} ))
+if (( ${#provider_schemas[@]} != expected_provider_schemas )); then
+  echo "each provider must own exactly ${family_count} family schemas" >&2
   exit 1
 fi
-if (( ${#provider_manifests[@]} != 7 )); then
-  echo "expected exactly seven provider-owned package manifests" >&2
+if (( ${#provider_manifests[@]} < 7 )); then
+  echo "expected at least one provider for each of the seven claim layers" >&2
   exit 1
 fi
 support_manifest="${fixture_root}/support/package-manifest.json"
@@ -581,6 +638,11 @@ jq -e '
   all(.execution_profiles[];
     .semantic_version == "1.0.0" and .network_allowed == false and
     .capability_ids == [] and
+    .scheduler_id == "fixture-scheduler-v1" and
+    .numeric_policy_id == "fixture-numeric-v1" and
+    .schema_policy_id == "fixture-schema-v1" and
+    .artifact_policy_id == "fixture-artifact-v1" and
+    .budget_policy_id == "fixture-budget-v1" and
     .reproducibility_classes == ["ProfileRecomputation", "CrossProfileConformance"]
   )
 ' "${fixture_root}/support/draft-execution-authority.json" >/dev/null || {

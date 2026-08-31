@@ -22,6 +22,7 @@ use std::path::{Component, Path, PathBuf};
 
 const PROFILE_COUNT: usize = 7;
 const FIXTURES_PER_PROFILE: usize = 7;
+const JSON_FIXTURE_ADAPTER_ID: &str = "pigloros-json-v1";
 #[cfg(target_os = "linux")]
 const MAX_SOURCE_FILE_COUNT: usize = 4_096;
 #[cfg(target_os = "linux")]
@@ -69,7 +70,7 @@ struct FixturePaths {
     redaction_state: CatalogRedactionState,
     schema: FixtureAsset,
     input: FixtureAsset,
-    expected: FixtureAsset,
+    evidence_status: FixtureAsset,
     oracle: FixtureAsset,
 }
 
@@ -136,6 +137,7 @@ struct FixtureProvider {
     payload_media_type: String,
     oracle_media_type: String,
     evidence_status_media_type: String,
+    package_support: ProviderPackageSupportPaths,
 }
 
 #[derive(serde::Deserialize)]
@@ -147,6 +149,50 @@ struct ProviderArtifactMediaTypes {
     evidence_status: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderFixtureAdapter {
+    id: String,
+    config: JsonFixtureAdapterConfig,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonFixtureAdapterConfig {
+    operations: BTreeMap<String, Option<String>>,
+    payloads: BTreeMap<String, JsonFixturePayloadVariants>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonFixturePayloadVariants {
+    with_operation: Value,
+    #[serde(default)]
+    without_operation: Option<Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderPackageSupportPaths {
+    licence: String,
+    notices: String,
+    sbom: String,
+    source_provenance: String,
+    limitations: String,
+}
+
+impl ProviderPackageSupportPaths {
+    fn paths(&self) -> [&str; 5] {
+        [
+            &self.licence,
+            &self.notices,
+            &self.sbom,
+            &self.source_provenance,
+            &self.limitations,
+        ]
+    }
+}
+
 #[derive(Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CatalogFixtureContract {
@@ -154,6 +200,41 @@ struct CatalogFixtureContract {
     watchdog_ms: u64,
     network_allowed: bool,
     minimum_capability_ids: Vec<String>,
+    #[serde(default)]
+    allowed_divergence: Option<CatalogAllowedDivergence>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogAllowedDivergence {
+    classification: CatalogDivergenceMismatchKind,
+    first_coordinate: String,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CatalogDivergenceMismatchKind {
+    EventIdentity,
+    EventOrder,
+    CanonicalBytes,
+    ProjectionCheckpoint,
+    TypedFailure,
+    Artifact,
+    SchemaOrUpcaster,
+}
+
+impl CatalogDivergenceMismatchKind {
+    const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::EventIdentity => "DivergenceMismatchKindV1::EventIdentity",
+            Self::EventOrder => "DivergenceMismatchKindV1::EventOrder",
+            Self::CanonicalBytes => "DivergenceMismatchKindV1::CanonicalBytes",
+            Self::ProjectionCheckpoint => "DivergenceMismatchKindV1::ProjectionCheckpoint",
+            Self::TypedFailure => "DivergenceMismatchKindV1::TypedFailure",
+            Self::Artifact => "DivergenceMismatchKindV1::Artifact",
+            Self::SchemaOrUpcaster => "DivergenceMismatchKindV1::SchemaOrUpcaster",
+        }
+    }
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -177,6 +258,10 @@ enum CatalogStrictOracle {
         owner_id: String,
         contract_version: String,
         code_id: String,
+    },
+    Divergence {
+        classification: CatalogDivergenceMismatchKind,
+        first_coordinate: String,
     },
 }
 
@@ -277,7 +362,7 @@ struct SupportArtifactDeclaration {
     provider_package: bool,
 }
 
-#[derive(Clone, Copy, serde::Deserialize)]
+#[derive(Clone, Copy, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum SupportArtifactRole {
     NormativeSpecification,
@@ -331,6 +416,11 @@ struct DraftExecutionProfile {
     network_allowed: bool,
     capability_ids: Vec<String>,
     reproducibility_classes: Vec<DraftReproducibilityClass>,
+    scheduler_id: String,
+    numeric_policy_id: String,
+    schema_policy_id: String,
+    artifact_policy_id: String,
+    budget_policy_id: String,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, serde::Deserialize)]
@@ -645,7 +735,7 @@ fn expected_source_paths(
             for fixture in &provider.fixtures {
                 paths.insert(fixture.schema.relative.clone());
                 paths.insert(fixture.input.relative.clone());
-                paths.insert(fixture.expected.relative.clone());
+                paths.insert(fixture.evidence_status.relative.clone());
                 paths.insert(fixture.oracle.relative.clone());
             }
         }
@@ -742,6 +832,7 @@ fn verify_source_inventory(
     profiles: &[ProfilePaths],
 ) -> Result<[u8; 32], io::Error> {
     let support = support_package_manifest(snapshots)?;
+    validate_provider_support_roles(profiles, &support)?;
     let expected_paths = expected_source_paths(profiles, &support);
     let declared_paths = snapshots
         .sha256_entries
@@ -787,6 +878,42 @@ fn verify_source_inventory(
     Ok(Sha256::digest(&snapshots.sha256_inventory).into())
 }
 
+fn validate_provider_support_roles(
+    profiles: &[ProfilePaths],
+    support: &SupportPackageManifest,
+) -> Result<(), io::Error> {
+    let roles = support
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.provider_package)
+        .map(|artifact| (artifact.path.as_str(), artifact.role))
+        .collect::<BTreeMap<_, _>>();
+    let valid = profiles.iter().all(|profile| {
+        profile.fixture_providers.iter().all(|provider| {
+            let paths = &provider.provider.package_support;
+            [
+                (paths.licence.as_str(), SupportArtifactRole::Licence),
+                (paths.notices.as_str(), SupportArtifactRole::Notice),
+                (paths.sbom.as_str(), SupportArtifactRole::Sbom),
+                (
+                    paths.source_provenance.as_str(),
+                    SupportArtifactRole::Provenance,
+                ),
+                (paths.limitations.as_str(), SupportArtifactRole::Limitations),
+            ]
+            .into_iter()
+            .all(|(path, expected_role)| roles.get(path) == Some(&expected_role))
+        })
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_data(
+            "provider package support paths do not match their declared roles",
+        ))
+    }
+}
+
 fn json_field<'a>(value: &'a Value, field: &str) -> Result<&'a Value, io::Error> {
     value
         .get(field)
@@ -828,15 +955,60 @@ fn validate_fixture_provider(
             "provider artifact media types are invalid: {error}"
         ))
     })?;
+    let fixture_adapter: ProviderFixtureAdapter = serde_json::from_value(
+        json_field(provider, "fixture_adapter")?.clone(),
+    )
+    .map_err(|error| invalid_data(format!("provider fixture adapter is invalid: {error}")))?;
+    let support: ProviderPackageSupportPaths = serde_json::from_value(
+        json_field(provider, "package_support")?.clone(),
+    )
+    .map_err(|error| invalid_data(format!("provider package support is invalid: {error}")))?;
+    let support_paths = support.paths();
+    support_paths.iter().try_for_each(|path| {
+        relative_components(path, "provider package support path").map(|_| ())
+    })?;
+    let family_names = schemas
+        .map(|schemas| schemas.keys().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default();
+    let operation_families = fixture_adapter
+        .config
+        .operations
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let payload_families = fixture_adapter
+        .config
+        .payloads
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let adapter_config_is_valid = fixture_adapter.id == JSON_FIXTURE_ADAPTER_ID
+        && operation_families == family_names
+        && payload_families == family_names
+        && fixture_adapter
+            .config
+            .operations
+            .values()
+            .all(|operation| operation.as_ref().is_none_or(|value| !value.is_empty()))
+        && fixture_adapter.config.payloads.values().all(|payload| {
+            payload.with_operation.is_object()
+                && payload
+                    .without_operation
+                    .as_ref()
+                    .is_none_or(Value::is_object)
+        });
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
-        && u16::try_from(json_u64(provider, "abi_minor")?).is_ok()
+        && u16::try_from(json_u64(provider, "abi_minor")?).is_ok_and(|minor| minor < u16::MAX)
         && !json_text(provider, "package_path")?.is_empty()
-        && valid_media_type(&media_types.schema)
-        && valid_media_type(&media_types.payload)
-        && valid_media_type(&media_types.oracle)
-        && valid_media_type(&media_types.evidence_status)
+        && media_types.schema == "application/schema+json"
+        && media_types.payload == "application/json"
+        && media_types.oracle == "application/json"
+        && media_types.evidence_status == "application/json"
+        && adapter_config_is_valid
+        && support_paths.iter().all(|path| !path.is_empty())
+        && support_paths.into_iter().collect::<BTreeSet<_>>().len() == 5
         && json_text(provider, "claim_layer")? == claim_layer
         && json_text(provider, "subject_adapter")? == subject_adapter
         && contracts_match_families;
@@ -898,10 +1070,22 @@ fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyC
 fn strict_oracle(
     family: &FixtureFamilyDeclaration,
     provider: &FixtureProvider,
+    contract: &CatalogFixtureContract,
 ) -> Result<CatalogStrictOracle, io::Error> {
     let operation_valid = matches!(family.operation.as_str(), "required" | "optional");
     if !operation_valid {
         return Err(invalid_data("fixture-family operation policy is invalid"));
+    }
+    if let Some(divergence) = &contract.allowed_divergence {
+        if divergence.first_coordinate.is_empty() || divergence.first_coordinate.len() > 128 {
+            return Err(invalid_data(
+                "fixture divergence coordinate must contain 1..=128 bytes",
+            ));
+        }
+        return Ok(CatalogStrictOracle::Divergence {
+            classification: divergence.classification,
+            first_coordinate: divergence.first_coordinate.clone(),
+        });
     }
     Ok(match &family.oracle {
         FixtureFamilyOracle::CanonicalOutput => CatalogStrictOracle::CanonicalOutput,
@@ -939,6 +1123,10 @@ fn fixture_provider(provider: &Value) -> Result<FixtureProvider, io::Error> {
             "provider artifact media types are invalid: {error}"
         ))
     })?;
+    let package_support: ProviderPackageSupportPaths = serde_json::from_value(
+        json_field(provider, "package_support")?.clone(),
+    )
+    .map_err(|error| invalid_data(format!("provider package support is invalid: {error}")))?;
     Ok(FixtureProvider {
         provider_id: json_text(provider, "provider_id")?,
         contract_version: json_text(provider, "contract_version")?,
@@ -949,6 +1137,7 @@ fn fixture_provider(provider: &Value) -> Result<FixtureProvider, io::Error> {
         payload_media_type: media_types.payload,
         oracle_media_type: media_types.oracle,
         evidence_status_media_type: media_types.evidence_status,
+        package_support,
     })
 }
 
@@ -1004,24 +1193,26 @@ fn profile_fixtures(
                 )));
             }
             let input = relative_asset(snapshots, fixture, "input")?;
-            let expected = relative_asset(snapshots, fixture, "expected")?;
+            let evidence_status = relative_asset(snapshots, fixture, "expected")?;
             let oracle = relative_asset(snapshots, fixture, "oracle")?;
             let family_declaration = family_contract
                 .declarations
                 .get(&family)
                 .ok_or_else(|| invalid_data(format!("fixture-family contract omits {family}")))?;
+            let contract = fixture_contract(provider_value, &family)?;
+            let strict_oracle = strict_oracle(family_declaration, provider, &contract)?;
             Ok(FixturePaths {
                 case_id,
                 family_variant,
                 schema_path,
-                contract: fixture_contract(provider_value, &family)?,
-                strict_oracle: strict_oracle(family_declaration, provider)?,
+                contract,
+                strict_oracle,
                 failure_outcome: family_declaration.failure_outcome,
                 replay_claim: family_declaration.replay_claim,
                 redaction_state: family_declaration.redaction_state,
                 schema,
                 input,
-                expected,
+                evidence_status,
                 oracle,
             })
         })
@@ -1055,6 +1246,16 @@ fn profile_fixture_provider(
         context.subject_adapter,
     )?;
     let provider = fixture_provider(&provider_value)?;
+    provider
+        .package_support
+        .paths()
+        .into_iter()
+        .try_for_each(|path| {
+            context
+                .snapshots
+                .bytes(path, "provider package support artifact")
+                .map(|_| ())
+        })?;
     let provider_schemas = json_field(&provider_value, "schemas")?
         .as_object()
         .ok_or_else(|| invalid_data("provider manifest schemas must be an object"))?;
@@ -1441,6 +1642,26 @@ fn emit_strict_oracle(
             )?;
             writeln!(generated, "                        }},")
         }
+        CatalogStrictOracle::Divergence {
+            classification,
+            first_coordinate,
+        } => {
+            let classification = classification.rust_variant();
+            writeln!(
+                generated,
+                "                        strict_oracle: CatalogStrictOracle::Divergence {{"
+            )?;
+            writeln!(
+                generated,
+                "                            classification: {classification},"
+            )?;
+            writeln!(
+                generated,
+                "                            first_coordinate: &{:?},",
+                first_coordinate.as_bytes()
+            )?;
+            writeln!(generated, "                        }},")
+        }
     }
 }
 
@@ -1482,8 +1703,8 @@ fn emit_fixture(
     )?;
     writeln!(
         generated,
-        "                        expected: &{:?},",
-        fixture.expected.bytes
+        "                        evidence_status: &{:?},",
+        fixture.evidence_status.bytes
     )?;
     writeln!(
         generated,
@@ -1544,56 +1765,7 @@ fn emit_profile(
     let mut fixture_index = first_fixture_index;
     for entry in &profile.fixture_providers {
         writeln!(generated, "                    CatalogFixtureProvider {{")?;
-        writeln!(
-            generated,
-            "                        provider: FixtureProvider {{"
-        )?;
-        writeln!(
-            generated,
-            "                            provider_id: {:?},",
-            entry.provider.provider_id
-        )?;
-        writeln!(
-            generated,
-            "                            contract_version: {:?},",
-            entry.provider.contract_version
-        )?;
-        writeln!(
-            generated,
-            "                            abi_major: {},",
-            entry.provider.abi_major
-        )?;
-        writeln!(
-            generated,
-            "                            abi_minor: {},",
-            entry.provider.abi_minor
-        )?;
-        writeln!(
-            generated,
-            "                            package_path: {:?},",
-            entry.provider.package_path
-        )?;
-        writeln!(
-            generated,
-            "                            schema_media_type: {:?},",
-            entry.provider.schema_media_type
-        )?;
-        writeln!(
-            generated,
-            "                            payload_media_type: {:?},",
-            entry.provider.payload_media_type
-        )?;
-        writeln!(
-            generated,
-            "                            oracle_media_type: {:?},",
-            entry.provider.oracle_media_type
-        )?;
-        writeln!(
-            generated,
-            "                            evidence_status_media_type: {:?},",
-            entry.provider.evidence_status_media_type
-        )?;
-        writeln!(generated, "                        }},")?;
+        emit_fixture_provider(generated, &entry.provider)?;
         writeln!(generated, "                        fixtures: vec![")?;
         for current_index in fixture_index..fixture_index + entry.fixtures.len() {
             writeln!(
@@ -1607,6 +1779,57 @@ fn emit_profile(
     }
     writeln!(generated, "                ],")?;
     writeln!(generated, "            }}\n}}")
+}
+
+fn emit_fixture_provider(
+    generated: &mut String,
+    provider: &FixtureProvider,
+) -> Result<(), std::fmt::Error> {
+    writeln!(
+        generated,
+        "                        provider: FixtureProvider {{"
+    )?;
+    for (field, value) in [
+        ("provider_id", provider.provider_id.as_str()),
+        ("contract_version", provider.contract_version.as_str()),
+        ("package_path", provider.package_path.as_str()),
+        ("schema_media_type", provider.schema_media_type.as_str()),
+        ("payload_media_type", provider.payload_media_type.as_str()),
+        ("oracle_media_type", provider.oracle_media_type.as_str()),
+        (
+            "evidence_status_media_type",
+            provider.evidence_status_media_type.as_str(),
+        ),
+    ] {
+        writeln!(generated, "                            {field}: {value:?},")?;
+    }
+    for (field, path) in [
+        ("licence", provider.package_support.licence.as_str()),
+        ("notices", provider.package_support.notices.as_str()),
+        ("sbom", provider.package_support.sbom.as_str()),
+        (
+            "source_provenance",
+            provider.package_support.source_provenance.as_str(),
+        ),
+        ("limitations", provider.package_support.limitations.as_str()),
+    ] {
+        writeln!(
+            generated,
+            "                            {field}: &{},",
+            support_artifact_constant_name(path)
+        )?;
+    }
+    writeln!(
+        generated,
+        "                            abi_major: {},",
+        provider.abi_major
+    )?;
+    writeln!(
+        generated,
+        "                            abi_minor: {},",
+        provider.abi_minor
+    )?;
+    writeln!(generated, "                        }},")
 }
 
 fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
@@ -1662,6 +1885,11 @@ fn draft_authority(
                 && !profile.semantic_version.is_empty()
                 && !profile.network_allowed
                 && profile.capability_ids.is_empty()
+                && !profile.scheduler_id.is_empty()
+                && !profile.numeric_policy_id.is_empty()
+                && !profile.schema_policy_id.is_empty()
+                && !profile.artifact_policy_id.is_empty()
+                && !profile.budget_policy_id.is_empty()
                 && profile.reproducibility_classes
                     == [
                         DraftReproducibilityClass::ProfileRecomputation,
@@ -1700,39 +1928,59 @@ fn draft_authority(
 fn emit_draft_authority(
     declaration: &DraftAuthorityDeclaration,
     key: [u8; 32],
+    include_policy_constants: bool,
 ) -> Result<String, std::fmt::Error> {
-    let mut generated = format!(
-        "const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n\
-         const DRAFT_AUTHORITY_TRUST_POLICY_ID: &str = {:?};\n\
-         const DRAFT_AUTHORITY_TRUST_POLICY_EPOCH: u64 = {};\n\
-         const DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION: u64 = {};\n\
-         const DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH: &str = {:?};\n\
-         const DRAFT_AUTHORITY_KEY_ID: &str = {:?};\n",
-        declaration.trust_policy_id,
-        declaration.trust_policy_epoch,
-        declaration.effective_timeline_position,
-        declaration.offline_valid_through,
-        declaration.fixture_authority_key_id,
-    );
+    let mut generated = format!("const DRAFT_AUTHORITY_PUBLIC_KEY_BYTES: [u8; 32] = {key:?};\n");
+    if include_policy_constants {
+        writeln!(
+            generated,
+            "const DRAFT_AUTHORITY_TRUST_POLICY_ID: &str = {:?};\n\
+             const DRAFT_AUTHORITY_TRUST_POLICY_EPOCH: u64 = {};\n\
+             const DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION: u64 = {};\n\
+             const DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH: &str = {:?};\n\
+             const DRAFT_AUTHORITY_KEY_ID: &str = {:?};",
+            declaration.trust_policy_id,
+            declaration.trust_policy_epoch,
+            declaration.effective_timeline_position,
+            declaration.offline_valid_through,
+            declaration.fixture_authority_key_id,
+        )?;
+    }
+    if include_policy_constants {
+        generated.push_str(
+            "struct DraftExecutionProfileSource {\n\
+                 profile_id: &'static str,\n\
+                 semantic_version: &'static str,\n\
+                 network_allowed: bool,\n\
+                 reproducibility_classes: &'static [u64],\n\
+                 scheduler_id: &'static str,\n\
+                 numeric_policy_id: &'static str,\n\
+                 schema_policy_id: &'static str,\n\
+                 artifact_policy_id: &'static str,\n\
+                 budget_policy_id: &'static str,\n\
+             }\n",
+        );
+    } else {
+        generated.push_str(
+            "struct DraftExecutionProfileSource {\n\
+                 profile_id: &'static str,\n\
+             }\n",
+        );
+    }
     writeln!(
         generated,
-        "struct DraftExecutionProfileSource {{\n\
-             profile_id: &'static str,\n\
-             semantic_version: &'static str,\n\
-             network_allowed: bool,\n\
-             capability_ids: &'static [&'static str],\n\
-             reproducibility_classes: &'static [u64],\n\
-         }}\n\
-         const DRAFT_EXECUTION_PROFILES: [DraftExecutionProfileSource; {}] = [",
+        "const DRAFT_EXECUTION_PROFILES: [DraftExecutionProfileSource; {}] = [",
         declaration.execution_profiles.len()
     )?;
     for profile in &declaration.execution_profiles {
-        let capabilities = profile
-            .capability_ids
-            .iter()
-            .map(|capability| format!("{capability:?}"))
-            .collect::<Vec<_>>()
-            .join(", ");
+        if !include_policy_constants {
+            writeln!(
+                generated,
+                "    DraftExecutionProfileSource {{ profile_id: {:?} }},",
+                profile.profile_id,
+            )?;
+            continue;
+        }
         let classes = profile
             .reproducibility_classes
             .iter()
@@ -1743,12 +1991,16 @@ fn emit_draft_authority(
             .join(", ");
         writeln!(
             generated,
-            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, capability_ids: &[{}], reproducibility_classes: &[{}] }},",
+            "    DraftExecutionProfileSource {{ profile_id: {:?}, semantic_version: {:?}, network_allowed: {}, reproducibility_classes: &[{}], scheduler_id: {:?}, numeric_policy_id: {:?}, schema_policy_id: {:?}, artifact_policy_id: {:?}, budget_policy_id: {:?} }},",
             profile.profile_id,
             profile.semantic_version,
             profile.network_allowed,
-            capabilities,
             classes,
+            profile.scheduler_id,
+            profile.numeric_policy_id,
+            profile.schema_policy_id,
+            profile.artifact_policy_id,
+            profile.budget_policy_id,
         )?;
     }
     generated.push_str("];\n");
@@ -1774,6 +2026,10 @@ fn support_constant_name(path: &str) -> String {
     }
     name.push_str("_BYTES");
     name
+}
+
+fn support_artifact_constant_name(path: &str) -> String {
+    support_constant_name(path) + "_ARTIFACT"
 }
 
 fn emit_bundle_contract_assets(snapshots: &SourceSnapshots) -> Result<String, Box<dyn Error>> {
@@ -1829,12 +2085,35 @@ fn support_package_manifest(
         .artifacts
         .windows(2)
         .all(|pair| pair[0].path < pair[1].path);
+    let provider_roles = manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.provider_package)
+        .map(|artifact| artifact.role)
+        .collect::<Vec<_>>();
+    let provider_roles_are_exact = provider_roles.len() == 5
+        && [
+            SupportArtifactRole::Licence,
+            SupportArtifactRole::Notice,
+            SupportArtifactRole::Sbom,
+            SupportArtifactRole::Provenance,
+            SupportArtifactRole::Limitations,
+        ]
+        .into_iter()
+        .all(|required| {
+            provider_roles
+                .iter()
+                .filter(|role| **role == required)
+                .count()
+                == 1
+        });
     if manifest.magic == "SPM1"
         && manifest.version == 1
         && declared.len() == manifest.artifacts.len()
         && declared == inventoried_support
         && records_are_valid
         && records_are_ordered
+        && provider_roles_are_exact
     {
         Ok(manifest)
     } else {
@@ -1848,7 +2127,7 @@ fn emit_materialization_assets(
     key: [u8; 32],
     source_inventory_digest: [u8; 32],
 ) -> Result<String, Box<dyn Error>> {
-    let mut generated = emit_draft_authority(draft_authority, key)?;
+    let mut generated = emit_draft_authority(draft_authority, key, false)?;
     writeln!(
         generated,
         "const SOURCE_INVENTORY_DIGEST: [u8; 32] = {source_inventory_digest:?};"
@@ -1870,11 +2149,13 @@ fn emit_materialization_assets(
         )?;
     }
     generated.push_str(
-        "struct MaterializationSupportArtifact {\n\
+        "#[derive(Clone, Copy)]\n\
+         struct MaterializationSupportArtifact {\n\
              path: &'static str,\n\
              media_type: &'static str,\n\
              bytes: &'static [u8],\n\
              role: BundleMemberRoleV1,\n\
+             provider_package: bool,\n\
          }\n",
     );
     let support = support_package_manifest(snapshots)?;
@@ -1885,40 +2166,28 @@ fn emit_materialization_assets(
             snapshots.bytes(&artifact.path, "support package artifact")?,
         )?;
     }
+    for artifact in &support.artifacts {
+        let bytes_constant = support_constant_name(&artifact.path);
+        writeln!(
+            generated,
+            "const {}: MaterializationSupportArtifact = MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: {bytes_constant}, role: {}, provider_package: {} }};",
+            support_artifact_constant_name(&artifact.path),
+            artifact.path,
+            artifact.media_type,
+            artifact.role.rust_variant(),
+            artifact.provider_package,
+        )?;
+    }
     writeln!(
         generated,
         "const MATERIALIZATION_SUPPORT_ARTIFACTS: [MaterializationSupportArtifact; {}] = [",
         support.artifacts.len()
     )?;
     for artifact in &support.artifacts {
-        let bytes_constant = support_constant_name(&artifact.path);
         writeln!(
             generated,
-            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: {bytes_constant}, role: {} }},",
-            artifact.path,
-            artifact.media_type,
-            artifact.role.rust_variant(),
-        )?;
-    }
-    generated.push_str("];\n");
-    let provider_support = support
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.provider_package)
-        .collect::<Vec<_>>();
-    writeln!(
-        generated,
-        "const MATERIALIZATION_PROVIDER_PACKAGE_SUPPORT: [MaterializationSupportArtifact; {}] = [",
-        provider_support.len()
-    )?;
-    for artifact in provider_support {
-        let bytes_constant = support_constant_name(&artifact.path);
-        writeln!(
-            generated,
-            "    MaterializationSupportArtifact {{ path: {:?}, media_type: {:?}, bytes: {bytes_constant}, role: {} }},",
-            artifact.path,
-            artifact.media_type,
-            artifact.role.rust_variant(),
+            "    {},",
+            support_artifact_constant_name(&artifact.path),
         )?;
     }
     generated.push_str("];\n");
@@ -1958,7 +2227,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     std::fs::write(
         out_dir.join("draft_authority.rs"),
-        emit_draft_authority(&draft_authority, draft_authority_key)?,
+        emit_draft_authority(&draft_authority, draft_authority_key, true)?,
     )?;
     std::fs::write(
         out_dir.join("bundle_contract_assets.rs"),

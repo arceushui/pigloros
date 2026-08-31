@@ -1,18 +1,19 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-use ciborium::value::Value;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use pos_conformance::{
-    expected_result_member_path, verify_archive_release_filename,
-    verify_release_tree_independently, ArtifactDescriptorV1, BundleExpectedResultV1,
-    BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1, ClaimLayerV1,
-    ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1, DeterministicBudgetV1,
-    EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureContractTransitionV1, FixtureDescriptorV1,
-    FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderEntryV1, FixtureProviderKeyV1,
-    FixtureProviderPackageV1, FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1,
-    IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
-    ProviderFamilySchemaV1, RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1,
-    SubjectAdapterKindV1, VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
+    draft_trust_policy_snapshot_bytes_v1, expected_result_member_path,
+    verify_archive_release_filename, verify_release_tree_independently, AllowedDivergenceV1,
+    ArtifactDescriptorV1, BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
+    CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1,
+    ConformanceProfileV1, DeterministicBudgetV1, DivergenceMismatchKindV1, EvaluatorHardCapsV1,
+    EvaluatorProtocolV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureFamilyV1,
+    FixtureProvenanceV1, FixtureProviderEntryV1, FixtureProviderKeyV1, FixtureProviderPackageV1,
+    FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1, IndependenceRequirementsV1,
+    NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1,
+    RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
+    VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
@@ -87,58 +88,10 @@ enum MaterializationError {
 
 include!(concat!(env!("OUT_DIR"), "/materialization_assets.rs"));
 
-// This seed is repository test-fixture authority only.  It is never a
-// deployment trust root and is used solely to make Draft evidence reproducible.
-const DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES: [u8; 32] = [7; 32];
-
-fn authority_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&DRAFT_FIXTURE_AUTHORITY_SIGNING_BYTES)
-}
-
-fn cbor_bytes(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
-        .map_err(Box::<dyn Error>::from)
-        .map(|()| bytes)
-}
-
 fn execution_profile_bytes(
     declaration: &DraftExecutionProfileSource,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let reproducibility_classes = declaration
-        .reproducibility_classes
-        .iter()
-        .copied()
-        .map(|code| Value::Integer(code.into()))
-        .collect::<Vec<_>>();
-    let fields = vec![
-        Value::Text("EPF1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Text(declaration.profile_id.to_owned()),
-        Value::Text(declaration.semantic_version.to_owned()),
-        Value::Array(reproducibility_classes),
-        Value::Bool(declaration.network_allowed),
-        Value::Array(
-            declaration
-                .capability_ids
-                .iter()
-                .map(|capability| Value::Text((*capability).to_owned()))
-                .collect(),
-        ),
-        Value::Text("fixture-scheduler-v1".to_owned()),
-        Value::Text("fixture-numeric-v1".to_owned()),
-        Value::Text("fixture-schema-v1".to_owned()),
-        Value::Text("fixture-artifact-v1".to_owned()),
-        Value::Text("fixture-budget-v1".to_owned()),
-        Value::Array(Vec::new()),
-        Value::Null,
-    ];
-    cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
-        let digest = labeled_digest("PiglorOS.ExecutionProfile.v1", &unsigned);
-        let mut signed_fields = fields;
-        signed_fields.push(Value::Bytes(digest.to_vec()));
-        cbor_bytes(&Value::Array(signed_fields))
-    })
+    draft_execution_profile_bytes_v1(declaration.profile_id).map_err(Box::<dyn Error>::from)
 }
 
 fn execution_profile_digest(
@@ -148,39 +101,11 @@ fn execution_profile_digest(
 }
 
 fn trust_policy_snapshot_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
-    let key = authority_signing_key();
-    let fields = vec![
-        Value::Text("TPS1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Text(DRAFT_AUTHORITY_TRUST_POLICY_ID.to_owned()),
-        Value::Integer(DRAFT_AUTHORITY_TRUST_POLICY_EPOCH.into()),
-        Value::Integer(DRAFT_AUTHORITY_EFFECTIVE_TIMELINE_POSITION.into()),
-        Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
-        Value::Bytes(DRAFT_AUTHORITY_PUBLIC_KEY_BYTES.to_vec()),
-        Value::Array(Vec::new()),
-        Value::Array(Vec::new()),
-        Value::Array(Vec::new()),
-        Value::Text(DRAFT_AUTHORITY_OFFLINE_VALID_THROUGH.to_owned()),
-        Value::Null,
-    ];
-    cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
-        let mut signed_fields = fields;
-        signed_fields.push(Value::Bytes(key.sign(&unsigned).to_bytes().to_vec()));
-        cbor_bytes(&Value::Array(signed_fields))
-    })
+    draft_trust_policy_snapshot_bytes_v1().map_err(Box::<dyn Error>::from)
 }
 
 fn trust_policy_snapshot_digest() -> Result<[u8; 32], Box<dyn Error>> {
     trust_policy_snapshot_bytes().map(|bytes| *blake3::hash(&bytes).as_bytes())
-}
-
-fn provider_key_value(key: &FixtureProviderKeyV1) -> Value {
-    Value::Array(vec![
-        Value::Text(key.provider_id.clone()),
-        Value::Text(key.contract_version.clone()),
-        Value::Integer(u64::from(key.abi_major).into()),
-        Value::Integer(u64::from(key.abi_minor).into()),
-    ])
 }
 
 fn release_admission_bytes(
@@ -190,24 +115,14 @@ fn release_admission_bytes(
     from: &FixtureProviderKeyV1,
     to: &FixtureProviderKeyV1,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let key = authority_signing_key();
-    let fields = vec![
-        Value::Text("RAD1".to_owned()),
-        Value::Integer(1_u64.into()),
-        Value::Integer(0_u64.into()),
-        Value::Text(case_id.to_owned()),
-        Value::Bytes(execution_profile_digest.to_vec()),
-        Value::Bytes(trust_policy_snapshot_digest.to_vec()),
-        provider_key_value(from),
-        provider_key_value(to),
-        Value::Bool(false),
-        Value::Text(DRAFT_AUTHORITY_KEY_ID.to_owned()),
-    ];
-    cbor_bytes(&Value::Array(fields.clone())).and_then(|unsigned| {
-        let mut signed_fields = fields;
-        signed_fields.push(Value::Bytes(key.sign(&unsigned).to_bytes().to_vec()));
-        cbor_bytes(&Value::Array(signed_fields))
-    })
+    draft_release_admission_bytes_v1(
+        case_id,
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+        from,
+        to,
+    )
+    .map_err(Box::<dyn Error>::from)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,6 +164,10 @@ enum CatalogStrictOracle {
         contract_version: &'static str,
         code_id: &'static str,
     },
+    Divergence {
+        classification: DivergenceMismatchKindV1,
+        first_coordinate: &'static [u8],
+    },
 }
 
 struct FixtureProvider {
@@ -261,6 +180,11 @@ struct FixtureProvider {
     payload_media_type: &'static str,
     oracle_media_type: &'static str,
     evidence_status_media_type: &'static str,
+    licence: &'static MaterializationSupportArtifact,
+    notices: &'static MaterializationSupportArtifact,
+    sbom: &'static MaterializationSupportArtifact,
+    source_provenance: &'static MaterializationSupportArtifact,
+    limitations: &'static MaterializationSupportArtifact,
 }
 
 impl FixtureProvider {
@@ -288,7 +212,7 @@ struct CatalogFixture {
     contract: CatalogFixtureContract,
     schema: &'static [u8],
     input: &'static [u8],
-    expected: &'static [u8],
+    evidence_status: &'static [u8],
     oracle: &'static [u8],
     strict_oracle: CatalogStrictOracle,
     failure_outcome: VerificationOutcomeV1,
@@ -369,7 +293,6 @@ struct ProviderCatalog {
 
 struct ProviderPackageSupportArtifact {
     artifact: PublicArtifact,
-    role: BundleMemberRoleV1,
 }
 
 impl ProviderCatalog {
@@ -404,11 +327,11 @@ fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> Public
 }
 
 fn package_support_artifacts() -> Vec<ProviderPackageSupportArtifact> {
-    MATERIALIZATION_PROVIDER_PACKAGE_SUPPORT
-        .into_iter()
+    MATERIALIZATION_SUPPORT_ARTIFACTS
+        .iter()
+        .filter(|artifact| artifact.provider_package)
         .map(|artifact| ProviderPackageSupportArtifact {
             artifact: public_artifact(artifact.path, artifact.media_type, artifact.bytes),
-            role: artifact.role,
         })
         .collect()
 }
@@ -420,12 +343,7 @@ fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn E
         .iter()
         .flat_map(|layer| {
             layer.fixture_providers.iter().map(|provider| {
-                provider_package(
-                    layer.claim_layer,
-                    layer.subject_adapter,
-                    provider,
-                    &package_support,
-                )
+                provider_package(layer.claim_layer, layer.subject_adapter, provider)
             })
         })
         .collect::<Result<Vec<_>, _>>()
@@ -490,23 +408,11 @@ fn provider_package(
     claim_layer: ClaimLayerV1,
     subject_adapter: SubjectAdapterKindV1,
     catalog_provider: &CatalogFixtureProvider,
-    package_support: &[ProviderPackageSupportArtifact],
 ) -> Result<ProviderPackage, Box<dyn Error>> {
     let provider_key = catalog_provider.provider.key();
     let schemas = provider_schema_artifacts(catalog_provider);
-    let support_descriptor = |role| {
-        let mut matching = package_support
-            .iter()
-            .filter(|support| support.role == role);
-        let descriptor = matching
-            .next()
-            .map(|support| support.artifact.descriptor())
-            .ok_or("provider package descriptor support is incomplete")?;
-        if matching.next().is_none() {
-            Ok(descriptor)
-        } else {
-            Err("provider package descriptor support is ambiguous")
-        }
+    let support_descriptor = |support: &MaterializationSupportArtifact| {
+        artifact_descriptor(support.path, support.media_type, support.bytes)
     };
     let mut package = FixtureProviderPackageV1 {
         provider_key: provider_key.clone(),
@@ -525,11 +431,13 @@ fn provider_package(
                 schema_descriptor: schema.descriptor(),
             })
             .collect(),
-        licence_descriptor: support_descriptor(BundleMemberRoleV1::Licence)?,
-        notices_descriptor: support_descriptor(BundleMemberRoleV1::Notice)?,
-        sbom_descriptor: support_descriptor(BundleMemberRoleV1::Sbom)?,
-        source_provenance_descriptor: support_descriptor(BundleMemberRoleV1::Provenance)?,
-        limitations_descriptor: support_descriptor(BundleMemberRoleV1::Limitations)?,
+        licence_descriptor: support_descriptor(catalog_provider.provider.licence),
+        notices_descriptor: support_descriptor(catalog_provider.provider.notices),
+        sbom_descriptor: support_descriptor(catalog_provider.provider.sbom),
+        source_provenance_descriptor: support_descriptor(
+            catalog_provider.provider.source_provenance,
+        ),
+        limitations_descriptor: support_descriptor(catalog_provider.provider.limitations),
         package_digest: [0; 32],
     };
     package
@@ -1003,6 +911,15 @@ fn profile_from_catalog(
                     fixture.modes.clone(),
                 )
             });
+            let mut allowed_divergences = fixtures
+                .iter()
+                .filter_map(|fixture| fixture.strict_oracle.divergence.clone())
+                .collect::<Vec<_>>();
+            allowed_divergences.sort_by(|left, right| {
+                (left.classification, left.first_coordinate.as_slice())
+                    .cmp(&(right.classification, right.first_coordinate.as_slice()))
+            });
+            allowed_divergences.dedup();
             DRAFT_EXECUTION_PROFILES
                 .iter()
                 .map(execution_profile_digest)
@@ -1021,7 +938,7 @@ fn profile_from_catalog(
                             execution_profile_digests,
                             fixture_provider_registry: providers.binding_for(provider_keys),
                             fixtures,
-                            allowed_divergences: Vec::new(),
+                            allowed_divergences,
                             evaluator_protocol: evaluator_protocol(),
                             independence_requirements: IndependenceRequirementsV1 {
                                 technical_independence_required: true,
@@ -1068,7 +985,7 @@ fn fixture_descriptor_from_record(
     let evidence = artifact_descriptor(
         &evidence_path,
         catalog_provider.provider.evidence_status_media_type,
-        fixture.expected,
+        fixture.evidence_status,
     );
     let oracle_output = artifact_descriptor(
         &oracle_output_path,
@@ -1082,15 +999,7 @@ fn fixture_descriptor_from_record(
         vec![evidence, oracle_output]
     };
     let downgrade = fixture.family == FixtureFamilyV1::Downgrade;
-    let transition = downgrade.then(|| FixtureContractTransitionV1 {
-        from: FixtureProviderKeyV1 {
-            provider_id: provider_key.provider_id.clone(),
-            contract_version: provider_key.contract_version.clone(),
-            abi_major: provider_key.abi_major,
-            abi_minor: 1,
-        },
-        to: provider_key.clone(),
-    });
+    let transition = fixture_downgrade_transition(fixture.family, provider_key);
     trust_policy_snapshot_digest().and_then(|trust_policy_snapshot_digest| {
         let release_admission_digest = transition.as_ref().map_or_else(
             || Ok(None),
@@ -1156,6 +1065,24 @@ fn fixture_descriptor_from_record(
     })
 }
 
+fn fixture_downgrade_transition(
+    family: FixtureFamilyV1,
+    provider_key: &FixtureProviderKeyV1,
+) -> Option<FixtureContractTransitionV1> {
+    if family != FixtureFamilyV1::Downgrade {
+        return None;
+    }
+    Some(FixtureContractTransitionV1 {
+        from: FixtureProviderKeyV1 {
+            provider_id: provider_key.provider_id.clone(),
+            contract_version: provider_key.contract_version.clone(),
+            abi_major: provider_key.abi_major,
+            abi_minor: provider_key.abi_minor + 1,
+        },
+        to: provider_key.clone(),
+    })
+}
+
 fn fixture_expectation(
     fixture: &CatalogFixture,
     auxiliary: &ArtifactDescriptorV1,
@@ -1190,6 +1117,25 @@ fn fixture_expectation(
                 },
                 fixture.failure_outcome,
                 Some(failure),
+            )
+        }
+        CatalogStrictOracle::Divergence {
+            classification,
+            first_coordinate,
+        } => {
+            let divergence = AllowedDivergenceV1 {
+                classification: *classification,
+                first_coordinate: first_coordinate.to_vec(),
+            };
+            (
+                StrictOracleV1 {
+                    kind: StrictOracleKindV1::Divergence,
+                    output: None,
+                    failure: None,
+                    divergence: Some(divergence),
+                },
+                VerificationOutcomeV1::Diverged,
+                None,
             )
         }
     };
@@ -1304,7 +1250,7 @@ fn bundle_inputs_from_profile(
                 evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
             members.push(BundleMemberV1::evidence_status(
                 evidence_path,
-                source.expected.to_vec(),
+                source.evidence_status.to_vec(),
             ));
             let member = BundleMemberV1::expected_result(path.clone(), source.oracle.to_vec());
             expected_results.push(BundleExpectedResultV1 {
@@ -1406,15 +1352,12 @@ fn append_draft_release_admissions(
         .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
         .filter(|fixture| fixture.modes.contains(&execution_mode))
         .try_for_each(|fixture| {
-            let transition = FixtureContractTransitionV1 {
-                from: FixtureProviderKeyV1 {
-                    provider_id: fixture.provider_key.provider_id.clone(),
-                    contract_version: fixture.provider_key.contract_version.clone(),
-                    abi_major: fixture.provider_key.abi_major,
-                    abi_minor: 1,
-                },
-                to: fixture.provider_key.clone(),
-            };
+            let transition = fixture.transition.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "downgrade fixture is missing its provider transition",
+                )
+            })?;
             trust_policy_snapshot_digest().and_then(|trust_snapshot| {
                 release_admission_bytes(
                     &fixture.case_id,

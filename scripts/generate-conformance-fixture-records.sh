@@ -6,9 +6,9 @@ profile_root="${fixture_root}/profiles"
 family_contract="${fixture_root}/support/fixture-family-contract.json"
 mode="${2:---check}"
 
-# This is the current JSON provider adapter. It owns JSON payload expansion and
-# JSON-Schema checks; CPF1's generic catalog builder and verifier treat the
-# resulting provider artifacts as opaque bytes.
+# This command dispatches every provider through its explicitly declared fixture
+# adapter. The current tree supports only the JSON adapter; unknown adapters
+# fail closed until they have their own regeneration implementation.
 [[ "${mode}" == "--check" || "${mode}" == "--write" ]] || {
   echo "usage: $0 [fixture-root] [--check|--write]" >&2
   exit 1
@@ -56,13 +56,55 @@ jq -e '
   echo "invalid canonical fixture-family contract" >&2
   exit 1
 }
+family_names="$(jq -c '[.families[].name]' "${family_contract}")"
+
+validate_json_fixture_adapter() {
+  local provider_manifest="$1"
+  jq -e --argjson family_names "${family_names}" '
+    (.fixture_adapter | keys | sort) == (["config", "id"] | sort) and
+    .fixture_adapter.id == "pigloros-json-v1" and
+    (.fixture_adapter.config | keys | sort) == (["operations", "payloads"] | sort) and
+    (.fixture_adapter.config.operations | keys | sort) == ($family_names | sort) and
+    all(.fixture_adapter.config.operations[];
+      . == null or (type == "string" and length > 0)) and
+    (.fixture_adapter.config.payloads | keys | sort) == ($family_names | sort) and
+    all(.fixture_adapter.config.payloads[];
+      (keys - ["with_operation", "without_operation"] | length) == 0 and
+      (.with_operation | type == "object") and
+      ((has("without_operation") | not) or (.without_operation | type == "object"))) and
+    .artifact_media_types == {
+      schema: "application/schema+json",
+      payload: "application/json",
+      oracle: "application/json",
+      evidence_status: "application/json"
+    }
+  ' "${provider_manifest}" >/dev/null || {
+    echo "invalid pigloros-json-v1 fixture adapter declaration: ${provider_manifest#"${fixture_root}/"}" >&2
+    exit 1
+  }
+}
+
+while IFS= read -r -d '' provider_manifest; do
+  adapter_id="$(jq -er '.fixture_adapter.id | select(type == "string" and length > 0)' "${provider_manifest}")" || {
+    echo "provider fixture adapter declaration is missing or invalid: ${provider_manifest#"${fixture_root}/"}" >&2
+    exit 1
+  }
+  case "${adapter_id}" in
+    pigloros-json-v1) validate_json_fixture_adapter "${provider_manifest}" ;;
+    *)
+      echo "unsupported provider fixture adapter: ${adapter_id}" >&2
+      exit 1
+      ;;
+  esac
+done < <(find "${fixture_root}/providers" -mindepth 2 -maxdepth 2 -type f -name provider.json -print0 | sort -z)
 
 generated_root="$(mktemp -d)"
 trap 'rm -rf "${generated_root}"' EXIT
 
 generated_count=0
 declare -A seen_expected_paths=()
-while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor evidence_status_media_type encoded_payload operation; do
+
+while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_path input_path expected_path oracle_path subject_adapter provider_id contract_version abi_major abi_minor schema_media_type payload_media_type oracle_media_type evidence_status_media_type encoded_payload operation; do
   [[ -n "${case_id}" && -n "${claim_layer}" && -n "${family}" ]] || {
     echo "profile contains an empty fixture identity" >&2
     exit 1
@@ -77,10 +119,6 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
   }
   [[ "${input_path}" != *".."* && "${expected_path}" != *".."* ]] || {
     echo "unsafe fixture path: ${case_id}" >&2
-    exit 1
-  }
-  [[ "${evidence_status_media_type}" == "application/json" ]] || {
-    echo "the current JSON provider adapter requires JSON evidence status: ${case_id}" >&2
     exit 1
   }
   expected_from_input="expected/${input_path#inputs/}"
@@ -311,18 +349,20 @@ done < <(
           .input, .expected, .oracle,
           $provider.subject_adapter, $provider.provider_id, $provider.contract_version,
           ($provider.abi_major | tostring), ($provider.abi_minor | tostring),
+          $provider.artifact_media_types.schema,
+          $provider.artifact_media_types.payload,
+          $provider.artifact_media_types.oracle,
           $provider.artifact_media_types.evidence_status,
-          ($provider.fixture_payloads[.family] | @base64),
-          ($provider.fixture_operations[.family] // "")
+          ($provider.fixture_adapter.config.payloads[.family] | @base64),
+          ($provider.fixture_adapter.config.operations[.family] // "")
         ] | @tsv
       ' "${profile}"
     done < <(jq -r '.fixture_providers[] | [.manifest, (.fixture_case_ids | tojson)] | @tsv' "${profile}")
   done < <(find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 | sort -z)
 )
 
-expected_count="$(find "${profile_root}" -mindepth 2 -maxdepth 2 -type f -name profile.json -print0 | xargs -0 jq '[.fixtures[]] | length' | awk '{total += $1} END {print total + 0}')"
-if (( generated_count != expected_count || generated_count == 0 )); then
-  echo "independently regenerated ${generated_count} fixture records; expected ${expected_count}" >&2
+if (( generated_count == 0 )); then
+  echo "the fixture tree does not contain fixtures owned by a declared adapter" >&2
   exit 1
 fi
 

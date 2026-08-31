@@ -22,6 +22,7 @@ pub const FIXTURE_PROVIDER_PACKAGE_MAGIC_V1: &str = "FPP1";
 /// Canonical archive member path for the FPR1 registry artifact.
 pub const FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1: &str =
     "authority/fixture-provider-registry.cbor";
+const PROVIDER_RECORD_MEDIA_TYPE_V1: &str = "application/cbor";
 /// Largest raw artifact that a provider descriptor may name.
 pub const MAX_PROVIDER_ARTIFACT_BYTES_V1: u64 = 64 * 1024 * 1024;
 const MAX_PROVIDER_RECORD_BYTES: usize = 16 * 1024 * 1024;
@@ -285,6 +286,8 @@ impl FixtureProviderRegistryBindingV1 {
         validate_descriptor(&self.registry_artifact).and_then(|()| {
             if self.registry_artifact.member_path != FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1 {
                 Err(ProviderContractErrorV1::InvalidMemberPath)
+            } else if self.registry_artifact.media_type != PROVIDER_RECORD_MEDIA_TYPE_V1 {
+                Err(ProviderContractErrorV1::InvalidMediaType)
             } else if self.required_provider_keys.is_empty() {
                 Err(ProviderContractErrorV1::FieldOutOfBounds)
             } else if self
@@ -467,6 +470,13 @@ fn validate_package_paths(
 fn validate_provider_entry(entry: &FixtureProviderEntryV1) -> Result<(), ProviderContractErrorV1> {
     validate_provider_key(&entry.provider_key)
         .and_then(|()| validate_descriptor(&entry.provider_package_descriptor))
+        .and_then(|()| {
+            if entry.provider_package_descriptor.media_type == PROVIDER_RECORD_MEDIA_TYPE_V1 {
+                Ok(())
+            } else {
+                Err(ProviderContractErrorV1::InvalidMediaType)
+            }
+        })
 }
 
 fn validate_provider_key(key: &FixtureProviderKeyV1) -> Result<(), ProviderContractErrorV1> {

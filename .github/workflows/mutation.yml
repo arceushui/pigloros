@@ -81,6 +81,8 @@ jobs:
         run: |
           set -euo pipefail
           set +e
+          # Each worker has an isolated target directory, so its first cold
+          # build may exceed the stricter per-test timeout on hosted runners.
           timeout --foreground 60m cargo mutants \
             --workspace \
             --all-features \
@@ -90,7 +92,7 @@ jobs:
             --baseline skip \
             --jobs 4 \
             --timeout 120 \
-            --build-timeout 120 \
+            --build-timeout 300 \
             --cap-lints true \
             --cargo-arg=--locked \
             -- \

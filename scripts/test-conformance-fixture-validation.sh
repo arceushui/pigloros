@@ -68,11 +68,38 @@ unsupported_schema_root="$(new_fixture_copy unsupported-schema-keyword)"
 replace_json "${unsupported_schema_root}/${positive_schema}" '.oneOf = []'
 expect_adapter_rejection "${unsupported_schema_root}" "unsupported JSON adapter semantics"
 
-non_json_evidence_root="$(new_fixture_copy non-json-evidence-status)"
-replace_json "${non_json_evidence_root}/providers/artifact-integrity/provider.json" \
-  '.artifact_media_types.evidence_status = "application/cbor"'
-expect_adapter_rejection "${non_json_evidence_root}" \
-  "current JSON provider adapter requires JSON evidence status"
+for media_case in \
+  'schema|application/cbor' \
+  'payload|application/cbor' \
+  'oracle|application/cbor' \
+  'evidence_status|application/cbor'; do
+  IFS='|' read -r media_field non_json_media <<<"${media_case}"
+  non_json_root="$(new_fixture_copy "opaque-${media_field}-media-type")"
+  replace_json "${non_json_root}/providers/artifact-integrity/provider.json" \
+    ".artifact_media_types.${media_field} = \"${non_json_media}\""
+  expect_adapter_rejection "${non_json_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+  expect_rejection "${non_json_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+done
+
+unknown_adapter_root="$(new_fixture_copy unknown-fixture-adapter)"
+replace_json "${unknown_adapter_root}/providers/artifact-integrity/provider.json" \
+  '.fixture_adapter.id = "future-plugin-v1"'
+expect_adapter_rejection "${unknown_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
+expect_rejection "${unknown_adapter_root}" "unsupported provider fixture adapter: future-plugin-v1"
+
+unknown_adapter_config_root="$(new_fixture_copy unknown-adapter-config-field)"
+replace_json "${unknown_adapter_config_root}/providers/artifact-integrity/provider.json" \
+  '.fixture_adapter.config.plugin_entrypoint = "example"'
+expect_adapter_rejection "${unknown_adapter_config_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+expect_rejection "${unknown_adapter_config_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+
+legacy_provider_root="$(new_fixture_copy legacy-provider-fields)"
+replace_json "${legacy_provider_root}/providers/artifact-integrity/provider.json" \
+  '.fixture_operations = .fixture_adapter.config.operations |
+   .fixture_payloads = .fixture_adapter.config.payloads |
+   del(.fixture_adapter)'
+expect_adapter_rejection "${legacy_provider_root}" "provider fixture adapter declaration is missing or invalid"
+expect_rejection "${legacy_provider_root}" "provider fixture adapter declaration is missing or invalid"
 
 unknown_authority_root="$(new_fixture_copy unknown-authority-field)"
 replace_json "${unknown_authority_root}/support/draft-execution-authority.json" \

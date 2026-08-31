@@ -411,13 +411,13 @@ fn knowledge_profile(
         family_fixture.case_id = format!("art-{name}");
         family_fixture.family = family;
         if family == FixtureFamilyV1::Downgrade {
-            let mut next_provider = provider_key.clone();
-            next_provider.abi_minor = 1;
+            let mut previous_provider = provider_key.clone();
+            previous_provider.abi_minor = 1;
             family_fixture.trust_policy_snapshot_digest = Some([22; 32]);
             family_fixture.release_admission_digest = Some([23; 32]);
             family_fixture.transition = Some(pos_conformance::FixtureContractTransitionV1 {
-                from: provider_key.clone(),
-                to: next_provider,
+                from: previous_provider,
+                to: provider_key.clone(),
             });
         }
         family_fixture.fixture_digest = family_fixture.digest();
@@ -669,9 +669,9 @@ fn with_second_provider(mut profile: ConformanceProfileV1) -> ConformanceProfile
                 &second,
             );
             if let Some(transition) = fixture.transition.as_mut() {
-                transition.from = second.clone();
                 transition.to = second.clone();
-                transition.to.abi_minor = transition.to.abi_minor.saturating_add(1);
+                transition.from = second.clone();
+                transition.from.abi_minor = transition.from.abi_minor.saturating_add(1);
             }
             fixture.fixture_digest = fixture.digest();
             fixture
@@ -1003,6 +1003,17 @@ fn public_profile_requires_every_mode_coordinate_from_every_provider() {
 }
 
 #[test]
+fn public_profile_rejects_mixed_claim_layers() {
+    let mut profile = profile_for_digest();
+    profile.fixtures[0].claim_layer = ClaimLayerV1::ReplayConformance;
+    refresh(&mut profile);
+    assert_eq!(
+        profile.validate(),
+        Err(ConformanceContractError::FieldOutOfBounds)
+    );
+}
+
+#[test]
 fn every_provider_execution_mode_coordinate_requires_exactly_seven_families() -> TestResult {
     let complete = with_second_execution_coordinate(profile_for_digest());
     assert_eq!(complete.validate(), Ok(()));
@@ -1253,6 +1264,17 @@ fn public_fixture_oracles_cover_failure_divergence_and_claim_rejection(
     refresh(&mut undeclared);
     assert_eq!(
         undeclared.validate(),
+        Err(ConformanceContractError::DivergenceClassificationMismatch)
+    );
+
+    let mut unused = profile.clone();
+    unused.allowed_divergences = vec![AllowedDivergenceV1 {
+        classification: DivergenceMismatchKindV1::CanonicalBytes,
+        first_coordinate: b"unused/0".to_vec(),
+    }];
+    refresh(&mut unused);
+    assert_eq!(
+        unused.validate(),
         Err(ConformanceContractError::DivergenceClassificationMismatch)
     );
 
@@ -2299,13 +2321,13 @@ fn public_profile_decoder_rejects_active_failure_and_transition_fields(
     downgrade.fixtures[5].trust_policy_snapshot_digest = Some([40; 32]);
     downgrade.fixtures[5].release_admission_digest = Some([41; 32]);
     downgrade.fixtures[5].transition = Some(pos_conformance::FixtureContractTransitionV1 {
-        from: downgrade.fixtures[5].provider_key.clone(),
-        to: FixtureProviderKeyV1 {
+        from: FixtureProviderKeyV1 {
             provider_id: "pigloros.fixture.artifact-integrity".to_owned(),
             contract_version: "1.0.0".to_owned(),
             abi_major: 1,
             abi_minor: 1,
         },
+        to: downgrade.fixtures[5].provider_key.clone(),
     });
     refresh(&mut downgrade);
     let downgrade_bytes = downgrade.to_canonical_cbor()?;
@@ -2367,6 +2389,32 @@ fn public_profile_rejects_deep_divergence_downgrade_and_failure_violations() {
         Err(ConformanceContractError::ProvenanceMissing)
     );
 
+    let mut reversed_downgrade = profile_for_digest();
+    let fixture = &mut reversed_downgrade.fixtures[5];
+    let mut newer = fixture.provider_key.clone();
+    newer.abi_minor += 1;
+    fixture.transition = Some(pos_conformance::FixtureContractTransitionV1 {
+        from: fixture.provider_key.clone(),
+        to: newer,
+    });
+    refresh(&mut reversed_downgrade);
+    assert_eq!(
+        reversed_downgrade.validate(),
+        Err(ConformanceContractError::ProfileLifecycleInvalid)
+    );
+
+    let mut unrelated_downgrade = profile_for_digest();
+    let transition = &mut unrelated_downgrade.fixtures[5].transition;
+    assert!(transition.is_some());
+    if let Some(transition) = transition {
+        transition.from.provider_id = "other.provider".to_owned();
+    }
+    refresh(&mut unrelated_downgrade);
+    assert_eq!(
+        unrelated_downgrade.validate(),
+        Err(ConformanceContractError::ProfileLifecycleInvalid)
+    );
+
     let mut ownership = profile_for_digest();
     let failure = NamespacedFailureV1 {
         owner_id: "other.provider".to_owned(),
@@ -2417,6 +2465,14 @@ fn public_profile_rejects_invalid_failure_ownership_and_divergence_order() {
         first_coordinate: vec![1],
     };
     let mut duplicate = profile_for_digest();
+    duplicate.fixtures[0].strict_oracle = StrictOracleV1 {
+        kind: StrictOracleKindV1::Divergence,
+        output: None,
+        failure: None,
+        divergence: Some(divergence.clone()),
+    };
+    duplicate.fixtures[0].expected_verification_outcome = VerificationOutcomeV1::Diverged;
+    duplicate.fixtures[0].expected_verification_error = None;
     duplicate.allowed_divergences = vec![divergence.clone(), divergence];
     refresh(&mut duplicate);
     assert_eq!(
