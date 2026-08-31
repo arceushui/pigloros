@@ -184,6 +184,18 @@ fn retry_admission(
 fn administrative_resolution(
     record: &ErasureCoordinatorRecordV1,
 ) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
+    administrative_resolution_for(
+        record,
+        vec![record.state().state_digest()],
+        ErasureAdministrativeResolutionActionV1::CloseContainment,
+    )
+}
+
+fn administrative_resolution_for(
+    record: &ErasureCoordinatorRecordV1,
+    affected_digests: Vec<ErasureReferenceV1>,
+    action: ErasureAdministrativeResolutionActionV1,
+) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
     let scope = record
         .supporting_records()
         .scope_commitment()
@@ -194,8 +206,8 @@ fn administrative_resolution(
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
         request: record.request().reference(),
-        affected_digests: vec![record.state().state_digest()],
-        action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+        affected_digests,
+        action,
         scope_commitment: scope.reference(),
         policy: record.request().policy(),
         trust: obligation_set.trust(),
@@ -203,7 +215,7 @@ fn administrative_resolution(
         authorization_provenance: reference(73),
         reason: reference(74),
         issue_position: 21,
-        predecessor_resolution: None,
+        predecessor_resolution: record.administrative_resolution_head(),
     })
 }
 
@@ -1988,6 +2000,52 @@ fn recovery_revalidates_retained_freeze_authorization() -> Result<(), ErasureErr
 }
 
 #[test]
+fn exact_submission_retry_revalidates_retained_freeze_authorization() -> Result<(), ErasureErrorV1>
+{
+    let mut fixture = frozen_fixture(vec![target(10)])?;
+    let request = latest_record(&fixture.state, fixture.request)?
+        .request()
+        .clone();
+    fixture.state.borrow_mut().freeze_authorization_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        ErasureCoordinator::submit(&mut fixture.machine, request),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+#[test]
+fn exact_corrected_submission_retry_revalidates_retained_freeze_authorization(
+) -> Result<(), ErasureErrorV1> {
+    let mut fixture = submitted_fixture(vec![target(10)])?;
+    fixture.machine.reject(fixture.request, reference(9))?;
+    let rejected = latest_record(&fixture.state, fixture.request)?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: fixture.request,
+        rejected_terminal_state: rejected.state().state_digest(),
+        correction_reason: reference(31),
+        authorization_provenance: reference(32),
+    })?;
+    let corrected = request_with(reference(40), correction.reference())?;
+    let corrected_reference = corrected.reference();
+    fixture
+        .machine
+        .submit_corrected(corrected.clone(), correction.clone())?;
+    fixture
+        .machine
+        .authorize(corrected_reference, reference(9))?;
+    fixture
+        .machine
+        .freeze_inventory(corrected_reference, freeze_transition())?;
+    fixture.state.borrow_mut().freeze_authorization_error = Some(ErasureErrorV1::Unauthorized);
+    assert_eq!(
+        fixture.machine.submit_corrected(corrected, correction),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+#[test]
 fn freeze_rejects_host_evidence_bound_to_another_request_or_authorization(
 ) -> Result<(), ErasureErrorV1> {
     let mut wrong_request = authorized_fixture(vec![target(10)])?;
@@ -2339,7 +2397,34 @@ fn finalization_requires_deadline_or_administrative_closure() -> Result<(), Eras
     );
 
     let record = latest_record(&early.state, early.request)?;
-    let resolution = administrative_resolution(&record)?;
+    let recovery = administrative_resolution_for(
+        &record,
+        vec![admission.reference()],
+        ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+    )?;
+    early
+        .machine
+        .resolve_administratively(early.request, recovery)?;
+    assert_eq!(
+        early.machine.finalize(
+            early.request,
+            receipt_input(
+                early.request,
+                target,
+                negative,
+                ErasureLifecycleV1::PartialFailure,
+                10,
+            ),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let record = latest_record(&early.state, early.request)?;
+    let resolution = administrative_resolution_for(
+        &record,
+        vec![admission.reference()],
+        ErasureAdministrativeResolutionActionV1::CloseContainment,
+    )?;
     early
         .machine
         .resolve_administratively(early.request, resolution)?;
@@ -2358,6 +2443,80 @@ fn finalization_requires_deadline_or_administrative_closure() -> Result<(), Eras
             )?
             .lifecycle(),
         ErasureLifecycleV1::PartialFailure
+    );
+    Ok(())
+}
+
+#[test]
+fn historical_administrative_closure_does_not_close_a_later_attempt() -> Result<(), ErasureErrorV1>
+{
+    let target = target(10);
+    let mut fixture = frozen_fixture(vec![target])?;
+    let first_admission = retry_admission(fixture.request, target, 0, None, 10)?;
+    fixture
+        .machine
+        .dispatch_attempt(fixture.request, &first_admission)?;
+    let first_negative = acknowledgement_for(
+        fixture.request,
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Negative,
+        reference(96),
+    )?;
+    fixture
+        .machine
+        .acknowledge(fixture.request, first_negative)?;
+    let record = latest_record(&fixture.state, fixture.request)?;
+    let resolution = administrative_resolution_for(
+        &record,
+        vec![first_admission.reference()],
+        ErasureAdministrativeResolutionActionV1::CloseContainment,
+    )?;
+    fixture
+        .machine
+        .resolve_administratively(fixture.request, resolution)?;
+    let first_receipt = fixture.machine.finalize(
+        fixture.request,
+        receipt_input(
+            fixture.request,
+            target,
+            first_negative,
+            ErasureLifecycleV1::PartialFailure,
+            11,
+        ),
+    )?;
+    let second_admission = retry_admission(
+        fixture.request,
+        target,
+        1,
+        Some(first_receipt.receipt_digest()),
+        20,
+    )?;
+    fixture
+        .machine
+        .dispatch_attempt(fixture.request, &second_admission)?;
+    let second_negative = acknowledgement_for(
+        fixture.request,
+        target,
+        target.replica_id,
+        ErasureAcknowledgementOutcomeV1::Negative,
+        reference(97),
+    )?;
+    fixture
+        .machine
+        .acknowledge(fixture.request, second_negative)?;
+    assert_eq!(
+        fixture.machine.finalize(
+            fixture.request,
+            receipt_input(
+                fixture.request,
+                target,
+                second_negative,
+                ErasureLifecycleV1::PartialFailure,
+                12,
+            ),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
 }

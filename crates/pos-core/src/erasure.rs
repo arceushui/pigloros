@@ -6075,17 +6075,23 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
     ) -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
         match self.port.load_record(request) {
-            Ok(Some(record)) => record
-                .validate(self.coordinator)
-                .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
-                .and_then(|()| self.validate_recovered_freeze_authorization(&record))
-                .map(|()| {
-                    self.cache(record.clone());
-                    record
-                }),
+            Ok(Some(record)) => self.validate_recovered_record(&record).map(|()| {
+                self.cache(record.clone());
+                record
+            }),
             Ok(None) => Err(ErasureErrorV1::ProvenanceMissing),
             Err(error) => Err(error),
         }
+    }
+
+    fn validate_recovered_record(
+        &self,
+        record: &ErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
+        record
+            .validate(self.coordinator)
+            .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
+            .and_then(|()| self.validate_recovered_freeze_authorization(record))
     }
 
     fn validate_recovered_freeze_authorization(
@@ -6143,18 +6149,15 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         match self.port.load_record(request.reference()) {
-            Ok(Some(record)) => record
-                .validate(self.coordinator)
-                .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
-                .and_then(|()| {
-                    if record.request.eq(&request) {
-                        let state = record.state.clone();
-                        self.cache(record);
-                        Ok(state)
-                    } else {
-                        Err(ErasureErrorV1::PolicyConflict)
-                    }
-                }),
+            Ok(Some(record)) => self.validate_recovered_record(&record).and_then(|()| {
+                if record.request.eq(&request) {
+                    let state = record.state.clone();
+                    self.cache(record);
+                    Ok(state)
+                } else {
+                    Err(ErasureErrorV1::PolicyConflict)
+                }
+            }),
             Ok(None) => self.port.authenticate(&request).and_then(|()| {
                 ErasureStateV1::submitted(request.reference(), self.coordinator, provenance)
                     .and_then(|state| {
@@ -6194,9 +6197,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         match self.port.load_record(request.reference()) {
-            Ok(Some(record)) => record
-                .validate(self.coordinator)
-                .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
+            Ok(Some(record)) => self
+                .validate_recovered_record(&record)
                 .and_then(|()| {
                     if record.request != request
                         || record.supporting_records.correction_provenance() != Some(&correction)
@@ -7053,6 +7055,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .iter()
             .any(|resolution| {
                 resolution.action() == ErasureAdministrativeResolutionActionV1::CloseContainment
+                    && resolution
+                        .affected_digests()
+                        .contains(&admission.reference())
             });
         if !complete
             && input.issue_position < admission.deadline_position()
