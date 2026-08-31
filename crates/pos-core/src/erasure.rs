@@ -52,6 +52,22 @@ const fn target_count_is_bounded(count: usize) -> bool {
     count <= ERASURE_MAX_TARGETS
 }
 
+const fn applicability_matrix_cardinality_is_valid(count: usize) -> bool {
+    count != 0 && count <= ERASURE_MAX_OBLIGATIONS && count.is_multiple_of(4)
+}
+
+const fn obligation_count_is_bounded(count: usize) -> bool {
+    count <= ERASURE_MAX_OBLIGATIONS
+}
+
+const fn category_obligation_count_is_bounded(count: usize) -> bool {
+    count <= ERASURE_MAX_OBLIGATIONS_PER_CATEGORY
+}
+
+const fn scope_extension_count_is_bounded(count: usize) -> bool {
+    count <= ERASURE_MAX_SCOPE_EXTENSIONS
+}
+
 /// Domain tag for correction-provenance records.
 pub const ERASURE_CORRECTION_PROVENANCE_TAG_V1: &str = "ERCP1";
 /// Domain tag for retry-admission records.
@@ -919,10 +935,7 @@ impl ErasureFreezeAdmissionEvidenceV1 {
 fn validate_applicability_matrix(
     matrix: &[ErasureFreezeApplicabilityRowV1],
 ) -> Result<(), ErasureErrorV1> {
-    if matrix.is_empty()
-        || matrix.len() > ERASURE_MAX_OBLIGATIONS
-        || !matrix.len().is_multiple_of(4)
-    {
+    if !applicability_matrix_cardinality_is_valid(matrix.len()) {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     let target_count = matrix.len() / 4;
@@ -2174,8 +2187,6 @@ impl ErasureSupportingRecordsV1 {
         }
         if self.scope_commitment.is_none()
             && (self.obligation_set.is_some()
-                || self.freeze_admission_evidence.is_some()
-                || self.freeze_authorization_evidence.is_some()
                 || !self.obligations.is_empty()
                 || !self.scope_extensions.is_empty()
                 || !self.scope_extension_ledgers.is_empty())
@@ -2267,7 +2278,7 @@ impl ErasureSupportingRecordsV1 {
         if self.obligations.is_empty() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if self.obligations.len() > ERASURE_MAX_OBLIGATIONS {
+        if !obligation_count_is_bounded(self.obligations.len()) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         let references = self
@@ -2296,7 +2307,7 @@ impl ErasureSupportingRecordsV1 {
         category_target_pairs.sort_unstable();
         if category_counts
             .iter()
-            .any(|count| *count > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY)
+            .any(|count| !category_obligation_count_is_bounded(*count))
             || has_duplicate(&command_owner_pairs)
             || has_duplicate(&category_target_pairs)
         {
@@ -2316,7 +2327,7 @@ impl ErasureSupportingRecordsV1 {
                 Err(ErasureErrorV1::PolicyConflict)
             };
         };
-        if self.scope_extensions.len() > ERASURE_MAX_SCOPE_EXTENSIONS
+        if !scope_extension_count_is_bounded(self.scope_extensions.len())
             || self.scope_extension_ledgers.len() != self.scope_extensions.len().saturating_add(1)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
@@ -5019,7 +5030,7 @@ impl ErasureAtomicFreezeAdmissionV1 {
                     }
                     let category = obligation.category().index();
                     categories[category] = categories[category].saturating_add(1);
-                    if categories[category] > ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
+                    if !category_obligation_count_is_bounded(categories[category]) {
                         return Err(ErasureErrorV1::ScopeInvalid);
                     }
                 }
@@ -5508,16 +5519,12 @@ impl ErasureCoordinatorRecordV1 {
                 let rejection_matches = predecessor
                     .supporting_records
                     .freeze_failure()
-                    .is_some_and(|failure| {
-                        failure.request() == predecessor.request.reference()
-                            && failure.reference() == predecessor.state.provenance()
-                    })
+                    .is_some_and(|failure| failure.reference() == predecessor.state.provenance())
                     || predecessor
                         .supporting_records
                         .authorization_rejection()
                         .is_some_and(|rejection| {
-                            rejection.request() == predecessor.request.reference()
-                                && rejection.reference() == predecessor.state.provenance()
+                            rejection.reference() == predecessor.state.provenance()
                         });
                 rejection_matches
                     .then_some(())
