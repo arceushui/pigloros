@@ -1053,12 +1053,12 @@ fn supporting_records_bind_minimal_acknowledgement_trust_and_record_request(
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let target = target(10);
-    let mut scoped = awaiting_fixture(vec![target])?;
+    let scoped_target = target;
+    let mut scoped = awaiting_fixture(vec![scoped_target])?;
     let acknowledgement = acknowledgement_for(
         scoped.request,
-        target,
-        target.replica_id,
+        scoped_target,
+        scoped_target.replica_id,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         reference(95),
     )?;
