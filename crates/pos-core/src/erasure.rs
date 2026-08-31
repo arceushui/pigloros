@@ -2186,10 +2186,7 @@ impl ErasureSupportingRecordsV1 {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if self.scope_commitment.is_none()
-            && (self.obligation_set.is_some()
-                || !self.obligations.is_empty()
-                || !self.scope_extensions.is_empty()
-                || !self.scope_extension_ledgers.is_empty())
+            && (!self.scope_extensions.is_empty() || !self.scope_extension_ledgers.is_empty())
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }

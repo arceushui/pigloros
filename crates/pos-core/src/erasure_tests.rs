@@ -39,6 +39,7 @@ pub(super) struct TestCoordinatorPort {
     >,
     acknowledgement_admitted: bool,
     acknowledgement_admissions: Rc<RefCell<Vec<ErasureAcknowledgementProvenanceV1>>>,
+    attempt_admissions: Rc<RefCell<Vec<ErasureRetryAdmissionV1>>>,
     freeze_error: Option<ErasureErrorV1>,
     frozen_targets_error: Option<ErasureErrorV1>,
     admitted_freeze_provenance: Option<ErasureReferenceV1>,
@@ -230,7 +231,8 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         }
         Ok(())
     }
-    fn admit_attempt(&self, _admission: &ErasureRetryAdmissionV1) -> Result<(), ErasureErrorV1> {
+    fn admit_attempt(&self, admission: &ErasureRetryAdmissionV1) -> Result<(), ErasureErrorV1> {
+        self.attempt_admissions.borrow_mut().push(admission.clone());
         Ok(())
     }
     fn admit_acknowledgement(
@@ -376,6 +378,7 @@ pub(super) fn test_port(
         authorization_decisions: Rc::new(RefCell::new(Vec::new())),
         acknowledgement_admitted: true,
         acknowledgement_admissions: Rc::new(RefCell::new(Vec::new())),
+        attempt_admissions: Rc::new(RefCell::new(Vec::new())),
         freeze_error: None,
         frozen_targets_error: None,
         admitted_freeze_provenance: None,
@@ -3778,9 +3781,6 @@ fn exclusive_supporting_records_reject_every_individual_conflict() -> Result<(),
 #[test]
 fn supporting_records_reject_each_independent_missing_scope_dependency(
 ) -> Result<(), ErasureErrorV1> {
-    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let frozen = record_after_freeze(vec![target])?;
-    let source = supporting_records_input(frozen.supporting_records());
     let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: reference(1),
         scope_commitment: reference(70),
@@ -3796,14 +3796,6 @@ fn supporting_records_reject_each_independent_missing_scope_dependency(
     })?;
 
     let missing_scope_cases = [
-        ErasureSupportingRecordsInputV1 {
-            obligation_set: source.obligation_set,
-            ..ErasureSupportingRecordsInputV1::default()
-        },
-        ErasureSupportingRecordsInputV1 {
-            obligations: frozen.supporting_records().obligations.clone(),
-            ..ErasureSupportingRecordsInputV1::default()
-        },
         ErasureSupportingRecordsInputV1 {
             scope_extensions: vec![extension],
             ..ErasureSupportingRecordsInputV1::default()
@@ -4164,6 +4156,46 @@ fn correction_predecessor_accepts_the_exact_rejected_record() -> Result<(), Eras
         corrected.validate_correction_predecessor(&predecessor),
         Ok(())
     );
+
+    let mut freeze_predecessor = record_after_submit()?;
+    freeze_predecessor.state = freeze_predecessor.state().transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    freeze_predecessor.authorize_provenance = Some(reference(9));
+    let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request: reference(1),
+        error: ErasureErrorV1::AccessFreezeFailed,
+        authorization_provenance: reference(9),
+        evidence: reference(10),
+    })?;
+    freeze_predecessor.state = freeze_predecessor
+        .state()
+        .transition(ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::Rejected,
+            freeze_position: None,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::StructuralOnly,
+            provenance: failure.reference(),
+        })?;
+    freeze_predecessor.supporting_records.freeze_failure = Some(failure);
+    let freeze_correction =
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: freeze_predecessor.request().reference(),
+            rejected_terminal_state: freeze_predecessor.state().state_digest(),
+            correction_reason: reference(74),
+            authorization_provenance: reference(75),
+        })?;
+    let mut freeze_corrected = record_after_submit()?;
+    freeze_corrected.supporting_records.correction_provenance = Some(freeze_correction);
+    assert_eq!(
+        freeze_corrected.validate_correction_predecessor(&freeze_predecessor),
+        Ok(())
+    );
     Ok(())
 }
 
@@ -4233,7 +4265,8 @@ fn freeze_persistence_rejects_each_independent_identity_mismatch() -> Result<(),
 }
 
 #[test]
-fn dispatch_attempt_rejects_a_foreign_request_before_admission() -> Result<(), ErasureErrorV1> {
+fn dispatch_attempt_rejects_a_wrong_source_receipt_before_admission() -> Result<(), ErasureErrorV1>
+{
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let mut coordinator =
         ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
@@ -4250,8 +4283,8 @@ fn dispatch_attempt_rejects_a_foreign_request_before_admission() -> Result<(), E
     )?;
     let frozen = coordinator.record(reference(1))?;
     let obligation = frozen.supporting_records().obligations()[0];
-    let admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
-        request: reference(99),
+    let mut admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request: reference(1),
         attempt_ordinal: 0,
         source_receipt: None,
         unresolved_obligations: vec![obligation.reference()],
@@ -4266,10 +4299,12 @@ fn dispatch_attempt_rejects_a_foreign_request_before_admission() -> Result<(), E
         deadline_position: frozen.request().horizon_position(),
         authorization_provenance: reference(9),
     })?;
+    admission.input.source_receipt = Some(reference(99));
     assert_eq!(
         coordinator.dispatch_attempt(reference(1), &admission),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    assert!(coordinator.port.attempt_admissions.borrow().is_empty());
     Ok(())
 }
 
