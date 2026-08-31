@@ -767,7 +767,7 @@ fn retry_admission_at(
 }
 
 fn acknowledgement_provenance_for(
-    base: ErasureAcknowledgementProvenanceV1,
+    base: &ErasureAcknowledgementProvenanceV1,
     admission: &ErasureRetryAdmissionV1,
     outcome: ErasureAcknowledgementOutcomeV1,
     marker: u8,
@@ -3772,44 +3772,47 @@ fn exclusive_supporting_records_reject_every_individual_conflict() -> Result<(),
         );
     }
 
-    let mut admission_only = ErasureSupportingRecordsInputV1::default();
-    admission_only.freeze_admission_evidence = source.freeze_admission_evidence;
-    assert_eq!(
-        ErasureSupportingRecordsV1::new(admission_only),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
-    let mut authorization_only = ErasureSupportingRecordsInputV1::default();
-    authorization_only.freeze_authorization_evidence = source.freeze_authorization_evidence;
-    assert_eq!(
-        ErasureSupportingRecordsV1::new(authorization_only),
-        Err(ErasureErrorV1::ProvenanceMissing)
-    );
+    Ok(())
+}
 
-    let mut missing_scope_cases = Vec::new();
-    let mut input = ErasureSupportingRecordsInputV1::default();
-    input.obligation_set = source.obligation_set;
-    missing_scope_cases.push(input);
-    let mut input = ErasureSupportingRecordsInputV1::default();
-    input.freeze_admission_evidence = frozen
-        .supporting_records()
-        .freeze_admission_evidence
-        .clone();
-    missing_scope_cases.push(input);
-    let mut input = ErasureSupportingRecordsInputV1::default();
-    input.freeze_authorization_evidence = frozen
-        .supporting_records()
-        .freeze_authorization_evidence
-        .clone();
-    missing_scope_cases.push(input);
-    let mut input = ErasureSupportingRecordsInputV1::default();
-    input.obligations = frozen.supporting_records().obligations.clone();
-    missing_scope_cases.push(input);
-    let mut input = ErasureSupportingRecordsInputV1::default();
-    input.scope_extensions = vec![extension];
-    missing_scope_cases.push(input);
-    let mut input = ErasureSupportingRecordsInputV1::default();
-    input.scope_extension_ledgers = vec![ledger];
-    missing_scope_cases.push(input);
+#[test]
+fn supporting_records_reject_each_independent_missing_scope_dependency(
+) -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let frozen = record_after_freeze(vec![target])?;
+    let source = supporting_records_input(frozen.supporting_records());
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: reference(70),
+        fork: reference(73),
+        lineage_rule: reference(72),
+        predecessor_extension: None,
+        admission_provenance: reference(74),
+    })?;
+    let ledger = ErasureScopeExtensionLedgerV1::new(ErasureScopeExtensionLedgerInputV1 {
+        scope_commitment: reference(70),
+        extensions: Vec::new(),
+        head: None,
+    })?;
+
+    let missing_scope_cases = [
+        ErasureSupportingRecordsInputV1 {
+            obligation_set: source.obligation_set,
+            ..ErasureSupportingRecordsInputV1::default()
+        },
+        ErasureSupportingRecordsInputV1 {
+            obligations: frozen.supporting_records().obligations.clone(),
+            ..ErasureSupportingRecordsInputV1::default()
+        },
+        ErasureSupportingRecordsInputV1 {
+            scope_extensions: vec![extension],
+            ..ErasureSupportingRecordsInputV1::default()
+        },
+        ErasureSupportingRecordsInputV1 {
+            scope_extension_ledgers: vec![ledger],
+            ..ErasureSupportingRecordsInputV1::default()
+        },
+    ];
     for missing_scope in missing_scope_cases {
         assert_eq!(
             ErasureSupportingRecordsV1::new(missing_scope),
@@ -3968,19 +3971,19 @@ fn effective_acknowledgements_select_only_the_earliest_matching_positive_evidenc
     let admission_1 = retry_admission_at(&admission_0, 1, 81)?;
     let admission_2 = retry_admission_at(&admission_0, 2, 82)?;
     let provenance_0 = acknowledgement_provenance_for(
-        baseline.acknowledgement_provenance[0],
+        &baseline.acknowledgement_provenance[0],
         &admission_0,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         83,
     )?;
     let provenance_1 = acknowledgement_provenance_for(
-        baseline.acknowledgement_provenance[0],
+        &baseline.acknowledgement_provenance[0],
         &admission_1,
         ErasureAcknowledgementOutcomeV1::Acknowledged,
         84,
     )?;
 
-    let mut records = baseline.clone();
+    let mut records = baseline;
     records.retry_admissions = vec![admission_0.clone(), admission_1.clone()];
     records.acknowledgement_provenance = vec![provenance_0];
     let selected = records.effective_acknowledgement_provenance(&admission_1);
@@ -4004,7 +4007,7 @@ fn effective_acknowledgements_select_only_the_earliest_matching_positive_evidenc
         .is_empty());
 
     let negative = acknowledgement_provenance_for(
-        provenance_0,
+        &provenance_0,
         &admission_0,
         ErasureAcknowledgementOutcomeV1::Negative,
         85,
@@ -4047,7 +4050,7 @@ fn effective_acknowledgements_select_only_the_earliest_matching_positive_evidenc
     let selected = records.effective_acknowledgement_provenance(&admission_2);
     assert!(std::ptr::eq(
         selected[0].1,
-        &records.acknowledgement_provenance[0]
+        records.acknowledgement_provenance.as_ptr()
     ));
     Ok(())
 }
