@@ -242,10 +242,15 @@ fn create_private_staging(
     parent_identity: DirectoryIdentity,
     effective_uid: u32,
 ) -> Result<(CString, OwnedFd, DirectoryIdentity), MaterializationError> {
-    revalidate_parent(parent, effective_uid)?;
-    let name = random_staging_name()?;
-    fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)).map_err(map_open_error)?;
-    configure_private_staging(parent, &name, parent_identity, effective_uid)
+    revalidate_parent(parent, effective_uid).and_then(|()| {
+        random_staging_name().and_then(|name| {
+            fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700))
+                .map_err(map_open_error)
+                .and_then(|()| {
+                    configure_private_staging(parent, &name, parent_identity, effective_uid)
+                })
+        })
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -257,9 +262,7 @@ fn configure_private_staging(
 ) -> Result<(CString, OwnedFd, DirectoryIdentity), MaterializationError> {
     configure_staging_descriptor(parent, staging_name, parent_identity, effective_uid)
         .map(|(staging, identity)| (staging_name.clone(), staging, identity))
-        .inspect_err(|_| {
-            let _cleanup_result = unlink_empty_directory(parent, staging_name);
-        })
+        .inspect_err(|_| drop(unlink_empty_directory(parent, staging_name)))
 }
 
 #[cfg(target_os = "linux")]
@@ -269,18 +272,21 @@ fn configure_staging_descriptor(
     parent_identity: DirectoryIdentity,
     effective_uid: u32,
 ) -> Result<(OwnedFd, DirectoryIdentity), MaterializationError> {
-    let staging = open_directory(parent, staging_name)?;
-    fs::fchmod(&staging, Mode::from_raw_mode(0o700))
-        .map_err(|_| MaterializationError::DurabilitySyncFailed)?;
-    sync_fd(&staging)?;
-    let identity = staging_identity(
-        parent,
-        staging_name,
-        &staging,
-        parent_identity,
-        effective_uid,
-    )?;
-    Ok((staging, identity))
+    open_directory(parent, staging_name).and_then(|staging| {
+        fs::fchmod(&staging, Mode::from_raw_mode(0o700))
+            .map_err(|_| MaterializationError::DurabilitySyncFailed)
+            .and_then(|()| sync_fd(&staging))
+            .and_then(|()| {
+                staging_identity(
+                    parent,
+                    staging_name,
+                    &staging,
+                    parent_identity,
+                    effective_uid,
+                )
+            })
+            .map(|identity| (staging, identity))
+    })
 }
 
 #[cfg(target_os = "linux")]

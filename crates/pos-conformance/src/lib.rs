@@ -3911,10 +3911,16 @@ pub mod strict_codec {
                     size: Some(10),
                 },
                 prior_matching_checkpoint_digest: Some([11; 32]),
-                follow_on_counts: vec![FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventIdentity,
-                    count: 1,
-                }],
+                follow_on_counts: vec![
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventIdentity,
+                        count: 1,
+                    },
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::SchemaOrUpcaster,
+                        count: 1,
+                    },
+                ],
                 report_digest: [0; 32],
             };
             report.report_digest = report.digest().map_err(|error| error.to_string())?;
