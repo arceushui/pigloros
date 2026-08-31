@@ -1770,7 +1770,16 @@ fn freeze_supporting_records_bind_erfa1_and_erfaa1_content() -> Result<(), Erasu
         ErasureSupportingRecordsV1::new(wrong_trust),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
 
+#[test]
+fn freeze_supporting_records_bind_admission_and_host_references() -> Result<(), ErasureErrorV1> {
+    let input = freeze_supporting_input(reference(1))?;
+    let admission = input
+        .freeze_admission_evidence
+        .clone()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let mut wrong_admission_reference = input.clone();
     let mismatched_admission =
         ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
