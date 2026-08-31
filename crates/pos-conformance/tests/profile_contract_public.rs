@@ -662,6 +662,7 @@ fn with_second_provider(mut profile: ConformanceProfileV1) -> ConformanceProfile
         .cloned()
         .map(|mut fixture| {
             fixture.provider_key = second.clone();
+            fixture.case_id.push_str("-zzz");
             retarget_provider_failure(fixture.strict_oracle.failure.as_mut(), &first, &second);
             retarget_provider_failure(
                 fixture.expected_verification_error.as_mut(),
