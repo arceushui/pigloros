@@ -4817,6 +4817,254 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
 }
 
 #[test]
+fn atomic_admission_helpers_reject_each_malformed_matrix_shape() -> Result<(), ErasureErrorV1> {
+    assert_eq!(
+        ErasureApplicabilityDecisionV1::from_code(2),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: reference(1),
+            policy: reference(2),
+            trust: reference(3),
+            evidence: Vec::new(),
+        },),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let (admission, _) = lineage_freeze_admission(target, reference(72))?;
+    let base = admission.input;
+    let obligation = base.obligations[0];
+    let matrix = base
+        .freeze_admission_evidence
+        .applicability_matrix()
+        .to_vec();
+
+    let mut wrong_freeze_position = base.clone();
+    wrong_freeze_position.freeze_position = 11;
+    assert_eq!(
+        ErasureAtomicFreezeAdmissionV1::new(wrong_freeze_position),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        validate_applicability_obligations(&matrix, &base.targets, &[obligation, obligation],),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let mut out_of_range = matrix.clone();
+    out_of_range[0].target_index = 1;
+    assert_eq!(
+        validate_applicability_obligations(&out_of_range, &base.targets, &base.obligations),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let mut overcounted = matrix;
+    overcounted[1].category = ErasureInventoryCategoryV1::Artifact;
+    overcounted[1].decision = ErasureApplicabilityDecisionV1::Applicable;
+    overcounted[1].owner = Some(obligation.owner());
+    assert_eq!(
+        validate_applicability_obligations(&overcounted, &base.targets, &base.obligations),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_helpers_reject_each_non_monotonic_dimension() -> Result<(), ErasureErrorV1> {
+    let submitted = record_after_submit()?;
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let frozen = record_after_freeze(vec![target])?;
+
+    let mut changed_identity = frozen.clone();
+    changed_identity.targets.clear();
+    assert_eq!(
+        frozen.validate_same_state_replacement(&changed_identity),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut changed_dispatch = submitted.clone();
+    changed_dispatch.dispatch_provenance = Some(reference(80));
+    assert_eq!(
+        submitted.validate_same_state_replacement(&changed_dispatch),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut premature_ledger = submitted.clone();
+    premature_ledger.scope_extension_ledger = Some(reference(81));
+    assert_eq!(
+        submitted.validate_same_state_replacement(&premature_ledger),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut premature_acknowledgement = frozen.clone();
+    premature_acknowledgement.acknowledgements = vec![acknowledgement(
+        1,
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+    )];
+    assert_eq!(
+        frozen.validate_same_state_replacement(&premature_acknowledgement),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let authorized_state = submitted.state().transition(change(
+        ErasureLifecycleV1::Authorized,
+        None,
+        Vec::new(),
+        Vec::new(),
+    ))?;
+    let mut authorized = submitted;
+    authorized.state = authorized_state;
+    authorized.authorize_provenance = Some(reference(9));
+
+    let wrong_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let wrong_frozen = record_after_freeze(vec![wrong_target])?;
+    assert_eq!(
+        authorized.validate_advanced_replacement(&wrong_frozen),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut changed_ledger = frozen.clone();
+    changed_ledger.scope_extension_ledger = Some(reference(82));
+    assert_eq!(
+        authorized.validate_advanced_replacement(&changed_ledger),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut changed_authorization = frozen;
+    changed_authorization.authorize_provenance = Some(reference(83));
+    assert_eq!(
+        authorized.validate_advanced_replacement(&changed_authorization),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn durable_validation_helpers_reject_each_incomplete_evidence_shape() -> Result<(), ErasureErrorV1>
+{
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let frozen = record_after_freeze(vec![target])?;
+
+    let mut missing_scope = frozen.clone();
+    missing_scope.supporting_records.scope_commitment = None;
+    assert_eq!(
+        missing_scope.validate_frozen_evidence(ErasureLifecycleV1::AccessFrozen),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut malformed_obligation = frozen.clone();
+    malformed_obligation.supporting_records.obligations[0]
+        .input
+        .command_identity = reference(84);
+    assert_eq!(
+        malformed_obligation.validate_frozen_evidence(ErasureLifecycleV1::AccessFrozen),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut wrong_ledger = frozen.clone();
+    wrong_ledger.scope_extension_ledger = Some(reference(85));
+    assert_eq!(
+        wrong_ledger.validate_frozen_evidence(ErasureLifecycleV1::AccessFrozen),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut complete = complete_record()?;
+    complete.acknowledgements.clear();
+    assert_eq!(
+        complete.validate_terminal(ErasureLifecycleV1::Complete, reference(2)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let mut missing_outcome = complete_record()?;
+    missing_outcome.supporting_records.attempt_outcomes.clear();
+    assert_eq!(
+        missing_outcome.validate_terminal(ErasureLifecycleV1::Complete, reference(2)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let mut wrong_terminal_provenance = complete_record()?;
+    wrong_terminal_provenance
+        .supporting_records
+        .receipt_provenance
+        .last_mut()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .input
+        .terminal_state = reference(86);
+    assert_eq!(
+        wrong_terminal_provenance.validate_terminal(ErasureLifecycleV1::Complete, reference(2)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let coordinator =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
+    let mut partial_authorization = frozen.clone();
+    partial_authorization
+        .supporting_records
+        .freeze_authorization_evidence = None;
+    assert_eq!(
+        coordinator.validate_recovered_freeze_authorization(&partial_authorization),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut conflicting_intents = record_after_dispatch_intent(target)?;
+    let duplicate_intent = conflicting_intents.supporting_records.retry_admissions[0].clone();
+    conflicting_intents
+        .supporting_records
+        .retry_admissions
+        .push(duplicate_intent);
+    assert_eq!(
+        conflicting_intents.validate_attempt_evidence_shape(ErasureLifecycleV1::AccessFrozen),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let awaiting = awaiting_record()?;
+    let mut missing_intent = awaiting.clone();
+    missing_intent.supporting_records.retry_admissions.clear();
+    assert_eq!(
+        missing_intent
+            .validate_attempt_evidence_shape(ErasureLifecycleV1::AwaitingAcknowledgements),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let mut wrong_intent = awaiting;
+    wrong_intent.state.provenance = reference(87);
+    assert_eq!(
+        wrong_intent.validate_attempt_evidence_shape(ErasureLifecycleV1::AwaitingAcknowledgements),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn finalization_helpers_reject_missing_or_unbalanced_attempts() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let coordinator =
+        ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
+    let input = receipt_input(
+        ErasureLifecycleV1::Complete,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let mut missing_attempt = awaiting_record()?;
+    missing_attempt.supporting_records.retry_admissions.clear();
+    assert_eq!(
+        coordinator.prepare_finalization(reference(1), &mut missing_attempt, &input),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let mut unbalanced_attempt = awaiting_record()?;
+    let duplicate = unbalanced_attempt.supporting_records.retry_admissions[0].clone();
+    unbalanced_attempt
+        .supporting_records
+        .retry_admissions
+        .push(duplicate);
+    assert_eq!(
+        coordinator.prepare_finalization(reference(1), &mut unbalanced_attempt, &input),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
 fn durable_validation_rejects_removed_acknowledgements() -> Result<(), ErasureErrorV1> {
     let acknowledged = record_after_acknowledgement()?;
     let mut missing_ack_parts = record_parts(&acknowledged);
