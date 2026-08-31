@@ -1212,6 +1212,146 @@ fn coordinator_reloads_durable_identity_after_restart() -> Result<(), ErasureErr
 }
 
 #[test]
+fn coordinator_corrected_submission_persists_and_retries_through_unit_port(
+) -> Result<(), ErasureErrorV1> {
+    let port = test_port(true, Vec::new());
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.reject(reference(1), reference(9))?;
+    let predecessor = coordinator
+        .port
+        .records
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: predecessor.request().reference(),
+        rejected_terminal_state: predecessor.state().state_digest(),
+        correction_reason: reference(70),
+        authorization_provenance: reference(71),
+    })?;
+    let mut corrected_input = request_input(vec![reference(8), reference(7)]);
+    corrected_input.request = reference(11);
+    corrected_input.provenance = correction.reference();
+    let corrected = ErasureRequestV1::new(corrected_input)?;
+
+    let submitted = coordinator.submit_corrected(corrected.clone(), correction)?;
+    assert_eq!(submitted.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(
+        coordinator.submit_corrected(corrected, correction)?,
+        submitted
+    );
+    Ok(())
+}
+
+fn lineage_freeze_admission(
+    target: ErasureRequiredTargetV1,
+    lineage_rule: ErasureReferenceV1,
+) -> Result<(ErasureAtomicFreezeAdmissionV1, ErasureReferenceV1), ErasureErrorV1> {
+    let request = reference(1);
+    let targets = vec![target];
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: target.replica_id,
+        command_identity: destruction_command_reference(request, target),
+    })?;
+    let obligations = vec![obligation];
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: vec![obligation.reference()],
+        policy: reference(5),
+        trust: reference(3),
+    })?;
+    let scope = ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(7), reference(8)],
+        target_closure: target_closure_digest(&targets),
+        lineage_rule: Some(lineage_rule),
+    };
+    let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
+    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
+        request,
+        scope_reference,
+        &obligation_set,
+        &targets,
+        &obligations,
+        10,
+        reference(9),
+    )?;
+    ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+        targets,
+        scope,
+        obligations,
+        obligation_set,
+        freeze_position: 10,
+        freeze_admission_evidence,
+        freeze_authorization_evidence,
+    })
+    .map(|admission| (admission, scope_reference))
+}
+
+#[test]
+fn coordinator_lineage_and_resolution_successors_run_through_unit_port(
+) -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let lineage_rule = reference(72);
+    let (admission, scope_commitment) = lineage_freeze_admission(target, lineage_rule)?;
+    let port = test_port(true, vec![target]);
+    port.freeze_reservation.borrow_mut().replace(admission);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+    coordinator.submit(request()?, reference(3))?;
+    coordinator.authorize(reference(1), reference(9))?;
+    let frozen = coordinator.freeze_inventory(
+        reference(1),
+        change(
+            ErasureLifecycleV1::AccessFrozen,
+            Some(10),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment,
+        fork: reference(73),
+        lineage_rule,
+        predecessor_extension: None,
+        admission_provenance: reference(74),
+    })?;
+    let extended = coordinator.append_scope_extension(reference(1), extension)?;
+    assert_eq!(extended, frozen);
+    assert_eq!(
+        coordinator.append_scope_extension(reference(1), extension)?,
+        frozen
+    );
+
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: reference(1),
+            affected_digests: vec![frozen.state_digest()],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment,
+            policy: reference(5),
+            trust: reference(3),
+            principal: reference(75),
+            authorization_provenance: reference(76),
+            reason: reference(77),
+            issue_position: 11,
+            predecessor_resolution: None,
+        })?;
+    let resolved = coordinator.resolve_administratively(reference(1), resolution.clone())?;
+    assert_eq!(resolved, frozen);
+    assert_eq!(
+        coordinator.resolve_administratively(reference(1), resolution)?,
+        frozen
+    );
+    Ok(())
+}
+
+#[test]
 fn durable_record_reconstructs_through_public_parts_api() -> Result<(), ErasureErrorV1> {
     let request = request()?;
     let port = test_port(true, Vec::new());
