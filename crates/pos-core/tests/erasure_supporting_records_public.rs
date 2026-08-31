@@ -1757,7 +1757,7 @@ fn freeze_supporting_records_bind_erfa1_and_erfaa1_content() -> Result<(), Erasu
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let mut wrong_trust = input.clone();
+    let mut wrong_trust = input;
     wrong_trust.freeze_authorization_evidence = Some(ErasureFreezeAuthorizationEvidenceV1::new(
         ErasureFreezeAuthorizationEvidenceInputV1 {
             admission_body_digest: authorization.admission_body_digest(),
