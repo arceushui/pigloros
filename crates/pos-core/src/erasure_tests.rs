@@ -21,6 +21,7 @@ use crate::erasure::codec::{
 };
 use ciborium::value::Value;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -411,6 +412,15 @@ fn freeze_evidence_fixture(
     ),
     ErasureErrorV1,
 > {
+    let owners_by_obligation = obligations
+        .iter()
+        .map(|obligation| {
+            (
+                (obligation.category(), obligation.target()),
+                obligation.owner(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut applicability_matrix = Vec::with_capacity(targets.len().saturating_mul(4));
     for category in [
         ErasureInventoryCategoryV1::Artifact,
@@ -419,12 +429,7 @@ fn freeze_evidence_fixture(
         ErasureInventoryCategoryV1::Backup,
     ] {
         for (target_index, target) in targets.iter().enumerate() {
-            let owner = obligations
-                .iter()
-                .find(|obligation| {
-                    obligation.category() == category && obligation.target() == *target
-                })
-                .map(ErasureObligationV1::owner);
+            let owner = owners_by_obligation.get(&(category, *target)).copied();
             applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
                 category,
                 target_index as u64,
