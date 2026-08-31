@@ -323,7 +323,7 @@ fn mutate_acknowledgement_provenance(
         return Err(ErasureErrorV1::InvalidEncoding);
     };
     let provenance = supporting_fields
-        .get_mut(10)
+        .get_mut(12)
         .ok_or(ErasureErrorV1::InvalidEncoding)?;
     let Value::Array(provenance) = provenance else {
         return Err(ErasureErrorV1::InvalidEncoding);
