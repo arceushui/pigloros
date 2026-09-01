@@ -165,4 +165,37 @@ replace_json "${unknown_authority_root}/support/draft-execution-authority.json" 
   '.undeclared_authority = true'
 expect_rejection "${unknown_authority_root}" "invalid Draft authority declaration fields"
 
+divergent_positive_root="$(new_fixture_copy divergent-positive-oracle)"
+replace_json "${divergent_positive_root}/providers/empirical-evaluation/provider.json" \
+  '.fixture_contracts.positive.allowed_divergence = {
+    "classification": "canonical-bytes",
+    "first_coordinate": "expected/assessment"
+  }'
+expect_adapter_rejection "${divergent_positive_root}" \
+  "invalid pigloros-json-v1 fixture adapter declaration"
+
+short_plugin_id_root="$(new_fixture_copy short-plugin-invocation-id)"
+replace_json "${short_plugin_id_root}/providers/plugin-conformance/provider.json" \
+  '.fixture_adapter.config.payloads.denied.with_operation.stimulus.input["invocation-id"] |= .[:-1]'
+expect_adapter_rejection "${short_plugin_id_root}" \
+  "generated fixture does not satisfy its provider schema"
+
+missing_publication_parent="${temporary_base}/missing-publication-parent"
+publication_log="${temporary_base}/missing-publication-parent.log"
+if PIGLOROS_CONFORMANCE_SIGNING_KEY="0707070707070707070707070707070707070707070707070707070707070707" \
+  bash scripts/materialize-conformance-bundles.sh "${missing_publication_parent}" \
+  >"${publication_log}" 2>&1; then
+  echo "materialization accepted a missing publication parent" >&2
+  exit 1
+fi
+grep -Fq "publication parent must already exist" "${publication_log}" || {
+  echo "missing publication parent failed for the wrong reason" >&2
+  cat "${publication_log}" >&2
+  exit 1
+}
+[[ ! -e "${missing_publication_parent}" ]] || {
+  echo "materialization wrapper created the rejected publication parent" >&2
+  exit 1
+}
+
 echo "conformance fixture validator negative controls passed"
