@@ -73,20 +73,17 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             .transpose()
     }
 
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        self.commit_records(std::slice::from_ref(&record))
-    }
-
     fn commit_records(
         &mut self,
-        records: &[ErasureCoordinatorRecordV1],
+        records: &[pos_core::VerifiedErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
         if self.config.fail_commits {
             return Err(ErasureErrorV1::ReceiptCommitFailed);
         }
         let mut staged_records = self.records.clone();
         let mut staged_states = self.states.clone();
-        for record in records {
+        for verified in records {
+            let record = verified.record();
             if let Some(existing) = staged_records
                 .iter()
                 .find(|existing| existing.request() == record.request())
@@ -116,12 +113,12 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         &mut self,
         request: ErasureReferenceV1,
         expected_ledger: ErasureReferenceV1,
-        record: ErasureCoordinatorRecordV1,
+        record: pos_core::VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         let current = self
             .load_record(request, self)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if current == record {
+        if current == *record.record() {
             return Ok(());
         }
         if current.scope_extension_ledger() != Some(expected_ledger) {
@@ -134,12 +131,12 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         &mut self,
         request: ErasureReferenceV1,
         expected_head: Option<ErasureReferenceV1>,
-        record: ErasureCoordinatorRecordV1,
+        record: pos_core::VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         let current = self
             .load_record(request, self)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if current == record {
+        if current == *record.record() {
             return Ok(());
         }
         if current.administrative_resolution_head() != expected_head {

@@ -38,6 +38,10 @@
 pub mod memory;
 pub mod stitch;
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod erasure_test_support;
+
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 

@@ -14,13 +14,14 @@ const ERQ1: &str = "ERQ1";
 const ERS1: &str = "ERS1";
 const ERC1: &str = "ERC1";
 const ERCR1: &str = "ERCR1";
+const ERCRP1: &str = "ERCRP1";
 const ERASURE_INVENTORY_CATEGORY_COUNT: usize = 4;
 
 /// Largest encoded ERQ1 or ERS1 accepted by V1.
 pub const ERASURE_REQUEST_OR_STATE_MAX_BYTES: usize = 1024 * 1024;
 /// Largest encoded ERC1 accepted by V1.
 pub const ERASURE_RECEIPT_MAX_BYTES: usize = 16 * 1024 * 1024;
-/// Largest encoded durable ERQ1/ERS1/ERC1 coordinator record accepted by V1.
+/// Largest aggregate ERCR1 envelope or normalized persistence manifest.
 pub const ERASURE_COORDINATOR_RECORD_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Largest selector or owner collection accepted by V1.
 pub const ERASURE_MAX_REFERENCES: usize = 4_096;
@@ -45,9 +46,6 @@ pub const ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Largest encoded retry-admission record.
 pub const ERASURE_RETRY_ADMISSION_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Independent ordinal ceiling for attempt outcomes or ERC1 receipts.
-///
-/// The 64 MiB aggregate ledger bound remains authoritative and may bind
-/// before this defensive cardinality ceiling for unusually large evidence.
 pub const ERASURE_MAX_ATTEMPT_OUTCOMES: usize = 4_096;
 /// Maximum number of administrative resolutions per ERQ1.
 pub const ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS: usize = 4_096;
@@ -2115,7 +2113,8 @@ impl ErasureSupportingRecordsV1 {
     ///
     /// # Errors
     ///
-    /// Returns a closed error when the ledger exceeds the coordinator bound.
+    /// Returns a closed error when this optional aggregate envelope exceeds
+    /// the coordinator bound. Durable adapters use normalized evidence.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
         encode_limited(
             &supporting_records_value(self),
@@ -2169,13 +2168,7 @@ impl ErasureSupportingRecordsV1 {
             receipt_provenance: input.receipt_provenance,
             administrative_resolutions: input.administrative_resolutions,
         };
-        records.validate().and_then(|()| {
-            encode_limited(
-                &supporting_records_value(&records),
-                ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-            )
-            .map(|_| records)
-        })
+        records.validate().map(|()| records)
     }
 
     /// Return correction provenance, when this ERQ1 replaces a rejection.
@@ -2280,6 +2273,45 @@ impl ErasureSupportingRecordsV1 {
     #[must_use]
     pub fn administrative_resolutions(&self) -> &[ErasureAdministrativeResolutionV1] {
         &self.administrative_resolutions
+    }
+
+    fn persistence_evidence(&self) -> Result<Vec<(ErasureReferenceV1, Vec<u8>)>, ErasureErrorV1> {
+        let mut evidence = Vec::new();
+        macro_rules! push_optional {
+            ($value:expr) => {
+                if let Some(value) = $value {
+                    evidence.push((value.reference(), value.to_canonical_cbor()?));
+                }
+            };
+        }
+        macro_rules! push_records {
+            ($values:expr) => {
+                for value in $values {
+                    evidence.push((value.reference(), value.to_canonical_cbor()?));
+                }
+            };
+        }
+
+        push_optional!(self.correction_provenance.as_ref());
+        push_optional!(self.authorization_rejection.as_ref());
+        push_optional!(self.scope_commitment.as_ref());
+        push_optional!(self.freeze_admission_evidence.as_ref());
+        push_optional!(self.freeze_authorization_evidence.as_ref());
+        push_optional!(self.freeze_provenance.as_ref());
+        push_optional!(self.freeze_failure.as_ref());
+        push_records!(&self.obligations);
+        push_optional!(self.obligation_set.as_ref());
+        push_records!(&self.scope_extensions);
+        push_records!(&self.scope_extension_ledgers);
+        push_records!(&self.retry_admissions);
+        push_records!(&self.acknowledgement_provenance);
+        push_records!(&self.attempt_outcomes);
+        for receipt in &self.receipts {
+            evidence.push((receipt.receipt_digest(), receipt.to_canonical_cbor()?));
+        }
+        push_records!(&self.receipt_provenance);
+        push_records!(&self.administrative_resolutions);
+        Ok(evidence)
     }
 
     fn validate(&self) -> Result<(), ErasureErrorV1> {
@@ -2429,9 +2461,6 @@ impl ErasureSupportingRecordsV1 {
                 Err(ErasureErrorV1::ProvenanceMissing)
             };
         };
-        if self.obligations.is_empty() {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
         if !obligation_count_is_bounded(self.obligations.len()) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
@@ -2970,9 +2999,6 @@ fn normalize_retry_admission(
     {
         return Err(ErasureErrorV1::PolicyConflict);
     }
-    if input.unresolved_obligations.is_empty() {
-        return Err(ErasureErrorV1::ScopeInvalid);
-    }
     if input.unresolved_obligations.len() != input.command_identities.len() {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
@@ -3135,33 +3161,40 @@ pub enum ErasureReplayClaimV1 {
     IncompatibleProfile,
 }
 
-/// One deterministic destruction command in the frozen target closure.
+/// One deterministic destruction intent for an admitted obligation.
 ///
-/// The command identifier is derived from `(request, target)` and therefore
-/// remains stable across retries and process restarts.  The command carries
-/// no payload; the target closure and the host-owned provenance are the only
-/// inputs an adapter may dispatch.
+/// The command identifier is derived from `(request, target)` and may therefore
+/// be shared by several category-scoped obligations. The obligation and owner
+/// fields keep those durable intents distinct across retries and restarts.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ErasureDestructionCommandV1 {
-    /// The frozen artifact/key/replica target owned by this command.
+    /// Content address of the selected immutable obligation.
+    pub obligation: ErasureReferenceV1,
+    /// Category whose registered owner receives this intent.
+    pub category: ErasureInventoryCategoryV1,
+    /// The frozen artifact/key/replica target owned by this obligation.
     pub target: ErasureRequiredTargetV1,
+    /// Independently authenticated category-scoped owner.
+    pub owner: ErasureReferenceV1,
     /// Content-addressed command identity, stable across retries.
     pub command: ErasureReferenceV1,
-    /// Host-authenticated dispatch provenance.
+    /// Host-authenticated attempt provenance.
     pub provenance: ErasureReferenceV1,
 }
 
 impl ErasureDestructionCommandV1 {
-    /// Construct the retry-stable command for one frozen target.
+    /// Construct one owner-specific intent from a validated obligation.
     #[must_use]
-    pub fn new(
-        request: ErasureReferenceV1,
-        target: ErasureRequiredTargetV1,
+    pub const fn from_obligation(
+        obligation: &ErasureObligationV1,
         provenance: ErasureReferenceV1,
     ) -> Self {
         Self {
-            target,
-            command: destruction_command_reference(request, target),
+            obligation: obligation.reference(),
+            category: obligation.category(),
+            target: obligation.target(),
+            owner: obligation.owner(),
+            command: obligation.command_identity(),
             provenance,
         }
     }
@@ -3501,11 +3534,11 @@ impl ErasureObligationSetV1 {
     ///
     /// # Errors
     ///
-    /// Returns a closed scope error for an empty, duplicate, unordered, or
-    /// oversized obligation collection.
+    /// Returns a closed scope error for a duplicate, unordered, or oversized
+    /// obligation collection. An empty set is valid when every applicability
+    /// row is inapplicable.
     pub fn new(input: ErasureObligationSetInputV1) -> Result<Self, ErasureErrorV1> {
-        if input.obligations.is_empty()
-            || input.obligations.len() > ERASURE_MAX_OBLIGATIONS
+        if input.obligations.len() > ERASURE_MAX_OBLIGATIONS
             || !strictly_increasing(&input.obligations)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
@@ -4405,9 +4438,7 @@ impl ErasureReceiptV1 {
         &self,
         obligations: &[ErasureObligationV1],
     ) -> Result<(), ErasureErrorV1> {
-        if obligations.is_empty()
-            || !inventories_match_frozen_obligations(&self.0.inventories, obligations)
-        {
+        if !inventories_match_frozen_obligations(&self.0.inventories, obligations) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         let (pending, failed) =
@@ -4692,6 +4723,44 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
+/// Coordinator record whose retained freeze authorization has been verified
+/// for one persistence operation.
+///
+/// The inner record is intentionally private so persistence adapters cannot
+/// construct a frozen commit without invoking the host-owned verifier. A
+/// pre-freeze record also uses this capability and succeeds without evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedErasureCoordinatorRecordV1(ErasureCoordinatorRecordV1);
+
+impl VerifiedErasureCoordinatorRecordV1 {
+    /// Verify a record before it crosses the durable commit boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance or authorization error when retained freeze
+    /// evidence is incomplete or rejected by the host-owned verifier.
+    pub fn new(
+        record: ErasureCoordinatorRecordV1,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        record
+            .verify_recovered_freeze_authorization(verifier)
+            .map(|()| Self(record))
+    }
+
+    /// Borrow the verified record for adapter validation and encoding.
+    #[must_use]
+    pub const fn record(&self) -> &ErasureCoordinatorRecordV1 {
+        &self.0
+    }
+
+    /// Consume the capability after a successful staged commit.
+    #[must_use]
+    pub fn into_record(self) -> ErasureCoordinatorRecordV1 {
+        self.0
+    }
+}
+
 /// Durable persistence SPI for the complete ERQ1/ERS1/ERC1 coordinator record.
 ///
 /// This port contains persistence plus the mandatory recovery-verification
@@ -4733,7 +4802,7 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     /// durable state unchanged.
     fn commit_records(
         &mut self,
-        records: &[ErasureCoordinatorRecordV1],
+        records: &[VerifiedErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1>;
 
     /// Persist one record through the batch transaction seam.
@@ -4744,7 +4813,10 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     /// # Errors
     ///
     /// Returns the adapter's closed storage, encoding, or conflict error.
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
+    fn commit_record(
+        &mut self,
+        record: VerifiedErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
         self.commit_records(std::slice::from_ref(&record))
     }
 
@@ -4761,7 +4833,7 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
         &mut self,
         request: ErasureReferenceV1,
         expected_ledger: ErasureReferenceV1,
-        record: ErasureCoordinatorRecordV1,
+        record: VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1>;
 
     /// Atomically append an administrative-resolution successor.
@@ -4777,7 +4849,7 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
         &mut self,
         request: ErasureReferenceV1,
         expected_head: Option<ErasureReferenceV1>,
-        record: ErasureCoordinatorRecordV1,
+        record: VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1>;
 }
 
@@ -4999,9 +5071,11 @@ pub trait ErasureCoordinatorPortV1:
     ) -> Result<(), ErasureErrorV1>;
     /// Dispatch idempotent destruction commands for a frozen closure.
     ///
-    /// The host must deduplicate by `(request, target)` and retain that
-    /// identity across retries and process restarts.  The core state machine
-    /// never advances to `DestructionDispatched` unless this call succeeds.
+    /// The host must retain one durable intent per admitted obligation. Stable
+    /// command identities may repeat when distinct category-scoped owners act
+    /// on the same target; deduplication uses `(attempt, obligation)` rather
+    /// than command identity alone. The core state machine never advances to
+    /// `DestructionDispatched` unless this call succeeds.
     ///
     /// # Errors
     ///
@@ -5352,6 +5426,52 @@ pub struct ErasureCoordinatorRecordV1 {
     supporting_records: ErasureSupportingRecordsV1,
 }
 
+/// One independently bounded, content-addressed supporting-evidence object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasurePersistenceEvidenceV1 {
+    reference: ErasureReferenceV1,
+    canonical_cbor: Vec<u8>,
+}
+
+impl ErasurePersistenceEvidenceV1 {
+    /// Return the content address used by persistence adapters.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.reference
+    }
+
+    /// Return the canonical bytes for this independently bounded object.
+    #[must_use]
+    pub fn canonical_cbor(&self) -> &[u8] {
+        &self.canonical_cbor
+    }
+}
+
+/// Normalized durable coordinator representation.
+///
+/// The bounded manifest contains ERQ1/ERS1 and references to supporting
+/// evidence. Each evidence object is stored independently so the permitted
+/// receipt history cannot be rejected by an unrelated aggregate byte limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasurePersistenceBundleV1 {
+    manifest_cbor: Vec<u8>,
+    evidence: Vec<ErasurePersistenceEvidenceV1>,
+}
+
+impl ErasurePersistenceBundleV1 {
+    /// Return the bounded canonical coordinator manifest.
+    #[must_use]
+    pub fn manifest_cbor(&self) -> &[u8] {
+        &self.manifest_cbor
+    }
+
+    /// Return independently bounded content-addressed evidence objects.
+    #[must_use]
+    pub fn evidence(&self) -> &[ErasurePersistenceEvidenceV1] {
+        &self.evidence
+    }
+}
+
 impl ErasureCoordinatorRecordV1 {
     /// Reconstruct a durable coordinator record from host storage.
     ///
@@ -5414,6 +5534,71 @@ impl ErasureCoordinatorRecordV1 {
             ERASURE_MAX_INVENTORY_RESULTS,
         )
         .and_then(|value| exact_array(&value, 13).and_then(record_from_fields))
+    }
+
+    /// Split this record into a bounded manifest and independently bounded
+    /// content-addressed supporting objects for durable adapters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed validation or encoding error for invalid evidence.
+    pub fn to_persistence_bundle(&self) -> Result<ErasurePersistenceBundleV1, ErasureErrorV1> {
+        self.validate(self.state.coordinator()).and_then(|()| {
+            let manifest_cbor = encode_limited(
+                &persistence_manifest_value(self),
+                ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+            )?;
+            let mut evidence = BTreeMap::new();
+            self.supporting_records
+                .persistence_evidence()
+                .into_iter()
+                .try_for_each(|(reference, canonical_cbor)| {
+                    match evidence.entry(reference) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(canonical_cbor);
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry) => {
+                            if entry.get() != &canonical_cbor {
+                                return Err(ErasureErrorV1::ProvenanceMissing);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            Ok(ErasurePersistenceBundleV1 {
+                manifest_cbor,
+                evidence: evidence
+                    .into_iter()
+                    .map(|(reference, canonical_cbor)| ErasurePersistenceEvidenceV1 {
+                        reference,
+                        canonical_cbor,
+                    })
+                    .collect(),
+            })
+        })
+    }
+
+    /// Rehydrate a normalized durable record through a content-addressed
+    /// evidence resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or provenance error when the manifest is
+    /// malformed, an object is unavailable, or bytes do not match their
+    /// expected content address.
+    pub fn from_persistence_manifest(
+        manifest_cbor: &[u8],
+        evidence: &mut dyn FnMut(ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1>,
+    ) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            manifest_cbor,
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+            ERASURE_MAX_INVENTORY_RESULTS,
+        )
+        .and_then(|value| {
+            exact_array(&value, 13)
+                .and_then(|fields| record_from_persistence_manifest(fields, evidence))
+        })
     }
 
     /// Verify retained host authorization before a recovered record is returned.
@@ -6358,10 +6543,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .and_then(|()| verify_predecessor_chain(record.state.clone(), &self.port))
     }
     fn commit(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        record
-            .validate(self.coordinator)
-            .and_then(|()| self.port.commit_record(record.clone()))
-            .map(|()| self.cache(record))
+        record.validate(self.coordinator).and_then(|()| {
+            VerifiedErasureCoordinatorRecordV1::new(record.clone(), &self.port)
+                .and_then(|verified| self.port.commit_record(verified))
+                .map(|()| self.cache(record))
+        })
     }
     fn commit_records(
         &mut self,
@@ -6370,7 +6556,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         records
             .iter()
             .try_for_each(|record| record.validate(self.coordinator))
-            .and_then(|()| self.port.commit_records(records))
+            .and_then(|()| {
+                records
+                    .iter()
+                    .cloned()
+                    .map(|record| VerifiedErasureCoordinatorRecordV1::new(record, &self.port))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .and_then(|verified| self.port.commit_records(&verified))
             .map(|()| {
                 records
                     .iter()
@@ -6916,8 +7109,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .iter()
             .zip(admission.command_identities())
             .try_fold(
-                (Vec::new(), BTreeSet::new()),
-                |(mut commands, mut identities), (obligation_reference, command)| {
+                Vec::new(),
+                |mut commands, (obligation_reference, command)| {
                     obligations
                         .get(obligation_reference)
                         .copied()
@@ -6926,19 +7119,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                             if obligation.command_identity() != *command {
                                 return Err(ErasureErrorV1::ScopeInvalid);
                             }
-                            let candidate = ErasureDestructionCommandV1::new(
-                                admission.request(),
-                                obligation.target(),
+                            commands.push(ErasureDestructionCommandV1::from_obligation(
+                                obligation,
                                 admission.reference(),
-                            );
-                            if identities.insert(candidate.command) {
-                                commands.push(candidate);
-                            }
-                            Ok((commands, identities))
+                            ));
+                            Ok(commands)
                         })
                 },
             )
-            .map(|(commands, _)| commands)
     }
 
     /// Dispatch the initial attempt using request-pinned policy and host provenance.
@@ -7447,12 +7635,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                             let mut next = record;
                             next.retain_scope_extension(extension, successor);
                             let state = next.state.clone();
-                            self.port
-                                .compare_and_swap_scope_extension(
-                                    request,
-                                    current_reference,
-                                    next.clone(),
-                                )
+                            VerifiedErasureCoordinatorRecordV1::new(next.clone(), &self.port)
+                                .and_then(|verified| {
+                                    self.port.compare_and_swap_scope_extension(
+                                        request,
+                                        current_reference,
+                                        verified,
+                                    )
+                                })
                                 .map(|()| {
                                     self.cache(next);
                                     state
@@ -7513,12 +7703,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                             let mut next = record;
                             next.retain_administrative_resolution(resolution);
                             let state = next.state.clone();
-                            self.port
-                                .compare_and_swap_administrative_resolution(
-                                    request,
-                                    expected_head,
-                                    next.clone(),
-                                )
+                            VerifiedErasureCoordinatorRecordV1::new(next.clone(), &self.port)
+                                .and_then(|verified| {
+                                    self.port.compare_and_swap_administrative_resolution(
+                                        request,
+                                        expected_head,
+                                        verified,
+                                    )
+                                })
                                 .map(|()| {
                                     self.cache(next);
                                     state
@@ -7624,14 +7816,14 @@ use codec::{
     has_duplicate_acknowledgement_identity, invalid_owner_sets, inventories_exceed_bound,
     inventories_have_duplicate_targets, inventories_match_closure, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, obligation_from_fields, obligation_set_from_fields,
-    obligation_set_value, obligation_value, receipt_core_value, receipt_from_fields,
-    receipt_provenance_from_fields, receipt_provenance_value, receipt_value, record_from_fields,
-    record_value, reference_zero, request_from_fields, request_value, retry_admission_from_fields,
-    retry_admission_value, scope_commitment_from_fields, scope_commitment_value,
-    scope_extension_from_fields, scope_extension_ledger_from_fields, scope_extension_ledger_value,
-    scope_extension_value, sort_inventories, state_core_value, state_from_fields, state_value,
-    strictly_increasing, supporting_records_from_value, supporting_records_value,
-    weakest_inventory_claim,
+    obligation_set_value, obligation_value, persistence_manifest_value, receipt_core_value,
+    receipt_from_fields, receipt_provenance_from_fields, receipt_provenance_value, receipt_value,
+    record_from_fields, record_from_persistence_manifest, record_value, reference_zero,
+    request_from_fields, request_value, retry_admission_from_fields, retry_admission_value,
+    scope_commitment_from_fields, scope_commitment_value, scope_extension_from_fields,
+    scope_extension_ledger_from_fields, scope_extension_ledger_value, scope_extension_value,
+    sort_inventories, state_core_value, state_from_fields, state_value, strictly_increasing,
+    supporting_records_from_value, supporting_records_value, weakest_inventory_claim,
 };
 
 #[cfg(test)]

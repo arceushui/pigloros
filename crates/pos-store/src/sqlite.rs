@@ -43,30 +43,11 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     ConsentAppendPermit, CoreError, ErasureCoordinatorRecordV1, ErasureErrorV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, ErasureReferenceV1,
-    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, GEOGRAPHIC_EVENT_TYPE,
+    ErasureFreezeAuthorizationVerifierV1, ErasurePersistenceBundleV1, ErasurePersistencePortV1,
+    ErasureReferenceV1, ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
+    VerifiedErasureCoordinatorRecordV1, GEOGRAPHIC_EVENT_TYPE,
 };
-
-#[cfg(test)]
-struct TestFreezeAuthorizationVerifier;
-
-#[cfg(test)]
-const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
-    TestFreezeAuthorizationVerifier;
-
-#[cfg(test)]
-impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
-    fn validate_freeze_authorization(
-        &self,
-        admission: &pos_core::ErasureFreezeAdmissionEvidenceV1,
-        authorization: &pos_core::ErasureFreezeAuthorizationEvidenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
-    }
-}
 
 #[cfg(test)]
 thread_local! {
@@ -540,6 +521,10 @@ impl SqliteStore {
                  state_digest BLOB NOT NULL CHECK (length(state_digest) = 32),
                  record_cbor BLOB NOT NULL CHECK (length(record_cbor) <= 67108864)
              );
+             CREATE TABLE IF NOT EXISTS erasure_evidence (
+                 reference_digest BLOB NOT NULL PRIMARY KEY CHECK (length(reference_digest) = 32),
+                 object_cbor BLOB NOT NULL CHECK (length(object_cbor) <= 16777216)
+             );
              CREATE TABLE IF NOT EXISTS erasure_states (
                  state_digest BLOB NOT NULL PRIMARY KEY CHECK (length(state_digest) = 32),
                  request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
@@ -639,16 +624,16 @@ impl SqliteStore {
     }
 
     fn validate_erasure_schema(&self) -> Result<(), CoreError> {
-        let tables = [
+        let tables: &[(&str, &str, &[(&str, &str, i64, i64)], &[&str])] = &[
             (
                 "erasure_records",
                 "PRAGMA table_info(erasure_records)",
-                [
+                &[
                     ("request_digest", "BLOB", 1_i64, 1_i64),
                     ("state_digest", "BLOB", 1_i64, 0_i64),
                     ("record_cbor", "BLOB", 1_i64, 0_i64),
                 ],
-                [
+                &[
                     "request_digest",
                     "state_digest",
                     "record_cbor",
@@ -658,14 +643,28 @@ impl SqliteStore {
                 ],
             ),
             (
+                "erasure_evidence",
+                "PRAGMA table_info(erasure_evidence)",
+                &[
+                    ("reference_digest", "BLOB", 1_i64, 1_i64),
+                    ("object_cbor", "BLOB", 1_i64, 0_i64),
+                ],
+                &[
+                    "reference_digest",
+                    "object_cbor",
+                    "length(reference_digest)=32",
+                    "length(object_cbor)<=16777216",
+                ],
+            ),
+            (
                 "erasure_states",
                 "PRAGMA table_info(erasure_states)",
-                [
+                &[
                     ("state_digest", "BLOB", 1_i64, 1_i64),
                     ("request_digest", "BLOB", 1_i64, 0_i64),
                     ("state_cbor", "BLOB", 1_i64, 0_i64),
                 ],
-                [
+                &[
                     "state_digest",
                     "request_digest",
                     "state_cbor",
@@ -715,10 +714,16 @@ impl SqliteStore {
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(Self::into_storage_error)?;
             let expected_columns = expected_columns
+                .iter()
                 .map(|(name, kind, not_null, primary_key)| {
-                    (name.to_owned(), kind.to_owned(), not_null, primary_key)
+                    (
+                        (*name).to_owned(),
+                        (*kind).to_owned(),
+                        *not_null,
+                        *primary_key,
+                    )
                 })
-                .to_vec();
+                .collect::<Vec<_>>();
             if columns != expected_columns {
                 return Err(CoreError::Storage(format!(
                     "SQLite {table} table has an incompatible schema: columns or key constraints"
@@ -4168,16 +4173,17 @@ impl ErasurePersistencePortV1 for SqliteStore {
 
     fn commit_records(
         &mut self,
-        records: &[ErasureCoordinatorRecordV1],
+        records: &[VerifiedErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
         records
             .iter()
+            .map(VerifiedErasureCoordinatorRecordV1::record)
             .map(|record| {
-                record.to_canonical_cbor().and_then(|record_bytes| {
+                record.to_persistence_bundle().and_then(|bundle| {
                     record
                         .state()
                         .to_canonical_cbor()
-                        .map(|state_bytes| (record.clone(), record_bytes, state_bytes))
+                        .map(|state_bytes| (record.clone(), bundle, state_bytes))
                 })
             })
             .collect::<Result<Vec<_>, _>>()
@@ -4190,8 +4196,8 @@ impl ErasurePersistencePortV1 for SqliteStore {
                     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
                 let result = encoded
                     .iter()
-                    .try_for_each(|(record, record_bytes, state_bytes)| {
-                        stage_erasure_record_sql(&self.conn, record, record_bytes, state_bytes)
+                    .try_for_each(|(record, bundle, state_bytes)| {
+                        stage_erasure_record_sql(&self.conn, record, bundle, state_bytes)
                     });
                 finish_erasure_transaction(&self.conn, result)
             })
@@ -4201,13 +4207,13 @@ impl ErasurePersistencePortV1 for SqliteStore {
         &mut self,
         request: ErasureReferenceV1,
         expected_ledger: ErasureReferenceV1,
-        record: ErasureCoordinatorRecordV1,
+        record: VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         compare_and_swap_erasure_record_sql(
             &self.conn,
             request,
             ErasureCasExpectation::ScopeExtension(expected_ledger),
-            &record,
+            record.record(),
         )
     }
 
@@ -4215,13 +4221,13 @@ impl ErasurePersistencePortV1 for SqliteStore {
         &mut self,
         request: ErasureReferenceV1,
         expected_head: Option<ErasureReferenceV1>,
-        record: ErasureCoordinatorRecordV1,
+        record: VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         compare_and_swap_erasure_record_sql(
             &self.conn,
             request,
             ErasureCasExpectation::AdministrativeResolution(expected_head),
-            &record,
+            record.record(),
         )
     }
 }
@@ -4238,7 +4244,7 @@ fn compare_and_swap_erasure_record_sql(
     expectation: ErasureCasExpectation,
     record: &ErasureCoordinatorRecordV1,
 ) -> Result<(), ErasureErrorV1> {
-    let record_bytes = record.to_canonical_cbor()?;
+    let bundle = record.to_persistence_bundle()?;
     let state_bytes = record.state().to_canonical_cbor()?;
     conn.execute_batch(begin_immediate_sql())
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
@@ -4258,7 +4264,7 @@ fn compare_and_swap_erasure_record_sql(
         if !expectation_matches {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        stage_erasure_record_sql(conn, record, &record_bytes, &state_bytes)
+        stage_erasure_record_sql(conn, record, &bundle, &state_bytes)
     });
     finish_erasure_transaction(conn, result)
 }
@@ -4281,7 +4287,10 @@ fn load_sqlite_erasure_record(
     .optional()
     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
     .map(|(state_digest, bytes)| {
-        ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).and_then(|record| {
+        ErasureCoordinatorRecordV1::from_persistence_manifest(&bytes, &mut |reference| {
+            load_sqlite_erasure_evidence(conn, reference)
+        })
+        .and_then(|record| {
             let metadata_digest: [u8; 32] = state_digest
                 .try_into()
                 .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
@@ -4301,6 +4310,47 @@ fn load_sqlite_erasure_record(
         })
     })
     .transpose()
+}
+
+fn load_sqlite_erasure_evidence(
+    conn: &Connection,
+    reference: ErasureReferenceV1,
+) -> Result<Vec<u8>, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT object_cbor FROM erasure_evidence WHERE reference_digest = ?1",
+        params![reference.digest().as_slice()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+    .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+fn persist_erasure_evidence(
+    conn: &Connection,
+    bundle: &ErasurePersistenceBundleV1,
+) -> Result<(), ErasureErrorV1> {
+    bundle.evidence().iter().try_for_each(|object| {
+        conn.execute(
+            "INSERT INTO erasure_evidence (reference_digest, object_cbor)
+             VALUES (?1, ?2)
+             ON CONFLICT(reference_digest) DO UPDATE SET
+               object_cbor = excluded.object_cbor
+             WHERE erasure_evidence.object_cbor = excluded.object_cbor",
+            params![
+                object.reference().digest().as_slice(),
+                object.canonical_cbor()
+            ],
+        )
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+        .and_then(|changed| {
+            if changed == 0 {
+                Err(ErasureErrorV1::ProvenanceMissing)
+            } else {
+                Ok(())
+            }
+        })
+    })
 }
 
 struct SqliteErasureStateResolver<'a> {
@@ -4353,23 +4403,27 @@ fn resolve_sqlite_erasure_state(
 fn stage_erasure_record_sql(
     conn: &Connection,
     record: &ErasureCoordinatorRecordV1,
-    record_bytes: &[u8],
+    bundle: &ErasurePersistenceBundleV1,
     state_bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
     let request = record.request().reference();
     validate_sqlite_correction(conn, record).and_then(|()| {
         let state_digest = record.state().state_digest();
-        validate_erasure_record_slot(conn, request, record, record_bytes).and_then(
+        validate_erasure_record_slot(conn, request, record, bundle.manifest_cbor()).and_then(
             |existing_state_digest| {
-                persist_erasure_state(
-                    conn,
-                    request,
-                    record,
-                    state_digest,
-                    state_bytes,
-                    existing_state_digest,
-                )
-                .and_then(|()| insert_erasure_record(conn, request, state_digest, record_bytes))
+                persist_erasure_evidence(conn, bundle).and_then(|()| {
+                    persist_erasure_state(
+                        conn,
+                        request,
+                        record,
+                        state_digest,
+                        state_bytes,
+                        existing_state_digest,
+                    )
+                    .and_then(|()| {
+                        insert_erasure_record(conn, request, state_digest, bundle.manifest_cbor())
+                    })
+                })
             },
         )
     })
@@ -4382,16 +4436,9 @@ fn validate_sqlite_correction(
     let Some(correction) = record.supporting_records().correction_provenance() else {
         return Ok(());
     };
-    conn.query_row(
-        "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
-        params![correction.rejected_request().digest().as_slice()],
-        |row| row.get::<_, Vec<u8>>(0),
-    )
-    .optional()
-    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
-    .and_then(|bytes| bytes.ok_or(ErasureErrorV1::ProvenanceMissing))
-    .and_then(|bytes| ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes))
-    .and_then(|predecessor| record.validate_correction_predecessor(&predecessor))
+    load_sqlite_erasure_record(conn, correction.rejected_request())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
+        .and_then(|predecessor| record.validate_correction_predecessor(&predecessor))
 }
 
 fn validate_erasure_record_slot(
@@ -4420,7 +4467,10 @@ fn validate_erasure_record_slot(
         }
         return Ok(None);
     };
-    let existing = ErasureCoordinatorRecordV1::from_canonical_cbor(&existing_bytes)?;
+    let existing =
+        ErasureCoordinatorRecordV1::from_persistence_manifest(&existing_bytes, &mut |reference| {
+            load_sqlite_erasure_evidence(conn, reference)
+        })?;
     let metadata_state_digest: [u8; 32] = metadata_state_digest
         .try_into()
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
@@ -4562,22 +4612,12 @@ fn finish_erasure_transaction<T>(
     conn: &Connection,
     result: Result<T, ErasureErrorV1>,
 ) -> Result<T, ErasureErrorV1> {
-    match result {
-        Ok(value) => {
-            if conn.execute_batch("COMMIT").is_ok() {
-                Ok(value)
-            } else {
-                drop(conn.execute_batch("ROLLBACK"));
-                Err(ErasureErrorV1::ReceiptCommitFailed)
-            }
-        }
-        Err(error) => {
-            if conn.execute_batch("ROLLBACK").is_err() {
-                return Err(ErasureErrorV1::ReceiptCommitFailed);
-            }
-            Err(error)
-        }
-    }
+    finish_transaction(
+        conn,
+        result,
+        |_, _| ErasureErrorV1::ReceiptCommitFailed,
+        |_, _| ErasureErrorV1::ReceiptCommitFailed,
+    )
 }
 
 #[cfg(test)]
@@ -4597,23 +4637,42 @@ fn finish_immediate_transaction<T>(
     conn: &Connection,
     result: Result<T, CoreError>,
 ) -> Result<T, CoreError> {
+    finish_transaction(
+        conn,
+        result,
+        |commit_error, rollback_error| {
+            rollback_error.map_or_else(
+                || CoreError::Storage(format!("transaction commit failed: {commit_error}")),
+                |rollback_error| {
+                    CoreError::Storage(format!(
+                        "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
+                    ))
+                },
+            )
+        },
+        |error, rollback_error| {
+            CoreError::Storage(format!("{error}; rollback failed: {rollback_error}"))
+        },
+    )
+}
+
+fn finish_transaction<T, E>(
+    conn: &Connection,
+    result: Result<T, E>,
+    commit_failure: impl FnOnce(rusqlite::Error, Option<rusqlite::Error>) -> E,
+    rollback_failure: impl FnOnce(E, rusqlite::Error) -> E,
+) -> Result<T, E> {
     match result {
         Ok(value) => match conn.execute_batch("COMMIT") {
             Ok(()) => Ok(value),
-            Err(commit_error) => match conn.execute_batch("ROLLBACK") {
-                Ok(()) => Err(CoreError::Storage(format!(
-                    "transaction commit failed: {commit_error}"
-                ))),
-                Err(rollback_error) => Err(CoreError::Storage(format!(
-                    "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
-                ))),
-            },
+            Err(commit_error) => Err(commit_failure(
+                commit_error,
+                conn.execute_batch("ROLLBACK").err(),
+            )),
         },
         Err(error) => match conn.execute_batch("ROLLBACK") {
             Ok(()) => Err(error),
-            Err(rollback_error) => Err(CoreError::Storage(format!(
-                "{error}; rollback failed: {rollback_error}"
-            ))),
+            Err(rollback_error) => Err(rollback_failure(error, rollback_error)),
         },
     }
 }
@@ -4766,6 +4825,10 @@ use pos_core::geo_cell_admission::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::erasure_test_support::{
+        erasure_record, erasure_reference, verified_erasure_record,
+        TEST_FREEZE_AUTHORIZATION_VERIFIER,
+    };
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::GeoLocationAdmissionFenceV1,
@@ -7226,6 +7289,7 @@ mod tests {
     fn open_rejects_incompatible_erasure_persistence_schema() {
         for schema in [
             "CREATE TABLE erasure_records (request_digest BLOB PRIMARY KEY);",
+            "CREATE TABLE erasure_evidence (reference_digest BLOB PRIMARY KEY);",
             "CREATE TABLE erasure_states (state_digest BLOB PRIMARY KEY);",
             "CREATE TABLE erasure_records (
                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
@@ -12658,51 +12722,6 @@ pub(super) mod key_registry_coverage {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    const fn erasure_reference(value: u8) -> ErasureReferenceV1 {
-        ErasureReferenceV1::from_digest([value; 32])
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn erasure_record() -> ErasureCoordinatorRecordV1 {
-        let request = fixture(pos_core::ErasureRequestV1::new(
-            pos_core::ErasureRequestInputV1 {
-                request: erasure_reference(1),
-                subject: erasure_reference(2),
-                scope: pos_core::ErasureScopeV1::PrivateSubjectData,
-                selectors: vec![erasure_reference(3)],
-                requester: erasure_reference(4),
-                authorization: erasure_reference(5),
-                policy: erasure_reference(6),
-                request_position: 10,
-                horizon_position: 20,
-                provenance: erasure_reference(7),
-            },
-        ));
-        let state = fixture(pos_core::ErasureStateV1::submitted(
-            request.reference(),
-            erasure_reference(8),
-            erasure_reference(9),
-        ));
-        fixture(ErasureCoordinatorRecordV1::from_parts(
-            pos_core::ErasureCoordinatorRecordPartsV1 {
-                request,
-                state,
-                targets: Vec::new(),
-                acknowledgements: Vec::new(),
-                receipt: None,
-                receipt_input: None,
-                authorize_provenance: None,
-                freeze_provenance: None,
-                dispatch_provenance: None,
-                scope_extension_ledger: None,
-                administrative_resolution_head: None,
-                supporting_records: pos_core::ErasureSupportingRecordsV1::default(),
-            },
-            erasure_reference(8),
-        ))
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn erasure_record_with_predecessor() -> (ErasureCoordinatorRecordV1, pos_core::ErasureStateV1) {
         let submitted = erasure_record();
         let predecessor = submitted.state().clone();
@@ -12803,7 +12822,9 @@ pub(super) mod key_registry_coverage {
     fn erasure_record_load_error_regions_are_instrumented() {
         let record = erasure_record();
         let request = record.request().reference();
-        let record_bytes = fixture(record.to_canonical_cbor());
+        let record_bytes = fixture(record.to_persistence_bundle())
+            .manifest_cbor()
+            .to_vec();
         let record_query_error = tests::new_store();
         fixture(
             record_query_error
@@ -12856,7 +12877,7 @@ pub(super) mod key_registry_coverage {
         let record = erasure_record();
         let mut begin_error = tests::new_store();
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(true));
-        let begin_result = begin_error.commit_record(record.clone());
+        let begin_result = begin_error.commit_record(verified_erasure_record(record.clone()));
         FAIL_BEGIN_IMMEDIATE.with(|flag| flag.set(false));
         assert!(begin_result.is_err());
 
@@ -12866,17 +12887,19 @@ pub(super) mod key_registry_coverage {
                 .conn
                 .execute_batch("DROP TABLE erasure_records"),
         );
-        assert!(slot_query_error.commit_record(record.clone()).is_err());
+        assert!(slot_query_error
+            .commit_record(verified_erasure_record(record.clone()))
+            .is_err());
 
         let request = record.request().reference();
         let mut malformed_existing_record = tests::new_store();
-        fixture(malformed_existing_record.commit_record(record.clone()));
+        fixture(malformed_existing_record.commit_record(verified_erasure_record(record.clone())));
         fixture(malformed_existing_record.conn.execute(
             "UPDATE erasure_records SET record_cbor = X'01' WHERE request_digest = ?1",
             params![request.digest().as_slice()],
         ));
         assert!(malformed_existing_record
-            .commit_record(record.clone())
+            .commit_record(verified_erasure_record(record.clone()))
             .is_err());
 
         let mut state_row_query_error = tests::new_store();
@@ -12885,11 +12908,16 @@ pub(super) mod key_registry_coverage {
                 .conn
                 .execute_batch("DROP TABLE erasure_states"),
         );
-        assert!(state_row_query_error.commit_record(record.clone()).is_err());
+        assert!(state_row_query_error
+            .commit_record(verified_erasure_record(record.clone()))
+            .is_err());
 
         let state_digest = record.state().state_digest();
         let mut malformed_state_metadata_on_commit = tests::new_store();
-        fixture(malformed_state_metadata_on_commit.commit_record(record.clone()));
+        fixture(
+            malformed_state_metadata_on_commit
+                .commit_record(verified_erasure_record(record.clone())),
+        );
         fixture(
             malformed_state_metadata_on_commit
                 .conn
@@ -12900,19 +12928,19 @@ pub(super) mod key_registry_coverage {
             params![state_digest.digest().as_slice()],
         ));
         assert!(malformed_state_metadata_on_commit
-            .commit_record(record)
+            .commit_record(verified_erasure_record(record))
             .is_err());
 
         let record = erasure_record();
         let state_digest = record.state().state_digest();
         let mut missing_state = tests::new_store();
-        fixture(missing_state.commit_record(record.clone()));
+        fixture(missing_state.commit_record(verified_erasure_record(record.clone())));
         fixture(missing_state.conn.execute(
             "DELETE FROM erasure_states WHERE state_digest = ?1",
             params![state_digest.digest().as_slice()],
         ));
         assert_eq!(
-            missing_state.commit_record(record.clone()),
+            missing_state.commit_record(verified_erasure_record(record.clone())),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
@@ -12924,14 +12952,14 @@ pub(super) mod key_registry_coverage {
             ),
         ] {
             let mut corrupt_state = tests::new_store();
-            fixture(corrupt_state.commit_record(record.clone()));
+            fixture(corrupt_state.commit_record(verified_erasure_record(record.clone())));
             fixture(corrupt_state.conn.execute(
                 "UPDATE erasure_states
                  SET request_digest = ?1, state_cbor = ?2 WHERE state_digest = ?3",
                 params![request_digest, state_cbor, state_digest.digest().as_slice()],
             ));
             assert_eq!(
-                corrupt_state.commit_record(record.clone()),
+                corrupt_state.commit_record(verified_erasure_record(record.clone())),
                 Err(ErasureErrorV1::ProvenanceMissing)
             );
         }
@@ -12944,17 +12972,25 @@ pub(super) mod key_registry_coverage {
         let request = record.request().reference();
         let state_digest = record.state().state_digest();
         let mut store = tests::new_store();
-        fixture(store.commit_record(record.clone()));
+        fixture(store.commit_record(verified_erasure_record(record.clone())));
         fixture(store.conn.execute(
             "DELETE FROM erasure_states WHERE state_digest = ?1",
             params![state_digest.digest().as_slice()],
         ));
         assert_eq!(
-            store.compare_and_swap_scope_extension(request, erasure_reference(90), record.clone(),),
+            store.compare_and_swap_scope_extension(
+                request,
+                erasure_reference(90),
+                verified_erasure_record(record.clone()),
+            ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
         assert_eq!(
-            store.compare_and_swap_administrative_resolution(request, None, record),
+            store.compare_and_swap_administrative_resolution(
+                request,
+                None,
+                verified_erasure_record(record),
+            ),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
@@ -12967,7 +13003,7 @@ pub(super) mod key_registry_coverage {
 
         for metadata_state_digest in [vec![9_u8], vec![9_u8; 32]] {
             let mut store = tests::new_store();
-            fixture(store.commit_record(record.clone()));
+            fixture(store.commit_record(verified_erasure_record(record.clone())));
             fixture(
                 store
                     .conn
@@ -12979,7 +13015,7 @@ pub(super) mod key_registry_coverage {
             ));
 
             assert_eq!(
-                store.commit_record(record.clone()),
+                store.commit_record(verified_erasure_record(record.clone())),
                 Err(ErasureErrorV1::ProvenanceMissing)
             );
         }

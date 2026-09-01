@@ -475,13 +475,9 @@ impl ErasurePersistencePortV1 for SharedPort {
             .transpose()
     }
 
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
-        self.commit_records(std::slice::from_ref(&record))
-    }
-
     fn commit_records(
         &mut self,
-        records: &[ErasureCoordinatorRecordV1],
+        records: &[pos_core::VerifiedErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
         if let Some(error) = self.state.borrow().commit_error {
             return Err(error);
@@ -490,7 +486,8 @@ impl ErasurePersistencePortV1 for SharedPort {
         let mut staged_records = state.records.clone();
         let mut staged_states = state.states.clone();
         let mut staged_history = state.record_history.clone();
-        for record in records {
+        for verified in records {
+            let record = verified.record();
             if let Some(existing) = staged_records
                 .iter()
                 .find(|existing| existing.request() == record.request())
@@ -522,7 +519,7 @@ impl ErasurePersistencePortV1 for SharedPort {
         &mut self,
         request: ErasureReferenceV1,
         expected_ledger: ErasureReferenceV1,
-        record: ErasureCoordinatorRecordV1,
+        record: pos_core::VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         if let Some(error) = self.state.borrow().scope_cas_error {
             return Err(error);
@@ -541,7 +538,7 @@ impl ErasurePersistencePortV1 for SharedPort {
         &mut self,
         request: ErasureReferenceV1,
         expected_head: Option<ErasureReferenceV1>,
-        record: ErasureCoordinatorRecordV1,
+        record: pos_core::VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         if let Some(error) = self.state.borrow().administrative_cas_error {
             return Err(error);

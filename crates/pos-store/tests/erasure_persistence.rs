@@ -25,6 +25,7 @@ use pos_core::{
     ErasureScopeExtensionLedgerInputV1, ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1,
     ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
     ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1, EventDraft, EventStore, Kind,
+    VerifiedErasureCoordinatorRecordV1,
 };
 use pos_store::memory::MemoryStore;
 use std::cell::RefCell;
@@ -57,6 +58,12 @@ impl ErasureFreezeAuthorizationVerifierV1 for RejectingFreezeAuthorizationVerifi
     ) -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::Unauthorized)
     }
+}
+
+fn verified_record(
+    record: ErasureCoordinatorRecordV1,
+) -> Result<VerifiedErasureCoordinatorRecordV1, ErasureErrorV1> {
+    VerifiedErasureCoordinatorRecordV1::new(record, &TEST_FREEZE_AUTHORIZATION_VERIFIER)
 }
 
 #[cfg(feature = "sqlite")]
@@ -181,12 +188,12 @@ fn assert_correction_chain<S: ErasurePersistencePortV1>(
     let (submitted, predecessor, corrected) = rejected_and_corrected_records()?;
     let corrected_request = corrected.request().reference();
     assert_eq!(
-        store.commit_record(corrected.clone()),
+        store.commit_record(verified_record(corrected.clone())?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    store.commit_record(submitted)?;
-    store.commit_record(predecessor)?;
-    store.commit_record(corrected.clone())?;
+    store.commit_record(verified_record(submitted)?)?;
+    store.commit_record(verified_record(predecessor)?)?;
+    store.commit_record(verified_record(corrected.clone())?)?;
     assert_eq!(
         store.load_record(corrected_request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
         Some(corrected)
@@ -391,13 +398,16 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for CoordinatorHost<S
         self.store.borrow().load_record(request, verifier)
     }
 
-    fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
+    fn commit_record(
+        &mut self,
+        record: pos_core::VerifiedErasureCoordinatorRecordV1,
+    ) -> Result<(), ErasureErrorV1> {
         self.store.borrow_mut().commit_record(record)
     }
 
     fn commit_records(
         &mut self,
-        records: &[ErasureCoordinatorRecordV1],
+        records: &[pos_core::VerifiedErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
         self.store.borrow_mut().commit_records(records)
     }
@@ -406,7 +416,7 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for CoordinatorHost<S
         &mut self,
         request: ErasureReferenceV1,
         expected_ledger: ErasureReferenceV1,
-        record: ErasureCoordinatorRecordV1,
+        record: pos_core::VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         self.store
             .borrow_mut()
@@ -417,7 +427,7 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for CoordinatorHost<S
         &mut self,
         request: ErasureReferenceV1,
         expected_head: Option<ErasureReferenceV1>,
-        record: ErasureCoordinatorRecordV1,
+        record: pos_core::VerifiedErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
         self.store
             .borrow_mut()
@@ -713,18 +723,18 @@ fn assert_scope_extension_cas<S: ErasurePersistencePortV1>(store: S) -> Result<(
     shared.borrow_mut().compare_and_swap_scope_extension(
         reference(1),
         expected_ledger,
-        winner.clone(),
+        verified_record(winner.clone())?,
     )?;
     shared.borrow_mut().compare_and_swap_scope_extension(
         reference(1),
         expected_ledger,
-        winner.clone(),
+        verified_record(winner.clone())?,
     )?;
     assert_eq!(
         shared.borrow_mut().compare_and_swap_scope_extension(
             reference(1),
             expected_ledger,
-            competing,
+            verified_record(competing)?,
         ),
         Err(ErasureErrorV1::PolicyConflict)
     );
@@ -756,14 +766,26 @@ fn assert_administrative_resolution_cas<S: ErasurePersistencePortV1>(
 
     shared
         .borrow_mut()
-        .compare_and_swap_administrative_resolution(reference(1), None, winner.clone())?;
+        .compare_and_swap_administrative_resolution(
+            reference(1),
+            None,
+            verified_record(winner.clone())?,
+        )?;
     shared
         .borrow_mut()
-        .compare_and_swap_administrative_resolution(reference(1), None, winner.clone())?;
+        .compare_and_swap_administrative_resolution(
+            reference(1),
+            None,
+            verified_record(winner.clone())?,
+        )?;
     assert_eq!(
         shared
             .borrow_mut()
-            .compare_and_swap_administrative_resolution(reference(1), None, competing),
+            .compare_and_swap_administrative_resolution(
+                reference(1),
+                None,
+                verified_record(competing)?,
+            ),
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
@@ -929,7 +951,7 @@ fn assert_public_contract<S: ErasurePersistencePortV1>(
     );
     assert_eq!(store.resolve_state(state_digest)?, None);
 
-    store.commit_record(record.clone())?;
+    store.commit_record(verified_record(record.clone())?)?;
     assert_eq!(
         store.load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
         Some(record.clone())
@@ -940,7 +962,7 @@ fn assert_public_contract<S: ErasurePersistencePortV1>(
     );
 
     // Exact retries are idempotent and do not alter the loaded record.
-    store.commit_record(record.clone())?;
+    store.commit_record(verified_record(record.clone())?)?;
     assert_eq!(
         store.load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
         Some(record)
@@ -954,11 +976,15 @@ fn assert_missing_cas_record<S: ErasurePersistencePortV1>(
     let record = submitted_record()?;
     let request = record.request().reference();
     assert_eq!(
-        store.compare_and_swap_scope_extension(request, reference(90), record.clone()),
+        store.compare_and_swap_scope_extension(
+            request,
+            reference(90),
+            verified_record(record.clone())?,
+        ),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
-        store.compare_and_swap_administrative_resolution(request, None, record),
+        store.compare_and_swap_administrative_resolution(request, None, verified_record(record)?,),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -995,7 +1021,11 @@ fn memory_erasure_persistence_recovers_supporting_records() -> Result<(), Erasur
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     store
         .borrow_mut()
-        .compare_and_swap_administrative_resolution(reference(1), None, expected.clone())?;
+        .compare_and_swap_administrative_resolution(
+            reference(1),
+            None,
+            verified_record(expected.clone())?,
+        )?;
     let request = expected.request().reference();
     let expected_supporting_records = expected.supporting_records().clone();
     let loaded = store
@@ -1005,7 +1035,7 @@ fn memory_erasure_persistence_recovers_supporting_records() -> Result<(), Erasur
     assert_eq!(loaded.supporting_records(), &expected_supporting_records);
     assert_eq!(loaded.administrative_resolution_head(), Some(expected_head));
     assert_eq!(
-        store.borrow_mut().commit_record(initial),
+        store.borrow_mut().commit_record(verified_record(initial)?),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -1085,7 +1115,7 @@ fn memory_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
     drop(completed);
     let mut store = MemoryStore::new();
     assert_eq!(
-        store.commit_record(terminal.clone()),
+        store.commit_record(verified_record(terminal.clone())?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
@@ -1093,7 +1123,8 @@ fn memory_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
         None
     );
 
-    let root = submitted_record()?;
+    let root = verified_record(submitted_record()?)?;
+    let terminal = verified_record(terminal)?;
     assert_eq!(
         store.commit_records(&[root, terminal]),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -1124,7 +1155,9 @@ fn memory_erasure_persistence_rejects_a_conflicting_terminal_retry() -> Result<(
     parts.supporting_records = with_replacement_receipt(&parts.supporting_records, receipt)?;
     let conflicting = ErasureCoordinatorRecordV1::from_parts(parts, reference(30))?;
     assert_eq!(
-        shared.borrow_mut().commit_record(conflicting),
+        shared
+            .borrow_mut()
+            .commit_record(verified_record(conflicting)?),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -1150,7 +1183,9 @@ fn sqlite_erasure_persistence_rejects_a_conflicting_terminal_retry() -> Result<(
     parts.supporting_records = with_replacement_receipt(&parts.supporting_records, receipt)?;
     let conflicting = ErasureCoordinatorRecordV1::from_parts(parts, reference(30))?;
     assert_eq!(
-        shared.borrow_mut().commit_record(conflicting),
+        shared
+            .borrow_mut()
+            .commit_record(verified_record(conflicting)?),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -1283,7 +1318,7 @@ fn sqlite_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
     let mut store =
         SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
     assert_eq!(
-        store.commit_record(terminal_record.clone()),
+        store.commit_record(verified_record(terminal_record.clone())?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
@@ -1291,7 +1326,8 @@ fn sqlite_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
         None
     );
 
-    let root = submitted_record()?;
+    let root = verified_record(submitted_record()?)?;
+    let terminal_record = verified_record(terminal_record)?;
     assert_eq!(
         store.commit_records(&[root, terminal_record]),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -1316,7 +1352,7 @@ fn sqlite_erasure_persistence_survives_reopen() -> Result<(), Box<dyn std::error
     let request = record.request().reference();
 
     let mut store = SqliteStore::open(path)?;
-    store.commit_record(record.clone())?;
+    store.commit_record(verified_record(record.clone())?)?;
     drop(store);
 
     let reopened = SqliteStore::open(path)?;
@@ -1349,7 +1385,7 @@ fn sqlite_erasure_persistence_recovers_supporting_records_after_reopen(
     let expected = record.supporting_records().clone();
     store
         .borrow_mut()
-        .compare_and_swap_administrative_resolution(reference(1), None, record)?;
+        .compare_and_swap_administrative_resolution(reference(1), None, verified_record(record)?)?;
     drop(store);
 
     let reopened = SqliteStore::open(path)?;

@@ -223,6 +223,19 @@ fn portable_scope_and_obligation_records_expose_canonical_public_seams(
     assert_eq!(obligation_set.trust(), reference(5));
     assert_ne!(obligation_set.reference(), reference(0));
 
+    let empty_obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request: reference(1),
+        obligations: Vec::new(),
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let empty_obligation_set = roundtrip(
+        &empty_obligation_set,
+        ErasureObligationSetV1::to_canonical_cbor,
+        ErasureObligationSetV1::from_canonical_cbor,
+    )?;
+    assert!(empty_obligation_set.obligations().is_empty());
+
     let scope = scope_commitment(reference(1))?;
     let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
         request: reference(1),
@@ -1091,10 +1104,7 @@ fn retry_admission_rejects_invalid_ordinals_deadlines_and_obligation_sets() {
     let mut empty_obligations = retry_input();
     empty_obligations.unresolved_obligations.clear();
     empty_obligations.command_identities.clear();
-    assert_eq!(
-        ErasureRetryAdmissionV1::new(empty_obligations),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
+    assert!(ErasureRetryAdmissionV1::new(empty_obligations).is_ok());
 
     let mut oversized_obligations = retry_input();
     oversized_obligations.unresolved_obligations = vec![reference(20); ERASURE_MAX_OBLIGATIONS + 1];
