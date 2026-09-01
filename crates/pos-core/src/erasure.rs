@@ -7022,7 +7022,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         acknowledgement: ErasureAcknowledgementV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
-            if record.acknowledgements.contains(&acknowledgement) {
+            if record
+                .acknowledgements
+                .binary_search(&acknowledgement)
+                .is_ok()
+            {
                 return Ok(record.state);
             }
             if !matches!(
@@ -7031,14 +7035,19 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             ) {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
-            if !record.targets.contains(&acknowledgement.target) {
+            if record
+                .targets
+                .binary_search(&acknowledgement.target)
+                .is_err()
+            {
                 return Err(ErasureErrorV1::Unauthorized);
             }
             record
                 .supporting_records
                 .obligations()
-                .iter()
-                .find(|candidate| candidate.reference() == acknowledgement.obligation)
+                .binary_search_by_key(&acknowledgement.obligation, ErasureObligationV1::reference)
+                .ok()
+                .map(|index| &record.supporting_records.obligations()[index])
                 .ok_or(ErasureErrorV1::Unauthorized)
                 .and_then(|obligation| {
                     if (obligation.target(), obligation.owner())
@@ -7069,12 +7078,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 .and_then(|(command, admission)| {
                     let pair_is_admitted = admission
                         .unresolved_obligations()
-                        .iter()
-                        .zip(admission.command_identities())
-                        .any(|(obligation, admitted_command)| {
-                            *obligation == acknowledgement.obligation
-                                && *admitted_command == command
-                        });
+                        .binary_search(&acknowledgement.obligation)
+                        .is_ok_and(|index| admission.command_identities()[index] == command);
                     if !pair_is_admitted {
                         return Err(ErasureErrorV1::Unauthorized);
                     }
