@@ -42,9 +42,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        authorization.verify_admission_body_binding(admission)
     }
 }
 
@@ -262,14 +260,18 @@ const fn target(value: u8) -> ErasureRequiredTargetV1 {
     }
 }
 
-fn freeze_evidence_fixture(
+struct FreezeEvidenceFixtureInput<'a> {
     request: ErasureReferenceV1,
-    scope: &ErasureScopeCommitmentInputV1,
-    obligation_set: &ErasureObligationSetV1,
-    targets: &[ErasureRequiredTargetV1],
-    obligations: &[ErasureObligationV1],
+    scope: &'a ErasureScopeCommitmentInputV1,
+    obligation_set: &'a ErasureObligationSetV1,
+    targets: &'a [ErasureRequiredTargetV1],
+    obligations: &'a [ErasureObligationV1],
     freeze_position: u64,
     proof: ErasureReferenceV1,
+}
+
+fn freeze_evidence_fixture(
+    input: FreezeEvidenceFixtureInput<'_>,
 ) -> Result<
     (
         ErasureFreezeAdmissionEvidenceV1,
@@ -277,15 +279,11 @@ fn freeze_evidence_fixture(
     ),
     ErasureErrorV1,
 > {
-    let mut applicability_matrix = Vec::with_capacity(targets.len().saturating_mul(4));
-    for category in [
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-    ] {
-        for (target_index, target) in targets.iter().enumerate() {
-            let owner = obligations
+    let mut applicability_matrix = Vec::with_capacity(input.targets.len().saturating_mul(4));
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        for (target_index, target) in input.targets.iter().enumerate() {
+            let owner = input
+                .obligations
                 .iter()
                 .find(|obligation| {
                     obligation.category() == category && obligation.target() == *target
@@ -303,27 +301,27 @@ fn freeze_evidence_fixture(
             )?);
         }
     }
-    let input = ErasureFreezeAdmissionEvidenceInputV1 {
-        request,
-        scope_commitment: ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
-        obligation_set: obligation_set.reference(),
+    let admission_input = ErasureFreezeAdmissionEvidenceInputV1 {
+        request: input.request,
+        scope_commitment: ErasureScopeCommitmentV1::new(input.scope.clone())?.reference(),
+        obligation_set: input.obligation_set.reference(),
         applicability_matrix,
-        freeze_position,
-        policy: obligation_set.policy(),
-        trust: obligation_set.trust(),
+        freeze_position: input.freeze_position,
+        policy: input.obligation_set.policy(),
+        trust: input.obligation_set.trust(),
         authorization_provenance: reference(0),
     };
-    let provisional = ErasureFreezeAdmissionEvidenceV1::new(input.clone())?;
+    let provisional = ErasureFreezeAdmissionEvidenceV1::new(admission_input.clone())?;
     let authorization =
         ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
             admission_body_digest: provisional.authorization_body_digest()?,
-            policy: obligation_set.policy(),
-            trust: obligation_set.trust(),
-            evidence: proof.digest().to_vec(),
+            policy: input.obligation_set.policy(),
+            trust: input.obligation_set.trust(),
+            evidence: input.proof.digest().to_vec(),
         })?;
     let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
         authorization_provenance: authorization.reference(),
-        ..input
+        ..admission_input
     })?;
     Ok((admission, authorization))
 }
@@ -441,9 +439,7 @@ impl<S: ErasurePersistencePortV1> ErasureFreezeAuthorizationVerifierV1 for Coord
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        authorization.verify_admission_body_binding(admission)
     }
 }
 
@@ -504,15 +500,16 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
             lineage_rule: Some(reference(55)),
         };
         let freeze_position = requested.freeze_position.unwrap_or(10);
-        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
-            request,
-            &scope,
-            &obligation_set,
-            &targets,
-            &obligations,
-            freeze_position,
-            requested.provenance,
-        )?;
+        let (freeze_admission_evidence, freeze_authorization_evidence) =
+            freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+                request,
+                scope: &scope,
+                obligation_set: &obligation_set,
+                targets: &targets,
+                obligations: &obligations,
+                freeze_position,
+                proof: requested.provenance,
+            })?;
         let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: targets.clone(),
             scope,

@@ -15,7 +15,7 @@ const ERS1: &str = "ERS1";
 const ERC1: &str = "ERC1";
 const ERCR1: &str = "ERCR1";
 const ERCRP1: &str = "ERCRP1";
-const ERASURE_INVENTORY_CATEGORY_COUNT: usize = 4;
+const ERASURE_INVENTORY_CATEGORY_COUNT: usize = ErasureInventoryCategoryV1::CANONICAL.len();
 
 /// Largest encoded ERQ1 or ERS1 accepted by V1.
 pub const ERASURE_REQUEST_OR_STATE_MAX_BYTES: usize = 1024 * 1024;
@@ -737,6 +737,25 @@ impl ErasureFreezeAuthorizationEvidenceV1 {
         self.content_digest
     }
 
+    /// Verify that this evidence names the exact supplied admission body.
+    ///
+    /// This verifies the canonical digest binding only. The host-owned
+    /// [`ErasureFreezeAuthorizationVerifierV1`] remains responsible for
+    /// interpreting the retained policy, trust, and proof material.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization error when the body digest differs, or
+    /// propagates a canonical-encoding error from the admission body.
+    pub fn verify_admission_body_binding(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (self.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
+    }
+
     /// Encode the exact retained authorization-evidence object.
     ///
     /// # Errors
@@ -943,12 +962,7 @@ fn validate_applicability_matrix(
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     let target_count = matrix.len() / ERASURE_INVENTORY_CATEGORY_COUNT;
-    for category in [
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-    ] {
+    for category in ErasureInventoryCategoryV1::CANONICAL {
         let offset = category.index() * target_count;
         for (target_index, row) in matrix[offset..offset + target_count].iter().enumerate() {
             if row.category() != category || row.target_index() != target_index as u64 {
@@ -3372,6 +3386,9 @@ pub enum ErasureInventoryCategoryV1 {
 }
 
 impl ErasureInventoryCategoryV1 {
+    /// Every inventory category in canonical wire order.
+    pub const CANONICAL: [Self; 4] = [Self::Artifact, Self::Key, Self::Replica, Self::Backup];
+
     const fn code(self) -> u64 {
         match self {
             Self::Artifact => 0,

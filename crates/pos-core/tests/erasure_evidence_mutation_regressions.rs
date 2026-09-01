@@ -207,23 +207,18 @@ fn public_atomic_freeze_decision_binds_explicit_category_obligations_and_exact_m
 ) -> Result<(), ErasureErrorV1> {
     let request = reference(1);
     let target = required_target();
-    let mut obligations = [
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, category)| {
-        ErasureObligationV1::new(ErasureObligationInputV1 {
-            category,
-            target,
-            owner: reference([20, 21, 22, 23][index]),
-            command_identity: pos_core::destruction_command_reference(request, target),
+    let mut obligations = ErasureInventoryCategoryV1::CANONICAL
+        .into_iter()
+        .enumerate()
+        .map(|(index, category)| {
+            ErasureObligationV1::new(ErasureObligationInputV1 {
+                category,
+                target,
+                owner: reference([20, 21, 22, 23][index]),
+                command_identity: pos_core::destruction_command_reference(request, target),
+            })
         })
-    })
-    .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     obligations.sort_unstable_by_key(ErasureObligationV1::reference);
     let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
         request,

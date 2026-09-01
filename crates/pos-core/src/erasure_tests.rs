@@ -113,9 +113,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for TestCoordinatorPort {
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        authorization.verify_admission_body_binding(admission)
     }
 }
 
@@ -200,16 +198,18 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
         let freeze_position = self
             .admitted_freeze_position
             .unwrap_or_else(|| requested.freeze_position.unwrap_or(10));
-        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
-            request,
-            scope_reference,
-            &obligation_set,
-            &targets,
-            &obligations,
-            freeze_position,
-            self.admitted_freeze_provenance
-                .unwrap_or(requested.provenance),
-        )?;
+        let (freeze_admission_evidence, freeze_authorization_evidence) =
+            freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+                request,
+                scope_commitment: scope_reference,
+                obligation_set: &obligation_set,
+                targets: &targets,
+                obligations: &obligations,
+                freeze_position,
+                proof: self
+                    .admitted_freeze_provenance
+                    .unwrap_or(requested.provenance),
+            })?;
         let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: targets.clone(),
             scope,
@@ -413,14 +413,18 @@ fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
-fn freeze_evidence_fixture(
+struct FreezeEvidenceFixtureInput<'a> {
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,
-    obligation_set: &ErasureObligationSetV1,
-    targets: &[ErasureRequiredTargetV1],
-    obligations: &[ErasureObligationV1],
+    obligation_set: &'a ErasureObligationSetV1,
+    targets: &'a [ErasureRequiredTargetV1],
+    obligations: &'a [ErasureObligationV1],
     freeze_position: u64,
     proof: ErasureReferenceV1,
+}
+
+fn freeze_evidence_fixture(
+    input: FreezeEvidenceFixtureInput<'_>,
 ) -> Result<
     (
         ErasureFreezeAdmissionEvidenceV1,
@@ -428,7 +432,8 @@ fn freeze_evidence_fixture(
     ),
     ErasureErrorV1,
 > {
-    let owners_by_obligation = obligations
+    let owners_by_obligation = input
+        .obligations
         .iter()
         .map(|obligation| {
             (
@@ -437,14 +442,9 @@ fn freeze_evidence_fixture(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut applicability_matrix = Vec::with_capacity(targets.len().saturating_mul(4));
-    for category in [
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-    ] {
-        for (target_index, target) in targets.iter().enumerate() {
+    let mut applicability_matrix = Vec::with_capacity(input.targets.len().saturating_mul(4));
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        for (target_index, target) in input.targets.iter().enumerate() {
             let owner = owners_by_obligation.get(&(category, *target)).copied();
             applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
                 category,
@@ -459,12 +459,12 @@ fn freeze_evidence_fixture(
         }
     }
     freeze_evidence_with_matrix(
-        request,
-        scope_commitment,
-        obligation_set,
+        input.request,
+        input.scope_commitment,
+        input.obligation_set,
         applicability_matrix,
-        freeze_position,
-        proof,
+        input.freeze_position,
+        input.proof,
     )
 }
 
@@ -1470,15 +1470,16 @@ fn lineage_freeze_admission(
         lineage_rule: Some(lineage_rule),
     };
     let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
-    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
-        request_reference,
-        scope_reference,
-        &obligation_set,
-        &targets,
-        &obligations,
-        10,
-        reference(9),
-    )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+            request: request_reference,
+            scope_commitment: scope_reference,
+            obligation_set: &obligation_set,
+            targets: &targets,
+            obligations: &obligations,
+            freeze_position: 10,
+            proof: reference(9),
+        })?;
     ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
         targets,
         scope,
@@ -1551,6 +1552,36 @@ fn coordinator_lineage_and_resolution_successors_run_through_unit_port(
 }
 
 #[test]
+fn freeze_authorization_binding_rejects_a_different_admission_body() -> Result<(), ErasureErrorV1> {
+    let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
+    let (admission, scope_commitment) = lineage_freeze_admission(target, reference(72))?;
+    let input = admission.input;
+    assert_eq!(
+        input
+            .freeze_authorization_evidence
+            .verify_admission_body_binding(&input.freeze_admission_evidence),
+        Ok(())
+    );
+
+    let (different_admission, _) = freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+        request: reference(1),
+        scope_commitment,
+        obligation_set: &input.obligation_set,
+        targets: &input.targets,
+        obligations: &input.obligations,
+        freeze_position: input.freeze_position + 1,
+        proof: reference(9),
+    })?;
+    assert_eq!(
+        input
+            .freeze_authorization_evidence
+            .verify_admission_body_binding(&different_admission),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+#[test]
 fn atomic_freeze_rejects_complete_but_inconsistent_applicability_matrices(
 ) -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
@@ -1558,15 +1589,16 @@ fn atomic_freeze_rejects_complete_but_inconsistent_applicability_matrices(
     let base = admission.input;
 
     let extra_target = acknowledgement(2, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let (oversized_matrix, oversized_authorization) = freeze_evidence_fixture(
-        reference(1),
-        scope_commitment,
-        &base.obligation_set,
-        &[target, extra_target],
-        &base.obligations,
-        10,
-        reference(9),
-    )?;
+    let (oversized_matrix, oversized_authorization) =
+        freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+            request: reference(1),
+            scope_commitment,
+            obligation_set: &base.obligation_set,
+            targets: &[target, extra_target],
+            obligations: &base.obligations,
+            freeze_position: 10,
+            proof: reference(9),
+        })?;
     let mut wrong_cardinality = base.clone();
     wrong_cardinality.freeze_admission_evidence = oversized_matrix;
     wrong_cardinality.freeze_authorization_evidence = oversized_authorization;
@@ -1575,22 +1607,17 @@ fn atomic_freeze_rejects_complete_but_inconsistent_applicability_matrices(
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
-    let matrix = [
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-    ]
-    .into_iter()
-    .map(|category| {
-        ErasureFreezeApplicabilityRowV1::new(
-            category,
-            0,
-            ErasureApplicabilityDecisionV1::Inapplicable,
-            None,
-        )
-    })
-    .collect::<Result<Vec<_>, _>>()?;
+    let matrix = ErasureInventoryCategoryV1::CANONICAL
+        .into_iter()
+        .map(|category| {
+            ErasureFreezeApplicabilityRowV1::new(
+                category,
+                0,
+                ErasureApplicabilityDecisionV1::Inapplicable,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let (inapplicable_matrix, inapplicable_authorization) = freeze_evidence_with_matrix(
         reference(1),
         scope_commitment,
@@ -1627,22 +1654,17 @@ fn all_inapplicable_matrix_admits_an_empty_obligation_set() -> Result<(), Erasur
         lineage_rule: None,
     };
     let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
-    let matrix = [
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-    ]
-    .into_iter()
-    .map(|category| {
-        ErasureFreezeApplicabilityRowV1::new(
-            category,
-            0,
-            ErasureApplicabilityDecisionV1::Inapplicable,
-            None,
-        )
-    })
-    .collect::<Result<Vec<_>, _>>()?;
+    let matrix = ErasureInventoryCategoryV1::CANONICAL
+        .into_iter()
+        .map(|category| {
+            ErasureFreezeApplicabilityRowV1::new(
+                category,
+                0,
+                ErasureApplicabilityDecisionV1::Inapplicable,
+                None,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_with_matrix(
         request_reference,
         scope_reference,
@@ -3189,15 +3211,11 @@ fn receipt_inventory_encoding() -> Result<Vec<u8>, ErasureErrorV1> {
     acknowledgements[4].target.artifact_class = ErasureArtifactClassV1::CalibrationReport;
     acknowledgements[5].target.artifact_class = ErasureArtifactClassV1::Export;
     acknowledgements[6].target.artifact_class = ErasureArtifactClassV1::ForkOrSnapshot;
-    for (acknowledgement, category) in acknowledgements.iter_mut().zip([
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Key,
-        ErasureInventoryCategoryV1::Replica,
-        ErasureInventoryCategoryV1::Backup,
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Artifact,
-        ErasureInventoryCategoryV1::Artifact,
-    ]) {
+    for (acknowledgement, category) in acknowledgements.iter_mut().zip(
+        ErasureInventoryCategoryV1::CANONICAL
+            .into_iter()
+            .chain([ErasureInventoryCategoryV1::Artifact; 3]),
+    ) {
         acknowledgement.obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
             category,
             target: acknowledgement.target,

@@ -147,13 +147,18 @@ pub struct SqliteStore {
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
-type ErasureSchemaColumn = (&'static str, &'static str, i64, i64);
+struct ErasureSchemaColumn {
+    name: &'static str,
+    kind: &'static str,
+    not_null: bool,
+    primary_key: bool,
+}
 
 struct ErasureSchemaTable {
     name: &'static str,
     columns_query: &'static str,
     columns: &'static [ErasureSchemaColumn],
-    markers: &'static [&'static str],
+    required_sql_fragments: &'static [&'static str],
 }
 
 const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
@@ -161,11 +166,26 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
         name: "erasure_records",
         columns_query: "PRAGMA table_info(erasure_records)",
         columns: &[
-            ("request_digest", "BLOB", 1, 1),
-            ("state_digest", "BLOB", 1, 0),
-            ("record_cbor", "BLOB", 1, 0),
+            ErasureSchemaColumn {
+                name: "request_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            ErasureSchemaColumn {
+                name: "state_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "record_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
-        markers: &[
+        required_sql_fragments: &[
             "request_digest",
             "state_digest",
             "record_cbor",
@@ -178,10 +198,20 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
         name: "erasure_evidence",
         columns_query: "PRAGMA table_info(erasure_evidence)",
         columns: &[
-            ("reference_digest", "BLOB", 1, 1),
-            ("object_cbor", "BLOB", 1, 0),
+            ErasureSchemaColumn {
+                name: "reference_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            ErasureSchemaColumn {
+                name: "object_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
-        markers: &[
+        required_sql_fragments: &[
             "reference_digest",
             "object_cbor",
             "length(reference_digest)=32",
@@ -192,11 +222,26 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
         name: "erasure_states",
         columns_query: "PRAGMA table_info(erasure_states)",
         columns: &[
-            ("state_digest", "BLOB", 1, 1),
-            ("request_digest", "BLOB", 1, 0),
-            ("state_cbor", "BLOB", 1, 0),
+            ErasureSchemaColumn {
+                name: "state_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            ErasureSchemaColumn {
+                name: "request_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "state_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
-        markers: &[
+        required_sql_fragments: &[
             "state_digest",
             "request_digest",
             "state_cbor",
@@ -713,9 +758,9 @@ impl SqliteStore {
             .filter(|character| !character.is_whitespace())
             .collect::<String>();
         if table
-            .markers
+            .required_sql_fragments
             .iter()
-            .any(|marker| !normalized.contains(*marker))
+            .any(|fragment| !normalized.contains(*fragment))
         {
             return Err(CoreError::Storage(format!(
                 "SQLite {} table has an incompatible schema",
@@ -741,12 +786,12 @@ impl SqliteStore {
         let expected = table
             .columns
             .iter()
-            .map(|(name, kind, not_null, primary_key)| {
+            .map(|column| {
                 (
-                    (*name).to_owned(),
-                    (*kind).to_owned(),
-                    *not_null,
-                    *primary_key,
+                    column.name.to_owned(),
+                    column.kind.to_owned(),
+                    i64::from(column.not_null),
+                    i64::from(column.primary_key),
                 )
             })
             .collect::<Vec<_>>();

@@ -12,7 +12,7 @@ use pos_core::{
     ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
 };
 
-use crate::erasure_support::freeze_evidence_fixture;
+use crate::erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
 
 pub struct PublicCoordinatorPortConfig {
     pub targets: Vec<ErasureRequiredTargetV1>,
@@ -152,9 +152,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for PublicCoordinatorPort {
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        authorization.verify_admission_body_binding(admission)
     }
 }
 
@@ -215,15 +213,16 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
             target_closure: target_closure_digest(&self.config.targets),
             lineage_rule: None,
         };
-        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence_fixture(
-            request,
-            ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
-            &obligation_set,
-            &self.config.targets,
-            &obligations,
-            10,
-            &self.config.freeze_evidence.digest(),
-        )?;
+        let (freeze_admission_evidence, freeze_authorization_evidence) =
+            freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+                request,
+                scope_commitment: ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
+                obligation_set: &obligation_set,
+                targets: &self.config.targets,
+                obligations: &obligations,
+                freeze_position: 10,
+                evidence: &self.config.freeze_evidence.digest(),
+            })?;
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: self.config.targets.clone(),
             scope,

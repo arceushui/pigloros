@@ -563,9 +563,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for SharedPort {
         if let Some(error) = self.state.borrow().freeze_authorization_error {
             return Err(error);
         }
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        authorization.verify_admission_body_binding(admission)
     }
 }
 

@@ -19,9 +19,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
         admission: &ErasureFreezeAdmissionEvidenceV1,
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
+        authorization.verify_admission_body_binding(admission)
     }
 }
 
