@@ -419,17 +419,17 @@ generated_authority="${generated_root}/expected-authority/inventory.json"
 mkdir -p "$(dirname "${generated_authority}")"
 jq -n '
   [
-    {fixture_id: "RPL-001", execution_class: "RecordedReplay", expected_outcome: "VerifiedExact"},
-    {fixture_id: "PRF-001", execution_class: "ProfileRecomputation", expected_outcome: "VerifiedExact"},
-    {fixture_id: "PRF-002", execution_class: "CrossProfileConformance", expected_outcome: "VerifiedExact"},
-    {fixture_id: "DIV-001", execution_class: "ProfileRecomputation", expected_outcome: "Diverged"},
-    {fixture_id: "INV-001", execution_class: "DeterministicProfile", expected_outcome: "InvalidManifest"},
-    {fixture_id: "INV-002", execution_class: "DeterministicProfile", expected_outcome: "UnverifiableArtifactsMissing"},
-    {fixture_id: "INV-003", execution_class: "DeterministicProfile", expected_outcome: "IncompatibleProfile"},
-    {fixture_id: "RES-001", execution_class: "ProfileRecomputation", expected_outcome: "ResourceLimitExceeded"},
-    {fixture_id: "LIVE-001", execution_class: "LiveUnverified", expected_outcome: "NonDeterministicAdmission"},
-    {fixture_id: "ERA-001", execution_class: "RecordedReplay", expected_outcome: "OutcomePreservedReplayClaimDegraded"},
-    {fixture_id: "SEC-001", execution_class: "DeterministicProfile", expected_outcome: "TypedFailure"}
+    {fixture_id: "RPL-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-002", execution_classes: ["CrossProfileConformance"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "DIV-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "Diverged"},
+    {fixture_id: "INV-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "InvalidManifest"},
+    {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing"},
+    {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile"},
+    {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded"},
+    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission"},
+    {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded"},
+    {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure"}
   ] |
   map(. + {
     fixture_bytes_path: null,
@@ -447,10 +447,14 @@ jq -n '
     entries: .
   }
 ' > "${generated_authority}"
-cmp -- "${generated_authority}" "${fixture_root}/expected-authority/inventory.json" || {
-  echo "Draft authority inventory is not independently reproducible" >&2
-  exit 1
-}
+if [[ "${mode}" == "--write" ]]; then
+  install -m 0644 -- "${generated_authority}" "${fixture_root}/expected-authority/inventory.json"
+else
+  cmp -- "${generated_authority}" "${fixture_root}/expected-authority/inventory.json" || {
+    echo "Draft authority inventory is not independently reproducible" >&2
+    exit 1
+  }
+fi
 
 generated_sha256="${generated_root}/SHA256SUMS"
 generated_blake3="${generated_root}/BLAKE3SUMS"

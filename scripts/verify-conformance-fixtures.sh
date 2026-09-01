@@ -225,11 +225,26 @@ jq -e '
     "INV-003", "RES-001", "LIVE-001", "ERA-001", "SEC-001"
   ]) and
   ([.entries[].fixture_id] | unique | length == 11) and
+  ([.entries[] | {
+    fixture_id, execution_classes, profiles, expected_outcome
+  }] == [
+    {fixture_id: "RPL-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-002", execution_classes: ["CrossProfileConformance"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "DIV-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "Diverged"},
+    {fixture_id: "INV-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "InvalidManifest"},
+    {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing"},
+    {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile"},
+    {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded"},
+    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission"},
+    {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded"},
+    {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure"}
+  ]) and
   all(.entries[];
     (keys | sort) == ([
-      "execution_class", "expected_outcome", "expected_result_digest",
+      "execution_classes", "expected_outcome", "expected_result_digest",
       "expected_result_path", "fixture_bytes_digest", "fixture_bytes_path",
-      "fixture_id", "materialization_status"
+      "fixture_id", "materialization_status", "profiles"
     ] | sort) and
     (.fixture_bytes_path == null) and (.expected_result_path == null) and
     (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
