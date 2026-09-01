@@ -110,6 +110,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Do not infer specification compliance from green gates.** CI, coverage, mutation, lint, and security analysis can all pass while an acceptance criterion or ADR invariant remains unimplemented. Report source-review readiness and hosted-gate readiness as separate facts.
 
+- **Give Spec reviewers the complete acceptance record.** Requirements alone are insufficient when delivery evidence lives in issue journals, PR descriptions, hosted reports, or recorded measurements. Supply those authoritative artifacts with the fixed review baseline, and require the reviewer to distinguish missing implementation from missing external evidence before assigning severity.
+
 ## CI / GitHub Actions
 
 - **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that `cargo test --workspace --locked -- --include-ignored` in the `test` job actually executes it. The `--include-ignored` flag is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
@@ -118,9 +120,15 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Treat hosted CI as an independent environment probe.** Permission, non-root process identity, ordering, cache, target, and runner behavior can differ from a root local checkout. Overlap independent review with hosted latency, but do not substitute either evidence stream for the other.
 
+- **Profile sanitizer work at executable and fixture boundaries.** Cargo build-job limits and per-process test threads do not parallelize separate test executables. Measure each executable before tuning the job, then place a dominant target in an explicit shard and balance for the slowest shard. Inside a hot mutation loop, decode stable fixture structure once and mutate/restore only the field under test instead of rebuilding equivalent state for every case.
+
+- **Remove accidental serialization only after isolating test state.** A process-wide mutex can dominate an instrumented test suite even when tests do not share a resource. Give each test collision-proof temporary state using the label, process ID, timestamp, and an atomic sequence; retain serialization only for a genuine process-global or external resource.
+
 - **Treat coverage summaries as evidence, not intent.** Adding tests or seeing a smaller diff does not prove a per-file region target was met. Download and inspect the hosted coverage artifact for the exact final PR head, including every requested file, before reporting coverage complete.
 
 - **Separate status evidence from diagnostic evidence.** Batch or reduce GitHub polling; if REST quota is exhausted, use an exact-head GraphQL check rollup to preserve status, but do not change code or classify a failure until the authoritative hosted job log is available.
+
+- **Keep sharded required gates disjoint and fail closed.** Lock the exact target inventory and shard partition in an executable policy test, retain all features and test targets, and expose one stable aggregate check that runs with `always()` and succeeds only when every shard succeeds. Update the live branch rules to require that aggregate rather than an individual shard; a workflow fan-in does not protect merges unless branch policy requires its exact status.
 
 - **Validate workflow changes through a canary pull request.** Inspect every hosted job, fix failures in the isolated worktree, require a clean ruleset, merge, and verify the post-merge `main` workflows.
 
@@ -136,11 +144,17 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Validate mutation in the correct order.** The unmutated baseline must compile and pass before shard output is meaningful; every shard must be classified. For a survivor, trace reachability and public observability first, remove equivalent or unreachable checks when the stronger invariant already implies them, and add a focused boundary test only for independent behavior.
 
+- **Diagnose mutation timeouts by phase and test frontier.** Inspect the scenario outcome and log before changing code or timeout policy. A cold `cargo test --no-run` timeout needs a separate build allowance; a Test-phase timeout needs the last running tests traced to shared setup and checked for pathological cost at domain maxima. Do not hide either defect by enlarging one global timeout.
+
 - **Design tests at public seams and account for coverage shape.** A test should fail at the authority or adapter boundary it claims to protect, not through an obsolete incidental mismatch. Equivalent Rust syntax can produce different LLVM regions; choose clear constructs, avoid untestable branches, and keep test-only instrumentation within test scope.
+
+- **Synchronize on semantic prerequisites, not progress proxies.** Poll for the exact file, directory, child state, or other observable condition an operation needs, with child-exit detection and a bounded deadline. Arbitrary file counts and sleeps become flaky under sanitizer overhead and concurrent subprocess contention.
 
 - **Treat repository policy as stronger than tool suggestions.** Compiler help text, formatter output, and a single lint message are local hints. Check the configured Trunk/Clippy policy and existing conventions before applying a suggestion; intentional must-use drops, combinator changes, and suppressions must satisfy the repository contract.
 
 - **Keep workflow changes minimal and executable.** Remove whitespace-only churn, use the repository’s naming conventions, and verify folded shell commands, quoting, environment transport, path filters, timeouts, cancellation behavior, and aggregators on the actual runner. Performance improvements should be measured; do not hide architectural debt with larger timeouts.
+
+- **Check formatting on the changed files themselves.** `cargo fmt --all` covers Cargo's discovered target graph, which can omit a changed Rust fixture or integration target that repository-wide Trunk checks format directly. Run the repository formatter and the pinned rustfmt check on every changed Rust file before pushing; keep the hosted formatter authoritative.
 
 - **Keep required workflows alive while scoping expensive gates.** Use a pinned path-filter action with its filter configuration loaded from the pull request’s trusted base revision and a conservative documentation-only allowlist to drive job-level `needs`/`if` conditions; keep required workflow triggers broad because top-level path filters can leave checks pending. Ensure unknown, deleted, renamed, generated, and policy inputs run the full suite, and keep pushes, schedules, and manual runs full.
 
