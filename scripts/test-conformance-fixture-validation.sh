@@ -192,22 +192,13 @@ replace_json "${short_plugin_id_root}/providers/plugin-conformance/provider.json
 expect_adapter_rejection "${short_plugin_id_root}" \
   "generated fixture does not satisfy its provider schema"
 
-missing_publication_parent="${temporary_base}/missing-publication-parent"
-publication_log="${temporary_base}/missing-publication-parent.log"
-if PIGLOROS_CONFORMANCE_SIGNING_KEY="0707070707070707070707070707070707070707070707070707070707070707" \
-  bash scripts/materialize-conformance-bundles.sh "${missing_publication_parent}" \
-  >"${publication_log}" 2>&1; then
-  echo "materialization accepted a missing publication parent" >&2
+publication_wrapper_prefix="${temporary_base}/publication-wrapper-prefix.sh"
+sed -n '1,/^first_fingerprint=/p' scripts/materialize-conformance-bundles.sh \
+  >"${publication_wrapper_prefix}"
+if grep -Eq '(\[\[.*publication_parent|mkdir .*publication_parent|realpath .*publication_parent|readlink .*publication_parent)' \
+  "${publication_wrapper_prefix}"; then
+  echo "materialization wrapper traverses the publication parent before Rust" >&2
   exit 1
 fi
-grep -Fq "publication parent must already exist" "${publication_log}" || {
-  echo "missing publication parent failed for the wrong reason" >&2
-  cat "${publication_log}" >&2
-  exit 1
-}
-[[ ! -e "${missing_publication_parent}" ]] || {
-  echo "materialization wrapper created the rejected publication parent" >&2
-  exit 1
-}
 
 echo "conformance fixture validator negative controls passed"

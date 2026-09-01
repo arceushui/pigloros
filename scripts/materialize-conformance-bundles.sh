@@ -23,14 +23,9 @@ output_root="${publication_parent}/${source_digest}"
 temporary_root="$(mktemp -d)"
 trap 'rm -rf -- "${temporary_root}"' EXIT
 
-# Atomic publication deliberately requires an existing trusted parent. The
-# orchestrator owns creation of that parent; this wrapper must not traverse or
-# create caller-controlled path components before the binary opens the parent
-# descriptor-relatively and rejects symlinks.
-[[ -d "${publication_parent}" ]] || {
-  echo "publication parent must already exist" >&2
-  exit 1
-}
+# The wrapper deliberately performs no filesystem operation on the caller's
+# publication path. The Rust boundary opens the existing parent with
+# RESOLVE_NO_SYMLINKS before creating any output.
 
 first_fingerprint="$(
   cargo run --quiet -p pos-conformance --bin materialize-conformance-bundles \
