@@ -5953,14 +5953,13 @@ fn durable_validation_helpers_reject_each_incomplete_evidence_shape() -> Result<
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let coordinator =
-        ErasureCoordinatorStateMachineV1::new(test_port(true, vec![target]), reference(2));
+    let verifier = test_port(true, vec![target]);
     let mut partial_authorization = frozen;
     partial_authorization
         .supporting_records
         .freeze_authorization_evidence = None;
     assert_eq!(
-        coordinator.validate_recovered_freeze_authorization(&partial_authorization),
+        partial_authorization.verify_recovered_freeze_authorization(&verifier),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
