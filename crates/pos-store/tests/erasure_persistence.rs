@@ -2,9 +2,12 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-use pos_core::erasure::{
-    destruction_command_reference, target_closure_digest, ErasureApplicabilityDecisionV1,
-};
+#[path = "../../pos-core/tests/support/erasure.rs"]
+mod freeze_fixture_support;
+
+use freeze_fixture_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
+
+use pos_core::erasure::{destruction_command_reference, target_closure_digest};
 use pos_core::{
     CanonicalBytes, EntityId, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
@@ -14,11 +17,10 @@ use pos_core::{
     ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1,
     ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
-    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
+    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
@@ -260,73 +262,6 @@ const fn target(value: u8) -> ErasureRequiredTargetV1 {
     }
 }
 
-#[derive(Clone, Copy)]
-struct FreezeEvidenceFixtureInput<'a> {
-    request: ErasureReferenceV1,
-    scope: &'a ErasureScopeCommitmentInputV1,
-    obligation_set: &'a ErasureObligationSetV1,
-    targets: &'a [ErasureRequiredTargetV1],
-    obligations: &'a [ErasureObligationV1],
-    freeze_position: u64,
-    proof: ErasureReferenceV1,
-}
-
-fn freeze_evidence_fixture(
-    input: FreezeEvidenceFixtureInput<'_>,
-) -> Result<
-    (
-        ErasureFreezeAdmissionEvidenceV1,
-        ErasureFreezeAuthorizationEvidenceV1,
-    ),
-    ErasureErrorV1,
-> {
-    let mut applicability_matrix = Vec::with_capacity(input.targets.len().saturating_mul(4));
-    for category in ErasureInventoryCategoryV1::CANONICAL {
-        for (target_index, target) in input.targets.iter().enumerate() {
-            let owner = input
-                .obligations
-                .iter()
-                .find(|obligation| {
-                    obligation.category() == category && obligation.target() == *target
-                })
-                .map(ErasureObligationV1::owner);
-            applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
-                category,
-                target_index as u64,
-                if owner.is_some() {
-                    ErasureApplicabilityDecisionV1::Applicable
-                } else {
-                    ErasureApplicabilityDecisionV1::Inapplicable
-                },
-                owner,
-            )?);
-        }
-    }
-    let admission_input = ErasureFreezeAdmissionEvidenceInputV1 {
-        request: input.request,
-        scope_commitment: ErasureScopeCommitmentV1::new(input.scope.clone())?.reference(),
-        obligation_set: input.obligation_set.reference(),
-        applicability_matrix,
-        freeze_position: input.freeze_position,
-        policy: input.obligation_set.policy(),
-        trust: input.obligation_set.trust(),
-        authorization_provenance: reference(0),
-    };
-    let provisional = ErasureFreezeAdmissionEvidenceV1::new(admission_input.clone())?;
-    let authorization =
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: provisional.authorization_body_digest()?,
-            policy: input.obligation_set.policy(),
-            trust: input.obligation_set.trust(),
-            evidence: input.proof.digest().to_vec(),
-        })?;
-    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
-        authorization_provenance: authorization.reference(),
-        ..admission_input
-    })?;
-    Ok((admission, authorization))
-}
-
 fn acknowledgement(
     target: ErasureRequiredTargetV1,
     evidence: u8,
@@ -504,12 +439,12 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
         let (freeze_admission_evidence, freeze_authorization_evidence) =
             freeze_evidence_fixture(FreezeEvidenceFixtureInput {
                 request,
-                scope: &scope,
+                scope_commitment: ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
                 obligation_set: &obligation_set,
                 targets: &targets,
                 obligations: &obligations,
                 freeze_position,
-                proof: requested.provenance,
+                evidence: requested.provenance.digest(),
             })?;
         let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: targets.clone(),

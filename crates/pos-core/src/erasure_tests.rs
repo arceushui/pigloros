@@ -5,6 +5,11 @@
 //! validation branches; externally observable lifecycle behavior remains
 //! covered through `ErasureCoordinator` in `tests/`.
 
+#[path = "../tests/support/erasure.rs"]
+mod freeze_fixture_support;
+
+use freeze_fixture_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
+
 fn test_uint(value: u64) -> Value {
     Value::Integer(value.into())
 }
@@ -206,9 +211,10 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
                 targets: &targets,
                 obligations: &obligations,
                 freeze_position,
-                proof: self
+                evidence: self
                     .admitted_freeze_provenance
-                    .unwrap_or(requested.provenance),
+                    .unwrap_or(requested.provenance)
+                    .digest(),
             })?;
         let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: targets.clone(),
@@ -413,62 +419,6 @@ fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
-#[derive(Clone, Copy)]
-struct FreezeEvidenceFixtureInput<'a> {
-    request: ErasureReferenceV1,
-    scope_commitment: ErasureReferenceV1,
-    obligation_set: &'a ErasureObligationSetV1,
-    targets: &'a [ErasureRequiredTargetV1],
-    obligations: &'a [ErasureObligationV1],
-    freeze_position: u64,
-    proof: ErasureReferenceV1,
-}
-
-fn freeze_evidence_fixture(
-    input: FreezeEvidenceFixtureInput<'_>,
-) -> Result<
-    (
-        ErasureFreezeAdmissionEvidenceV1,
-        ErasureFreezeAuthorizationEvidenceV1,
-    ),
-    ErasureErrorV1,
-> {
-    let owners_by_obligation = input
-        .obligations
-        .iter()
-        .map(|obligation| {
-            (
-                (obligation.category(), obligation.target()),
-                obligation.owner(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut applicability_matrix = Vec::with_capacity(input.targets.len().saturating_mul(4));
-    for category in ErasureInventoryCategoryV1::CANONICAL {
-        for (target_index, target) in input.targets.iter().enumerate() {
-            let owner = owners_by_obligation.get(&(category, *target)).copied();
-            applicability_matrix.push(ErasureFreezeApplicabilityRowV1::new(
-                category,
-                target_index as u64,
-                if owner.is_some() {
-                    ErasureApplicabilityDecisionV1::Applicable
-                } else {
-                    ErasureApplicabilityDecisionV1::Inapplicable
-                },
-                owner,
-            )?);
-        }
-    }
-    freeze_evidence_with_matrix(
-        input.request,
-        input.scope_commitment,
-        input.obligation_set,
-        applicability_matrix,
-        input.freeze_position,
-        input.proof,
-    )
-}
-
 fn freeze_evidence_with_matrix(
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,
@@ -544,7 +494,7 @@ pub(super) fn request_input(selectors: Vec<ErasureReferenceV1>) -> ErasureReques
 pub(super) fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(request_input(vec![reference(8), reference(7)]))
 }
-pub(super) fn change(
+pub(super) fn state_transition(
     lifecycle: ErasureLifecycleV1,
     freeze_position: Option<u64>,
     pending_owners: Vec<ErasureReferenceV1>,
@@ -679,19 +629,19 @@ fn receipt_accepts_an_empty_inapplicable_obligation_set_and_rejects_mismatches(
 }
 fn dispatched() -> Result<ErasureStateV1, ErasureErrorV1> {
     ErasureStateV1::submitted(reference(1), reference(2), reference(3))?
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::Authorized,
             None,
             Vec::new(),
             Vec::new(),
         ))?
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
             Vec::new(),
         ))?
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::DestructionDispatched,
             Some(10),
             Vec::new(),
@@ -801,7 +751,7 @@ pub(super) fn record_after_freeze(
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -840,7 +790,7 @@ pub(super) fn record_after_acknowledgement() -> Result<ErasureCoordinatorRecordV
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -870,7 +820,7 @@ pub(super) fn record_after_dispatch_intent(
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -894,7 +844,7 @@ pub(super) fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErr
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -908,7 +858,7 @@ pub(super) fn complete_record() -> Result<ErasureCoordinatorRecordV1, ErasureErr
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let terminal = awaiting.transition({
-        let mut transition = change(
+        let mut transition = state_transition(
             ErasureLifecycleV1::Complete,
             awaiting.freeze_position(),
             Vec::new(),
@@ -946,7 +896,7 @@ fn completed_coordinator(
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -959,7 +909,7 @@ fn completed_coordinator(
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let mut terminal_change = change(
+    let mut terminal_change = state_transition(
         ErasureLifecycleV1::Complete,
         awaiting.freeze_position(),
         Vec::new(),
@@ -1181,7 +1131,7 @@ fn exercise_state_machine_edges() -> Result<(), ErasureErrorV1> {
     assert_eq!(
         missing_targets.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -1200,7 +1150,7 @@ fn exercise_state_machine_edges() -> Result<(), ErasureErrorV1> {
     assert_eq!(
         reservation_commit.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -1479,7 +1429,7 @@ fn lineage_freeze_admission(
             targets: &targets,
             obligations: &obligations,
             freeze_position: 10,
-            proof: reference(9),
+            evidence: reference(9).digest(),
         })?;
     ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
         targets,
@@ -1506,7 +1456,7 @@ fn coordinator_lineage_and_resolution_successors_run_through_unit_port(
     coordinator.authorize(reference(1), reference(9))?;
     let frozen = coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -1571,7 +1521,7 @@ fn freeze_authorization_binding_rejects_a_different_admission_body() -> Result<(
         targets: &input.targets,
         obligations: &input.obligations,
         freeze_position: input.freeze_position + 1,
-        proof: reference(9),
+        evidence: reference(9).digest(),
     })?;
     assert_eq!(
         input
@@ -1598,7 +1548,7 @@ fn atomic_freeze_rejects_complete_but_inconsistent_applicability_matrices(
             targets: &[target, extra_target],
             obligations: &base.obligations,
             freeze_position: 10,
-            proof: reference(9),
+            evidence: reference(9).digest(),
         })?;
     let mut wrong_cardinality = base.clone();
     wrong_cardinality.freeze_admission_evidence = oversized_matrix;
@@ -1638,7 +1588,7 @@ fn atomic_freeze_rejects_complete_but_inconsistent_applicability_matrices(
 }
 
 #[test]
-fn all_inapplicable_matrix_admits_an_empty_obligation_set() -> Result<(), ErasureErrorV1> {
+fn all_inapplicable_matrix_commits_a_complete_empty_receipt() -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let request_reference = reference(1);
     let targets = vec![target];
@@ -1686,31 +1636,45 @@ fn all_inapplicable_matrix_admits_an_empty_obligation_set() -> Result<(), Erasur
     let port = test_port(true, vec![target]);
     port.freeze_reservation.borrow_mut().replace(admission);
     let attempts = Rc::clone(&port.attempt_admissions);
+    let receipt_inputs = Rc::clone(&port.receipt_inputs);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(request_reference, reference(9))?;
     coordinator.freeze_inventory(
         request_reference,
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
             Vec::new(),
         ),
     )?;
-    let dispatched = coordinator.dispatch_destruction(request_reference, reference(10))?;
+    let awaiting = coordinator.dispatch_destruction(request_reference, reference(10))?;
 
     assert_eq!(
-        dispatched.lifecycle(),
-        ErasureLifecycleV1::DestructionDispatched
+        awaiting.lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
     );
     assert_eq!(attempts.borrow()[0].unresolved_obligations(), &[]);
     assert_eq!(attempts.borrow()[0].command_identities(), &[]);
     assert_eq!(
         coordinator.dispatch_destruction(request_reference, reference(10))?,
-        dispatched
+        awaiting
     );
     assert_eq!(attempts.borrow().len(), 1);
+    let receipt = coordinator.finalize(
+        request_reference,
+        receipt_input(
+            ErasureLifecycleV1::Complete,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+    )?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert!(receipt.acknowledgements().is_empty());
+    assert!(receipt_inputs.borrow()[0].inventories.artifacts.is_empty());
+    assert_eq!(receipt_inputs.borrow().len(), 1);
     Ok(())
 }
 
@@ -1837,7 +1801,7 @@ fn submit_rehydration_verifies_the_persisted_predecessor_chain() -> Result<(), E
         .first()
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let authorized = persisted.state().transition(change(
+    let authorized = persisted.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -1889,7 +1853,7 @@ fn durable_record_parts_reject_inconsistent_public_inputs() -> Result<(), Erasur
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let authorized = persisted.state().transition(change(
+    let authorized = persisted.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -1901,7 +1865,7 @@ fn durable_record_parts_reject_inconsistent_public_inputs() -> Result<(), Erasur
         ErasureCoordinatorRecordV1::from_parts(missing_authorization, reference(2)),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    let frozen = authorized.transition(change(
+    let frozen = authorized.transition(state_transition(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
         Vec::new(),
@@ -1915,19 +1879,19 @@ fn durable_record_parts_reject_inconsistent_public_inputs() -> Result<(), Erasur
     );
     let dispatched = persisted
         .state()
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::Authorized,
             None,
             Vec::new(),
             Vec::new(),
         ))?
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
             Vec::new(),
         ))?
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::DestructionDispatched,
             Some(10),
             Vec::new(),
@@ -2098,7 +2062,7 @@ fn durable_record_atomic_freeze_evidence_bindings_are_checked() -> Result<(), Er
 #[test]
 fn durable_authorized_shape_checks_each_persisted_field() -> Result<(), ErasureErrorV1> {
     let submitted = record_after_submit()?;
-    let authorized_state = submitted.state().transition(change(
+    let authorized_state = submitted.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -2316,7 +2280,7 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
         assert_eq!(
             api.freeze_access(
                 reference(1),
-                change(
+                state_transition(
                     ErasureLifecycleV1::AccessFrozen,
                     Some(10),
                     Vec::new(),
@@ -2343,7 +2307,7 @@ fn coordinator_trait_interface_covers_each_lifecycle_operation() -> Result<(), E
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let terminal = awaiting.transition({
-        let mut transition = change(
+        let mut transition = state_transition(
             ErasureLifecycleV1::Complete,
             awaiting.freeze_position(),
             Vec::new(),
@@ -2385,7 +2349,7 @@ fn coordinator_finalize_from_awaiting_state_rechecks_authority() -> Result<(), E
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -2397,7 +2361,7 @@ fn coordinator_finalize_from_awaiting_state_rechecks_authority() -> Result<(), E
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let terminal = awaiting.transition(change(
+    let terminal = awaiting.transition(state_transition(
         ErasureLifecycleV1::PartialFailure,
         awaiting.freeze_position(),
         vec![target.replica_id],
@@ -2438,7 +2402,7 @@ fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
     coordinator.authorize(reference(1), reference(9))?;
     let frozen = coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -2469,7 +2433,7 @@ fn coordinator_persists_host_freeze_provenance() -> Result<(), ErasureErrorV1> {
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -2493,7 +2457,7 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
     assert_eq!(
         unknown.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -2550,7 +2514,7 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -2567,7 +2531,7 @@ fn coordinator_exposes_unknown_and_port_failure_contracts() -> Result<(), Erasur
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -2593,7 +2557,7 @@ fn dispatch_intent_is_persisted_before_host_dispatch() -> Result<(), ErasureErro
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -2676,7 +2640,7 @@ fn coordinator_rejects_a_host_freeze_closure_mismatch() -> Result<(), ErasureErr
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -2698,7 +2662,7 @@ fn freeze_retry_reuses_the_atomic_host_admission_after_restart() -> Result<(), E
     coordinator.submit(request()?, reference(3))?;
     coordinator.authorize(reference(1), reference(9))?;
 
-    let requested = change(
+    let requested = state_transition(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
         Vec::new(),
@@ -2757,7 +2721,7 @@ fn coordinator_rejects_receipt_admission_after_terminal_derivation() -> Result<(
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -2772,7 +2736,7 @@ fn coordinator_rejects_receipt_admission_after_terminal_derivation() -> Result<(
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let mut terminal_change = change(
+    let mut terminal_change = state_transition(
         ErasureLifecycleV1::PartialFailure,
         awaiting.freeze_position(),
         Vec::new(),
@@ -2826,7 +2790,7 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
     );
     let frozen = coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -2836,7 +2800,7 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -2851,7 +2815,7 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
             .lifecycle(),
         ErasureLifecycleV1::AccessFrozen
     );
-    let mut conflicting_freeze = change(
+    let mut conflicting_freeze = state_transition(
         ErasureLifecycleV1::Authorized,
         Some(11),
         Vec::new(),
@@ -2920,7 +2884,7 @@ fn coordinator_normalizes_core_derived_finalize_fields_and_retries() -> Result<(
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -2933,7 +2897,7 @@ fn coordinator_normalizes_core_derived_finalize_fields_and_retries() -> Result<(
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let mut terminal_change = change(
+    let mut terminal_change = state_transition(
         ErasureLifecycleV1::Complete,
         awaiting.freeze_position(),
         Vec::new(),
@@ -3004,7 +2968,7 @@ fn coordinator_derives_partial_failure_for_a_missing_frozen_target() -> Result<(
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -3017,7 +2981,7 @@ fn coordinator_derives_partial_failure_for_a_missing_frozen_target() -> Result<(
         .existing(reference(1))
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let mut terminal_change = change(
+    let mut terminal_change = state_transition(
         ErasureLifecycleV1::PartialFailure,
         awaiting.freeze_position(),
         Vec::new(),
@@ -3052,7 +3016,7 @@ fn coordinator_rejects_premature_finalize_and_preserves_awaiting_acknowledgement
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -3102,25 +3066,25 @@ fn coordinator_rejects_unauthenticated_submission_and_unsupported_version(
 #[test]
 fn receipt_history_requires_a_resolved_monotonic_terminal_chain() -> Result<(), ErasureErrorV1> {
     let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
-    let authorized = submitted.transition(change(
+    let authorized = submitted.transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
         Vec::new(),
     ))?;
-    let frozen = authorized.transition(change(
+    let frozen = authorized.transition(state_transition(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let dispatched = frozen.transition(change(
+    let dispatched = frozen.transition(state_transition(
         ErasureLifecycleV1::DestructionDispatched,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let waiting = dispatched.transition(change(
+    let waiting = dispatched.transition(state_transition(
         ErasureLifecycleV1::AwaitingAcknowledgements,
         Some(10),
         Vec::new(),
@@ -3352,7 +3316,7 @@ fn coordinator_public_seam_rejections() -> Result<(), ErasureErrorV1> {
     );
     let frozen = coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -3363,7 +3327,7 @@ fn coordinator_public_seam_rejections() -> Result<(), ErasureErrorV1> {
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -3673,7 +3637,7 @@ fn coordinator_requires_host_admission_for_acknowledgements() -> Result<(), Eras
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -3693,7 +3657,7 @@ fn coordinator_requires_host_admission_for_acknowledgements() -> Result<(), Eras
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -4080,7 +4044,7 @@ fn scope_extension_ledger_rejects_an_independently_wrong_extension_prefix(
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -4274,7 +4238,7 @@ fn lifecycle_and_rejection_guards_reject_each_independent_conflict() -> Result<(
     );
 
     let mut authorized = submitted;
-    authorized.state = authorized.state().transition(change(
+    authorized.state = authorized.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -4361,7 +4325,7 @@ fn correction_predecessor_accepts_the_exact_rejected_record() -> Result<(), Eras
     );
 
     let mut freeze_predecessor = record_after_submit()?;
-    freeze_predecessor.state = freeze_predecessor.state().transition(change(
+    freeze_predecessor.state = freeze_predecessor.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -4413,7 +4377,7 @@ fn freeze_retry_accepts_only_a_persisted_freeze_failure() -> Result<(), ErasureE
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -4477,7 +4441,7 @@ fn dispatch_attempt_rejects_a_wrong_source_receipt_before_admission() -> Result<
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -4678,13 +4642,13 @@ fn public_decoders_reject_terminal_and_inventory_conflicts() -> Result<(), Erasu
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
-    let waiting = dispatched()?.transition(change(
+    let waiting = dispatched()?.transition(state_transition(
         ErasureLifecycleV1::AwaitingAcknowledgements,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let mut complete_change = change(
+    let mut complete_change = state_transition(
         ErasureLifecycleV1::Complete,
         Some(10),
         Vec::new(),
@@ -4703,7 +4667,7 @@ fn public_decoders_reject_terminal_and_inventory_conflicts() -> Result<(), Erasu
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let partial = waiting.transition(change(
+    let partial = waiting.transition(state_transition(
         ErasureLifecycleV1::PartialFailure,
         Some(10),
         vec![reference(7)],
@@ -4804,10 +4768,10 @@ fn receipt_decoder_exercises_each_public_field_boundary() -> Result<(), ErasureE
             return Err(ErasureErrorV1::InvalidEncoding);
         };
         fields[index] = Value::Null;
-        assert!(matches!(
+        assert_eq!(
             decode_receipt(&malformed),
             Err(ErasureErrorV1::InvalidEncoding)
-        ));
+        );
     }
     for (index, value) in [(4_usize, test_uint(99)), (11, test_uint(99))] {
         let mut malformed = public_receipt_value(&receipt()?)?;
@@ -4876,7 +4840,7 @@ fn lifecycle_public_edges_and_terminality_are_closed() {
 fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
     let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     assert_eq!(
-        submitted.transition(change(
+        submitted.transition(state_transition(
             ErasureLifecycleV1::Submitted,
             None,
             Vec::new(),
@@ -4885,7 +4849,7 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
-        submitted.transition(change(
+        submitted.transition(state_transition(
             ErasureLifecycleV1::Rejected,
             None,
             vec![reference(7)],
@@ -4893,14 +4857,14 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
         )),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    let authorized = submitted.transition(change(
+    let authorized = submitted.transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
         Vec::new(),
     ))?;
     assert_eq!(
-        authorized.transition(change(
+        authorized.transition(state_transition(
             ErasureLifecycleV1::AccessFrozen,
             None,
             Vec::new(),
@@ -4908,14 +4872,14 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
         )),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    let frozen = authorized.transition(change(
+    let frozen = authorized.transition(state_transition(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
     assert_eq!(
-        frozen.transition(change(
+        frozen.transition(state_transition(
             ErasureLifecycleV1::DestructionDispatched,
             Some(11),
             Vec::new(),
@@ -4923,20 +4887,20 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
         )),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    let dispatched = frozen.transition(change(
+    let dispatched = frozen.transition(state_transition(
         ErasureLifecycleV1::DestructionDispatched,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let waiting = dispatched.transition(change(
+    let waiting = dispatched.transition(state_transition(
         ErasureLifecycleV1::AwaitingAcknowledgements,
         Some(10),
         vec![reference(7)],
         Vec::new(),
     ))?;
     assert_eq!(
-        waiting.transition(change(
+        waiting.transition(state_transition(
             ErasureLifecycleV1::Complete,
             Some(10),
             vec![reference(7)],
@@ -4944,7 +4908,7 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
         )),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    let partial = waiting.transition(change(
+    let partial = waiting.transition(state_transition(
         ErasureLifecycleV1::PartialFailure,
         Some(10),
         Vec::new(),
@@ -4973,7 +4937,7 @@ fn lifecycle_is_monotonic_and_digest_linked() -> Result<(), ErasureErrorV1> {
 fn owner_evidence_bounds_are_enforced_at_the_public_transition() -> Result<(), ErasureErrorV1> {
     let dispatched = dispatched()?;
     assert!(dispatched
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::AwaitingAcknowledgements,
             Some(10),
             references(ERASURE_MAX_REFERENCES),
@@ -4981,7 +4945,7 @@ fn owner_evidence_bounds_are_enforced_at_the_public_transition() -> Result<(), E
         ))
         .is_ok());
     assert!(dispatched
-        .transition(change(
+        .transition(state_transition(
             ErasureLifecycleV1::AwaitingAcknowledgements,
             Some(10),
             Vec::new(),
@@ -4989,7 +4953,7 @@ fn owner_evidence_bounds_are_enforced_at_the_public_transition() -> Result<(), E
         ))
         .is_ok());
     assert_eq!(
-        dispatched.transition(change(
+        dispatched.transition(state_transition(
             ErasureLifecycleV1::AwaitingAcknowledgements,
             Some(10),
             references(ERASURE_MAX_REFERENCES + 1),
@@ -4998,7 +4962,7 @@ fn owner_evidence_bounds_are_enforced_at_the_public_transition() -> Result<(), E
         Err(ErasureErrorV1::ScopeInvalid)
     );
     assert_eq!(
-        dispatched.transition(change(
+        dispatched.transition(state_transition(
             ErasureLifecycleV1::AwaitingAcknowledgements,
             Some(10),
             Vec::new(),
@@ -5103,25 +5067,25 @@ fn request_wire_enum_roundtrip() -> Result<(), ErasureErrorV1> {
 
 fn state_wire_enum_roundtrip() -> Result<(), ErasureErrorV1> {
     let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
-    let authorized = submitted.transition(change(
+    let authorized = submitted.transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
         Vec::new(),
     ))?;
-    let frozen = authorized.transition(change(
+    let frozen = authorized.transition(state_transition(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let dispatched = frozen.transition(change(
+    let dispatched = frozen.transition(state_transition(
         ErasureLifecycleV1::DestructionDispatched,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let waiting = dispatched.transition(change(
+    let waiting = dispatched.transition(state_transition(
         ErasureLifecycleV1::AwaitingAcknowledgements,
         Some(10),
         Vec::new(),
@@ -5138,13 +5102,13 @@ fn state_wire_enum_roundtrip() -> Result<(), ErasureErrorV1> {
         replay_claim: ErasureReplayClaimV1::StructuralOnly,
         provenance: reference(9),
     })?;
-    let partial = waiting.transition(change(
+    let partial = waiting.transition(state_transition(
         ErasureLifecycleV1::PartialFailure,
         Some(10),
         vec![reference(44)],
         Vec::new(),
     ))?;
-    let rejected = submitted.transition(change(
+    let rejected = submitted.transition(state_transition(
         ErasureLifecycleV1::Rejected,
         None,
         Vec::new(),
@@ -5165,7 +5129,8 @@ fn state_wire_enum_roundtrip() -> Result<(), ErasureErrorV1> {
         ErasureReplayClaimV1::UnverifiableArtifactsMissing,
         ErasureReplayClaimV1::IncompatibleProfile,
     ] {
-        let mut transition = change(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new());
+        let mut transition =
+            state_transition(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new());
         transition.replay_claim = claim;
         let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?
             .transition(transition)?;
@@ -5252,7 +5217,7 @@ fn request_decoder_rejects_retained_wire_boundaries() -> Result<(), ErasureError
 fn state_decoder_rejects_retained_wire_boundaries() -> Result<(), ErasureErrorV1> {
     let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     assert_eq!(
-        submitted.transition(change(
+        submitted.transition(state_transition(
             ErasureLifecycleV1::Authorized,
             None,
             vec![reference(7), reference(7)],
@@ -5323,7 +5288,7 @@ fn public_state_owner_accessors_and_freeze_rejection_remain_exact() -> Result<()
     let dispatched = dispatched()?;
     let pending = vec![reference(7)];
     let failed = vec![reference(8)];
-    let awaiting = dispatched.transition(change(
+    let awaiting = dispatched.transition(state_transition(
         ErasureLifecycleV1::AwaitingAcknowledgements,
         Some(10),
         pending.clone(),
@@ -5339,7 +5304,7 @@ fn public_state_owner_accessors_and_freeze_rejection_remain_exact() -> Result<()
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -5352,14 +5317,14 @@ fn public_state_owner_accessors_and_freeze_rejection_remain_exact() -> Result<()
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new(),),
+            state_transition(ErasureLifecycleV1::Authorized, None, Vec::new(), Vec::new(),),
         ),
         Err(ErasureErrorV1::PolicyConflict)
     );
     assert_eq!(
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -5382,7 +5347,7 @@ fn public_freeze_rejects_a_required_target_closure_over_the_bound() -> Result<()
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -5407,25 +5372,25 @@ fn public_freeze_rejects_a_required_target_closure_over_the_bound() -> Result<()
 fn public_receipt_history_rejects_each_terminal_and_predecessor_mismatch(
 ) -> Result<(), ErasureErrorV1> {
     let submitted = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
-    let authorized = submitted.transition(change(
+    let authorized = submitted.transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
         Vec::new(),
     ))?;
-    let frozen = authorized.transition(change(
+    let frozen = authorized.transition(state_transition(
         ErasureLifecycleV1::AccessFrozen,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let dispatched = frozen.transition(change(
+    let dispatched = frozen.transition(state_transition(
         ErasureLifecycleV1::DestructionDispatched,
         Some(10),
         Vec::new(),
         Vec::new(),
     ))?;
-    let waiting = dispatched.transition(change(
+    let waiting = dispatched.transition(state_transition(
         ErasureLifecycleV1::AwaitingAcknowledgements,
         Some(10),
         Vec::new(),
@@ -5532,7 +5497,7 @@ fn finalization_persists_the_atomic_batch_across_restart() -> Result<(), Erasure
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -5604,7 +5569,7 @@ fn acknowledgement_requires_both_the_admitted_obligation_and_command() -> Result
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -5630,7 +5595,7 @@ fn finalization_accepts_the_exact_attempt_deadline() -> Result<(), ErasureErrorV
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -5664,7 +5629,7 @@ fn replacement_validation_accepts_idempotent_and_same_state_extensions(
     assert_eq!(submitted.validate_replacement(&submitted), Ok(()));
 
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
-    let authorized_state = submitted.state().transition(change(
+    let authorized_state = submitted.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -5727,7 +5692,7 @@ fn replacement_validation_rejects_each_non_monotonic_record_dimension() -> Resul
         Err(ErasureErrorV1::ProvenanceMissing)
     );
 
-    let authorized_state = submitted.state().transition(change(
+    let authorized_state = submitted.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -5738,7 +5703,7 @@ fn replacement_validation_rejects_each_non_monotonic_record_dimension() -> Resul
     authorized.authorize_provenance = Some(reference(9));
 
     let mut rejected = authorized.clone();
-    rejected.state = authorized.state().transition(change(
+    rejected.state = authorized.state().transition(state_transition(
         ErasureLifecycleV1::Rejected,
         None,
         Vec::new(),
@@ -5790,7 +5755,7 @@ fn awaiting_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -5808,7 +5773,7 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
 ) -> Result<(), ErasureErrorV1> {
     let target = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged).target;
     let submitted = record_after_submit()?;
-    let authorized_state = submitted.state().transition(change(
+    let authorized_state = submitted.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -5849,7 +5814,7 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
         coordinator.authorize(reference(1), reference(9))?;
         coordinator.freeze_inventory(
             reference(1),
-            change(
+            state_transition(
                 ErasureLifecycleV1::AccessFrozen,
                 Some(10),
                 Vec::new(),
@@ -5966,7 +5931,7 @@ fn replacement_helpers_reject_each_non_monotonic_dimension() -> Result<(), Erasu
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let authorized_state = submitted.state().transition(change(
+    let authorized_state = submitted.state().transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),
@@ -5991,7 +5956,7 @@ fn replacement_helpers_reject_each_non_monotonic_dimension() -> Result<(), Erasu
     );
 
     let mut dispatched = frozen.clone();
-    dispatched.state = frozen.state().transition(change(
+    dispatched.state = frozen.state().transition(state_transition(
         ErasureLifecycleV1::DestructionDispatched,
         Some(10),
         Vec::new(),
@@ -6227,7 +6192,7 @@ fn dispatch_retry_rejects_a_different_intent_provenance() -> Result<(), ErasureE
     coordinator.authorize(reference(1), reference(9))?;
     coordinator.freeze_inventory(
         reference(1),
-        change(
+        state_transition(
             ErasureLifecycleV1::AccessFrozen,
             Some(10),
             Vec::new(),
@@ -6266,7 +6231,7 @@ fn predecessor_validation_rejects_an_exhausted_chain_budget() -> Result<(), Eras
 fn state_predecessor_validation_enforces_the_shared_transition_contract(
 ) -> Result<(), ErasureErrorV1> {
     let previous = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
-    let current = previous.transition(change(
+    let current = previous.transition(state_transition(
         ErasureLifecycleV1::Authorized,
         None,
         Vec::new(),

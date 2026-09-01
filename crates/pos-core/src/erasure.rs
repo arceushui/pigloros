@@ -7045,11 +7045,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                                 if ordinal != 0 {
                                     return Ok(record.state);
                                 }
-                                self.persist_initial_dispatch(
-                                    &mut record,
-                                    admission,
-                                    !commands.is_empty(),
-                                )
+                                self.persist_initial_dispatch(&mut record, admission)
                             })
                     })
                 })
@@ -7060,7 +7056,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &mut self,
         record: &mut ErasureCoordinatorRecordV1,
         admission: &ErasureRetryAdmissionV1,
-        await_acknowledgements: bool,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let freeze_position = record.state.freeze_position();
         let replay_claim = record.state.replay_claim();
@@ -7073,9 +7068,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             replay_claim,
             provenance: admission.reference(),
         })?;
-        if !await_acknowledgements {
-            return self.commit(record.clone()).map(|()| record.state.clone());
-        }
         let dispatched_record = record.clone();
         record.state = record.state.transition(ErasureStateTransitionV1 {
             lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,

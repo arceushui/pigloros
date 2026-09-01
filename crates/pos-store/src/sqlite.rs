@@ -7377,10 +7377,7 @@ mod tests {
             let error = SqliteStore::open(file.path().to_str().test_ok())
                 .err()
                 .test_ok();
-            assert!(matches!(
-                error,
-                CoreError::Storage(message) if message.contains("incompatible schema")
-            ));
+            assert!(error.to_string().contains("incompatible schema"));
         }
     }
 

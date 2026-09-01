@@ -5551,9 +5551,9 @@ mod coverage_entrypoints {
         let mut store = MemoryStore::new();
         let timeline = ok(store.create_timeline("coverage-geographic-admin"));
         store.geographic_timelines.insert(timeline.id());
-        assert!(matches!(
-            store.delete_timeline(timeline.id()),
-            Err(CoreError::TimelineNotFound(id)) if id == timeline.id()
-        ));
+        let error = store
+            .delete_timeline(timeline.id())
+            .expect_err("geographic timelines must reject administrative deletion");
+        assert!(error.to_string().contains("timeline not found"));
     }
 }

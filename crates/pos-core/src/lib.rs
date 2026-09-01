@@ -11,6 +11,9 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod authority;
+#[cfg(test)]
+extern crate self as pos_core;
+
 pub mod clock;
 pub mod consent;
 pub mod crypto;
