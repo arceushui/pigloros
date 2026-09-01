@@ -32,7 +32,7 @@ def entry(*, status: str, crap: float) -> dict:
 
 
 def report(*entries: dict) -> dict:
-    return {"version": "0.0.2", "entries": list(entries), "removed": []}
+    return {"version": "0.2.2", "entries": list(entries), "removed": []}
 
 
 class CargoCrapReportTests(unittest.TestCase):

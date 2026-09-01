@@ -9,7 +9,7 @@ import sys
 from typing import Any
 
 
-REPORT_VERSION = "0.0.2"
+REPORT_VERSION = "0.2.2"
 NEW_FUNCTION_THRESHOLD = 30.0
 ALLOWED_STATUSES = {"regressed", "improved", "new", "unchanged", "moved"}
 

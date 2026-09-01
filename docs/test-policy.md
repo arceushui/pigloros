@@ -18,6 +18,7 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
 | Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions |
+| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
 ## Coverage attribution policy
@@ -27,6 +28,21 @@ mapped to a source line or segment after a fresh non-root run. It is a
 reporting-tolerance only: all tests still run with `--include-ignored`, and
 `coverage(off)` remains test-only. Do not use the allowance to exempt
 production code or avoid writing a reachable behavior test.
+
+## Change-risk policy
+
+The hosted coverage job passes its completed LCOV report to pinned
+`cargo-crap` v0.2.2. The required verdict rejects any existing function whose
+CRAP score rises by more than the tool's 0.01 comparison tolerance and any new
+function whose score exceeds 30. Standard Cargo integration-test, benchmark,
+and example directories are excluded from complexity scoring; their execution
+still contributes coverage to production code.
+
+The committed baseline records pre-existing scores; it is not a waiver file.
+Do not raise a baseline score to make a pull request pass. Regenerate it only
+from a green `main` coverage run when intentionally adopting a new tool/formula
+version or recording verified score reductions. The gate treats missing
+coverage pessimistically and bounds source analysis to two threads.
 
 ## Hardware-dependent startup
 

@@ -155,9 +155,9 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
   --fail-under-lines 99 --fail-under-regions 99 -- --include-ignored
 ```
 
-CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny** (all features), **cargo-shear**, **fmt**, **rustdoc** (`-D warnings`), **test** (`--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions, with bounded hosted-runner parallelism), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io), plus pull-request diff mutation testing, scheduled fuzzing, ThreadSanitizer, and CodeQL workflows. See `.github/workflows/`. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job with bounded parallelism; when local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering the threshold.
+CI (GitHub Actions): **Trunk Check** (`rust-test-policy`), **cargo-deny** (all features), **cargo-shear**, **cargo-crap** (no existing-score regressions; new functions at most 30), **fmt**, **rustdoc** (`-D warnings`), **test** (`--include-ignored`), **clippy pedantic**, **llvm-cov** (99% lines and 99% regions, with bounded hosted-runner parallelism), **docker-build** (image + smoke test), **deploy** (workflow_dispatch: build → smoke → push to ghcr.io), plus pull-request diff mutation testing, scheduled fuzzing, ThreadSanitizer, and CodeQL workflows. See `.github/workflows/`. The repository-wide LLVM gate is intentionally executed in the hosted `coverage` job with bounded parallelism; its completed LCOV data feeds cargo-crap without a second instrumented build. When local instrumentation exceeds available memory, run the other local gates and use that Actions job for the coverage execution without lowering either threshold.
 
-Quality floor: **800+ tests · 0 failures · at least 99% line and 99% region coverage · clippy pedantic clean**
+Quality floor: **800+ tests · 0 failures · at least 99% line and 99% region coverage · no CRAP regressions · new-function CRAP ≤30 · clippy pedantic clean**
 
 ### Test & coverage policy
 
@@ -168,6 +168,7 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy (also mir
 | `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
 | Local git hook | Versioned `.githooks/pre-commit` + Trunk **`rust-test-policy`** | Blocks a commit if the staged Rust policy fails |
 | Runtime `#[ignore]` | `cargo test -- --include-ignored` + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report `0 ignored` |
+| Change risk | pinned **cargo-crap** + `scripts/check_cargo_crap_report.py` | Existing scores cannot regress; new functions must score ≤30 |
 | Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
 
 #### Git hooks (local)

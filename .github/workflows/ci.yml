@@ -230,6 +230,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -256,7 +258,26 @@ jobs:
       - name: Export LCOV for cargo-crap
         run: cargo llvm-cov report --lcov
           --output-path "${{ runner.temp }}/coverage.lcov"
-      - name: Generate cargo-crap bootstrap baseline
+      - name: Select trusted cargo-crap baseline
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            if git cat-file -e "${BASE_SHA}:.cargo-crap-baseline.json"; then
+              git show "${BASE_SHA}:.cargo-crap-baseline.json" > "${baseline}"
+            else
+              # One-time bootstrap is safe only when no analyzed Rust input changed.
+              git diff --quiet "${BASE_SHA}...HEAD" -- \
+                '*.rs' Cargo.toml Cargo.lock rust-toolchain.toml
+              cp .cargo-crap-baseline.json "${baseline}"
+            fi
+          else
+            cp .cargo-crap-baseline.json "${baseline}"
+          fi
+      - name: Analyze CRAP score changes
         run: >
           cargo crap --workspace
           --lcov "${{ runner.temp }}/coverage.lcov"
@@ -265,14 +286,20 @@ jobs:
           --exclude 'tests/**'
           --exclude 'benches/**'
           --exclude 'examples/**'
+          --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
+          --epsilon 0.01
           --format json
-          --output "${{ runner.temp }}/cargo-crap-baseline.json"
-      - name: Upload cargo-crap bootstrap baseline
+          --output "${{ runner.temp }}/cargo-crap-report.json"
+      - name: Enforce cargo-crap policy
+        run: python scripts/check_cargo_crap_report.py
+          "${{ runner.temp }}/cargo-crap-report.json"
+      - name: Upload cargo-crap report
+        if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cargo-crap-bootstrap-${{ github.sha }}
-          path: ${{ runner.temp }}/cargo-crap-baseline.json
-          if-no-files-found: error
+          name: cargo-crap-report-${{ github.sha }}
+          path: ${{ runner.temp }}/cargo-crap-report.json
+          if-no-files-found: ignore
       - name: Export coverage details
         if: always()
         continue-on-error: true
@@ -553,6 +580,12 @@ jobs:
         run: |
           python scripts/test_check_asan_ci_policy.py
           python scripts/test_check_lsan_suppression_report.py
+      - name: Check cargo-crap CI policy
+        run: python scripts/check_cargo_crap_ci_policy.py
+      - name: Test cargo-crap policy checkers
+        run: |
+          python scripts/test_check_cargo_crap_ci_policy.py
+          python scripts/test_check_cargo_crap_report.py
 
   modules-structure:
     name: modules-structure (reports only)
