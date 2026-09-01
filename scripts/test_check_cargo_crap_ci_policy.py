@@ -38,7 +38,7 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
     def cargo_crap_step(self, workflow: dict, name: str) -> dict:
         return next(
             step
-            for step in workflow["jobs"]["coverage"]["steps"]
+            for step in workflow["jobs"]["cargo-crap"]["steps"]
             if step.get("name") == name
         )
 
@@ -90,8 +90,15 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
 
     def test_rejects_shallow_checkout(self) -> None:
         self.assert_rejected(
-            lambda workflow: workflow["jobs"]["coverage"]["steps"][0].update(
+            lambda workflow: workflow["jobs"]["cargo-crap"]["steps"][0].update(
                 {"with": {"fetch-depth": 1}}
+            )
+        )
+
+    def test_requires_visible_job_after_coverage(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"].update(
+                {"needs": "test"}
             )
         )
 

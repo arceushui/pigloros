@@ -11,6 +11,7 @@ import yaml
 
 INSTALL_ACTION = "taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780"
 UPLOAD_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+DOWNLOAD_ACTION = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 REQUIRED_ANALYSIS_ARGUMENTS = {
     "cargo crap --workspace",
     '--lcov "${{ runner.temp }}/coverage.lcov"',
@@ -55,10 +56,37 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     require("continue-on-error" not in coverage, "coverage job must be blocking")
     require("if" not in coverage, "coverage job must be unconditional")
 
-    steps = coverage.get("steps")
-    require(isinstance(steps, list), "coverage steps must be an array")
+    coverage_steps = coverage.get("steps")
+    require(isinstance(coverage_steps, list), "coverage steps must be an array")
+    export = named_step(coverage_steps, "Export LCOV for cargo-crap")
+    require(
+        export.get("run")
+        == 'cargo llvm-cov report --lcov --output-path "${{ runner.temp }}/coverage.lcov"',
+        "cargo-crap must reuse the completed hosted LCOV instrumentation",
+    )
+    lcov_upload = named_step(coverage_steps, "Upload LCOV for cargo-crap")
+    require(lcov_upload.get("uses") == UPLOAD_ACTION, "LCOV upload Action must be pinned")
+    require(
+        lcov_upload.get("with")
+        == {
+            "name": "coverage-lcov-${{ github.sha }}",
+            "path": "${{ runner.temp }}/coverage.lcov",
+            "retention-days": 1,
+            "if-no-files-found": "error",
+        },
+        "coverage must publish the exact required LCOV artifact",
+    )
+
+    job = jobs.get("cargo-crap")
+    require(isinstance(job, dict), "missing visible cargo-crap job")
+    require(job.get("name") == "cargo-crap", "cargo-crap check name changed")
+    require(job.get("needs") == "coverage", "cargo-crap must depend on coverage")
+    require("continue-on-error" not in job, "cargo-crap job must be blocking")
+    require("if" not in job, "cargo-crap job must require successful coverage")
+    steps = job.get("steps")
+    require(isinstance(steps, list), "cargo-crap steps must be an array")
     checkout = steps[0] if steps else None
-    require(isinstance(checkout, dict), "coverage must start with checkout")
+    require(isinstance(checkout, dict), "cargo-crap must start with checkout")
     require(
         checkout.get("with", {}).get("fetch-depth") == 0,
         "coverage checkout must fetch the pull-request base baseline",
@@ -71,11 +99,18 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
         "cargo-crap version or installer inputs changed",
     )
 
-    export = named_step(steps, "Export LCOV for cargo-crap")
+    download = named_step(steps, "Download hosted LCOV")
     require(
-        export.get("run")
-        == 'cargo llvm-cov report --lcov --output-path "${{ runner.temp }}/coverage.lcov"',
-        "cargo-crap must reuse the completed hosted LCOV instrumentation",
+        download
+        == {
+            "name": "Download hosted LCOV",
+            "uses": DOWNLOAD_ACTION,
+            "with": {
+                "name": "coverage-lcov-${{ github.sha }}",
+                "path": "${{ runner.temp }}",
+            },
+        },
+        "cargo-crap must download the exact hosted LCOV artifact",
     )
 
     baseline = named_step(steps, "Select trusted cargo-crap baseline")

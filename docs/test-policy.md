@@ -31,8 +31,8 @@ production code or avoid writing a reachable behavior test.
 
 ## Change-risk policy
 
-The hosted coverage job passes its completed LCOV report to pinned
-`cargo-crap` v0.2.2. The required verdict rejects any existing function whose
+The hosted coverage job publishes its completed LCOV report to a separate,
+required `cargo-crap` check running pinned v0.2.2. The verdict rejects any existing function whose
 CRAP score rises by more than the tool's 0.01 comparison tolerance and any new
 function whose score exceeds 30. Standard Cargo integration-test, benchmark,
 and example directories are excluded from complexity scoring; their execution
