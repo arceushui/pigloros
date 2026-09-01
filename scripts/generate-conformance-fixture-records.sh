@@ -72,6 +72,7 @@ validate_json_fixture_adapter() {
       (keys - ["with_operation", "without_operation"] | length) == 0 and
       (.with_operation | type == "object") and
       ((has("without_operation") | not) or (.without_operation | type == "object"))) and
+    (.fixture_contracts.positive | has("allowed_divergence") | not) and
     .artifact_media_types == {
       schema: "application/schema+json",
       payload: "application/json",
@@ -201,8 +202,9 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
   jq -e --arg family "${family}" '
     def supported_schema:
       type == "object" and
-      ((keys) - ["$schema", "additionalProperties", "const", "maximum", "minLength",
-        "minimum", "pattern", "properties", "required", "type"] | length) == 0 and
+      ((keys) - ["$schema", "additionalProperties", "const", "items", "maximum",
+        "maxItems", "minItems", "minLength", "minimum", "pattern", "properties",
+        "required", "type"] | length) == 0 and
       ((has("type") | not) or
         (.type == "array" or .type == "boolean" or .type == "integer" or
          .type == "null" or .type == "number" or .type == "object" or
@@ -217,7 +219,13 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
       ((has("maximum") | not) or (.maximum | type == "number")) and
       ((has("minLength") | not) or
         (.minLength | type == "number" and . >= 0 and floor == .)) and
+      ((has("minItems") | not) or
+        (.minItems | type == "number" and . >= 0 and floor == .)) and
+      ((has("maxItems") | not) or
+        (.maxItems | type == "number" and . >= 0 and floor == .)) and
+      (((has("minItems") and has("maxItems")) | not) or .minItems <= .maxItems) and
       ((has("pattern") | not) or (.pattern | type == "string")) and
+      ((has("items") | not) or (.items | supported_schema)) and
       ((.properties // {}) | type == "object") and
       all((.properties // {})[]; supported_schema);
     supported_schema and
@@ -295,6 +303,12 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
         (($value | type) != "number" or $value <= $schema.maximum)) and
       ((($schema | has("minLength")) | not) or
         (($value | type) != "string" or ($value | length) >= $schema.minLength)) and
+      ((($schema | has("minItems")) | not) or
+        (($value | type) != "array" or ($value | length) >= $schema.minItems)) and
+      ((($schema | has("maxItems")) | not) or
+        (($value | type) != "array" or ($value | length) <= $schema.maxItems)) and
+      ((($schema | has("items")) | not) or
+        (($value | type) != "array" or all($value[]; validates($schema.items)))) and
       ((($schema | has("pattern")) | not) or
         (($value | type) != "string" or ($value | test($schema.pattern)))) and
       ((($schema | has("required")) | not) or
@@ -419,17 +433,17 @@ generated_authority="${generated_root}/expected-authority/inventory.json"
 mkdir -p "$(dirname "${generated_authority}")"
 jq -n '
   [
-    {fixture_id: "RPL-001", execution_class: "RecordedReplay", expected_outcome: "VerifiedExact"},
-    {fixture_id: "PRF-001", execution_class: "ProfileRecomputation", expected_outcome: "VerifiedExact"},
-    {fixture_id: "PRF-002", execution_class: "CrossProfileConformance", expected_outcome: "VerifiedExact"},
-    {fixture_id: "DIV-001", execution_class: "ProfileRecomputation", expected_outcome: "Diverged"},
-    {fixture_id: "INV-001", execution_class: "DeterministicProfile", expected_outcome: "InvalidManifest"},
-    {fixture_id: "INV-002", execution_class: "DeterministicProfile", expected_outcome: "UnverifiableArtifactsMissing"},
-    {fixture_id: "INV-003", execution_class: "DeterministicProfile", expected_outcome: "IncompatibleProfile"},
-    {fixture_id: "RES-001", execution_class: "ProfileRecomputation", expected_outcome: "ResourceLimitExceeded"},
-    {fixture_id: "LIVE-001", execution_class: "LiveUnverified", expected_outcome: "NonDeterministicAdmission"},
-    {fixture_id: "ERA-001", execution_class: "RecordedReplay", expected_outcome: "OutcomePreservedReplayClaimDegraded"},
-    {fixture_id: "SEC-001", execution_class: "DeterministicProfile", expected_outcome: "TypedFailure"}
+    {fixture_id: "RPL-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-002", execution_classes: ["CrossProfileConformance"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "DIV-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "Diverged"},
+    {fixture_id: "INV-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "InvalidManifest"},
+    {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing"},
+    {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile"},
+    {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded"},
+    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission"},
+    {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded"},
+    {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure"}
   ] |
   map(. + {
     fixture_bytes_path: null,
@@ -447,10 +461,14 @@ jq -n '
     entries: .
   }
 ' > "${generated_authority}"
-cmp -- "${generated_authority}" "${fixture_root}/expected-authority/inventory.json" || {
-  echo "Draft authority inventory is not independently reproducible" >&2
-  exit 1
-}
+if [[ "${mode}" == "--write" ]]; then
+  install -m 0644 -- "${generated_authority}" "${fixture_root}/expected-authority/inventory.json"
+else
+  cmp -- "${generated_authority}" "${fixture_root}/expected-authority/inventory.json" || {
+    echo "Draft authority inventory is not independently reproducible" >&2
+    exit 1
+  }
+fi
 
 generated_sha256="${generated_root}/SHA256SUMS"
 generated_blake3="${generated_root}/BLAKE3SUMS"

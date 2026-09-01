@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-denied",
   "family": "denied",
-  "input_blake3_digest": "47c149dad684a5b7d47d69ccfbf93ebc86c08487bcb35f625058c310783a299a",
+  "input_blake3_digest": "b8ab0f050aa7c6b15245764e98ad2821f413a4ecb06514770dba2b2169b50a3b",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

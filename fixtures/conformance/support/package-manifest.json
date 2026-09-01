@@ -11,7 +11,6 @@
     { "path": "support/evaluator-request-v1.cddl", "media_type": "text/plain", "role": "schema", "provider_package": false },
     { "path": "support/fixture-family-contract.json", "media_type": "application/json", "role": "fixture-contract-policy", "provider_package": false },
     { "path": "support/limitations.md", "media_type": "text/markdown", "role": "limitations", "provider_package": true },
-    { "path": "support/normative-requirements.md", "media_type": "text/markdown", "role": "normative-specification", "provider_package": false },
     { "path": "support/package-manifest.json", "media_type": "application/json", "role": "schema", "provider_package": false },
     { "path": "support/publication-review.json", "media_type": "application/json", "role": "provenance", "provider_package": false },
     { "path": "support/sbom.json", "media_type": "application/json", "role": "sbom", "provider_package": true },

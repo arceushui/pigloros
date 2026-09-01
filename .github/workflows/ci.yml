@@ -146,7 +146,9 @@ jobs:
           # Same public deterministic fixture key used for main verification;
           # these signatures prove fixture consistency, not publisher identity.
           PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
-        run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
+        run: |
+          mkdir -- "${RUNNER_TEMP}/conformance-draft"
+          bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
       - name: Exercise build-time fixture rejection boundary
         run: bash scripts/test-conformance-build-validation.sh
       - name: Upload main-branch Draft verification artifact

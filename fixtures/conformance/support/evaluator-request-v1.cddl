@@ -1,4 +1,4 @@
-# EVR1 evaluator request (deterministic, definite-length CBOR array)
+; EVR1 evaluator request (deterministic, definite-length CBOR array)
 
 evaluator-request-v1 = [
   magic: "EVR1",

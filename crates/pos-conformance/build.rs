@@ -83,6 +83,8 @@ struct ProfilePaths {
     wire_code: u64,
     profile: String,
     profile_id: String,
+    semantic_version: String,
+    normative_requirements: FixtureAsset,
     claim_layer: String,
     claim_layer_variant: String,
     subject_adapter: CatalogSubjectAdapter,
@@ -200,41 +202,6 @@ struct CatalogFixtureContract {
     watchdog_ms: u64,
     network_allowed: bool,
     minimum_capability_ids: Vec<String>,
-    #[serde(default)]
-    allowed_divergence: Option<CatalogAllowedDivergence>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogAllowedDivergence {
-    classification: CatalogDivergenceMismatchKind,
-    first_coordinate: String,
-}
-
-#[derive(Clone, Copy, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum CatalogDivergenceMismatchKind {
-    EventIdentity,
-    EventOrder,
-    CanonicalBytes,
-    ProjectionCheckpoint,
-    TypedFailure,
-    Artifact,
-    SchemaOrUpcaster,
-}
-
-impl CatalogDivergenceMismatchKind {
-    const fn rust_variant(self) -> &'static str {
-        match self {
-            Self::EventIdentity => "DivergenceMismatchKindV1::EventIdentity",
-            Self::EventOrder => "DivergenceMismatchKindV1::EventOrder",
-            Self::CanonicalBytes => "DivergenceMismatchKindV1::CanonicalBytes",
-            Self::ProjectionCheckpoint => "DivergenceMismatchKindV1::ProjectionCheckpoint",
-            Self::TypedFailure => "DivergenceMismatchKindV1::TypedFailure",
-            Self::Artifact => "DivergenceMismatchKindV1::Artifact",
-            Self::SchemaOrUpcaster => "DivergenceMismatchKindV1::SchemaOrUpcaster",
-        }
-    }
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -258,10 +225,6 @@ enum CatalogStrictOracle {
         owner_id: String,
         contract_version: String,
         code_id: String,
-    },
-    Divergence {
-        classification: CatalogDivergenceMismatchKind,
-        first_coordinate: String,
     },
 }
 
@@ -757,6 +720,7 @@ fn expected_source_paths(
     );
     for profile in profiles {
         paths.insert(profile.profile.clone());
+        paths.insert(profile.normative_requirements.relative.clone());
         for provider in &profile.fixture_providers {
             paths.insert(provider.manifest.relative.clone());
             for fixture in &provider.fixtures {
@@ -1100,22 +1064,10 @@ fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyC
 fn strict_oracle(
     family: &FixtureFamilyDeclaration,
     provider: &FixtureProvider,
-    contract: &CatalogFixtureContract,
 ) -> Result<CatalogStrictOracle, io::Error> {
     let operation_valid = matches!(family.operation.as_str(), "required" | "optional");
     if !operation_valid {
         return Err(invalid_data("fixture-family operation policy is invalid"));
-    }
-    if let Some(divergence) = &contract.allowed_divergence {
-        if divergence.first_coordinate.is_empty() || divergence.first_coordinate.len() > 128 {
-            return Err(invalid_data(
-                "fixture divergence coordinate must contain 1..=128 bytes",
-            ));
-        }
-        return Ok(CatalogStrictOracle::Divergence {
-            classification: divergence.classification,
-            first_coordinate: divergence.first_coordinate.clone(),
-        });
     }
     Ok(match &family.oracle {
         FixtureFamilyOracle::CanonicalOutput => CatalogStrictOracle::CanonicalOutput,
@@ -1230,7 +1182,7 @@ fn profile_fixtures(
                 .get(&family)
                 .ok_or_else(|| invalid_data(format!("fixture-family contract omits {family}")))?;
             let contract = fixture_contract(provider_value, &family)?;
-            let strict_oracle = strict_oracle(family_declaration, provider, &contract)?;
+            let strict_oracle = strict_oracle(family_declaration, provider)?;
             Ok(FixturePaths {
                 case_id,
                 family_variant,
@@ -1420,7 +1372,42 @@ fn profile_paths(
     let profile_record = snapshots.bytes(&profile, "profile manifest")?.to_vec();
     let profile_value: Value = serde_json::from_slice(&profile_record)?;
     let profile_id = json_text(&profile_value, "profile_id")?;
+    let semantic_version = json_text(&profile_value, "semantic_version")?;
+    let normative_requirements_path = json_text(&profile_value, "normative_requirements")?;
     let claim_layer = json_text(&profile_value, "claim_layer")?;
+    let expected_profile_id = match claim_layer.as_str() {
+        "artifact-integrity" => "pigloros.w8.artifact-integrity",
+        "empirical-evaluation" => "pigloros.w8.empirical-evaluation",
+        "gateway-client-conformance" => "pigloros.w8.gateway-client-seam",
+        "knowledge-non-interference" => "pigloros.w8.knowledge-non-interference",
+        "metric-conformance" => "pigloros.w8.metric-computation",
+        "plugin-conformance" => "pigloros.w8.plugin-host-seam",
+        "replay-conformance" => "pigloros.w8.replay",
+        _ => return Err(invalid_data("profile manifest has an unknown claim layer").into()),
+    };
+    if profile_id != expected_profile_id || semantic_version != "1.0.0" {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} has a non-canonical profile identity"
+        ))
+        .into());
+    }
+    let expected_normative_requirements =
+        format!("profiles/{claim_layer}/normative-requirements.md");
+    if normative_requirements_path != expected_normative_requirements {
+        return Err(invalid_data(format!(
+            "profile manifest {profile} does not own its normative requirements"
+        ))
+        .into());
+    }
+    let normative_requirements = FixtureAsset {
+        bytes: snapshots
+            .bytes(
+                &normative_requirements_path,
+                "profile normative requirements",
+            )?
+            .to_vec(),
+        relative: normative_requirements_path,
+    };
     let claim_layer_variant =
         rust_enum_variant("ClaimLayerV1", &claim_layer, "profile claim layer")?;
     let subject_adapter = json_text(&profile_value, "subject_adapter")?;
@@ -1471,6 +1458,8 @@ fn profile_paths(
         wire_code,
         profile,
         profile_id,
+        semantic_version,
+        normative_requirements,
         claim_layer,
         claim_layer_variant,
         subject_adapter: catalog_subject_adapter,
@@ -1672,26 +1661,6 @@ fn emit_strict_oracle(
             )?;
             writeln!(generated, "                        }},")
         }
-        CatalogStrictOracle::Divergence {
-            classification,
-            first_coordinate,
-        } => {
-            let classification = classification.rust_variant();
-            writeln!(
-                generated,
-                "                        strict_oracle: CatalogStrictOracle::Divergence {{"
-            )?;
-            writeln!(
-                generated,
-                "                            classification: {classification},"
-            )?;
-            writeln!(
-                generated,
-                "                            first_coordinate: &{:?},",
-                first_coordinate.as_bytes()
-            )?;
-            writeln!(generated, "                        }},")
-        }
     }
 }
 
@@ -1780,6 +1749,16 @@ fn emit_profile(
         generated,
         "                profile_id: {:?},",
         profile.profile_id
+    )?;
+    writeln!(
+        generated,
+        "                semantic_version: {:?},",
+        profile.semantic_version
+    )?;
+    writeln!(
+        generated,
+        "                normative_requirements: &{:?},",
+        profile.normative_requirements.bytes
     )?;
     writeln!(
         generated,
