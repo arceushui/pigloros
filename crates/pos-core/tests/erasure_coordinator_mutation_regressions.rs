@@ -6,7 +6,9 @@ pub mod erasure_support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use erasure_support::freeze_evidence_fixture as atomic_freeze_evidence;
+use erasure_support::{
+    freeze_evidence_fixture as atomic_freeze_evidence, FreezeEvidenceFixtureInput,
+};
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     destruction_command_reference, ErasureAcknowledgementOutcomeV1,
@@ -273,15 +275,16 @@ fn atomic_admission_input(
         },
         lineage_rule,
     };
-    let (freeze_admission_evidence, freeze_authorization_evidence) = atomic_freeze_evidence(
-        request,
-        ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
-        &obligation_set,
-        &targets,
-        &obligations,
-        10,
-        &[90],
-    )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        atomic_freeze_evidence(FreezeEvidenceFixtureInput {
+            request,
+            scope_commitment: ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
+            obligation_set: &obligation_set,
+            targets: &targets,
+            obligations: &obligations,
+            freeze_position: 10,
+            evidence: &[90],
+        })?;
     Ok(ErasureAtomicFreezeAdmissionInputV1 {
         targets: targets.clone(),
         scope,
@@ -309,15 +312,16 @@ fn bind_atomic_obligations(
         policy: reference(6),
         trust: reference(94),
     })?;
-    let (freeze_admission_evidence, freeze_authorization_evidence) = atomic_freeze_evidence(
-        input.scope.request,
-        ErasureScopeCommitmentV1::new(input.scope.clone())?.reference(),
-        &input.obligation_set,
-        &input.targets,
-        &input.obligations,
-        input.freeze_position,
-        &[90],
-    )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        atomic_freeze_evidence(FreezeEvidenceFixtureInput {
+            request: input.scope.request,
+            scope_commitment: ErasureScopeCommitmentV1::new(input.scope.clone())?.reference(),
+            obligation_set: &input.obligation_set,
+            targets: &input.targets,
+            obligations: &input.obligations,
+            freeze_position: input.freeze_position,
+            evidence: &[90],
+        })?;
     input.freeze_admission_evidence = freeze_admission_evidence;
     input.freeze_authorization_evidence = freeze_authorization_evidence;
     Ok(input)
@@ -859,15 +863,15 @@ fn rebind_supporting_freeze(
         target_closure: scope.target_closure(),
         lineage_rule: scope.lineage_rule(),
     };
-    let (admission, authorization) = atomic_freeze_evidence(
-        scope.request(),
-        ErasureScopeCommitmentV1::new(scope_input)?.reference(),
+    let (admission, authorization) = atomic_freeze_evidence(FreezeEvidenceFixtureInput {
+        request: scope.request(),
+        scope_commitment: ErasureScopeCommitmentV1::new(scope_input)?.reference(),
         obligation_set,
         targets,
-        &supporting.obligations,
+        obligations: &supporting.obligations,
         freeze_position,
-        &[90],
-    )?;
+        evidence: &[90],
+    })?;
     supporting.freeze_provenance = Some(ErasureFreezeProvenanceV1::new(
         ErasureFreezeProvenanceInputV1 {
             request: scope.request(),

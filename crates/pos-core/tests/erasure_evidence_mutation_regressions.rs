@@ -4,7 +4,7 @@
 pub mod erasure_support;
 
 use ciborium::value::Value;
-use erasure_support::freeze_evidence_fixture as freeze_evidence;
+use erasure_support::{freeze_evidence_fixture as freeze_evidence, FreezeEvidenceFixtureInput};
 use pos_core::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, selected_obligations_reference,
@@ -236,15 +236,17 @@ fn public_atomic_freeze_decision_binds_explicit_category_obligations_and_exact_m
         lineage_rule: Some(reference(3)),
     };
     let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
-    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
-        request,
-        scope_reference,
-        &obligation_set,
-        &[target],
-        &obligations,
-        0,
-        &[6],
-    )?;
+    let targets = [target];
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        freeze_evidence(FreezeEvidenceFixtureInput {
+            request,
+            scope_commitment: scope_reference,
+            obligation_set: &obligation_set,
+            targets: &targets,
+            obligations: &obligations,
+            freeze_position: 0,
+            evidence: &[6],
+        })?;
     let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
         targets: vec![target],
         scope,
@@ -264,15 +266,16 @@ fn public_atomic_freeze_decision_binds_explicit_category_obligations_and_exact_m
         lineage_rule: Some(reference(3)),
     };
     let invalid_scope_reference = ErasureScopeCommitmentV1::new(invalid_scope.clone())?.reference();
-    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
-        request,
-        invalid_scope_reference,
-        &obligation_set,
-        &[target],
-        &obligations,
-        0,
-        &[6],
-    )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        freeze_evidence(FreezeEvidenceFixtureInput {
+            request,
+            scope_commitment: invalid_scope_reference,
+            obligation_set: &obligation_set,
+            targets: &targets,
+            obligations: &obligations,
+            freeze_position: 0,
+            evidence: &[6],
+        })?;
     assert_eq!(
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: vec![target],
@@ -614,15 +617,16 @@ fn complete_supporting_input(
         policy: reference(4),
         trust: reference(5),
     })?;
-    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
-        request,
-        scope.reference(),
-        &obligation_set,
-        &[target],
-        &[obligation],
-        10,
-        &[6],
-    )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        freeze_evidence(FreezeEvidenceFixtureInput {
+            request,
+            scope_commitment: scope.reference(),
+            obligation_set: &obligation_set,
+            targets: &[target],
+            obligations: &[obligation],
+            freeze_position: 10,
+            evidence: &[6],
+        })?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
         request,
         scope.reference(),
@@ -742,15 +746,16 @@ fn supporting_records_freeze_requires_matching_scope_extension() -> Result<(), E
         pos_core::erasure::target_closure_digest(&[target]),
         None,
     )?;
-    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
-        request,
-        scope.reference(),
-        &obligation_set,
-        &[target],
-        &obligations,
-        10,
-        &[6],
-    )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        freeze_evidence(FreezeEvidenceFixtureInput {
+            request,
+            scope_commitment: scope.reference(),
+            obligation_set: &obligation_set,
+            targets: &[target],
+            obligations: &obligations,
+            freeze_position: 10,
+            evidence: &[6],
+        })?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
         request,
         scope.reference(),
@@ -1165,15 +1170,16 @@ fn supporting_records_validate_every_public_request_binding() -> Result<(), Eras
         policy: reference(4),
         trust: reference(5),
     })?;
-    let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
-        freeze_request,
-        scope.reference(),
-        &obligation_set,
-        &[target],
-        &[obligation],
-        10,
-        &[6],
-    )?;
+    let (freeze_admission_evidence, freeze_authorization_evidence) =
+        freeze_evidence(FreezeEvidenceFixtureInput {
+            request: freeze_request,
+            scope_commitment: scope.reference(),
+            obligation_set: &obligation_set,
+            targets: &[target],
+            obligations: &[obligation],
+            freeze_position: 10,
+            evidence: &[6],
+        })?;
     let freeze = ErasureFreezeProvenanceV1::new(freeze_input(
         freeze_request,
         scope.reference(),
