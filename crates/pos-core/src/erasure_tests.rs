@@ -211,7 +211,7 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
                 targets: &targets,
                 obligations: &obligations,
                 freeze_position,
-                evidence: self
+                evidence: &self
                     .admitted_freeze_provenance
                     .unwrap_or(requested.provenance)
                     .digest(),
@@ -1429,7 +1429,7 @@ fn lineage_freeze_admission(
             targets: &targets,
             obligations: &obligations,
             freeze_position: 10,
-            evidence: reference(9).digest(),
+            evidence: &reference(9).digest(),
         })?;
     ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
         targets,
@@ -1521,7 +1521,7 @@ fn freeze_authorization_binding_rejects_a_different_admission_body() -> Result<(
         targets: &input.targets,
         obligations: &input.obligations,
         freeze_position: input.freeze_position + 1,
-        evidence: reference(9).digest(),
+        evidence: &reference(9).digest(),
     })?;
     assert_eq!(
         input
@@ -1548,7 +1548,7 @@ fn atomic_freeze_rejects_complete_but_inconsistent_applicability_matrices(
             targets: &[target, extra_target],
             obligations: &base.obligations,
             freeze_position: 10,
-            evidence: reference(9).digest(),
+            evidence: &reference(9).digest(),
         })?;
     let mut wrong_cardinality = base.clone();
     wrong_cardinality.freeze_admission_evidence = oversized_matrix;

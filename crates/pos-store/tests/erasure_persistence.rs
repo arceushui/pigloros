@@ -444,7 +444,7 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
                 targets: &targets,
                 obligations: &obligations,
                 freeze_position,
-                evidence: requested.provenance.digest(),
+                evidence: &requested.provenance.digest(),
             })?;
         let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: targets.clone(),
