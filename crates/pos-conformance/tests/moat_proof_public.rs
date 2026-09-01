@@ -690,7 +690,10 @@ fn exercise_scalar_boundaries<T, E>(
             exercised += 1;
         }
     }
-    assert_eq!(mutant, *value, "scalar mutation helper must restore its input");
+    assert_eq!(
+        mutant, *value,
+        "scalar mutation helper must restore its input"
+    );
     exercised
 }
 
