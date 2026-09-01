@@ -674,7 +674,7 @@ fn acknowledgement_order_is_target_major_even_when_obligation_digests_disagree()
     let first_target = target();
     let second_target = second_target();
     assert!(first_target < second_target);
-    let mut acknowledgements = vec![
+    let mut acknowledgements = [
         ErasureAcknowledgementV1 {
             obligation: reference(0),
             target: second_target,
