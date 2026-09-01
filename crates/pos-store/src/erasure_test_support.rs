@@ -8,9 +8,9 @@ use pos_core::{
     VerifiedErasureCoordinatorRecordV1,
 };
 
-pub(crate) struct TestFreezeAuthorizationVerifier;
+pub struct TestFreezeAuthorizationVerifier;
 
-pub(crate) const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
+pub const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
     TestFreezeAuthorizationVerifier;
 
 impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
@@ -25,11 +25,11 @@ impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
     }
 }
 
-pub(crate) const fn erasure_reference(value: u8) -> ErasureReferenceV1 {
+pub const fn erasure_reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
-pub(crate) fn erasure_record() -> ErasureCoordinatorRecordV1 {
+pub fn erasure_record() -> ErasureCoordinatorRecordV1 {
     let request = fixture(ErasureRequestV1::new(ErasureRequestInputV1 {
         request: erasure_reference(1),
         subject: erasure_reference(2),
@@ -66,7 +66,7 @@ pub(crate) fn erasure_record() -> ErasureCoordinatorRecordV1 {
     ))
 }
 
-pub(crate) fn verified_erasure_record(
+pub fn verified_erasure_record(
     record: ErasureCoordinatorRecordV1,
 ) -> VerifiedErasureCoordinatorRecordV1 {
     fixture(VerifiedErasureCoordinatorRecordV1::new(
