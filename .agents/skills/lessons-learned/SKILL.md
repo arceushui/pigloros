@@ -100,6 +100,16 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Review the complete PR diff after rebases.** A review of only the newest commit can miss regressions introduced by earlier commits or by conflict resolution. Compare the final PR head with the latest `main`, and record the exact reviewed head.
 
+- **Pin one review baseline before delegation.** Fetch the remote base and record its exact commit, feature head, merge-base, changed-file list, and full commit list; give every reviewer the same `base...HEAD` range. A rebase invalidates the old source-review evidence and requires a new explicitly pinned baseline.
+
+- **Disposition the complete finding set.** Preserve Standards and Spec as separate axes, and show every item as accepted, rejected, or deferred with current evidence, ownership, merge impact, and the concrete reason. Previous findings are leads rather than evidence; verify them against current lines, omit stale defects, and explain whether a disagreement comes from a code misread, an over-literal rule, or valid debt outside the ticket.
+
+- **Separate ownership from correctness.** Defer a missing capability when an adjacent ticket owns it, but still flag provisional behavior that implements that capability incorrectly. Ticket boundaries prevent scope creep; they do not make incorrect behavior safe to merge as an accidental contract.
+
+- **Bound and retrieve delegated review reports deliberately.** Require concise structured output, retrieve large independent reports one at a time, and adjudicate only after all axes complete. Combining unbounded reports in one response can truncate evidence and hide findings.
+
+- **Do not infer specification compliance from green gates.** CI, coverage, mutation, lint, and security analysis can all pass while an acceptance criterion or ADR invariant remains unimplemented. Report source-review readiness and hosted-gate readiness as separate facts.
+
 ## CI / GitHub Actions
 
 - **Every test type must run in CI — no local-only tests.** GitHub Actions (`.github/workflows/ci.yml`) is the single source of truth for what passes. When adding any test — unit test, integration test (`tests/` directory), doctest, or `#[ignore]`d test — verify that `cargo test --workspace --locked -- --include-ignored` in the `test` job actually executes it. The `--include-ignored` flag is mandatory so `#[ignore]` cannot silently skip. If you write an integration test that lives in `tests/`, it MUST be picked up by the workspace test job; if it isn't, the test is dead and the CI green light is a lie. Before claiming a ticket is done, name the CI job/steps that run your new test.
