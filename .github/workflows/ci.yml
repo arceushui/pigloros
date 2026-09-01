@@ -6,6 +6,7 @@
 #   test         — cargo test --all-features (no ignored tests silently skip)
 #   clippy       — pedantic + -D warnings
 #   coverage     — lines ≥99%, regions ≥99%
+#   cargo-crap   — no CRAP regressions; new functions score ≤30
 #   audit        — cargo-audit (CVE advisories)
 #   deny         — cargo-deny (licenses, bans, sources)
 #   geiger       — no unsafe in own crates
@@ -238,6 +239,10 @@ jobs:
         uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           tool: cargo-llvm-cov
+      - name: Install cargo-crap
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
+        with:
+          tool: cargo-crap@0.2.2
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: coverage
@@ -248,6 +253,24 @@ jobs:
           --fail-under-lines 99
           --fail-under-regions 99
           -- --include-ignored
+      - name: Export LCOV for cargo-crap
+        run: cargo llvm-cov report --lcov
+          --output-path "${{ runner.temp }}/coverage.lcov"
+      - name: Generate cargo-crap bootstrap baseline
+        run: >
+          cargo crap --workspace
+          --lcov "${{ runner.temp }}/coverage.lcov"
+          --missing pessimistic
+          --jobs 2
+          --sort file
+          --format json
+          --output "${{ runner.temp }}/cargo-crap-baseline.json"
+      - name: Upload cargo-crap bootstrap baseline
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cargo-crap-bootstrap-${{ github.sha }}
+          path: ${{ runner.temp }}/cargo-crap-baseline.json
+          if-no-files-found: error
       - name: Export coverage details
         if: always()
         continue-on-error: true
