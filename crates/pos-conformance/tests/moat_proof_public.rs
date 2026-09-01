@@ -587,17 +587,22 @@ fn structural_paths(value: &ciborium::Value, path: &mut Vec<usize>, paths: &mut 
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn replace_at_path(value: &mut ciborium::Value, path: &[usize], replacement: ciborium::Value) {
+fn replace_at_path(
+    value: &mut ciborium::Value,
+    path: &[usize],
+    replacement: ciborium::Value,
+) -> ciborium::Value {
     let mut current = value;
     for index in &path[..path.len() - 1] {
         current = &mut current
             .as_array_mut()
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("array path changed")))[*index];
     }
-    current
+    let field = &mut current
         .as_array_mut()
         .unwrap_or_else(|| std::panic::resume_unwind(Box::new("array path changed")))
-        [path[path.len() - 1]] = replacement;
+        [path[path.len() - 1]];
+    std::mem::replace(field, replacement)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -669,20 +674,23 @@ fn exercise_scalar_boundaries<T, E>(
     let mut paths = Vec::new();
     structural_paths(value, &mut Vec::new(), &mut paths);
     let mut exercised = 0_usize;
+    let mut mutant = value.clone();
     for path in paths {
-        for replacement in scalar_replacements(value_at_path(value, &path)) {
-            if replacement == *value_at_path(value, &path) {
+        let original = value_at_path(value, &path).clone();
+        for replacement in scalar_replacements(&original) {
+            if replacement == original {
                 continue;
             }
-            let mut mutant = value.clone();
-            replace_at_path(&mut mutant, &path, replacement);
+            let displaced = replace_at_path(&mut mutant, &path, replacement);
             let bytes = encode_value(&mutant);
             if let Ok(canonical) = decode(&bytes).and_then(|decoded| encode(&decoded)) {
                 drop(decode(&canonical));
             }
+            drop(replace_at_path(&mut mutant, &path, displaced));
             exercised += 1;
         }
     }
+    assert_eq!(mutant, *value, "scalar mutation helper must restore its input");
     exercised
 }
 
@@ -977,9 +985,9 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
     let mut paths = Vec::new();
     structural_paths(&value, &mut Vec::new(), &mut paths);
     assert!(paths.len() > 512);
+    let mut mutant = value.clone();
     for path in paths {
-        let mut mutant = value.clone();
-        replace_at_path(
+        let displaced = replace_at_path(
             &mut mutant,
             &path,
             ciborium::Value::Tag(u64::MAX, Box::new(ciborium::Value::Null)),
@@ -987,7 +995,9 @@ fn malformed_canonical_records_reach_closed_decoder_boundaries() {
         expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
             &mutant,
         )));
+        drop(replace_at_path(&mut mutant, &path, displaced));
     }
+    assert_eq!(mutant, value, "tag mutation helper must restore its input");
     expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
         &replace_field(
             value.clone(),

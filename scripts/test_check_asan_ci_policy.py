@@ -147,6 +147,11 @@ class AsanCiPolicyTests(unittest.TestCase):
             lambda workflow: self.asan_step(workflow)["env"].pop("CARGO_BUILD_JOBS")
         )
 
+    def test_requires_bounded_test_concurrency(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.asan_step(workflow)["env"].pop("RUST_TEST_THREADS")
+        )
+
     def test_rejects_commented_serialization(self) -> None:
         source = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         source = source.replace(

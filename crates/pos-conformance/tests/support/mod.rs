@@ -12,6 +12,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -258,6 +259,8 @@ fn shared_named_wire_fields_cover_cross_suite_variants() {
 
 pub struct TemporaryOutput(pub PathBuf);
 
+static TEMPORARY_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 impl Drop for TemporaryOutput {
     fn drop(&mut self) {
         drop(fs::remove_dir_all(&self.0));
@@ -273,7 +276,11 @@ pub fn temporary_root(label: &str) -> TestResult<PathBuf> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    Ok(std::env::temp_dir().join(format!("pigloros-{label}-{}-{nonce}", std::process::id())))
+    let sequence = TEMPORARY_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    Ok(std::env::temp_dir().join(format!(
+        "pigloros-{label}-{}-{nonce}-{sequence}",
+        std::process::id()
+    )))
 }
 
 /// Returns the content address of the checked-in fixture inventory.
