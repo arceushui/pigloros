@@ -3,7 +3,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
-mod freeze_fixture_support;
+pub(crate) mod freeze_fixture_support;
 
 use freeze_fixture_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
 

@@ -6,7 +6,7 @@
 //! covered through `ErasureCoordinator` in `tests/`.
 
 #[path = "../tests/support/erasure.rs"]
-mod freeze_fixture_support;
+pub(crate) mod freeze_fixture_support;
 
 use freeze_fixture_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
 

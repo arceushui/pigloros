@@ -16,14 +16,14 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
 
 /// Named inputs for one mutually bound admission/authorization fixture.
 #[derive(Clone, Copy)]
-pub(super) struct FreezeEvidenceFixtureInput<'a> {
-    pub(super) request: ErasureReferenceV1,
-    pub(super) scope_commitment: ErasureReferenceV1,
-    pub(super) obligation_set: &'a ErasureObligationSetV1,
-    pub(super) targets: &'a [ErasureRequiredTargetV1],
-    pub(super) obligations: &'a [ErasureObligationV1],
-    pub(super) freeze_position: u64,
-    pub(super) evidence: &'a [u8],
+pub(crate) struct FreezeEvidenceFixtureInput<'a> {
+    pub(crate) request: ErasureReferenceV1,
+    pub(crate) scope_commitment: ErasureReferenceV1,
+    pub(crate) obligation_set: &'a ErasureObligationSetV1,
+    pub(crate) targets: &'a [ErasureRequiredTargetV1],
+    pub(crate) obligations: &'a [ErasureObligationV1],
+    pub(crate) freeze_position: u64,
+    pub(crate) evidence: &'a [u8],
 }
 
 /// Builds mutually bound admission and authorization evidence for a test freeze.
@@ -32,7 +32,7 @@ pub(super) struct FreezeEvidenceFixtureInput<'a> {
 ///
 /// Returns [`ErasureErrorV1`] when the fixture inputs violate an erasure
 /// evidence invariant or canonical encoding fails.
-pub(super) fn freeze_evidence_fixture(
+pub(crate) fn freeze_evidence_fixture(
     input: FreezeEvidenceFixtureInput<'_>,
 ) -> Result<
     (
