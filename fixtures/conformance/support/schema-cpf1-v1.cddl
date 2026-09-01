@@ -1,0 +1,158 @@
+# CPF1 public conformance schema (deterministic, definite-length CBOR arrays)
+
+cpf1 = [
+  magic: "CPF1",
+  version: 1,
+  profile-id: identifier,
+  semantic-version: tstr .size (1..64),
+  lifecycle: 0..3,
+  normative-spec-digest: digest,
+  execution-matrix-digest: digest,
+  execution-profile-digests: [1* digest],
+  fixture-provider-registry: provider-registry-binding,
+  fixtures: [1* fixture-contract],
+  allowed-divergences: [* divergence],
+  evaluator-protocol: protocol,
+  independence-requirements: requirements,
+  fixture-contract-policy-digest: digest,
+  limitations-digest: digest,
+  provenance-digest: digest,
+  previous-profile-digest: null / digest,
+  profile-digest: digest
+]
+
+provider-registry-binding = [
+  registry-artifact: artifact-descriptor,
+  required-provider-keys: [1*4096 provider-key]
+]
+
+provider-registry = [
+  magic: "FPR1",
+  version: 1,
+  providers: [1*4096 provider-entry],
+  registry-digest: digest
+]
+
+provider-entry = [
+  provider-id: identifier,
+  contract-version: tstr .size (1..64),
+  abi-major: 0..65535,
+  abi-minor: 0..65535,
+  claim-layer: 0..6,
+  subject-adapter: 0..2,
+  provider-package: artifact-descriptor
+]
+
+provider-key = [provider-id: identifier, contract-version: tstr .size (1..64),
+                abi-major: 0..65535, abi-minor: 0..65535]
+
+provider-package = [
+  magic: "FPP1",
+  version: 1,
+  provider: provider-key,
+  claim-layer: 0..6,
+  subject-adapter: 0..2,
+  family-schemas: [7*7 family-schema],
+  licence: artifact-descriptor,
+  notices: artifact-descriptor,
+  sbom: artifact-descriptor,
+  source-provenance: artifact-descriptor,
+  limitations: artifact-descriptor,
+  package-digest: digest
+]
+
+family-schema = [family: 0..6, schema: artifact-descriptor]
+
+fixture-contract = [
+  case-id: identifier,
+  mandatory: bool,
+  claim-layer: 0..6,
+  family: 0..6,
+  provider: provider-key,
+  subject-adapter: 0..2,
+  execution-profile-digest: digest,
+  modes: [1* 0..3],
+  schema: artifact-descriptor,
+  payload: artifact-descriptor,
+  auxiliary-artifacts: [* artifact-descriptor],
+  strict-oracle: strict-oracle,
+  verification-outcome: 0..5,
+  verification-error: null / namespaced-failure,
+  replay-claim: 0..4,
+  redaction-state: 0..3,
+  deterministic-budget: [8*8 uint .gt 0],
+  operational-safety: [watchdog-ms: uint .gt 0],
+  capability-policy: [network-allowed: bool, capability-ids: [* identifier]],
+  trust-policy-snapshot-digest: null / digest,
+  release-admission-digest: null / digest,
+  provenance: [licence-id: tstr .size (1..128), digest, digest, digest, digest, digest, digest],
+  contract-transition: null / [from: provider-key, to: provider-key],
+  fixture-digest: digest
+]
+
+artifact-descriptor = [member-path: tstr .size (1..512),
+                       media-type: tstr .size (3..127),
+                       byte-length: uint .gt 0, blake3-digest: digest]
+
+; Draft-only authority closure members. These are archive artifacts rather
+; than additional CPF1 fields: CPF1 already binds them by digest.
+execution-profile = [
+  magic: "EPF1", version: 1, profile-id: identifier,
+  semantic-version: tstr .size (1..64),
+  reproducibility-classes: [1* 0..3],
+  architecture-rules: [1* identifier], numeric-rules: [1* identifier],
+  scheduler-driver-order: [1*256 identifier], tick-policy: identifier,
+  schemas-and-upcasters: [1*256 identifier], artifact-rules: [1* identifier],
+  capabilities-and-network: [network-allowed: bool, capability-ids: [* identifier]],
+  deterministic-budgets: [uint .gt 0, uint .gt 0, uint .gt 0, uint .gt 0,
+                          uint .gt 0, uint .gt 0, uint .gt 0, uint .gt 0],
+  allowed-operational-differences: [* identifier],
+  compatibility: [minimum-evaluator-version: tstr .size (1..64),
+                  maximum-evaluator-version: tstr .size (1..64)],
+  previous-profile-digest: null / digest, profile-digest: digest
+]
+
+trust-policy-snapshot = [
+  magic: "TPS1", version: 1, policy-id: identifier, epoch: uint .gt 0,
+  effective-timeline-position: uint, trust-roots: [1*64 trust-root],
+  revoked-key-ids: [*4096 identifier], revoked-artifact-digests: [*4096 digest],
+  minimum-versions: [*256 minimum-version],
+  offline-valid-through: tstr .size (1..64), previous-digest: null / digest,
+  signature: bstr .size 64
+]
+trust-root = [key-id: identifier, root-version: uint .gt 0,
+              algorithm: "Ed25519", public-key: bstr .size 32]
+minimum-version = [artifact-kind: identifier, semantic-version: tstr .size (1..64)]
+
+release-admission = [
+  magic: "RAD1", version: 1, lifecycle: 0, case-id: identifier,
+  execution-profile-digest: digest, trust-policy-snapshot-digest: digest,
+  from-provider: provider-key, to-provider: provider-key,
+  allow-fallback: false, signer-key-id: identifier, signature: bstr .size 64
+]
+strict-oracle = [kind: 0..2, output: null / artifact-descriptor,
+                 failure: null / namespaced-failure,
+                 divergence: null / divergence]
+namespaced-failure = [owner-id: identifier,
+                      contract-version: tstr .size (1..64), code-id: identifier]
+divergence = [classification: 0..6, first-coordinate: bstr .size (1..128)]
+protocol = [protocol-id: identifier, protocol-digest: digest,
+            request-schema-digest: digest, report-schema-digest: digest,
+            hard-caps: hard-caps]
+hard-caps = [max-profile-bytes: uint, max-cases: uint,
+             max-bundle-members: uint, max-member-path-bytes: uint,
+             max-member-bytes: uint, max-total-bundle-bytes: uint,
+             max-compression-expansion: uint, max-structural-nesting: uint,
+             max-coordinate-bytes: uint, max-diagnostic-bytes: uint,
+             max-deterministic-memory-bytes: uint,
+             max-deterministic-cpu-fuel: uint,
+             max-deterministic-host-calls: uint,
+             max-deterministic-event-count: uint,
+             max-deterministic-output-bytes: uint,
+             max-deterministic-storage-bytes: uint,
+             max-deterministic-execution-steps: uint,
+             max-deterministic-simulation-time-ns: uint]
+requirements = [technical: bool, authorship: bool, organizational: bool,
+                trust-policy-snapshot-digest: digest, requirements-digest: digest]
+identifier = tstr .size (1..128)
+digest = bstr .size 32

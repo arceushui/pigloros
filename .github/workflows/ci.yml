@@ -97,6 +97,101 @@ jobs:
           cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log
 
+  conformance-fixtures:
+    name: conformance-fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Install fixture verification tools
+        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+      - name: Independently regenerate public fixture records
+        run: bash scripts/generate-conformance-fixture-records.sh
+      - name: Verify public conformance fixtures
+        run: bash scripts/verify-conformance-fixtures.sh
+      - name: Exercise conformance fixture rejection boundaries
+        run: bash scripts/test-conformance-fixture-validation.sh
+
+  materialize-conformance-bundles:
+    name: materialize-conformance-bundles
+    needs: conformance-fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: conformance-materialization
+      - name: Install fixture verification tools
+        run: sudo apt-get update && sudo apt-get install --yes b3sum jq
+      - name: Reject non-main manual artifact publication
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          echo 'repository Draft artifact publication is only permitted from main' >&2
+          exit 1
+      - name: Materialize repository-only Draft CPF1 verification bundles
+        if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+        env:
+          # Public deterministic fixture key. The declared Draft authority is
+          # repository-test-fixture-only and is never a deployment trust root.
+          PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
+        run: bash scripts/materialize-conformance-bundles.sh
+      - name: Materialize repository-only Draft bundles for pull-request verification
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          # Same public deterministic fixture key used for main verification;
+          # these signatures prove fixture consistency, not publisher identity.
+          PIGLOROS_CONFORMANCE_SIGNING_KEY: "0707070707070707070707070707070707070707070707070707070707070707"
+        run: bash scripts/materialize-conformance-bundles.sh "${RUNNER_TEMP}/conformance-draft"
+      - name: Exercise build-time fixture rejection boundary
+        run: bash scripts/test-conformance-build-validation.sh
+      - name: Upload main-branch Draft verification artifact
+        if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conformance-bundles-${{ github.sha }}
+          path: fixtures/conformance/published
+          retention-days: 7
+          if-no-files-found: error
+      - name: Upload pull-request Draft verification artifact
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conformance-bundles-pr-draft-${{ github.sha }}
+          path: ${{ runner.temp }}/conformance-draft
+          retention-days: 7
+          if-no-files-found: error
+
+  conformance-non-linux:
+    name: conformance-non-linux
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: conformance-non-linux
+      - name: Enforce the Linux-only secure fixture-generation boundary
+        run: |
+          set +e
+          cargo check -p pos-conformance --locked 2>&1 | tee "${RUNNER_TEMP}/conformance-non-linux.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "${status}" -eq 0 ]]; then
+            echo "non-Linux conformance build unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep --fixed-strings \
+            "secure conformance fixture snapshot generation requires Linux openat2" \
+            "${RUNNER_TEMP}/conformance-non-linux.log"
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
@@ -451,3 +546,65 @@ jobs:
         with:
           name: depgraph
           path: artifacts/depgraph.svg
+
+  # Branch protection requires this CI fan-in together with the separate
+  # `diff mutation testing` fan-in emitted by mutation.yml. Individual CI jobs
+  # and mutation shards are implementation details, not merge approvals. The
+  # informational report jobs above are intentionally excluded.
+  ci-gate:
+    name: ci-gate
+    if: ${{ always() }}
+    needs:
+      - fmt
+      - rustdoc
+      - test
+      - conformance-fixtures
+      - materialize-conformance-bundles
+      - conformance-non-linux
+      - clippy
+      - coverage
+      - audit
+      - deny
+      - cargo-shear
+      - geiger
+      - asan
+      - docker-build
+      - world-client-wasm
+      - world-client-browser-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every blocking CI job to pass
+        env:
+          FMT_RESULT: ${{ needs.fmt.result }}
+          RUSTDOC_RESULT: ${{ needs.rustdoc.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          CONFORMANCE_FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
+          MATERIALIZE_CONFORMANCE_BUNDLES_RESULT: ${{ needs.materialize-conformance-bundles.result }}
+          CONFORMANCE_NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
+          DENY_RESULT: ${{ needs.deny.result }}
+          CARGO_SHEAR_RESULT: ${{ needs.cargo-shear.result }}
+          GEIGER_RESULT: ${{ needs.geiger.result }}
+          ASAN_RESULT: ${{ needs.asan.result }}
+          DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
+          WORLD_CLIENT_WASM_RESULT: ${{ needs.world-client-wasm.result }}
+          WORLD_CLIENT_BROWSER_PARITY_RESULT: ${{ needs.world-client-browser-parity.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for result_name in \
+            FMT_RESULT RUSTDOC_RESULT TEST_RESULT CONFORMANCE_FIXTURES_RESULT \
+            MATERIALIZE_CONFORMANCE_BUNDLES_RESULT CONFORMANCE_NON_LINUX_RESULT \
+            CLIPPY_RESULT COVERAGE_RESULT \
+            AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
+            DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT; do
+            result="${!result_name}"
+            if [[ "${result}" != "success" ]]; then
+              echo "${result_name}=${result}" >&2
+              failed=1
+            fi
+          done
+          exit "${failed}"

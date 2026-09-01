@@ -1,0 +1,65 @@
+{
+  "magic": "DFA1",
+  "version": 1,
+  "lifecycle": "Draft",
+  "authority_kind": "repository-test-fixture-only",
+  "trust_policy_id": "pigloros.fixture.conformance-draft",
+  "trust_policy_epoch": 1,
+  "effective_timeline_position": 0,
+  "offline_valid_through": "2030-01-01T00:00:00Z",
+  "fixture_authority_key_id": "pigloros.fixture.conformance-authority",
+  "fixture_authority_public_key_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "trust_roots": [
+    {
+      "key_id": "pigloros.fixture.conformance-authority",
+      "root_version": 1,
+      "algorithm": "Ed25519",
+      "public_key_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+    }
+  ],
+  "revoked_key_ids": [],
+  "revoked_artifact_digests": [],
+  "minimum_versions": [
+    { "artifact_kind": "execution-profile", "semantic_version": "1.0.0" },
+    { "artifact_kind": "fixture-provider-package", "semantic_version": "1.0.0" }
+  ],
+  "previous_trust_policy_snapshot_digest": null,
+  "execution_profiles": [
+    {
+      "profile_id": "deterministic-air-gapped-v1",
+      "semantic_version": "1.0.0",
+      "network_allowed": false,
+      "capability_ids": [],
+      "architecture_rules": ["checked-u64-integers", "explicit-big-endian-domains", "authoritative-floats-forbidden"],
+      "numeric_rules": ["overflow-fails-closed", "nan-and-infinity-forbidden", "no-implicit-rounding"],
+      "scheduler_driver_order": ["fixture-host", "public-subject-adapter"],
+      "tick_policy": "one-fixture-attempt-per-tick-boundary",
+      "schemas_and_upcasters": ["cpf1-v1", "fpr1-v1", "fpp1-v1", "no-upcasters"],
+      "artifact_rules": ["exact-length-before-use", "blake3-256-before-use", "closure-only-no-locators"],
+      "deterministic_budgets": [1073741824, 1000000000, 1000000, 1000000, 67108864, 1073741824, 1000000000, 86400000000000],
+      "allowed_operational_differences": ["wall-duration", "host-path", "process-id", "log-timestamp"],
+      "minimum_evaluator_version": "1.0.0",
+      "maximum_evaluator_version": "1.0.0",
+      "previous_profile_digest": null,
+      "reproducibility_classes": ["ProfileRecomputation", "CrossProfileConformance"]
+    },
+    {
+      "profile_id": "deterministic-local-v1",
+      "semantic_version": "1.0.0",
+      "network_allowed": false,
+      "capability_ids": [],
+      "architecture_rules": ["checked-u64-integers", "explicit-big-endian-domains", "authoritative-floats-forbidden"],
+      "numeric_rules": ["overflow-fails-closed", "nan-and-infinity-forbidden", "no-implicit-rounding"],
+      "scheduler_driver_order": ["fixture-host", "public-subject-adapter"],
+      "tick_policy": "one-fixture-attempt-per-tick-boundary",
+      "schemas_and_upcasters": ["cpf1-v1", "fpr1-v1", "fpp1-v1", "no-upcasters"],
+      "artifact_rules": ["exact-length-before-use", "blake3-256-before-use", "closure-only-no-locators"],
+      "deterministic_budgets": [1073741824, 1000000000, 1000000, 1000000, 67108864, 1073741824, 1000000000, 86400000000000],
+      "allowed_operational_differences": ["wall-duration", "host-path", "process-id", "log-timestamp"],
+      "minimum_evaluator_version": "1.0.0",
+      "maximum_evaluator_version": "1.0.0",
+      "previous_profile_digest": null,
+      "reproducibility_classes": ["ProfileRecomputation", "CrossProfileConformance"]
+    }
+  ]
+}

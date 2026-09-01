@@ -1,0 +1,9 @@
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-downgrade",
+  "family": "downgrade",
+  "input_blake3_digest": "ddbe7ef2edc969b87c199cbe3b1d6ca27fba097cf0eec9f9cfa5074e1cef2c25",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

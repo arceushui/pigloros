@@ -12,6 +12,10 @@ plugins:
 # This is the section where you manage your linters. (https://docs.trunk.io/check/configuration)
 lint:
   definitions:
+    # Large Rust diffs can exceed Trunk's 10-minute default while rustfmt is
+    # formatting out-of-line modules. The workflow still bounds the full job.
+    - name: rustfmt
+      run_timeout: 20m
     # Custom policy: coverage(off) test-only; no ```ignore doctest fences.
     # #[ignore] is left to cargo test -- --include-ignored (CI still runs them).
     - name: rust-test-policy

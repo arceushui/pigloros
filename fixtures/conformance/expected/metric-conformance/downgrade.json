@@ -1,0 +1,9 @@
+{
+  "claim_layer": "metric-conformance",
+  "case_id": "metric-conformance-downgrade",
+  "family": "downgrade",
+  "input_blake3_digest": "c4ffb3303d7e6bfc5fc71f66d8d490b844666a34def1196494bbfac4475c900e",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

@@ -1,0 +1,1 @@
+{"case_id":"artifact-integrity-denied","claim_layer":"artifact-integrity","family":"denied","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.artifact-integrity","contract_version":"1.0.0","code_id":"capability-denied"}}

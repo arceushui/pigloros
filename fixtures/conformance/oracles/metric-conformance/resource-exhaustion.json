@@ -1,0 +1,1 @@
+{"case_id":"metric-conformance-resource-exhaustion","claim_layer":"metric-conformance","family":"resource-exhaustion","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.metric-conformance","contract_version":"1.0.0","code_id":"resource-limit"}}

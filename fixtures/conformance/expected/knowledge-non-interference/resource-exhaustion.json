@@ -1,0 +1,9 @@
+{
+  "claim_layer": "knowledge-non-interference",
+  "case_id": "knowledge-non-interference-resource-exhaustion",
+  "family": "resource-exhaustion",
+  "input_blake3_digest": "065a9a9abfa87a5c37ca42fa95cbc4006fac4138f78d2fff7f38ad30a2d5c875",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

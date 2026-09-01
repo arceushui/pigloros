@@ -1,0 +1,9 @@
+{
+  "claim_layer": "knowledge-non-interference",
+  "case_id": "knowledge-non-interference-positive",
+  "family": "positive",
+  "input_blake3_digest": "818127ad4bda3aeb7a841c23cfe166d79780398bc091ce091e146c811464d7d0",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

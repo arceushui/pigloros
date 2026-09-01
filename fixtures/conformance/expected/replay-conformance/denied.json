@@ -1,0 +1,9 @@
+{
+  "claim_layer": "replay-conformance",
+  "case_id": "replay-conformance-denied",
+  "family": "denied",
+  "input_blake3_digest": "5665ed01141214134c0d0bfe72a9d45e2646d772cca585c565c8c22bca6949bb",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

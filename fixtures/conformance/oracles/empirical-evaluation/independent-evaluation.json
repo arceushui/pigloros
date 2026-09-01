@@ -1,0 +1,1 @@
+{"case_id":"empirical-evaluation-independent-evaluation","claim_layer":"empirical-evaluation","family":"independent-evaluation","oracle":{"kind":"canonical-output"},"output":{"algorithm":"BLAKE3-256","expected_digest":"c7a24babf2df2043a4ada32db0a88ccdca64d4bb7b4bfc7cf982ecd113520ca8"}}

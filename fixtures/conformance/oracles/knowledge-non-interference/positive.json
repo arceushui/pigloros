@@ -1,0 +1,1 @@
+{"case_id":"knowledge-non-interference-positive","claim_layer":"knowledge-non-interference","family":"positive","oracle":{"kind":"canonical-output"},"output":{"public_outputs_equal":true,"secret_observations_absent":true}}

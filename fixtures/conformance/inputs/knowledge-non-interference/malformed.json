@@ -1,0 +1,1 @@
+{"case_id":"knowledge-non-interference-malformed","claim_layer":"knowledge-non-interference","family":"malformed","provider_contract":"pigloros.fixture.knowledge-non-interference@1.0.0","subject_adapter":"exported-artifact","stimulus":null,"expected":{"failure_code":"malformed-payload"}}

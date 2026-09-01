@@ -1,0 +1,1 @@
+{"case_id":"knowledge-non-interference-downgrade","claim_layer":"knowledge-non-interference","family":"downgrade","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.knowledge-non-interference","contract_version":"1.0.0","code_id":"incompatible-contract"}}

@@ -1,0 +1,1 @@
+{"case_id":"replay-conformance-resource-exhaustion","claim_layer":"replay-conformance","family":"resource-exhaustion","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.replay-conformance","contract_version":"1.0.0","code_id":"resource-limit"}}

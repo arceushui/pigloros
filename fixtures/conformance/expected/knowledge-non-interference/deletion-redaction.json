@@ -1,0 +1,9 @@
+{
+  "claim_layer": "knowledge-non-interference",
+  "case_id": "knowledge-non-interference-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "ce26126fe1db75d98ab97ad2cfd43581ff936c671fe2d5056bffc33301d34b10",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

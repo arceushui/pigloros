@@ -1,0 +1,1 @@
+{"case_id":"artifact-integrity-positive","claim_layer":"artifact-integrity","family":"positive","oracle":{"kind":"canonical-output"},"output":{"integrity":"verified","canonical":true}}

@@ -1,0 +1,94 @@
+{
+  "profile_id": "pigloros.w8.replay-conformance.1.0.0",
+  "claim_layer": "replay-conformance",
+  "wire_code": 1,
+  "subject_adapter": "exported-artifact",
+  "fixture_providers": [{
+    "manifest": "providers/replay-conformance/provider.json",
+    "fixture_case_ids": [
+      "replay-conformance-positive",
+      "replay-conformance-denied",
+      "replay-conformance-malformed",
+      "replay-conformance-resource-exhaustion",
+      "replay-conformance-deletion-redaction",
+      "replay-conformance-downgrade",
+      "replay-conformance-independent-evaluation"
+    ]
+  }],
+  "fixture_root": "replay-conformance",
+  "fixtures": [
+    {
+      "claim_layer": "replay-conformance",
+      "case_id": "replay-conformance-positive",
+      "family": "positive",
+      "schema": "providers/replay-conformance/schemas/positive.schema.json",
+      "input": "inputs/replay-conformance/positive.json",
+      "expected": "expected/replay-conformance/positive.json",
+      "oracle": "oracles/replay-conformance/positive.json"
+    },
+    {
+      "claim_layer": "replay-conformance",
+      "case_id": "replay-conformance-denied",
+      "family": "denied",
+      "schema": "providers/replay-conformance/schemas/denied.schema.json",
+      "input": "inputs/replay-conformance/denied.json",
+      "expected": "expected/replay-conformance/denied.json",
+      "oracle": "oracles/replay-conformance/denied.json"
+    },
+    {
+      "claim_layer": "replay-conformance",
+      "case_id": "replay-conformance-malformed",
+      "family": "malformed",
+      "schema": "providers/replay-conformance/schemas/malformed.schema.json",
+      "input": "inputs/replay-conformance/malformed.json",
+      "expected": "expected/replay-conformance/malformed.json",
+      "oracle": "oracles/replay-conformance/malformed.json"
+    },
+    {
+      "claim_layer": "replay-conformance",
+      "case_id": "replay-conformance-resource-exhaustion",
+      "family": "resource-exhaustion",
+      "schema": "providers/replay-conformance/schemas/resource-exhaustion.schema.json",
+      "input": "inputs/replay-conformance/resource-exhaustion.json",
+      "expected": "expected/replay-conformance/resource-exhaustion.json",
+      "oracle": "oracles/replay-conformance/resource-exhaustion.json"
+    },
+    {
+      "claim_layer": "replay-conformance",
+      "case_id": "replay-conformance-deletion-redaction",
+      "family": "deletion-redaction",
+      "schema": "providers/replay-conformance/schemas/deletion-redaction.schema.json",
+      "input": "inputs/replay-conformance/deletion-redaction.json",
+      "expected": "expected/replay-conformance/deletion-redaction.json",
+      "oracle": "oracles/replay-conformance/deletion-redaction.json"
+    },
+    {
+      "claim_layer": "replay-conformance",
+      "case_id": "replay-conformance-downgrade",
+      "family": "downgrade",
+      "schema": "providers/replay-conformance/schemas/downgrade.schema.json",
+      "input": "inputs/replay-conformance/downgrade.json",
+      "expected": "expected/replay-conformance/downgrade.json",
+      "oracle": "oracles/replay-conformance/downgrade.json"
+    },
+    {
+      "claim_layer": "replay-conformance",
+      "case_id": "replay-conformance-independent-evaluation",
+      "family": "independent-evaluation",
+      "schema": "providers/replay-conformance/schemas/independent-evaluation.schema.json",
+      "input": "inputs/replay-conformance/independent-evaluation.json",
+      "expected": "expected/replay-conformance/independent-evaluation.json",
+      "oracle": "oracles/replay-conformance/independent-evaluation.json"
+    }
+  ],
+  "authority_inventory": "expected-authority/inventory.json",
+  "authority_inventory_sha256_digest": "486fe381a9a3e94b103428f9f58c4cfed7bb5875d3a4bb98a7e5868af9ea66ea",
+  "execution_profiles": [
+    "deterministic-local-v1",
+    "deterministic-air-gapped-v1"
+  ],
+  "bundle_modes": [
+    "local",
+    "air-gapped"
+  ]
+}

@@ -1,0 +1,1393 @@
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+
+use ed25519_dalek::SigningKey;
+use pos_conformance::{
+    draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
+    draft_trust_policy_snapshot_bytes_v1, expected_result_member_path,
+    verify_archive_release_filename, verify_release_tree_independently, AllowedDivergenceV1,
+    ArtifactDescriptorV1, BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
+    CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1,
+    ConformanceProfileV1, DeterministicBudgetV1, DivergenceMismatchKindV1, EvaluatorHardCapsV1,
+    EvaluatorProtocolV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureFamilyV1,
+    FixtureProvenanceV1, FixtureProviderEntryV1, FixtureProviderKeyV1, FixtureProviderPackageV1,
+    FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1, IndependenceRequirementsV1,
+    NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1,
+    RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
+    VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+};
+use sha2::{Digest as Sha2Digest, Sha256};
+use std::error::Error;
+use std::ffi::OsString;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use thiserror::Error as ThisError;
+
+#[cfg(target_os = "linux")]
+include!("materialize-conformance-bundles/atomic_publication.rs");
+
+const MATERIALIZATION_METADATA_PATH: &str = "MATERIALIZATION-METADATA.json";
+const OUTPUT_CHECKSUM_INVENTORY_PATH: &str = "SHA256SUMS";
+#[derive(Clone, Copy)]
+struct FixtureContext {
+    claim_layer: ClaimLayerV1,
+    source_provenance_digest: [u8; 32],
+    build_provenance_digest: [u8; 32],
+    publication_review_digest: [u8; 32],
+    notice_digest: [u8; 32],
+    sbom_digest: [u8; 32],
+    limitations_digest: [u8; 32],
+    normative_spec_digest: [u8; 32],
+}
+
+struct MaterializationContext<'a> {
+    signing_key: &'a SigningKey,
+    inventory_bytes: &'a [u8],
+    providers: &'a ProviderCatalog,
+}
+
+#[derive(Clone)]
+struct MaterializedFile {
+    relative_path: String,
+    bytes: Vec<u8>,
+    archive_release_filename: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum MaterializationCommand {
+    Publish(PathBuf),
+    Fingerprint,
+}
+
+enum PreparedMaterializationCommand {
+    Publish(AtomicPublication),
+    Fingerprint,
+}
+
+#[derive(Debug, ThisError)]
+enum MaterializationError {
+    #[cfg(target_os = "linux")]
+    #[error("destination already exists")]
+    DestinationExists,
+    #[cfg(target_os = "linux")]
+    #[error("untrusted output directory")]
+    UntrustedOutputDirectory,
+    #[cfg(target_os = "linux")]
+    #[error("symbolic link detected in output path")]
+    SymlinkDetected,
+    #[error("atomic publication is unsupported")]
+    AtomicPublicationUnsupported,
+    #[cfg(target_os = "linux")]
+    #[error("durability synchronization failed")]
+    DurabilitySyncFailed,
+    #[cfg(target_os = "linux")]
+    #[error("staged archive digest mismatch")]
+    ArchiveDigestMismatch,
+    #[error("destination is not addressed by the source inventory digest")]
+    SourceInventoryAddressMismatch,
+}
+
+include!(concat!(env!("OUT_DIR"), "/materialization_assets.rs"));
+
+fn execution_profile_bytes(
+    declaration: &DraftExecutionProfileSource,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    draft_execution_profile_bytes_v1(declaration.profile_id).map_err(Box::<dyn Error>::from)
+}
+
+fn execution_profile_digest(
+    declaration: &DraftExecutionProfileSource,
+) -> Result<[u8; 32], Box<dyn Error>> {
+    execution_profile_bytes(declaration).map(|bytes| *blake3::hash(&bytes).as_bytes())
+}
+
+fn trust_policy_snapshot_bytes() -> Result<Vec<u8>, Box<dyn Error>> {
+    draft_trust_policy_snapshot_bytes_v1().map_err(Box::<dyn Error>::from)
+}
+
+fn trust_policy_snapshot_digest() -> Result<[u8; 32], Box<dyn Error>> {
+    trust_policy_snapshot_bytes().map(|bytes| *blake3::hash(&bytes).as_bytes())
+}
+
+fn release_admission_bytes(
+    case_id: &str,
+    execution_profile_digest: [u8; 32],
+    trust_policy_snapshot_digest: [u8; 32],
+    from: &FixtureProviderKeyV1,
+    to: &FixtureProviderKeyV1,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    draft_release_admission_bytes_v1(
+        case_id,
+        execution_profile_digest,
+        trust_policy_snapshot_digest,
+        from,
+        to,
+    )
+    .map_err(Box::<dyn Error>::from)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogBundleMode {
+    Local,
+    AirGapped,
+}
+
+impl CatalogBundleMode {
+    const ALL: [Self; 2] = [Self::Local, Self::AirGapped];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::AirGapped => "air-gapped",
+        }
+    }
+
+    const fn bundle_mode(self) -> BundleModeV1 {
+        match self {
+            Self::Local => BundleModeV1::Local,
+            Self::AirGapped => BundleModeV1::AirGapped,
+        }
+    }
+
+    const fn execution_mode(self) -> pos_conformance::ExecutionModeV1 {
+        match self {
+            Self::Local => pos_conformance::ExecutionModeV1::Local,
+            Self::AirGapped => pos_conformance::ExecutionModeV1::AirGapped,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum CatalogStrictOracle {
+    CanonicalOutput,
+    NamespacedFailure {
+        owner_id: &'static str,
+        contract_version: &'static str,
+        code_id: &'static str,
+    },
+    Divergence {
+        classification: DivergenceMismatchKindV1,
+        first_coordinate: &'static [u8],
+    },
+}
+
+struct FixtureProvider {
+    provider_id: &'static str,
+    contract_version: &'static str,
+    abi_major: u16,
+    abi_minor: u16,
+    package_path: &'static str,
+    schema_media_type: &'static str,
+    payload_media_type: &'static str,
+    oracle_media_type: &'static str,
+    evidence_status_media_type: &'static str,
+    licence: &'static MaterializationSupportArtifact,
+    notices: &'static MaterializationSupportArtifact,
+    sbom: &'static MaterializationSupportArtifact,
+    source_provenance: &'static MaterializationSupportArtifact,
+    limitations: &'static MaterializationSupportArtifact,
+}
+
+impl FixtureProvider {
+    fn key(&self) -> FixtureProviderKeyV1 {
+        FixtureProviderKeyV1 {
+            provider_id: self.provider_id.to_owned(),
+            contract_version: self.contract_version.to_owned(),
+            abi_major: self.abi_major,
+            abi_minor: self.abi_minor,
+        }
+    }
+}
+
+struct CatalogFixtureContract {
+    deterministic_budget: DeterministicBudgetV1,
+    watchdog_ms: u64,
+    network_allowed: bool,
+    minimum_capability_ids: &'static [&'static str],
+}
+
+struct CatalogFixture {
+    case_id: &'static str,
+    family: FixtureFamilyV1,
+    schema_path: &'static str,
+    contract: CatalogFixtureContract,
+    schema: &'static [u8],
+    input: &'static [u8],
+    evidence_status: &'static [u8],
+    oracle: &'static [u8],
+    strict_oracle: CatalogStrictOracle,
+    failure_outcome: VerificationOutcomeV1,
+    replay_claim: ReplayClaimV1,
+    redaction_state: RedactionStateV1,
+}
+
+struct FixtureExpectation {
+    strict_oracle: StrictOracleV1,
+    verification_outcome: VerificationOutcomeV1,
+    verification_error: Option<NamespacedFailureV1>,
+    replay_claim: ReplayClaimV1,
+    redaction_state: RedactionStateV1,
+}
+
+struct LayerCatalogEntry {
+    claim_layer: ClaimLayerV1,
+    profile_id: &'static str,
+    subject_adapter: SubjectAdapterKindV1,
+    profile_record: &'static [u8],
+    fixture_providers: Vec<CatalogFixtureProvider>,
+}
+
+struct CatalogFixtureProvider {
+    provider: FixtureProvider,
+    fixtures: Vec<CatalogFixture>,
+}
+
+struct LayerCatalog {
+    entries: Vec<LayerCatalogEntry>,
+}
+
+include!(concat!(env!("OUT_DIR"), "/conformance_fixture_catalog.rs"));
+
+#[derive(Clone)]
+struct PublicArtifact {
+    path: String,
+    media_type: &'static str,
+    bytes: Vec<u8>,
+}
+
+impl PublicArtifact {
+    fn descriptor(&self) -> ArtifactDescriptorV1 {
+        artifact_descriptor(&self.path, self.media_type, &self.bytes)
+    }
+
+    fn materialized_file(&self) -> MaterializedFile {
+        MaterializedFile {
+            relative_path: self.path.clone(),
+            bytes: self.bytes.clone(),
+            archive_release_filename: None,
+        }
+    }
+}
+
+fn artifact_descriptor(path: &str, media_type: &str, bytes: &[u8]) -> ArtifactDescriptorV1 {
+    ArtifactDescriptorV1 {
+        member_path: path.to_owned(),
+        media_type: media_type.to_owned(),
+        byte_length: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        blake3_digest: *blake3::hash(bytes).as_bytes(),
+    }
+}
+
+struct ProviderPackage {
+    provider_key: FixtureProviderKeyV1,
+    claim_layer: ClaimLayerV1,
+    subject_adapter: SubjectAdapterKindV1,
+    schemas: Vec<PublicArtifact>,
+    artifact: PublicArtifact,
+}
+
+struct ProviderCatalog {
+    registry: PublicArtifact,
+    packages: Vec<ProviderPackage>,
+    package_support: Vec<ProviderPackageSupportArtifact>,
+}
+
+struct ProviderPackageSupportArtifact {
+    artifact: PublicArtifact,
+}
+
+impl ProviderCatalog {
+    fn binding_for(
+        &self,
+        required_provider_keys: Vec<FixtureProviderKeyV1>,
+    ) -> FixtureProviderRegistryBindingV1 {
+        FixtureProviderRegistryBindingV1 {
+            registry_artifact: self.registry.descriptor(),
+            required_provider_keys,
+        }
+    }
+
+    fn materialized_files(&self) -> Vec<MaterializedFile> {
+        self.packages
+            .iter()
+            .flat_map(|package| &package.schemas)
+            .chain(self.package_support.iter().map(|support| &support.artifact))
+            .chain(self.packages.iter().map(|package| &package.artifact))
+            .chain(std::iter::once(&self.registry))
+            .map(PublicArtifact::materialized_file)
+            .collect()
+    }
+}
+
+fn public_artifact(path: &str, media_type: &'static str, bytes: &[u8]) -> PublicArtifact {
+    PublicArtifact {
+        path: path.to_owned(),
+        media_type,
+        bytes: bytes.to_vec(),
+    }
+}
+
+fn package_support_artifacts() -> Vec<ProviderPackageSupportArtifact> {
+    MATERIALIZATION_SUPPORT_ARTIFACTS
+        .iter()
+        .filter(|artifact| artifact.provider_package)
+        .map(|artifact| ProviderPackageSupportArtifact {
+            artifact: public_artifact(artifact.path, artifact.media_type, artifact.bytes),
+        })
+        .collect()
+}
+
+fn provider_catalog(catalog: &LayerCatalog) -> Result<ProviderCatalog, Box<dyn Error>> {
+    let package_support = package_support_artifacts();
+    catalog
+        .entries
+        .iter()
+        .flat_map(|layer| {
+            layer.fixture_providers.iter().map(|provider| {
+                provider_package(layer.claim_layer, layer.subject_adapter, provider)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|mut packages| {
+            packages.sort_by(|left, right| left.provider_key.cmp(&right.provider_key));
+            packages
+        })
+        .and_then(|packages| {
+            let providers = packages
+                .iter()
+                .map(|package| FixtureProviderEntryV1 {
+                    provider_key: package.provider_key.clone(),
+                    claim_layer: package.claim_layer,
+                    subject_adapter: package.subject_adapter,
+                    provider_package_descriptor: package.artifact.descriptor(),
+                })
+                .collect::<Vec<_>>();
+            let mut registry = FixtureProviderRegistryV1 {
+                providers,
+                registry_digest: [0; 32],
+            };
+            registry
+                .digest()
+                .map_err(Box::<dyn Error>::from)
+                .map(|registry_digest| {
+                    registry.registry_digest = registry_digest;
+                    (packages, registry)
+                })
+        })
+        .and_then(|(packages, registry)| {
+            registry
+                .providers
+                .iter()
+                .zip(&packages)
+                .try_for_each(|(entry, catalog_package)| {
+                    FixtureProviderPackageV1::from_canonical_cbor(&catalog_package.artifact.bytes)
+                        .and_then(|decoded| {
+                            decoded
+                                .validate_registry_binding(entry, &catalog_package.artifact.bytes)
+                        })
+                        .map_err(Box::<dyn Error>::from)
+                })
+                .map(|()| (packages, registry))
+        })
+        .and_then(|(packages, registry)| {
+            registry
+                .to_canonical_cbor()
+                .map_err(Box::<dyn Error>::from)
+                .map(|registry_bytes| ProviderCatalog {
+                    registry: public_artifact(
+                        FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+                        "application/cbor",
+                        &registry_bytes,
+                    ),
+                    packages,
+                    package_support,
+                })
+        })
+}
+
+fn provider_package(
+    claim_layer: ClaimLayerV1,
+    subject_adapter: SubjectAdapterKindV1,
+    catalog_provider: &CatalogFixtureProvider,
+) -> Result<ProviderPackage, Box<dyn Error>> {
+    let provider_key = catalog_provider.provider.key();
+    let schemas = provider_schema_artifacts(catalog_provider);
+    let support_descriptor = |support: &MaterializationSupportArtifact| {
+        artifact_descriptor(support.path, support.media_type, support.bytes)
+    };
+    let mut package = FixtureProviderPackageV1 {
+        provider_key: provider_key.clone(),
+        claim_layer,
+        subject_adapter,
+        family_schemas: schemas
+            .iter()
+            .zip(
+                catalog_provider
+                    .fixtures
+                    .iter()
+                    .map(|fixture| fixture.family),
+            )
+            .map(|(schema, family)| ProviderFamilySchemaV1 {
+                family,
+                schema_descriptor: schema.descriptor(),
+            })
+            .collect(),
+        licence_descriptor: support_descriptor(catalog_provider.provider.licence),
+        notices_descriptor: support_descriptor(catalog_provider.provider.notices),
+        sbom_descriptor: support_descriptor(catalog_provider.provider.sbom),
+        source_provenance_descriptor: support_descriptor(
+            catalog_provider.provider.source_provenance,
+        ),
+        limitations_descriptor: support_descriptor(catalog_provider.provider.limitations),
+        package_digest: [0; 32],
+    };
+    package
+        .digest()
+        .map_err(Box::<dyn Error>::from)
+        .and_then(|package_digest| {
+            package.package_digest = package_digest;
+            package
+                .to_canonical_cbor()
+                .map_err(Box::<dyn Error>::from)
+                .map(|package_bytes| ProviderPackage {
+                    provider_key,
+                    claim_layer,
+                    subject_adapter,
+                    schemas,
+                    artifact: public_artifact(
+                        catalog_provider.provider.package_path,
+                        "application/cbor",
+                        &package_bytes,
+                    ),
+                })
+        })
+}
+
+fn provider_schema_artifacts(catalog_provider: &CatalogFixtureProvider) -> Vec<PublicArtifact> {
+    catalog_provider
+        .fixtures
+        .iter()
+        .map(|fixture| {
+            public_artifact(
+                fixture.schema_path,
+                catalog_provider.provider.schema_media_type,
+                fixture.schema,
+            )
+        })
+        .collect()
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    run(
+        std::env::args_os(),
+        std::env::var("PIGLOROS_CONFORMANCE_SIGNING_KEY"),
+    )
+}
+
+fn run(
+    arguments: impl Iterator<Item = OsString>,
+    encoded_signing_key: Result<String, std::env::VarError>,
+) -> Result<(), Box<dyn Error>> {
+    command_from_arguments(arguments)
+        .and_then(|command| {
+            signing_key_from_encoded(encoded_signing_key).map(|signing_key| (command, signing_key))
+        })
+        .and_then(|(command, signing_key)| {
+            materialized_files(&signing_key).map(|outputs| (command, outputs))
+        })
+        .and_then(|(command, outputs)| {
+            prepare_command(command).and_then(|command| execute_command(command, &outputs))
+        })
+}
+
+fn prepare_command(
+    command: MaterializationCommand,
+) -> Result<PreparedMaterializationCommand, Box<dyn Error>> {
+    match command {
+        MaterializationCommand::Publish(output_root) => prepare_atomic_publication(&output_root)
+            .map(PreparedMaterializationCommand::Publish)
+            .map_err(Into::into),
+        MaterializationCommand::Fingerprint => Ok(PreparedMaterializationCommand::Fingerprint),
+    }
+}
+
+fn prepare_atomic_publication(
+    destination: &Path,
+) -> Result<AtomicPublication, MaterializationError> {
+    let expected = pos_conformance::hex_digest(&SOURCE_INVENTORY_DIGEST);
+    if destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == expected)
+    {
+        CString::new(expected)
+            .map_err(|_| MaterializationError::AtomicPublicationUnsupported)
+            .and_then(|destination_name| AtomicPublication::prepare(destination, destination_name))
+    } else {
+        Err(MaterializationError::SourceInventoryAddressMismatch)
+    }
+}
+
+fn execute_command(
+    command: PreparedMaterializationCommand,
+    outputs: &[MaterializedFile],
+) -> Result<(), Box<dyn Error>> {
+    match command {
+        PreparedMaterializationCommand::Publish(publication) => {
+            publish_materialized_tree(publication, outputs).map_err(Into::into)
+        }
+        PreparedMaterializationCommand::Fingerprint => {
+            let fingerprint = format!(
+                "{}\n",
+                pos_conformance::hex_digest(&materialized_tree_digest(outputs))
+            );
+            let mut output = std::io::stdout().lock();
+            output.write_all(fingerprint.as_bytes()).map_err(Into::into)
+        }
+    }
+}
+
+fn materialized_files(signing_key: &SigningKey) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
+    let inventory_bytes = MATERIALIZATION_AUTHORITY_INVENTORY_BYTES;
+    let catalog = layer_catalog();
+    provider_catalog(&catalog).and_then(|providers| {
+        let context = MaterializationContext {
+            signing_key,
+            inventory_bytes,
+            providers: &providers,
+        };
+        catalog
+            .entries
+            .iter()
+            .try_fold(providers.materialized_files(), |mut outputs, spec| {
+                materialize_profile(&context, spec, CatalogBundleMode::ALL).map(|files| {
+                    outputs.extend(files);
+                    outputs
+                })
+            })
+            .and_then(|mut outputs| {
+                let archives = outputs
+                    .iter()
+                    .filter(|output| output.archive_release_filename.is_some())
+                    .map(|output| output.bytes.as_slice())
+                    .collect::<Vec<_>>();
+                verify_release_tree_independently(&archives)
+                    .map_err(Box::<dyn Error>::from)
+                    .map(|()| {
+                        let published_file_count = outputs.len().saturating_add(2);
+                        outputs.push(materialization_metadata(&catalog, published_file_count));
+                        outputs.push(output_checksum_inventory(&outputs));
+                        outputs
+                    })
+            })
+    })
+}
+
+fn command_from_arguments(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<MaterializationCommand, Box<dyn Error>> {
+    let _program = arguments.next();
+    let argument = arguments
+        .next()
+        .ok_or("materialization output directory is required")?;
+    if arguments.next().is_some() {
+        return Err("materialization accepts exactly one output directory".into());
+    }
+    if argument == "--fingerprint" {
+        Ok(MaterializationCommand::Fingerprint)
+    } else {
+        Ok(MaterializationCommand::Publish(PathBuf::from(argument)))
+    }
+}
+
+fn materialized_tree_digest(files: &[MaterializedFile]) -> [u8; 32] {
+    let mut ordered = files.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.ConformanceMaterializedTree.v1\0");
+    hasher.update(&(ordered.len() as u64).to_be_bytes());
+    for file in ordered {
+        hasher.update(&(file.relative_path.len() as u64).to_be_bytes());
+        hasher.update(file.relative_path.as_bytes());
+        hasher.update(&(file.bytes.len() as u64).to_be_bytes());
+        hasher.update(&file.bytes);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn signing_key_from_encoded(
+    encoded: Result<String, std::env::VarError>,
+) -> Result<SigningKey, Box<dyn Error>> {
+    encoded
+        .map_err(Into::into)
+        .and_then(|encoded| {
+            pos_conformance::decode_hex_digest(&encoded)
+                .ok_or_else(|| "invalid conformance signing key".into())
+        })
+        .and_then(|bytes| {
+            let key = SigningKey::from_bytes(&bytes);
+            if key.verifying_key().to_bytes() == DRAFT_AUTHORITY_PUBLIC_KEY_BYTES {
+                Ok(key)
+            } else {
+                Err("conformance signing key is not declared by the Draft authority".into())
+            }
+        })
+}
+
+fn materialize_profile(
+    context: &MaterializationContext<'_>,
+    layer: &LayerCatalogEntry,
+    bundle_modes: [CatalogBundleMode; 2],
+) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
+    profile_from_catalog(layer, context.providers).and_then(|mut profile| {
+        profile.lifecycle = ProfileLifecycleV1::Draft;
+        profile.profile_digest = profile.digest();
+        let prefix = format!("{}/draft", layer.claim_layer.catalog_name());
+        profile
+            .to_canonical_cbor()
+            .map_err(Into::into)
+            .and_then(|profile_bytes| {
+                let [local, air_gapped] =
+                    bundle_modes.map(|mode| signed_bundle(context, layer, &profile, mode));
+                local.and_then(|local| {
+                    air_gapped.and_then(|air_gapped| {
+                        let pair = ConformanceBundlePairV1 { local, air_gapped };
+                        pair.validate().map_err(Into::into).and_then(|()| {
+                            materialized_profile_outputs(
+                                &profile,
+                                &prefix,
+                                profile_bytes,
+                                &pair,
+                                bundle_modes,
+                            )
+                        })
+                    })
+                })
+            })
+    })
+}
+
+fn signed_bundle(
+    context: &MaterializationContext<'_>,
+    layer: &LayerCatalogEntry,
+    profile: &ConformanceProfileV1,
+    mode: CatalogBundleMode,
+) -> Result<ConformanceBundleV1, Box<dyn Error>> {
+    bundle_inputs_from_profile(
+        layer,
+        profile,
+        mode,
+        context.inventory_bytes,
+        context.providers,
+    )
+    .and_then(|(members, expected_results)| {
+        ConformanceBundleV1::materialize(profile, mode.bundle_mode(), members, expected_results)
+            .and_then(|bundle| bundle.sign(context.signing_key))
+            .map_err(Into::into)
+    })
+}
+
+fn materialized_profile_outputs(
+    profile: &ConformanceProfileV1,
+    prefix: &str,
+    profile_bytes: Vec<u8>,
+    pair: &ConformanceBundlePairV1,
+    modes: [CatalogBundleMode; 2],
+) -> Result<Vec<MaterializedFile>, Box<dyn Error>> {
+    let outputs = vec![MaterializedFile {
+        relative_path: format!(
+            "{prefix}/CPF1-{}.cbor",
+            pos_conformance::hex_digest(&profile.profile_digest)
+        ),
+        bytes: profile_bytes,
+        archive_release_filename: None,
+    }];
+    modes
+        .into_iter()
+        .map(CatalogBundleMode::name)
+        .zip([&pair.local, &pair.air_gapped])
+        .try_fold(outputs, |mut outputs, (mode_name, bundle)| {
+            materialized_bundle_files(prefix, mode_name, bundle).map(|files| {
+                outputs.extend(files);
+                outputs
+            })
+        })
+}
+
+fn materialized_bundle_files(
+    prefix: &str,
+    mode_name: &str,
+    bundle: &ConformanceBundleV1,
+) -> Result<[MaterializedFile; 2], Box<dyn Error>> {
+    bundle
+        .manifest_digest()
+        .and_then(|manifest_digest| {
+            bundle
+                .release_filename()
+                .map(|release_filename| (manifest_digest, release_filename))
+        })
+        .and_then(|(manifest_digest, release_filename)| {
+            bundle
+                .manifest_bytes()
+                .map(|manifest_bytes| (manifest_digest, release_filename, manifest_bytes))
+        })
+        .and_then(|(manifest_digest, release_filename, manifest_bytes)| {
+            bundle.to_canonical_cbor().map(|bundle_bytes| {
+                (
+                    manifest_digest,
+                    release_filename,
+                    manifest_bytes,
+                    bundle_bytes,
+                )
+            })
+        })
+        .map_err(Into::into)
+        .and_then(
+            |(manifest_digest, release_filename, manifest_bytes, bundle_bytes)| {
+                verify_public_archive(&bundle_bytes, &release_filename).map(|()| {
+                    [
+                        MaterializedFile {
+                            relative_path: format!(
+                                "{prefix}/manifest-{mode_name}-{}.cbor",
+                                pos_conformance::hex_digest(&manifest_digest)
+                            ),
+                            bytes: manifest_bytes,
+                            archive_release_filename: None,
+                        },
+                        MaterializedFile {
+                            relative_path: format!("{prefix}/{release_filename}"),
+                            bytes: bundle_bytes,
+                            archive_release_filename: Some(release_filename),
+                        },
+                    ]
+                })
+            },
+        )
+}
+
+fn materialization_metadata(
+    catalog: &LayerCatalog,
+    published_file_count: usize,
+) -> MaterializedFile {
+    let layer_names = catalog
+        .entries
+        .iter()
+        .map(|layer| layer.claim_layer.catalog_name())
+        .collect::<Vec<_>>();
+    let mode_names = CatalogBundleMode::ALL
+        .into_iter()
+        .map(CatalogBundleMode::name)
+        .collect::<Vec<_>>();
+    MaterializedFile {
+        relative_path: MATERIALIZATION_METADATA_PATH.to_owned(),
+        bytes: serde_json::json!({
+            "format": 1,
+            "lifecycles": ["draft"],
+            "layers": layer_names,
+            "modes": mode_names,
+            "published_file_count": published_file_count,
+        })
+        .to_string()
+        .into_bytes(),
+        archive_release_filename: None,
+    }
+}
+
+fn output_checksum_inventory(files: &[MaterializedFile]) -> MaterializedFile {
+    let mut ordered = files.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut inventory = String::new();
+    for file in ordered {
+        let digest: [u8; 32] = Sha256::digest(&file.bytes).into();
+        inventory.push_str(&pos_conformance::hex_digest(&digest));
+        inventory.push_str("  ");
+        inventory.push_str(&file.relative_path);
+        inventory.push('\n');
+    }
+    MaterializedFile {
+        relative_path: OUTPUT_CHECKSUM_INVENTORY_PATH.to_owned(),
+        bytes: inventory.into_bytes(),
+        archive_release_filename: None,
+    }
+}
+
+fn fixture_context(claim_layer: ClaimLayerV1) -> FixtureContext {
+    let normative = MATERIALIZATION_SUPPORT_NORMATIVE_REQUIREMENTS_MD_BYTES;
+    let notice = MATERIALIZATION_SUPPORT_NOTICE_BYTES;
+    let sbom = MATERIALIZATION_SUPPORT_SBOM_JSON_BYTES;
+    let source_provenance = MATERIALIZATION_SUPPORT_SOURCE_PROVENANCE_JSON_BYTES;
+    let build_provenance = MATERIALIZATION_SUPPORT_BUILD_PROVENANCE_JSON_BYTES;
+    let publication_review = MATERIALIZATION_SUPPORT_PUBLICATION_REVIEW_JSON_BYTES;
+    let limitations = MATERIALIZATION_SUPPORT_LIMITATIONS_MD_BYTES;
+    let notice_digest = *blake3::hash(notice).as_bytes();
+    let sbom_digest = *blake3::hash(sbom).as_bytes();
+    let limitations_digest = *blake3::hash(limitations).as_bytes();
+    FixtureContext {
+        claim_layer,
+        source_provenance_digest: *blake3::hash(source_provenance).as_bytes(),
+        build_provenance_digest: *blake3::hash(build_provenance).as_bytes(),
+        publication_review_digest: *blake3::hash(publication_review).as_bytes(),
+        notice_digest,
+        sbom_digest,
+        limitations_digest,
+        normative_spec_digest: *blake3::hash(normative).as_bytes(),
+    }
+}
+
+fn fixtures_for_provider(
+    layer: &LayerCatalogEntry,
+    catalog_provider: &CatalogFixtureProvider,
+    context: &FixtureContext,
+    provider_key: &FixtureProviderKeyV1,
+) -> Result<Vec<FixtureDescriptorV1>, Box<dyn Error>> {
+    DRAFT_EXECUTION_PROFILES
+        .iter()
+        .map(execution_profile_digest)
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|execution_profiles| {
+            catalog_provider
+                .fixtures
+                .iter()
+                .flat_map(|fixture| {
+                    execution_profiles.iter().copied().flat_map(move |digest| {
+                        CatalogBundleMode::ALL
+                            .into_iter()
+                            .map(CatalogBundleMode::execution_mode)
+                            .map(move |mode| (fixture, digest, mode))
+                    })
+                })
+                .map(|(fixture, digest, mode)| {
+                    fixture_descriptor_from_record(
+                        layer,
+                        catalog_provider,
+                        fixture,
+                        context,
+                        provider_key,
+                        digest,
+                        mode,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map(|mut fixtures| {
+            fixtures.sort_by_key(|fixture| {
+                (
+                    fixture.provider_key.clone(),
+                    fixture.family,
+                    fixture.case_id.clone(),
+                    fixture.execution_profile_digest,
+                    fixture.modes.clone(),
+                )
+            });
+            fixtures
+        })
+}
+
+fn profile_from_catalog(
+    layer: &LayerCatalogEntry,
+    providers: &ProviderCatalog,
+) -> Result<ConformanceProfileV1, Box<dyn Error>> {
+    let context = fixture_context(layer.claim_layer);
+    let provider_keys = layer
+        .fixture_providers
+        .iter()
+        .map(|provider| provider.provider.key())
+        .collect::<Vec<_>>();
+    layer
+        .fixture_providers
+        .iter()
+        .zip(&provider_keys)
+        .map(|(catalog_provider, provider_key)| {
+            fixtures_for_provider(layer, catalog_provider, &context, provider_key)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|provider_fixtures| provider_fixtures.into_iter().flatten().collect::<Vec<_>>())
+        .and_then(|mut fixtures| {
+            fixtures.sort_by_key(|fixture| {
+                (
+                    fixture.provider_key.clone(),
+                    fixture.family,
+                    fixture.case_id.clone(),
+                    fixture.execution_profile_digest,
+                    fixture.modes.clone(),
+                )
+            });
+            let mut allowed_divergences = fixtures
+                .iter()
+                .filter_map(|fixture| fixture.strict_oracle.divergence.clone())
+                .collect::<Vec<_>>();
+            allowed_divergences.sort_by(|left, right| {
+                (left.classification, left.first_coordinate.as_slice())
+                    .cmp(&(right.classification, right.first_coordinate.as_slice()))
+            });
+            allowed_divergences.dedup();
+            DRAFT_EXECUTION_PROFILES
+                .iter()
+                .map(execution_profile_digest)
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|mut execution_profile_digests| {
+                    execution_profile_digests.sort_unstable();
+                    trust_policy_snapshot_digest().map(|snapshot_digest| {
+                        let execution_matrix_digest =
+                            *blake3::hash(MATERIALIZATION_EXECUTION_MATRIX_BYTES).as_bytes();
+                        let mut profile = ConformanceProfileV1 {
+                            profile_id: layer.profile_id.to_owned(),
+                            semantic_version: "1.0.0".to_owned(),
+                            lifecycle: ProfileLifecycleV1::Draft,
+                            normative_spec_digest: context.normative_spec_digest,
+                            execution_matrix_digest,
+                            execution_profile_digests,
+                            fixture_provider_registry: providers.binding_for(provider_keys),
+                            fixtures,
+                            allowed_divergences,
+                            evaluator_protocol: evaluator_protocol(),
+                            independence_requirements: IndependenceRequirementsV1 {
+                                technical_independence_required: true,
+                                authorship_independence_required: true,
+                                organizational_independence_required: false,
+                                trust_policy_snapshot_digest: snapshot_digest,
+                                requirements_digest: labeled_digest(
+                                    "PiglorOS.IndependenceRequirements.v1",
+                                    layer.profile_record,
+                                ),
+                            },
+                            fixture_contract_policy_digest: *blake3::hash(
+                                MATERIALIZATION_SUPPORT_FIXTURE_FAMILY_CONTRACT_JSON_BYTES,
+                            )
+                            .as_bytes(),
+                            limitations_digest: context.limitations_digest,
+                            provenance_digest: context.publication_review_digest,
+                            previous_profile_digest: None,
+                            profile_digest: [0; 32],
+                        };
+                        profile.profile_digest = profile.digest();
+                        profile
+                    })
+                })
+        })
+}
+
+fn fixture_descriptor_from_record(
+    layer: &LayerCatalogEntry,
+    catalog_provider: &CatalogFixtureProvider,
+    fixture: &CatalogFixture,
+    context: &FixtureContext,
+    provider_key: &FixtureProviderKeyV1,
+    execution_profile_digest: [u8; 32],
+    mode: pos_conformance::ExecutionModeV1,
+) -> Result<FixtureDescriptorV1, Box<dyn Error>> {
+    let payload_path = fixture_payload_member_path(fixture.case_id, &execution_profile_digest);
+    let evidence_path = evidence_status_member_path(fixture.case_id, &execution_profile_digest);
+    let oracle_output_path = expected_result_member_path(
+        fixture.case_id,
+        context.claim_layer,
+        &execution_profile_digest,
+    );
+    let evidence = artifact_descriptor(
+        &evidence_path,
+        catalog_provider.provider.evidence_status_media_type,
+        fixture.evidence_status,
+    );
+    let oracle_output = artifact_descriptor(
+        &oracle_output_path,
+        catalog_provider.provider.oracle_media_type,
+        fixture.oracle,
+    );
+    let expectation = fixture_expectation(fixture, &oracle_output);
+    let auxiliary = if expectation.strict_oracle.output.is_some() {
+        vec![evidence]
+    } else {
+        vec![evidence, oracle_output]
+    };
+    let downgrade = fixture.family == FixtureFamilyV1::Downgrade;
+    let transition = fixture_downgrade_transition(fixture.family, provider_key);
+    trust_policy_snapshot_digest().and_then(|trust_policy_snapshot_digest| {
+        let release_admission_digest = transition.as_ref().map_or_else(
+            || Ok(None),
+            |transition| {
+                release_admission_bytes(
+                    fixture.case_id,
+                    execution_profile_digest,
+                    trust_policy_snapshot_digest,
+                    &transition.from,
+                    &transition.to,
+                )
+                .map(|bytes| Some(*blake3::hash(&bytes).as_bytes()))
+            },
+        );
+        release_admission_digest.map(|release_admission_digest| {
+            let mut descriptor = FixtureDescriptorV1 {
+                case_id: fixture.case_id.to_owned(),
+                mandatory: true,
+                claim_layer: context.claim_layer,
+                family: fixture.family,
+                provider_key: provider_key.clone(),
+                execution_profile_digest,
+                modes: vec![mode],
+                subject_adapter: layer.subject_adapter,
+                schema: artifact_descriptor(
+                    fixture.schema_path,
+                    catalog_provider.provider.schema_media_type,
+                    fixture.schema,
+                ),
+                payload: artifact_descriptor(
+                    &payload_path,
+                    catalog_provider.provider.payload_media_type,
+                    fixture.input,
+                ),
+                auxiliary,
+                strict_oracle: expectation.strict_oracle,
+                expected_verification_outcome: expectation.verification_outcome,
+                expected_verification_error: expectation.verification_error,
+                replay_claim: expectation.replay_claim,
+                redaction_state: expectation.redaction_state,
+                deterministic_budget: fixture.contract.deterministic_budget.clone(),
+                operational_safety: OperationalSafetyV1 {
+                    watchdog_ms: fixture.contract.watchdog_ms,
+                },
+                capability_policy: CapabilityPolicyV1 {
+                    network_allowed: fixture.contract.network_allowed,
+                    capability_ids: fixture
+                        .contract
+                        .minimum_capability_ids
+                        .iter()
+                        .map(|capability| (*capability).to_owned())
+                        .collect(),
+                },
+                provenance: fixture_provenance(context),
+                trust_policy_snapshot_digest: downgrade.then_some(trust_policy_snapshot_digest),
+                release_admission_digest,
+                transition,
+                fixture_digest: [0; 32],
+            };
+            descriptor.fixture_digest = descriptor.digest();
+            descriptor
+        })
+    })
+}
+
+fn fixture_downgrade_transition(
+    family: FixtureFamilyV1,
+    provider_key: &FixtureProviderKeyV1,
+) -> Option<FixtureContractTransitionV1> {
+    if family != FixtureFamilyV1::Downgrade {
+        return None;
+    }
+    Some(FixtureContractTransitionV1 {
+        from: FixtureProviderKeyV1 {
+            provider_id: provider_key.provider_id.clone(),
+            contract_version: provider_key.contract_version.clone(),
+            abi_major: provider_key.abi_major,
+            abi_minor: provider_key.abi_minor + 1,
+        },
+        to: provider_key.clone(),
+    })
+}
+
+fn fixture_expectation(
+    fixture: &CatalogFixture,
+    auxiliary: &ArtifactDescriptorV1,
+) -> FixtureExpectation {
+    let (strict_oracle, verification_outcome, verification_error) = match &fixture.strict_oracle {
+        CatalogStrictOracle::CanonicalOutput => (
+            StrictOracleV1 {
+                kind: StrictOracleKindV1::Output,
+                output: Some(auxiliary.clone()),
+                failure: None,
+                divergence: None,
+            },
+            VerificationOutcomeV1::VerifiedExact,
+            None,
+        ),
+        CatalogStrictOracle::NamespacedFailure {
+            owner_id,
+            contract_version,
+            code_id,
+        } => {
+            let failure = NamespacedFailureV1 {
+                owner_id: (*owner_id).to_owned(),
+                contract_version: (*contract_version).to_owned(),
+                code_id: (*code_id).to_owned(),
+            };
+            (
+                StrictOracleV1 {
+                    kind: StrictOracleKindV1::Failure,
+                    output: None,
+                    failure: Some(failure.clone()),
+                    divergence: None,
+                },
+                fixture.failure_outcome,
+                Some(failure),
+            )
+        }
+        CatalogStrictOracle::Divergence {
+            classification,
+            first_coordinate,
+        } => {
+            let divergence = AllowedDivergenceV1 {
+                classification: *classification,
+                first_coordinate: first_coordinate.to_vec(),
+            };
+            (
+                StrictOracleV1 {
+                    kind: StrictOracleKindV1::Divergence,
+                    output: None,
+                    failure: None,
+                    divergence: Some(divergence),
+                },
+                VerificationOutcomeV1::Diverged,
+                None,
+            )
+        }
+    };
+    FixtureExpectation {
+        strict_oracle,
+        verification_outcome,
+        verification_error,
+        replay_claim: fixture.replay_claim,
+        redaction_state: fixture.redaction_state,
+    }
+}
+
+fn fixture_provenance(context: &FixtureContext) -> FixtureProvenanceV1 {
+    FixtureProvenanceV1 {
+        licence_id: "MIT".to_owned(),
+        notices_digest: context.notice_digest,
+        sbom_digest: context.sbom_digest,
+        source_digest: context.source_provenance_digest,
+        build_digest: context.build_provenance_digest,
+        publication_review_digest: context.publication_review_digest,
+        limitations_digest: context.limitations_digest,
+    }
+}
+
+fn labeled_digest(label: &str, bytes: &[u8]) -> [u8; 32] {
+    let mut input = Vec::with_capacity(label.len() + 1 + bytes.len());
+    input.extend_from_slice(label.as_bytes());
+    input.push(0);
+    input.extend_from_slice(bytes);
+    *blake3::hash(&input).as_bytes()
+}
+
+fn fixture_payload_member_path(case_id: &str, execution_profile_digest: &[u8; 32]) -> String {
+    format!(
+        "fixtures/{case_id}/{}.payload",
+        pos_conformance::hex_digest(execution_profile_digest)
+    )
+}
+
+fn evidence_status_member_path(case_id: &str, execution_profile_digest: &[u8; 32]) -> String {
+    format!(
+        "evidence/{case_id}/{}",
+        pos_conformance::hex_digest(execution_profile_digest)
+    )
+}
+
+fn evaluator_protocol() -> EvaluatorProtocolV1 {
+    EvaluatorProtocolV1 {
+        protocol_id: "pigloros.evaluator.v1".to_owned(),
+        protocol_digest: *blake3::hash(MATERIALIZATION_SUPPORT_EVALUATOR_PROTOCOL_V1_JSON_BYTES)
+            .as_bytes(),
+        request_schema_digest: *blake3::hash(
+            MATERIALIZATION_SUPPORT_EVALUATOR_REQUEST_V1_CDDL_BYTES,
+        )
+        .as_bytes(),
+        report_schema_digest: *blake3::hash(MATERIALIZATION_SUPPORT_EVALUATOR_REPORT_V1_CDDL_BYTES)
+            .as_bytes(),
+        hard_caps: EvaluatorHardCapsV1 {
+            max_profile_bytes: 16 * 1024 * 1024,
+            max_cases: 65_536,
+            max_bundle_members: 65_536,
+            max_member_path_bytes: 256,
+            max_member_bytes: 64 * 1024 * 1024,
+            max_total_bundle_bytes: 1024 * 1024 * 1024,
+            max_compression_expansion: 100,
+            max_structural_nesting: 32,
+            max_coordinate_bytes: 128,
+            max_diagnostic_bytes: 1024 * 1024,
+            max_deterministic_memory_bytes: 1024 * 1024 * 1024,
+            max_deterministic_cpu_fuel: 1_000_000_000,
+            max_deterministic_host_calls: 1_000_000,
+            max_deterministic_event_count: 1_000_000,
+            max_deterministic_output_bytes: 64 * 1024 * 1024,
+            max_deterministic_storage_bytes: 1024 * 1024 * 1024,
+            max_deterministic_execution_steps: 1_000_000_000,
+            max_deterministic_simulation_time_ns: 86_400_000_000_000,
+        },
+    }
+}
+
+fn bundle_inputs_from_profile(
+    layer: &LayerCatalogEntry,
+    profile: &ConformanceProfileV1,
+    mode: CatalogBundleMode,
+    inventory_bytes: &[u8],
+    providers: &ProviderCatalog,
+) -> Result<(Vec<BundleMemberV1>, Vec<BundleExpectedResultV1>), Box<dyn Error>> {
+    let execution_mode = mode.execution_mode();
+    let mut members = Vec::new();
+    let mut expected_results = Vec::new();
+    for source in layer
+        .fixture_providers
+        .iter()
+        .flat_map(|provider| &provider.fixtures)
+    {
+        for fixture in profile
+            .fixtures
+            .iter()
+            .filter(|fixture| fixture.case_id == source.case_id)
+            .filter(|fixture| fixture.modes.contains(&execution_mode))
+        {
+            members.push(BundleMemberV1::fixture_input(
+                fixture.payload.member_path.clone(),
+                source.input.to_vec(),
+            ));
+            let path = expected_result_member_path(
+                &fixture.case_id,
+                fixture.claim_layer,
+                &fixture.execution_profile_digest,
+            );
+            let evidence_path =
+                evidence_status_member_path(&fixture.case_id, &fixture.execution_profile_digest);
+            members.push(BundleMemberV1::evidence_status(
+                evidence_path,
+                source.evidence_status.to_vec(),
+            ));
+            let member = BundleMemberV1::expected_result(path.clone(), source.oracle.to_vec());
+            expected_results.push(BundleExpectedResultV1 {
+                case_id: fixture.case_id.clone(),
+                claim_layer: fixture.claim_layer,
+                execution_profile_digest: fixture.execution_profile_digest,
+                mode: mode.bundle_mode(),
+                member_path: path.clone(),
+                digest: member.digest,
+            });
+            members.push(member);
+        }
+    }
+    expected_results.sort();
+    append_supporting_members(&mut members, inventory_bytes, providers, profile, mode)
+        .map(|()| (members, expected_results))
+}
+
+fn append_supporting_members(
+    members: &mut Vec<BundleMemberV1>,
+    inventory_bytes: &[u8],
+    providers: &ProviderCatalog,
+    profile: &ConformanceProfileV1,
+    mode: CatalogBundleMode,
+) -> Result<(), Box<dyn Error>> {
+    members.extend(MATERIALIZATION_SUPPORT_ARTIFACTS.iter().map(|artifact| {
+        BundleMemberV1::supporting(artifact.path, artifact.bytes.to_vec(), artifact.role)
+    }));
+    for schema in providers
+        .packages
+        .iter()
+        .flat_map(|package| &package.schemas)
+    {
+        members.push(BundleMemberV1::supporting(
+            schema.path.clone(),
+            schema.bytes.clone(),
+            BundleMemberRoleV1::Schema,
+        ));
+    }
+    let inventory = BundleMemberV1::authority_inventory(inventory_bytes.to_vec());
+    members.push(inventory);
+    let matrix = BundleMemberV1::execution_matrix(MATERIALIZATION_EXECUTION_MATRIX_BYTES.to_vec());
+    members.push(matrix);
+    append_draft_authority_members(members, profile, mode).map(|()| {
+        members.push(BundleMemberV1::fixture_provider_registry(
+            providers.registry.bytes.clone(),
+        ));
+        for package in &providers.packages {
+            members.push(BundleMemberV1::fixture_provider_package(
+                package.artifact.path.clone(),
+                package.artifact.bytes.clone(),
+            ));
+        }
+    })
+}
+
+fn append_draft_authority_members(
+    members: &mut Vec<BundleMemberV1>,
+    profile: &ConformanceProfileV1,
+    mode: CatalogBundleMode,
+) -> Result<(), Box<dyn Error>> {
+    DRAFT_EXECUTION_PROFILES
+        .iter()
+        .map(|execution_profile| {
+            execution_profile_bytes(execution_profile).map(|bytes| {
+                BundleMemberV1::supporting(
+                    format!(
+                        "authority/execution-profiles/{}.epf1",
+                        execution_profile.profile_id
+                    ),
+                    bytes,
+                    BundleMemberRoleV1::ExecutionProfile,
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|execution_profiles| {
+            members.extend(execution_profiles);
+            trust_policy_snapshot_bytes().and_then(|snapshot| {
+                members.push(BundleMemberV1::supporting(
+                    "authority/trust-policy-snapshot.tps1",
+                    snapshot,
+                    BundleMemberRoleV1::TrustPolicySnapshot,
+                ));
+                append_draft_release_admissions(members, profile, mode)
+            })
+        })
+}
+
+fn append_draft_release_admissions(
+    members: &mut Vec<BundleMemberV1>,
+    profile: &ConformanceProfileV1,
+    mode: CatalogBundleMode,
+) -> Result<(), Box<dyn Error>> {
+    let execution_mode = mode.execution_mode();
+    profile
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.family == FixtureFamilyV1::Downgrade)
+        .filter(|fixture| fixture.modes.contains(&execution_mode))
+        .try_for_each(|fixture| {
+            let transition = fixture.transition.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "downgrade fixture is missing its provider transition",
+                )
+            })?;
+            trust_policy_snapshot_digest().and_then(|trust_snapshot| {
+                release_admission_bytes(
+                    &fixture.case_id,
+                    fixture.execution_profile_digest,
+                    trust_snapshot,
+                    &transition.from,
+                    &transition.to,
+                )
+                .map(|bytes| {
+                    members.push(BundleMemberV1::supporting(
+                        format!(
+                            "authority/release-admissions/{}-{}.rad1",
+                            fixture.case_id,
+                            pos_conformance::hex_digest(&fixture.execution_profile_digest)
+                        ),
+                        bytes,
+                        BundleMemberRoleV1::ReleaseAdmission,
+                    ));
+                })
+            })
+        })
+}
+
+fn verify_public_archive(
+    archive_bytes: &[u8],
+    release_filename: &str,
+) -> Result<(), Box<dyn Error>> {
+    ConformanceBundleV1::from_canonical_cbor(archive_bytes)
+        .map_err(Into::into)
+        .and_then(|_| {
+            verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
+        })
+}

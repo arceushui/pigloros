@@ -1,0 +1,1 @@
+{"case_id":"gateway-client-conformance-positive","claim_layer":"gateway-client-conformance","family":"positive","provider_contract":"pigloros.fixture.gateway-client-conformance@1.0.0","subject_adapter":"public-gateway-protocol","stimulus":{"operation":"read-gateway-health","request":{"method":"GET","path":"/health"}},"expected":{"response":{"status":200,"body":{"ok":true}}}}

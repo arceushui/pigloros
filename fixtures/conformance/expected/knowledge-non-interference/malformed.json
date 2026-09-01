@@ -1,0 +1,9 @@
+{
+  "claim_layer": "knowledge-non-interference",
+  "case_id": "knowledge-non-interference-malformed",
+  "family": "malformed",
+  "input_blake3_digest": "c7cd662a71c596f08b9722bd0563b8fcc022f9c1f4d0bd1ee4961ac276c91fc2",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

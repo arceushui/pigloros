@@ -1,0 +1,9 @@
+{
+  "claim_layer": "plugin-conformance",
+  "case_id": "plugin-conformance-denied",
+  "family": "denied",
+  "input_blake3_digest": "47c149dad684a5b7d47d69ccfbf93ebc86c08487bcb35f625058c310783a299a",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

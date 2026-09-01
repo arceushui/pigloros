@@ -1,0 +1,9 @@
+{
+  "claim_layer": "metric-conformance",
+  "case_id": "metric-conformance-denied",
+  "family": "denied",
+  "input_blake3_digest": "11a2fab8571627aa43efd3264cc4d578f0bd6447158f5d60bc97efc6b9a6dcd5",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

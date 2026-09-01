@@ -1,0 +1,9 @@
+{
+  "claim_layer": "knowledge-non-interference",
+  "case_id": "knowledge-non-interference-independent-evaluation",
+  "family": "independent-evaluation",
+  "input_blake3_digest": "f8306a417de8c0aeb7c6de8650969f5eb3e62713a226d4770adbc0330df73840",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

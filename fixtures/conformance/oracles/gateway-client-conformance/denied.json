@@ -1,0 +1,1 @@
+{"case_id":"gateway-client-conformance-denied","claim_layer":"gateway-client-conformance","family":"denied","oracle":{"kind":"namespaced-failure","owner_id":"pigloros.fixture.gateway-client-conformance","contract_version":"1.0.0","code_id":"capability-denied"}}

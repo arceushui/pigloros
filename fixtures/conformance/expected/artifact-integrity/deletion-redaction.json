@@ -1,0 +1,9 @@
+{
+  "claim_layer": "artifact-integrity",
+  "case_id": "artifact-integrity-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "43c34fc0f1aeb65644add98c45b5c79da42356bb3dc41695ede3507eaa853b38",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

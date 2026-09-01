@@ -1,0 +1,9 @@
+{
+  "claim_layer": "metric-conformance",
+  "case_id": "metric-conformance-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "01d1f14867b761f9420083ba3308adcde5d6156925f94911b6609c778ea8e498",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

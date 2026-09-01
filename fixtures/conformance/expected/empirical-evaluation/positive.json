@@ -1,0 +1,9 @@
+{
+  "claim_layer": "empirical-evaluation",
+  "case_id": "empirical-evaluation-positive",
+  "family": "positive",
+  "input_blake3_digest": "e4777459e223fb004807f4a0ba0a8dacbb22bfca6aa6cd32dfc6b8a16e5b2f80",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

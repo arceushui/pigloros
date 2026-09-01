@@ -1,0 +1,94 @@
+{
+  "profile_id": "pigloros.w8.artifact-integrity.1.0.0",
+  "claim_layer": "artifact-integrity",
+  "wire_code": 0,
+  "subject_adapter": "exported-artifact",
+  "fixture_providers": [{
+    "manifest": "providers/artifact-integrity/provider.json",
+    "fixture_case_ids": [
+      "artifact-integrity-positive",
+      "artifact-integrity-denied",
+      "artifact-integrity-malformed",
+      "artifact-integrity-resource-exhaustion",
+      "artifact-integrity-deletion-redaction",
+      "artifact-integrity-downgrade",
+      "artifact-integrity-independent-evaluation"
+    ]
+  }],
+  "fixture_root": "artifact-integrity",
+  "fixtures": [
+    {
+      "claim_layer": "artifact-integrity",
+      "case_id": "artifact-integrity-positive",
+      "family": "positive",
+      "schema": "providers/artifact-integrity/schemas/positive.schema.json",
+      "input": "inputs/artifact-integrity/positive.json",
+      "expected": "expected/artifact-integrity/positive.json",
+      "oracle": "oracles/artifact-integrity/positive.json"
+    },
+    {
+      "claim_layer": "artifact-integrity",
+      "case_id": "artifact-integrity-denied",
+      "family": "denied",
+      "schema": "providers/artifact-integrity/schemas/denied.schema.json",
+      "input": "inputs/artifact-integrity/denied.json",
+      "expected": "expected/artifact-integrity/denied.json",
+      "oracle": "oracles/artifact-integrity/denied.json"
+    },
+    {
+      "claim_layer": "artifact-integrity",
+      "case_id": "artifact-integrity-malformed",
+      "family": "malformed",
+      "schema": "providers/artifact-integrity/schemas/malformed.schema.json",
+      "input": "inputs/artifact-integrity/malformed.json",
+      "expected": "expected/artifact-integrity/malformed.json",
+      "oracle": "oracles/artifact-integrity/malformed.json"
+    },
+    {
+      "claim_layer": "artifact-integrity",
+      "case_id": "artifact-integrity-resource-exhaustion",
+      "family": "resource-exhaustion",
+      "schema": "providers/artifact-integrity/schemas/resource-exhaustion.schema.json",
+      "input": "inputs/artifact-integrity/resource-exhaustion.json",
+      "expected": "expected/artifact-integrity/resource-exhaustion.json",
+      "oracle": "oracles/artifact-integrity/resource-exhaustion.json"
+    },
+    {
+      "claim_layer": "artifact-integrity",
+      "case_id": "artifact-integrity-deletion-redaction",
+      "family": "deletion-redaction",
+      "schema": "providers/artifact-integrity/schemas/deletion-redaction.schema.json",
+      "input": "inputs/artifact-integrity/deletion-redaction.json",
+      "expected": "expected/artifact-integrity/deletion-redaction.json",
+      "oracle": "oracles/artifact-integrity/deletion-redaction.json"
+    },
+    {
+      "claim_layer": "artifact-integrity",
+      "case_id": "artifact-integrity-downgrade",
+      "family": "downgrade",
+      "schema": "providers/artifact-integrity/schemas/downgrade.schema.json",
+      "input": "inputs/artifact-integrity/downgrade.json",
+      "expected": "expected/artifact-integrity/downgrade.json",
+      "oracle": "oracles/artifact-integrity/downgrade.json"
+    },
+    {
+      "claim_layer": "artifact-integrity",
+      "case_id": "artifact-integrity-independent-evaluation",
+      "family": "independent-evaluation",
+      "schema": "providers/artifact-integrity/schemas/independent-evaluation.schema.json",
+      "input": "inputs/artifact-integrity/independent-evaluation.json",
+      "expected": "expected/artifact-integrity/independent-evaluation.json",
+      "oracle": "oracles/artifact-integrity/independent-evaluation.json"
+    }
+  ],
+  "authority_inventory": "expected-authority/inventory.json",
+  "authority_inventory_sha256_digest": "486fe381a9a3e94b103428f9f58c4cfed7bb5875d3a4bb98a7e5868af9ea66ea",
+  "execution_profiles": [
+    "deterministic-local-v1",
+    "deterministic-air-gapped-v1"
+  ],
+  "bundle_modes": [
+    "local",
+    "air-gapped"
+  ]
+}

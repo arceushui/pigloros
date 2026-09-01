@@ -10,6 +10,7 @@ on:
       - >-
         **/Cargo.toml
       - Cargo.lock
+      - fixtures/conformance/**
       - .github/workflows/mutation.yml
   workflow_dispatch:
 
@@ -45,19 +46,21 @@ jobs:
     needs: mutation-baseline
     runs-on: ubuntu-latest
     # The shell watchdog below exits with diagnostics before this outer limit.
-    timeout-minutes: 40
+    timeout-minutes: 70
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 8
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.97.1
+          # A pinned nightly enables libtest's per-test fail-fast mode. The
+          # stable workspace baseline above remains the compatibility gate.
+          toolchain: nightly-2026-08-28
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: mutation
@@ -71,28 +74,37 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
-      # changing the mutant set or weakening the gate. Build and test
-      # timeouts expose a single pathological mutant promptly.
+      # The baseline proves the whole workspace first. Each mutant retains the
+      # owning-package test selection used on main, while two harness threads
+      # limit four workers from multiplying test-thread concurrency.
       - name: Run mutants in changed lines
         run: |
           set -euo pipefail
           set +e
-          timeout --foreground 30m cargo mutants \
+          # Each worker has an isolated target directory, so its first cold
+          # build may exceed the stricter per-test timeout on hosted runners.
+          timeout --foreground 60m cargo mutants \
             --workspace \
             --all-features \
             --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
-            --shard "${{ matrix.shard }}/4" \
+            --shard "${{ matrix.shard }}/8" \
             --baseline skip \
             --jobs 4 \
             --timeout 120 \
-            --build-timeout 120 \
+            --build-timeout 300 \
             --cap-lints true \
-            --cargo-arg=--locked
+            --cargo-arg=--locked \
+            -- \
+            -- \
+            -Zunstable-options \
+            --fail-fast \
+            --include-ignored \
+            --test-threads=2
           mutation_status=$?
           set -e
           if [[ "$mutation_status" -eq 124 ]]; then
-            echo "Mutation shard watchdog timed out after 30 minutes."
+            echo "Mutation shard watchdog timed out after 60 minutes."
             latest_log=""
             if [[ -d mutants.out ]]; then
               latest_log="$(find mutants.out -type f -name '*.log' -printf '%T@ %p\n' \
@@ -113,6 +125,8 @@ jobs:
           if-no-files-found: ignore
 
   mutation-gate:
+    # Branch protection requires this fan-in together with `ci-gate`; shards
+    # and the baseline must never be configured as independent merge approvals.
     name: diff mutation testing
     if: always()
     needs: [mutation-baseline, mutation]

@@ -1,0 +1,1 @@
+{"case_id":"replay-conformance-deletion-redaction","claim_layer":"replay-conformance","family":"deletion-redaction","oracle":{"kind":"canonical-output"},"output":{"post_state":{"prohibited_data_present":false,"retained_metadata":{"record_id":"synthetic-1"}}}}

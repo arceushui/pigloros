@@ -1,0 +1,9 @@
+{
+  "claim_layer": "empirical-evaluation",
+  "case_id": "empirical-evaluation-independent-evaluation",
+  "family": "independent-evaluation",
+  "input_blake3_digest": "fc593ff882498385f5f6e446dce109f075dab163369c9e439085eff1d194090d",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

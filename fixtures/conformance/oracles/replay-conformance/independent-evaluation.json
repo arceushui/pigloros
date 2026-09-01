@@ -1,0 +1,1 @@
+{"case_id":"replay-conformance-independent-evaluation","claim_layer":"replay-conformance","family":"independent-evaluation","oracle":{"kind":"canonical-output"},"output":{"algorithm":"BLAKE3-256","expected_digest":"625b527087638e96074d0ecc1798c50866178261c9c82c0c837151a8e2be4b6d"}}

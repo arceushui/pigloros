@@ -16,16 +16,68 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
+mod bundle_contract;
 mod profile_contract;
+mod provider_contract;
+include!("wire_syntax.rs");
+include!(concat!(env!("OUT_DIR"), "/draft_authority.rs"));
 
+pub(crate) const MAX_PROVIDER_ENTRIES: usize = 4096;
+
+pub(crate) fn strictly_ordered<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+pub use bundle_contract::{
+    draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
+    draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
+    verify_archive_independently, verify_archive_release_filename,
+    verify_release_tree_independently, BundleContractErrorV1, BundleExpectedResultV1,
+    BundleManifestV1, BundleMemberDescriptorV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
+    ConformanceBundlePairV1, ConformanceBundleV1, CONFORMANCE_BUNDLE_MAGIC_V1,
+    MAX_CONFORMANCE_BUNDLE_BYTES_V1,
+};
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,
-    EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1, EvaluatorRequestV1,
-    ExpectedResultV1, FixtureBoundsV1, FixtureDescriptorV1, FixtureInputMemberV1,
-    FixtureProvenanceV1, IndependenceRequirementsV1, ProfileLifecycleV1,
-    StableEvidenceAttestationV1, StableImplementationEvidenceV1, SubjectAdapterKindV1,
-    TrustedRootPolicyV1, CONFORMANCE_PROFILE_MAGIC_V1, EVALUATOR_REQUEST_MAGIC_V1,
+    DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorOutputCapabilityV1, EvaluatorProtocolV1,
+    EvaluatorRequestV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureProvenanceV1,
+    IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1,
+    StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, CONFORMANCE_PROFILE_MAGIC_V1,
+    DETERMINISTIC_BUDGET_HARD_CAPS_V1, EVALUATOR_REQUEST_MAGIC_V1,
 };
+pub use provider_contract::{
+    ArtifactDescriptorV1, FixtureFamilyV1, FixtureProviderEntryV1, FixtureProviderKeyV1,
+    FixtureProviderPackageV1, FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1,
+    ProviderContractErrorV1, ProviderFamilySchemaV1, FIXTURE_PROVIDER_PACKAGE_MAGIC_V1,
+    FIXTURE_PROVIDER_REGISTRY_MAGIC_V1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    MAX_PROVIDER_ARTIFACT_BYTES_V1,
+};
+
+fn encode_artifact_descriptor_value(value: &ArtifactDescriptorV1) -> Value {
+    Value::Array(vec![
+        Value::Text(value.member_path.clone()),
+        Value::Text(value.media_type.clone()),
+        Value::Integer(value.byte_length.into()),
+        Value::Bytes(value.blake3_digest.to_vec()),
+    ])
+}
+
+fn decode_artifact_descriptor_value(value: &Value) -> Option<ArtifactDescriptorV1> {
+    let Value::Array(fields) = value else {
+        return None;
+    };
+    let [Value::Text(member_path), Value::Text(media_type), Value::Integer(byte_length), Value::Bytes(digest)] =
+        fields.as_slice()
+    else {
+        return None;
+    };
+    Some(ArtifactDescriptorV1 {
+        member_path: member_path.clone(),
+        media_type: media_type.clone(),
+        byte_length: u64::try_from(*byte_length).ok()?,
+        blake3_digest: digest.as_slice().try_into().ok()?,
+    })
+}
 
 /// Version of the first independent proof-evidence envelope.
 pub const EVIDENCE_FORMAT_V1: u32 = 1;
@@ -64,251 +116,6 @@ pub fn schema_id_for_event_type(event_type: &str) -> u32 {
             let digest = blake3::hash(&input);
             u32::from_be_bytes(digest.as_bytes()[..4].try_into().unwrap_or([0; 4])).max(1)
         }
-    }
-}
-
-#[cfg(test)]
-mod coverage_entrypoints {
-    use super::*;
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn expect_err<T, E: std::fmt::Debug>(value: &Result<T, E>) {
-        if value.is_ok() {
-            std::panic::resume_unwind(Box::new("expected a rejected coverage value"));
-        }
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn encode_value(value: &ciborium::Value) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes).unwrap_or_default();
-        bytes
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn decode_value(bytes: Vec<u8>) -> ciborium::Value {
-        ciborium::from_reader(std::io::Cursor::new(bytes)).unwrap_or(ciborium::Value::Null)
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn replace_field(
-        value: ciborium::Value,
-        index: usize,
-        replacement: ciborium::Value,
-    ) -> ciborium::Value {
-        let mut fields = match value {
-            ciborium::Value::Array(fields) => fields,
-            _ => Vec::new(),
-        };
-        fields[index] = replacement;
-        ciborium::Value::Array(fields)
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn replace_nested_field(
-        value: ciborium::Value,
-        outer: usize,
-        inner: usize,
-        replacement: ciborium::Value,
-    ) -> ciborium::Value {
-        let mut fields = match value {
-            ciborium::Value::Array(fields) => fields,
-            _ => Vec::new(),
-        };
-        let nested = fields.remove(outer);
-        fields.insert(outer, replace_field(nested, inner, replacement));
-        ciborium::Value::Array(fields)
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn replace_evidence_case_coordinate(
-        evidence: &ciborium::Value,
-        coordinate: ciborium::Value,
-    ) -> ciborium::Value {
-        let mut evidence_fields = evidence.as_array().map_or_else(Vec::new, Clone::clone);
-        let mut contract_fields = evidence_fields[10]
-            .as_array()
-            .map_or_else(Vec::new, Clone::clone);
-        let mut report_fields = contract_fields[6]
-            .as_array()
-            .map_or_else(Vec::new, Clone::clone);
-        let mut cases = report_fields[13]
-            .as_array()
-            .map_or_else(Vec::new, Clone::clone);
-        let mut case = cases[0].as_array().map_or_else(Vec::new, Clone::clone);
-        case[6] = coordinate;
-        cases[0] = ciborium::Value::Array(case);
-        report_fields[13] = ciborium::Value::Array(cases);
-        contract_fields[6] = ciborium::Value::Array(report_fields);
-        evidence_fields[10] = ciborium::Value::Array(contract_fields);
-        ciborium::Value::Array(evidence_fields)
-    }
-
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ok<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
-        value.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("unexpected coverage error: {error:?}")))
-        })
-    }
-
-    #[test]
-    fn exported_record_entrypoints_are_exercised_from_an_instrumented_test() {
-        let boundary = wave8_plugin_boundary();
-        assert_eq!(boundary.validate(), Ok(()));
-
-        let mut invalid_boundary = boundary.clone();
-        invalid_boundary.manifest_digest = [1; 32];
-        assert_eq!(
-            invalid_boundary.validate(),
-            Err(PluginBoundaryError::ManifestDigestMismatch)
-        );
-        invalid_boundary.manifest_digest = boundary.manifest_digest;
-        invalid_boundary.release_digest = [1; 32];
-        assert_eq!(
-            invalid_boundary.validate(),
-            Err(PluginBoundaryError::ReleaseDigestMismatch)
-        );
-
-        let evidence = tests::evidence();
-        assert!(evidence.digest().is_ok());
-        let evidence_bytes = evidence.to_canonical_cbor();
-        assert!(evidence_bytes.is_ok());
-        let verification = evidence.to_verification_result();
-        assert!(verification.is_ok());
-        let verification = verification.map(|result| {
-            assert!(result.digest().is_ok());
-            result.to_canonical_cbor()
-        });
-        assert!(verification.is_ok());
-
-        let mut report = DivergenceReportV1 {
-            request_digest: [1; 32],
-            manifest_digest: [2; 32],
-            execution_profile_digest: [3; 32],
-            fixture_digest: Some([4; 32]),
-            evaluator_digest: [5; 32],
-            reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
-            replay_claim: ReplayClaimV1::Exact,
-            location_kind: DivergenceLocationKindV1::TimelineSeq,
-            timeline_or_worldcut_id: [6; 16],
-            timeline_seq_or_cut_ordinal: 7,
-            tick: 8,
-            scheduler_position: Some(9),
-            driver_or_plugin_id: Some("world".to_owned()),
-            output_ordinal: Some(10),
-            mismatch_kind: DivergenceMismatchKindV1::CanonicalBytes,
-            expected: DigestSizeV1 {
-                digest: Some([11; 32]),
-                size: Some(12),
-            },
-            actual: DigestSizeV1 {
-                digest: Some([13; 32]),
-                size: Some(14),
-            },
-            prior_matching_checkpoint_digest: Some([15; 32]),
-            follow_on_counts: vec![FollowOnMismatchV1 {
-                kind: DivergenceMismatchKindV1::Artifact,
-                count: 1,
-            }],
-            report_digest: [0; 32],
-        };
-        report.report_digest = report.digest().unwrap_or([0; 32]);
-        let report_bytes = report.to_canonical_cbor();
-        assert!(report_bytes.is_ok());
-        assert!(DivergenceReportV1::from_canonical_cbor(&report_bytes.unwrap_or_default()).is_ok());
-    }
-
-    #[test]
-    fn malformed_canonical_records_reach_closed_decoder_boundaries() {
-        let evidence = tests::evidence();
-        expect_err(&strict_codec::decode_evidence(&encode_value(
-            &ciborium::Value::Map(Vec::new()),
-        )));
-        let mut invalid_closure = evidence.host_closure.clone();
-        invalid_closure.closure_event_type = "other".to_owned();
-        expect_err(&verify_host_closure(
-            &invalid_closure,
-            &evidence.authoritative_events,
-        ));
-        let value = decode_value(ok(evidence.to_canonical_cbor()));
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-            &replace_field(value.clone(), 0, ciborium::Value::Text("wrong".to_owned())),
-        )));
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-            &replace_field(value.clone(), 1, ciborium::Value::Integer(99_u64.into())),
-        )));
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-            &replace_nested_field(value, 2, 14, ciborium::Value::Text("wrong".to_owned())),
-        )));
-
-        let result = ok(tests::evidence().to_verification_result());
-        let result_value = decode_value(ok(result.to_canonical_cbor()));
-        expect_err(&VerificationResultV1::from_canonical_cbor(&encode_value(
-            &replace_field(result_value, 17, ciborium::Value::Bytes(vec![0; 32])),
-        )));
-
-        let mut report = DivergenceReportV1 {
-            request_digest: [1; 32],
-            manifest_digest: [2; 32],
-            execution_profile_digest: [3; 32],
-            fixture_digest: Some([4; 32]),
-            evaluator_digest: [5; 32],
-            reproducibility_class: ReproducibilityClassV1::ProfileRecomputation,
-            replay_claim: ReplayClaimV1::Exact,
-            location_kind: DivergenceLocationKindV1::TimelineSeq,
-            timeline_or_worldcut_id: [6; 16],
-            timeline_seq_or_cut_ordinal: 7,
-            tick: 8,
-            scheduler_position: Some(9),
-            driver_or_plugin_id: Some("world".to_owned()),
-            output_ordinal: Some(10),
-            mismatch_kind: DivergenceMismatchKindV1::CanonicalBytes,
-            expected: DigestSizeV1 {
-                digest: Some([11; 32]),
-                size: Some(12),
-            },
-            actual: DigestSizeV1 {
-                digest: Some([13; 32]),
-                size: Some(14),
-            },
-            prior_matching_checkpoint_digest: Some([15; 32]),
-            follow_on_counts: vec![FollowOnMismatchV1 {
-                kind: DivergenceMismatchKindV1::Artifact,
-                count: 1,
-            }],
-            report_digest: [0; 32],
-        };
-        report.report_digest = ok(report.digest());
-        let report_value = decode_value(ok(report.to_canonical_cbor()));
-        expect_err(&DivergenceReportV1::from_canonical_cbor(&encode_value(
-            &replace_field(report_value, 21, ciborium::Value::Bytes(vec![0; 32])),
-        )));
-
-        report.driver_or_plugin_id = Some("x".repeat(20_000));
-        expect_err(&report.to_canonical_cbor());
-    }
-
-    #[test]
-    fn public_evidence_decoder_enforces_case_coordinate_boundary() {
-        let evidence = tests::evidence();
-        let encoded = decode_value(ok(evidence.to_canonical_cbor()));
-        let exact =
-            replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 128]));
-        assert!(MoatProofEvidenceV1::from_canonical_cbor(&encode_value(&exact)).is_ok());
-
-        let oversized =
-            replace_evidence_case_coordinate(&encoded, ciborium::Value::Bytes(vec![b'x'; 129]));
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-            &oversized,
-        )));
-
-        let wrong_type = replace_evidence_case_coordinate(
-            &encoded,
-            ciborium::Value::Text("coordinate".to_owned()),
-        );
-        expect_err(&MoatProofEvidenceV1::from_canonical_cbor(&encode_value(
-            &wrong_type,
-        )));
     }
 }
 
@@ -414,6 +221,51 @@ pub enum ClaimLayerV1 {
     EmpiricalEvaluation,
 }
 
+impl ClaimLayerV1 {
+    /// Decode the canonical CPF1 wire code for a claim layer.
+    #[must_use]
+    pub const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::ArtifactIntegrity),
+            1 => Some(Self::ReplayConformance),
+            2 => Some(Self::KnowledgeNonInterference),
+            3 => Some(Self::GatewayClientConformance),
+            4 => Some(Self::PluginConformance),
+            5 => Some(Self::MetricConformance),
+            6 => Some(Self::EmpiricalEvaluation),
+            _ => None,
+        }
+    }
+
+    /// Return the canonical CPF1 wire code for this claim layer.
+    #[must_use]
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::ArtifactIntegrity => 0,
+            Self::ReplayConformance => 1,
+            Self::KnowledgeNonInterference => 2,
+            Self::GatewayClientConformance => 3,
+            Self::PluginConformance => 4,
+            Self::MetricConformance => 5,
+            Self::EmpiricalEvaluation => 6,
+        }
+    }
+
+    /// Return the canonical public catalog name for this claim layer.
+    #[must_use]
+    pub const fn catalog_name(self) -> &'static str {
+        match self {
+            Self::ArtifactIntegrity => "artifact-integrity",
+            Self::ReplayConformance => "replay-conformance",
+            Self::KnowledgeNonInterference => "knowledge-non-interference",
+            Self::GatewayClientConformance => "gateway-client-conformance",
+            Self::PluginConformance => "plugin-conformance",
+            Self::MetricConformance => "metric-conformance",
+            Self::EmpiricalEvaluation => "empirical-evaluation",
+        }
+    }
+}
+
 /// One case's closed conformance outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -512,11 +364,12 @@ impl MoatProofInputV1 {
     /// represented by the shared deterministic codec.
     #[must_use = "the input digest is needed for deterministic identity"]
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        let bytes = pos_crypto::canonical::encode(self)?;
-        let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
-        input.extend_from_slice(&[b'P', b'I', b'1', 0]);
-        input.extend_from_slice(bytes.as_slice());
-        Ok(*blake3::hash(&input).as_bytes())
+        pos_crypto::canonical::encode(self).map(|bytes| {
+            let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
+            input.extend_from_slice(&[b'P', b'I', b'1', 0]);
+            input.extend_from_slice(bytes.as_slice());
+            *blake3::hash(&input).as_bytes()
+        })
     }
 }
 
@@ -758,13 +611,15 @@ impl PluginBoundaryV1 {
         {
             return Err(PluginBoundaryError::InvalidDescriptor);
         }
-        if self.manifest_digest != self.digest_without_identity()? {
-            return Err(PluginBoundaryError::ManifestDigestMismatch);
-        }
-        if self.release_digest != self.release_digest_value() {
-            return Err(PluginBoundaryError::ReleaseDigestMismatch);
-        }
-        Ok(())
+        self.digest_without_identity().and_then(|manifest_digest| {
+            if self.manifest_digest != manifest_digest {
+                Err(PluginBoundaryError::ManifestDigestMismatch)
+            } else if self.release_digest != self.release_digest_value() {
+                Err(PluginBoundaryError::ReleaseDigestMismatch)
+            } else {
+                Ok(())
+            }
+        })
     }
 
     fn digest_without_identity(&self) -> Result<[u8; 32], PluginBoundaryError> {
@@ -1345,8 +1200,7 @@ impl ConformanceReportV1 {
     /// not a complete, self-consistent report.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, EvidenceError> {
         self.validate()?;
-        let bytes = strict_codec::encode_conformance_report(self)
-            .map_err(|_| EvidenceError::InvalidConformanceReport)?;
+        let bytes = strict_codec::encode_conformance_report(self).map_err(EvidenceError::from)?;
         if bytes.len() > 16 * 1024 * 1024 {
             Err(EvidenceError::InvalidConformanceReport)
         } else {
@@ -1374,8 +1228,7 @@ impl ConformanceReportV1 {
     /// Returns [`EvidenceError::InvalidConformanceReport`] when the fields
     /// cannot be represented by the strict canonical codec.
     pub fn digest(&self) -> Result<[u8; 32], EvidenceError> {
-        strict_codec::conformance_report_digest(self)
-            .map_err(|_| EvidenceError::InvalidConformanceReport)
+        strict_codec::conformance_report_digest(self).map_err(Into::into)
     }
 }
 
@@ -1569,11 +1422,12 @@ impl MoatProofEvidenceV1 {
     /// be represented by the shared deterministic codec.
     #[must_use = "the evidence digest is needed for comparison or verification"]
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        let bytes = self.to_canonical_cbor()?;
-        let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
-        input.extend_from_slice(&[b'E', b'V', b'1', 0]);
-        input.extend_from_slice(bytes.as_slice());
-        Ok(*blake3::hash(&input).as_bytes())
+        self.to_canonical_cbor().map(|bytes| {
+            let mut input = Vec::with_capacity(4 + bytes.as_slice().len());
+            input.extend_from_slice(&[b'E', b'V', b'1', 0]);
+            input.extend_from_slice(bytes.as_slice());
+            *blake3::hash(&input).as_bytes()
+        })
     }
 
     /// Export the closed verification result for this evidence.
@@ -1585,31 +1439,35 @@ impl MoatProofEvidenceV1 {
         verify_evidence(self).map_err(|error| {
             pos_core::CoreError::Serialization(format!("invalid proof evidence: {error}"))
         })?;
-        let fixture_domain = b"PiglorOS.AuthoritativeFixture.v1";
-        let fixture_digest = typed_digest(fixture_domain, &self.authoritative_events)?;
-        let mut result = VerificationResultV1 {
-            request_digest: self.manifest.input_digest,
-            manifest_digest: typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest)?,
-            execution_profile_digest: self.manifest.execution_profile_digest,
-            trust_policy_snapshot_digest: self.manifest.trust_policy_snapshot_digest,
-            artifact_closure_digest: self.manifest.artifact_closure_digest,
-            fixture_digest: Some(fixture_digest),
-            evaluator_digest: self.manifest.evaluator_digest,
-            reproducibility_class: self.manifest.reproducibility_class,
-            verification_outcome: VerificationOutcomeV1::VerifiedExact,
-            replay_claim: self.manifest.replay_claim,
-            authoritative_result_digest: Some(self.digest()?),
-            divergence_report_digest: None,
-            first_error: None,
-            checked_artifact_count: u64::try_from(
-                self.authoritative_events.len() + self.projections.len() + self.causal_trace.len(),
-            )
-            .unwrap_or(u64::MAX),
-            provenance_digest: self.contract.conformance_report.provenance_digest,
-            result_digest: [0; 32],
-        };
-        result.result_digest = result.digest()?;
-        Ok(result)
+        self.verification_digests().and_then(|digests| {
+            let mut result = VerificationResultV1 {
+                request_digest: self.manifest.input_digest,
+                manifest_digest: digests.manifest,
+                execution_profile_digest: self.manifest.execution_profile_digest,
+                trust_policy_snapshot_digest: self.manifest.trust_policy_snapshot_digest,
+                artifact_closure_digest: self.manifest.artifact_closure_digest,
+                fixture_digest: Some(digests.fixture),
+                evaluator_digest: self.manifest.evaluator_digest,
+                reproducibility_class: self.manifest.reproducibility_class,
+                verification_outcome: VerificationOutcomeV1::VerifiedExact,
+                replay_claim: self.manifest.replay_claim,
+                authoritative_result_digest: Some(digests.authoritative_result),
+                divergence_report_digest: None,
+                first_error: None,
+                checked_artifact_count: u64::try_from(
+                    self.authoritative_events.len()
+                        + self.projections.len()
+                        + self.causal_trace.len(),
+                )
+                .unwrap_or(u64::MAX),
+                provenance_digest: self.contract.conformance_report.provenance_digest,
+                result_digest: [0; 32],
+            };
+            result.digest().map(|result_digest| {
+                result.result_digest = result_digest;
+                result
+            })
+        })
     }
 
     /// Export the closed verification result as exact deterministic CBOR.
@@ -1618,8 +1476,32 @@ impl MoatProofEvidenceV1 {
     /// Returns a serialization error when the evidence or result cannot be
     /// represented by the closed CBOR record.
     pub fn to_verification_result_cbor(&self) -> Result<Vec<u8>, pos_core::CoreError> {
-        self.to_verification_result()?.to_canonical_cbor()
+        self.to_verification_result()
+            .and_then(|result| result.to_canonical_cbor())
     }
+
+    fn verification_digests(&self) -> Result<VerificationDigests, pos_core::CoreError> {
+        typed_digest(
+            b"PiglorOS.AuthoritativeFixture.v1",
+            &self.authoritative_events,
+        )
+        .and_then(|fixture| {
+            typed_digest(b"PiglorOS.ReproManifest.v1", &self.manifest).and_then(|manifest| {
+                self.digest()
+                    .map(|authoritative_result| VerificationDigests {
+                        fixture,
+                        manifest,
+                        authoritative_result,
+                    })
+            })
+        })
+    }
+}
+
+struct VerificationDigests {
+    fixture: [u8; 32],
+    manifest: [u8; 32],
+    authoritative_result: [u8; 32],
 }
 
 impl VerificationResultV1 {
@@ -1648,8 +1530,7 @@ impl VerificationResultV1 {
     /// # Errors
     /// Returns a serialization error when the result cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::verification_result_digest(self)
-            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+        strict_codec::verification_result_digest(self).map_err(Into::into)
     }
 }
 
@@ -1679,18 +1560,18 @@ impl DivergenceReportV1 {
     /// # Errors
     /// Returns a serialization error when the report cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], pos_core::CoreError> {
-        strict_codec::divergence_report_digest(self)
-            .map_err(|error| pos_core::CoreError::Serialization(error.to_string()))
+        strict_codec::divergence_report_digest(self).map_err(Into::into)
     }
 }
 
 fn typed_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<[u8; 32], pos_core::CoreError> {
-    let bytes = pos_crypto::canonical::encode(value)?;
-    let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());
-    input.extend_from_slice(domain);
-    input.push(0);
-    input.extend_from_slice(bytes.as_slice());
-    Ok(*blake3::hash(&input).as_bytes())
+    pos_crypto::canonical::encode(value).map(|bytes| {
+        let mut input = Vec::with_capacity(domain.len() + 1 + bytes.len());
+        input.extend_from_slice(domain);
+        input.push(0);
+        input.extend_from_slice(bytes.as_slice());
+        *blake3::hash(&input).as_bytes()
+    })
 }
 
 /// Strict portable wire codec for the Wave 8 records.
@@ -1754,13 +1635,7 @@ pub mod strict_codec {
                     .map(encode_event)
                     .collect(),
             ),
-            Value::Array(
-                evidence
-                    .projections
-                    .iter()
-                    .map(encode_projection)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
+            Value::Array(evidence.projections.iter().map(encode_projection).collect()),
             Value::Array(evidence.causal_trace.iter().map(encode_trace).collect()),
             Value::Array(
                 evidence
@@ -1814,8 +1689,11 @@ pub mod strict_codec {
     fn encode_value(value: &Value) -> Result<Vec<u8>, StrictCborError> {
         validate_value(value)?;
         let mut bytes = Vec::new();
-        ciborium::into_writer(value, &mut bytes)
-            .map_err(|error| StrictCborError::Serialization(error.to_string()))?;
+        if ciborium::into_writer(value, &mut bytes).is_err() {
+            return Err(StrictCborError::Serialization(
+                "in-memory CBOR writer failed".to_owned(),
+            ));
+        }
         Ok(bytes)
     }
 
@@ -1832,20 +1710,22 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "verification_result", 18)?;
         let result = decode_verification_result_fields(fields)?;
-        if result.result_digest != verification_result_digest(&result)? {
-            return Err(StrictCborError::InvalidField {
-                field: "verification_result_digest".to_owned(),
-            });
-        }
-        validate_verification_result(&result)?;
-        Ok(result)
+        verification_result_digest(&result).and_then(|expected_digest| {
+            if result.result_digest == expected_digest {
+                validate_verification_result(&result).map(|()| result)
+            } else {
+                Err(StrictCborError::InvalidField {
+                    field: "verification_result_digest".to_owned(),
+                })
+            }
+        })
     }
 
     pub(crate) fn verification_result_digest(
         result: &VerificationResultV1,
     ) -> Result<[u8; 32], StrictCborError> {
-        let bytes = encode_value(&encode_verification_result_value(result, false))?;
-        Ok(domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
+        encode_value(&encode_verification_result_value(result, false))
+            .map(|bytes| domain_digest(b"PiglorOS.VerificationResult.v1", &bytes))
     }
 
     fn encode_verification_result_value(
@@ -2029,13 +1909,15 @@ pub mod strict_codec {
     pub(crate) fn encode_divergence_report(
         report: &DivergenceReportV1,
     ) -> Result<Vec<u8>, StrictCborError> {
-        let bytes = encode_value(&encode_divergence_report_value(report, true))?;
-        if bytes.len() > 16 * 1024 {
-            return Err(StrictCborError::InvalidField {
-                field: "divergence_report_size".to_owned(),
-            });
-        }
-        Ok(bytes)
+        encode_value(&encode_divergence_report_value(report, true)).and_then(|bytes| {
+            if bytes.len() > 16 * 1024 {
+                Err(StrictCborError::InvalidField {
+                    field: "divergence_report_size".to_owned(),
+                })
+            } else {
+                Ok(bytes)
+            }
+        })
     }
 
     pub(crate) fn decode_divergence_report(
@@ -2044,20 +1926,22 @@ pub mod strict_codec {
         let value = decode_value(bytes)?;
         let fields = array(&value, "divergence_report", 22)?;
         let report = decode_divergence_report_fields(fields)?;
-        if report.report_digest != divergence_report_digest(&report)? {
-            return Err(StrictCborError::InvalidField {
-                field: "divergence_report_digest".to_owned(),
-            });
-        }
-        validate_divergence_report(&report)?;
-        Ok(report)
+        divergence_report_digest(&report).and_then(|expected_digest| {
+            if report.report_digest == expected_digest {
+                validate_divergence_report(&report).map(|()| report)
+            } else {
+                Err(StrictCborError::InvalidField {
+                    field: "divergence_report_digest".to_owned(),
+                })
+            }
+        })
     }
 
     pub(crate) fn divergence_report_digest(
         report: &DivergenceReportV1,
     ) -> Result<[u8; 32], StrictCborError> {
-        let bytes = encode_value(&encode_divergence_report_value(report, false))?;
-        Ok(domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
+        encode_value(&encode_divergence_report_value(report, false))
+            .map(|bytes| domain_digest(b"PiglorOS.DivergenceReport.v1", &bytes))
     }
 
     fn encode_divergence_report_value(report: &DivergenceReportV1, include_digest: bool) -> Value {
@@ -2157,9 +2041,11 @@ pub mod strict_codec {
                 .is_some_and(|value| value.is_empty() || value.len() > 128)
             || report.report_digest == [0; 32]
             || report.follow_on_counts.len() > 32
-            || report.follow_on_counts.windows(2).any(|pair| {
-                pair[0].kind >= pair[1].kind || pair[0].count == 0 || pair[1].count == 0
-            })
+            || report.follow_on_counts.iter().any(|entry| entry.count == 0)
+            || report
+                .follow_on_counts
+                .windows(2)
+                .any(|pair| pair[0].kind >= pair[1].kind)
         {
             return Err(StrictCborError::InvalidField {
                 field: "divergence_report_semantics".to_owned(),
@@ -2195,7 +2081,9 @@ pub mod strict_codec {
                 )?,
             });
         }
-        if result.windows(2).any(|pair| pair[0].kind >= pair[1].kind) {
+        if result.iter().any(|entry| entry.count == 0)
+            || result.windows(2).any(|pair| pair[0].kind >= pair[1].kind)
+        {
             return Err(StrictCborError::InvalidField {
                 field: "follow_on_counts_order".to_owned(),
             });
@@ -2297,11 +2185,13 @@ pub mod strict_codec {
         if cursor.position() != u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
             return Err(StrictCborError::NonCanonical);
         }
-        let canonical = encode_value(&value)?;
-        if canonical != bytes {
-            return Err(StrictCborError::NonCanonical);
-        }
-        Ok(value)
+        encode_value(&value).and_then(|canonical| {
+            if canonical == bytes {
+                Ok(value)
+            } else {
+                Err(StrictCborError::NonCanonical)
+            }
+        })
     }
 
     fn validate_value(value: &Value) -> Result<(), StrictCborError> {
@@ -2519,30 +2409,16 @@ pub mod strict_codec {
     }
 
     fn enum_claim_layer(value: ClaimLayerV1) -> Value {
-        uint(match value {
-            ClaimLayerV1::ArtifactIntegrity => 0,
-            ClaimLayerV1::ReplayConformance => 1,
-            ClaimLayerV1::KnowledgeNonInterference => 2,
-            ClaimLayerV1::GatewayClientConformance => 3,
-            ClaimLayerV1::PluginConformance => 4,
-            ClaimLayerV1::MetricConformance => 5,
-            ClaimLayerV1::EmpiricalEvaluation => 6,
-        })
+        uint(u64::from(value.wire_code()))
     }
 
     fn decode_claim_layer(value: &Value) -> Result<ClaimLayerV1, StrictCborError> {
-        match uint_value(value, "claim_layer")? {
-            0 => Ok(ClaimLayerV1::ArtifactIntegrity),
-            1 => Ok(ClaimLayerV1::ReplayConformance),
-            2 => Ok(ClaimLayerV1::KnowledgeNonInterference),
-            3 => Ok(ClaimLayerV1::GatewayClientConformance),
-            4 => Ok(ClaimLayerV1::PluginConformance),
-            5 => Ok(ClaimLayerV1::MetricConformance),
-            6 => Ok(ClaimLayerV1::EmpiricalEvaluation),
-            _ => Err(StrictCborError::InvalidField {
+        u8::try_from(uint_value(value, "claim_layer")?)
+            .ok()
+            .and_then(ClaimLayerV1::from_wire_code)
+            .ok_or_else(|| StrictCborError::InvalidField {
                 field: "claim_layer".to_owned(),
-            }),
-        }
+            })
     }
 
     fn enum_case_outcome(value: CaseOutcomeStatusV1) -> Value {
@@ -2719,7 +2595,11 @@ pub mod strict_codec {
 
     fn decode_manifest(value: &Value) -> Result<ReproManifestV1, StrictCborError> {
         let fields = array(value, "manifest", 18)?;
-        let versions = array(&fields[14], "plugin_versions", plugin_len(&fields[14])?)?;
+        let Value::Array(versions) = &fields[14] else {
+            return Err(StrictCborError::InvalidField {
+                field: "plugin_versions".to_owned(),
+            });
+        };
         let mut plugin_versions = BTreeMap::new();
         for pair in versions {
             let pair = array(pair, "plugin_version", 2)?;
@@ -2757,15 +2637,6 @@ pub mod strict_codec {
         })
     }
 
-    fn plugin_len(value: &Value) -> Result<usize, StrictCborError> {
-        match value {
-            Value::Array(values) => Ok(values.len()),
-            _ => Err(StrictCborError::InvalidField {
-                field: "plugin_versions".to_owned(),
-            }),
-        }
-    }
-
     fn encode_event(event: &AuthoritativeEventV1) -> Value {
         Value::Array(vec![
             uint(event.seq),
@@ -2794,14 +2665,16 @@ pub mod strict_codec {
         values.iter().map(decode_event).collect()
     }
 
-    fn encode_projection(projection: &ProjectionEvidenceV1) -> Result<Value, StrictCborError> {
-        let state = serde_json::to_vec(&projection.state)
-            .map_err(|error| StrictCborError::Json(error.to_string()))?;
-        Ok(Value::Array(vec![
+    fn encode_projection(projection: &ProjectionEvidenceV1) -> Value {
+        // `serde_json::Value` is already a closed JSON value tree, so compact
+        // serialization cannot fail. Keeping a synthetic error path here made
+        // callers handle an unreachable state.
+        let state = projection.state.to_string().into_bytes();
+        Value::Array(vec![
             text(&projection.reducer),
             text(&projection.entity),
             Value::Bytes(state),
-        ]))
+        ])
     }
 
     fn decode_projection(value: &Value) -> Result<ProjectionEvidenceV1, StrictCborError> {
@@ -3782,8 +3655,8 @@ pub mod strict_codec {
     pub(crate) fn conformance_report_digest(
         report: &ConformanceReportV1,
     ) -> Result<[u8; 32], StrictCborError> {
-        let bytes = encode_value(&encode_report_value(report, false))?;
-        Ok(domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes))
+        encode_value(&encode_report_value(report, false))
+            .map(|bytes| domain_digest(b"PiglorOS.ConformanceReport.v1", &bytes))
     }
 
     pub(crate) fn encode_report_value(report: &ConformanceReportV1, include_digest: bool) -> Value {
@@ -4006,871 +3879,6 @@ pub mod strict_codec {
     }
 
     #[cfg(test)]
-    pub mod coverage_helpers {
-        use super::*;
-
-        macro_rules! strict_codec_coverage_cases {
-            ($input:ident) => {{
-                fn consume<T, E>(value: Result<T, E>) {
-                    drop(std::hint::black_box(value));
-                }
-
-                fn replace_field(value: &Value, index: usize, replacement: Value) -> Value {
-                    let mut fields = value.as_array().map_or_else(Vec::new, Clone::clone);
-                    fields[index] = replacement;
-                    Value::Array(fields)
-                }
-
-                fn reject_each_field<T, F>(value: &Value, decoder: F)
-                where
-                    F: Fn(&Value) -> Result<T, StrictCborError>,
-                {
-                    let fields = value.as_array().map_or(&[] as &[Value], Vec::as_slice);
-                    for index in 0..fields.len() {
-                        let invalid = replace_field(value, index, Value::Map(Vec::new()));
-                        assert!(decoder(&invalid).is_err());
-                    }
-                }
-
-                fn reject_each_encoded_field<T, F>(value: &Value, decoder: F)
-                where
-                    F: Fn(&[u8]) -> Result<T, StrictCborError>,
-                {
-                    let fields = value.as_array().map_or(&[] as &[Value], Vec::as_slice);
-                    for index in 0..fields.len() {
-                        let invalid = replace_field(value, index, text("wrong"));
-                        let bytes = encode_value(&invalid).unwrap_or_default();
-                        assert!(decoder(&bytes).is_err());
-                    }
-                }
-
-                let evidence = $input;
-                let contract = &evidence.contract;
-                consume(encode_evidence(evidence));
-                let evidence_value = decode_value(&encode_evidence(evidence).unwrap_or_default())
-                    .unwrap_or(Value::Null);
-                reject_each_encoded_field(&evidence_value, decode_evidence);
-                let mut invalid_input = super::super::tests::input();
-                invalid_input.initial_position[0] = f64::NAN;
-                consume(invalid_input.digest());
-                let mut invalid_serialization = evidence.clone();
-                invalid_serialization.uncertainty[0].lower = f64::NAN;
-                consume(invalid_serialization.to_canonical_cbor());
-                consume(invalid_serialization.digest());
-                consume(invalid_serialization.to_verification_result());
-                consume(invalid_serialization.to_verification_result_cbor());
-                consume(super::super::compare(&invalid_serialization, evidence));
-                consume(super::super::compare(evidence, &invalid_serialization));
-                consume(MoatProofEvidenceV1::from_canonical_cbor(&[0xff]));
-
-                let manifest = encode_manifest(&evidence.manifest);
-                consume(decode_manifest(&manifest));
-                reject_each_field(&manifest, decode_manifest);
-                let duplicate_plugins = replace_field(
-                    &manifest,
-                    14,
-                    Value::Array(vec![
-                        Value::Array(vec![text("world"), text("1")]),
-                        Value::Array(vec![text("world"), text("2")]),
-                    ]),
-                );
-                consume(decode_manifest(&duplicate_plugins));
-                let invalid_plugin_pair =
-                    replace_field(&manifest, 14, Value::Array(vec![Value::Map(Vec::new())]));
-                consume(decode_manifest(&invalid_plugin_pair));
-                let invalid_plugin_version = replace_field(
-                    &manifest,
-                    14,
-                    Value::Array(vec![Value::Array(vec![text("world")])]),
-                );
-                consume(decode_manifest(&invalid_plugin_version));
-                let invalid_plugin_version_value = replace_field(
-                    &manifest,
-                    14,
-                    Value::Array(vec![Value::Array(vec![
-                        text("world"),
-                        Value::Map(Vec::new()),
-                    ])]),
-                );
-                consume(decode_manifest(&invalid_plugin_version_value));
-                consume(decode_manifest(&replace_field(&manifest, 14, Value::Null)));
-                let invalid_plugin_name = replace_field(
-                    &manifest,
-                    14,
-                    Value::Array(vec![Value::Array(vec![Value::Map(Vec::new()), text("1")])]),
-                );
-                consume(decode_manifest(&invalid_plugin_name));
-                consume(plugin_len(&Value::Null));
-                let bad_manifest = replace_field(&manifest, 0, uint(u64::MAX));
-                consume(decode_manifest(&bad_manifest));
-
-                let event = encode_event(&evidence.authoritative_events[0]);
-                consume(decode_event(&event));
-                reject_each_field(&event, decode_event);
-                consume(decode_events(&Value::Array(vec![event])));
-                consume(decode_events(&Value::Array(vec![Value::Map(Vec::new())])));
-                let projection = encode_projection(&evidence.projections[0]).unwrap_or(Value::Null);
-                consume(decode_projection(&projection));
-                reject_each_field(&projection, decode_projection);
-                consume(decode_projections(&Value::Array(vec![Value::Map(
-                    Vec::new(),
-                )])));
-                let invalid_projection = replace_field(&projection, 2, text("not-json-bytes"));
-                consume(decode_projection(&invalid_projection));
-                let invalid_projection_json =
-                    replace_field(&projection, 2, Value::Bytes(vec![0xff]));
-                consume(decode_projection(&invalid_projection_json));
-                let trace = encode_trace(&evidence.causal_trace[0]);
-                consume(decode_trace(&trace));
-                reject_each_field(&trace, decode_trace);
-                consume(decode_traces(&Value::Array(vec![trace])));
-                consume(decode_traces(&Value::Array(vec![Value::Map(Vec::new())])));
-                consume(encode_uncertainty(&evidence.uncertainty[0]));
-                let uncertainty =
-                    encode_uncertainty(&evidence.uncertainty[0]).unwrap_or(Value::Null);
-                reject_each_field(&uncertainty, |value| {
-                    decode_uncertainty(&Value::Array(vec![value.clone()]))
-                });
-                consume(decode_uncertainty(&Value::Array(vec![Value::Map(
-                    Vec::new(),
-                )])));
-                consume(encode_uncertainty(&UncertaintyV1 {
-                    label: "non-finite".to_owned(),
-                    lower: f64::NAN,
-                    upper: 1.0,
-                    confidence: 1.0,
-                }));
-                consume(decode_uncertainty(&Value::Array(vec![Value::Array(vec![
-                    text("bad"),
-                    text("lower"),
-                    uint(0),
-                    uint(0),
-                ])])));
-
-                let view = encode_participant_view(&evidence.participant_views[0]);
-                consume(decode_participant_view(&view));
-                reject_each_field(&view, decode_participant_view);
-                let participant_event =
-                    encode_participant_event(&evidence.participant_views[0].visible_events[0]);
-                reject_each_field(&participant_event, decode_participant_event);
-                let invalid_visible_events =
-                    replace_field(&view, 3, Value::Array(vec![Value::Map(Vec::new())]));
-                consume(decode_participant_view(&invalid_visible_events));
-                consume(decode_participant_views(&Value::Array(vec![view])));
-                consume(decode_participant_views(&Value::Array(vec![Value::Map(
-                    Vec::new(),
-                )])));
-                let mut failure_evidence = evidence.clone();
-                failure_evidence.plugin_failures = vec![PluginFailureV1 {
-                    plugin: "proof".to_owned(),
-                    class: PluginFailureClassV1::ResourceExhaustion,
-                    tick: 2,
-                    committed: false,
-                    staged_event_count: 0,
-                    committed_event_count: 0,
-                    state_digest_before: [1; 32],
-                    state_digest_after: [1; 32],
-                    sibling_step_count: 1,
-                }];
-                consume(decode_plugin_failures(&Value::Array(vec![
-                    encode_plugin_failure(&failure_evidence.plugin_failures[0]),
-                ])));
-                consume(decode_host_closure(&encode_host_closure(
-                    &evidence.host_closure,
-                )));
-                let plugin_failure = encode_plugin_failure(&failure_evidence.plugin_failures[0]);
-                reject_each_field(&plugin_failure, |value| {
-                    decode_plugin_failures(&Value::Array(vec![value.clone()]))
-                });
-                consume(decode_plugin_failures(&Value::Array(vec![Value::Map(
-                    Vec::new(),
-                )])));
-                let closure = encode_host_closure(&evidence.host_closure);
-                reject_each_field(&closure, decode_host_closure);
-                consume(array_values(&Value::Null, "not-an-array"));
-
-                let principal = &contract.scenario_room.principals[0];
-                consume(decode_principal(&encode_principal(principal)));
-                let principal_value = encode_principal(principal);
-                reject_each_field(&principal_value, decode_principal);
-                let mut principal_with_subject = principal.clone();
-                principal_with_subject.subject_id = Some("subject".to_owned());
-                consume(decode_principal(&encode_principal(&principal_with_subject)));
-                let grant = &contract.scenario_room.grants[0];
-                consume(decode_grant(&encode_grant(grant)));
-                let grant_value = encode_grant(grant);
-                reject_each_field(&grant_value, decode_grant);
-                let decision = &contract.authorization_decisions[0];
-                consume(decode_authorization(&encode_authorization(decision)));
-                let authorization_value = encode_authorization(decision);
-                reject_each_field(&authorization_value, decode_authorization);
-                consume(decode_digest_array(
-                    &digest_array(&[[1; 32], [2; 32]]),
-                    "digests",
-                ));
-                let digest_values = digest_array(&[[1; 32], [2; 32]]);
-                reject_each_field(&digest_values, |value| {
-                    decode_digest_array(value, "digests")
-                });
-
-                let snapshot = &contract.knowledge_snapshots[0];
-                consume(decode_knowledge(&encode_knowledge(snapshot)));
-                let knowledge_value = encode_knowledge(snapshot);
-                reject_each_field(&knowledge_value, decode_knowledge);
-                let invalid_knowledge_sequences = replace_field(
-                    &knowledge_value,
-                    5,
-                    Value::Array(vec![Value::Map(Vec::new())]),
-                );
-                consume(decode_knowledge(&invalid_knowledge_sequences));
-                let invalid_knowledge_hidden = replace_field(
-                    &knowledge_value,
-                    7,
-                    Value::Array(vec![Value::Map(Vec::new())]),
-                );
-                consume(decode_knowledge(&invalid_knowledge_hidden));
-                let room_value = encode_room(&contract.scenario_room);
-                reject_each_field(&room_value, decode_room);
-                for index in [5_usize, 6, 7, 8] {
-                    let invalid_room_list = replace_field(
-                        &room_value,
-                        index,
-                        Value::Array(vec![Value::Map(Vec::new())]),
-                    );
-                    consume(decode_room(&invalid_room_list));
-                }
-                consume(decode_room(&encode_room(&contract.scenario_room)));
-                let counterfactual = &contract.counterfactual;
-                consume(decode_dependency(&encode_dependency(
-                    &counterfactual.dependencies[0],
-                )));
-                let dependency_value = encode_dependency(&counterfactual.dependencies[0]);
-                reject_each_field(&dependency_value, decode_dependency);
-                consume(decode_counterfactual(&Value::Array(vec![
-                    digest16(&counterfactual.fork_id),
-                    uint(counterfactual.prior_generation),
-                    uint(counterfactual.generation),
-                    Value::Null,
-                    Value::Array(vec![Value::Map(Vec::new())]),
-                    encode_frontier(&counterfactual.frontier),
-                    encode_invalidation(&counterfactual.invalidation),
-                    Value::Array(vec![uint(1)]),
-                    digest_array(&counterfactual.retained_exogenous_digests),
-                    enum_replay_claim(counterfactual.replay_claim),
-                    digest(&counterfactual.contract_digest),
-                ])));
-                consume(decode_node(&encode_node(
-                    &counterfactual.frontier.affected_nodes[0],
-                )));
-                let node_value = encode_node(&counterfactual.frontier.affected_nodes[0]);
-                reject_each_field(&node_value, decode_node);
-                consume(decode_owner_frontier(&encode_owner_frontier(
-                    &counterfactual.frontier.owner_frontiers[0],
-                )));
-                let owner_value =
-                    encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
-                reject_each_field(&owner_value, decode_owner_frontier);
-                consume(decode_frontier(&encode_frontier(&counterfactual.frontier)));
-                let frontier_value = encode_frontier(&counterfactual.frontier);
-                reject_each_field(&frontier_value, decode_frontier);
-                for index in [6_usize, 7, 8, 12] {
-                    let invalid_frontier_list = replace_field(
-                        &frontier_value,
-                        index,
-                        Value::Array(vec![Value::Map(Vec::new())]),
-                    );
-                    consume(decode_frontier(&invalid_frontier_list));
-                }
-                consume(decode_invalid_artifact(&encode_invalid_artifact(
-                    &counterfactual.invalidation.invalid_artifacts[0],
-                )));
-                let artifact_value =
-                    encode_invalid_artifact(&counterfactual.invalidation.invalid_artifacts[0]);
-                reject_each_field(&artifact_value, decode_invalid_artifact);
-                consume(decode_invalidation(&encode_invalidation(
-                    &counterfactual.invalidation,
-                )));
-                let invalidation_value = encode_invalidation(&counterfactual.invalidation);
-                reject_each_field(&invalidation_value, decode_invalidation);
-                for coordinate_index in [1_usize, 2] {
-                    let coordinate = Value::Array(vec![
-                        digest16(&counterfactual.invalidation.commit_timeline_id),
-                        if coordinate_index == 1 {
-                            Value::Map(Vec::new())
-                        } else {
-                            uint(counterfactual.invalidation.commit_seq)
-                        },
-                        if coordinate_index == 2 {
-                            Value::Map(Vec::new())
-                        } else {
-                            uint(counterfactual.invalidation.commit_tick)
-                        },
-                    ]);
-                    let invalid_commit = replace_field(&invalidation_value, 15, coordinate);
-                    consume(decode_invalidation(&invalid_commit));
-                }
-                for index in [10_usize, 11, 12, 13] {
-                    let invalid_artifact_list = replace_field(
-                        &invalidation_value,
-                        index,
-                        Value::Array(vec![Value::Map(Vec::new())]),
-                    );
-                    consume(decode_invalidation(&invalid_artifact_list));
-                }
-                consume(decode_counterfactual(&encode_counterfactual(
-                    counterfactual,
-                )));
-                let counterfactual_value = encode_counterfactual(counterfactual);
-                reject_each_field(&counterfactual_value, decode_counterfactual);
-                for index in [4_usize, 7] {
-                    let invalid_recomputed = replace_field(
-                        &counterfactual_value,
-                        index,
-                        Value::Array(vec![Value::Map(Vec::new())]),
-                    );
-                    consume(decode_counterfactual(&invalid_recomputed));
-                }
-                let intervention = InterventionV1 {
-                    intervention_id: [21; 16],
-                    target: "body".to_owned(),
-                    operation: "set_velocity".to_owned(),
-                    value_digest: [22; 32],
-                    effective_tick: 2,
-                    ordinal: 1,
-                    principal_id: "principal:operator".to_owned(),
-                    capability: "intervene".to_owned(),
-                    consent_epoch: 0,
-                    provenance_digest: [23; 32],
-                };
-                consume(decode_intervention(&encode_intervention(&intervention)));
-                let intervention_value = encode_intervention(&intervention);
-                reject_each_field(&intervention_value, decode_intervention);
-                let mut counterfactual_with_intervention = counterfactual.clone();
-                counterfactual_with_intervention.intervention = Some(intervention.clone());
-                consume(decode_counterfactual(&encode_counterfactual(
-                    &counterfactual_with_intervention,
-                )));
-                consume(decode_atomicity(&encode_atomicity(&TickAtomicityV1 {
-                    failure_class: Some(PluginFailureClassV1::PluginCrash),
-                    committed: false,
-                    committed_event_count: 0,
-                    state_digest_before: [1; 32],
-                    state_digest_after: [1; 32],
-                    ..evidence.contract.atomicity[0].clone()
-                })));
-                let atomicity_value = encode_atomicity(&evidence.contract.atomicity[0]);
-                reject_each_field(&atomicity_value, decode_atomicity);
-                consume(decode_identity(&encode_identity(
-                    &contract.conformance_report.implementation,
-                )));
-                let identity_value = encode_identity(&contract.conformance_report.implementation);
-                reject_each_field(&identity_value, decode_identity);
-                consume(decode_independence(&encode_independence(
-                    &contract.conformance_report.independence,
-                )));
-                let independence_value =
-                    encode_independence(&contract.conformance_report.independence);
-                reject_each_field(&independence_value, decode_independence);
-                consume(decode_case(&encode_case(
-                    &contract.conformance_report.cases[0],
-                )));
-                let case_value = encode_case(&contract.conformance_report.cases[0]);
-                reject_each_field(&case_value, decode_case);
-
-                let mut case_with_all_optionals = contract.conformance_report.cases[0].clone();
-                case_with_all_optionals.first_coordinate = Some(b"tick=1".to_vec());
-                case_with_all_optionals.expected_digest = Some([24; 32]);
-                case_with_all_optionals.actual_digest = Some([25; 32]);
-                case_with_all_optionals.expected_error = Some(SafeErrorCodeV1::DigestMismatch);
-                case_with_all_optionals.actual_error = Some(SafeErrorCodeV1::ResourceLimitExceeded);
-                consume(decode_case(&encode_case(&case_with_all_optionals)));
-                consume(decode_report(&encode_report_value(
-                    &contract.conformance_report,
-                    true,
-                )));
-                let report_value_all_fields =
-                    encode_report_value(&contract.conformance_report, true);
-                reject_each_field(&report_value_all_fields, decode_report);
-                consume(decode_plugin_boundary(&encode_plugin_boundary(
-                    &contract.plugin_boundary,
-                )));
-                let plugin_boundary_value = encode_plugin_boundary(&contract.plugin_boundary);
-                reject_each_field(&plugin_boundary_value, decode_plugin_boundary);
-                for index in [8_usize, 9] {
-                    let invalid_interfaces = replace_field(
-                        &plugin_boundary_value,
-                        index,
-                        Value::Array(vec![Value::Map(Vec::new())]),
-                    );
-                    consume(decode_plugin_boundary(&invalid_interfaces));
-                }
-                consume(decode_non_interference_case(&encode_non_interference_case(
-                    &contract.non_interference[0],
-                )));
-                let non_interference_value =
-                    encode_non_interference_case(&contract.non_interference[0]);
-                reject_each_field(&non_interference_value, decode_non_interference_case);
-                consume(decode_contract(&encode_contract(contract)));
-                let contract_value = encode_contract(contract);
-                reject_each_field(&contract_value, decode_contract);
-                for index in [2_usize, 3, 5, 7] {
-                    let invalid_contract_lists = replace_field(
-                        &contract_value,
-                        index,
-                        Value::Array(vec![Value::Map(Vec::new())]),
-                    );
-                    consume(decode_contract(&invalid_contract_lists));
-                }
-
-                let plugin_boundary = encode_plugin_boundary(&contract.plugin_boundary);
-                for index in [0_usize, 3, 4, 5, 15, 16] {
-                    let invalid = replace_field(&plugin_boundary, index, uint(u64::MAX));
-                    consume(decode_plugin_boundary(&invalid));
-                }
-
-                let report_value = encode_report_value(&contract.conformance_report, true);
-                for index in [14_usize, 15, 16, 17, 18] {
-                    let invalid = replace_field(&report_value, index, uint(u64::MAX));
-                    consume(decode_report(&invalid));
-                }
-                let invalid_report_cases = replace_field(
-                    &report_value,
-                    13,
-                    Value::Array(vec![Value::Map(Vec::new())]),
-                );
-                consume(decode_report(&invalid_report_cases));
-                let invalid_report = replace_field(&report_value, 0, text("wrong"));
-                consume(decode_report(&invalid_report));
-
-                let mut invalid_node = encode_node(&counterfactual.frontier.affected_nodes[0]);
-                for index in [1_usize, 3, 4] {
-                    invalid_node = replace_field(&invalid_node, index, uint(u64::MAX));
-                    consume(decode_node(&invalid_node));
-                    invalid_node = encode_node(&counterfactual.frontier.affected_nodes[0]);
-                }
-                let mut invalid_owner =
-                    encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
-                for index in [2_usize, 3] {
-                    invalid_owner = replace_field(&invalid_owner, index, uint(u64::MAX));
-                    consume(decode_owner_frontier(&invalid_owner));
-                    invalid_owner =
-                        encode_owner_frontier(&counterfactual.frontier.owner_frontiers[0]);
-                }
-                let invalid_intervention = replace_field(
-                    &encode_intervention(
-                        &counterfactual_with_intervention
-                            .intervention
-                            .unwrap_or(intervention),
-                    ),
-                    5,
-                    uint(u64::MAX),
-                );
-                consume(decode_intervention(&invalid_intervention));
-                let invalid_artifact = replace_field(
-                    &encode_invalid_artifact(&counterfactual.invalidation.invalid_artifacts[0]),
-                    1,
-                    uint(u64::MAX),
-                );
-                consume(decode_invalid_artifact(&invalid_artifact));
-                let invalid_frontier = replace_field(&frontier_value, 1, uint(2));
-                consume(decode_frontier(&invalid_frontier));
-                let invalid_invalidation = replace_field(&invalidation_value, 1, uint(2));
-                consume(decode_invalidation(&invalid_invalidation));
-
-                let Some(result) = evidence.to_verification_result().ok() else {
-                    return;
-                };
-                consume(encode_verification_result(&result));
-                consume(verification_result_digest(&result));
-                let verification_value = encode_verification_result_value(&result, true);
-                reject_each_field(&verification_value, |value| {
-                    array(value, "verification_result", 18)
-                        .and_then(decode_verification_result_fields)
-                });
-                reject_each_encoded_field(&verification_value, decode_verification_result);
-                let error = VerificationErrorV1 {
-                    code: SafeErrorCodeV1::InvalidEncoding,
-                    field_ordinal: Some(7),
-                    canonical_coordinate: Some(vec![1, 2, 3]),
-                    related_digest: Some([26; 32]),
-                };
-                consume(decode_verification_error(&encode_verification_error(
-                    &error,
-                )));
-                for outcome in [
-                    VerificationOutcomeV1::VerifiedExact,
-                    VerificationOutcomeV1::Diverged,
-                    VerificationOutcomeV1::InvalidManifest,
-                    VerificationOutcomeV1::UnverifiableArtifactsMissing,
-                    VerificationOutcomeV1::IncompatibleProfile,
-                    VerificationOutcomeV1::ResourceLimitExceeded,
-                ] {
-                    let mut candidate = result.clone();
-                    candidate.verification_outcome = outcome;
-                    candidate.authoritative_result_digest =
-                        (outcome == VerificationOutcomeV1::VerifiedExact).then_some([27; 32]);
-                    candidate.divergence_report_digest =
-                        (outcome == VerificationOutcomeV1::Diverged).then_some([28; 32]);
-                    candidate.first_error = if matches!(
-                        outcome,
-                        VerificationOutcomeV1::InvalidManifest
-                            | VerificationOutcomeV1::UnverifiableArtifactsMissing
-                            | VerificationOutcomeV1::IncompatibleProfile
-                            | VerificationOutcomeV1::ResourceLimitExceeded
-                    ) {
-                        Some(error.clone())
-                    } else {
-                        None
-                    };
-                    consume(validate_verification_result(&candidate));
-                }
-                let mut invalid_error_result = result;
-                invalid_error_result.verification_outcome = VerificationOutcomeV1::InvalidManifest;
-                invalid_error_result.authoritative_result_digest = None;
-                invalid_error_result.first_error = Some(VerificationErrorV1 {
-                    canonical_coordinate: Some(vec![0; 129]),
-                    ..error
-                });
-                consume(validate_verification_result(&invalid_error_result));
-                for code in [
-                    SafeErrorCodeV1::InvalidEncoding,
-                    SafeErrorCodeV1::UnsupportedVersion,
-                    SafeErrorCodeV1::FieldOutOfBounds,
-                    SafeErrorCodeV1::NonCanonicalOrder,
-                    SafeErrorCodeV1::DigestMismatch,
-                    SafeErrorCodeV1::SignatureInvalid,
-                    SafeErrorCodeV1::TrustRootUnknown,
-                    SafeErrorCodeV1::TrustSnapshotRollback,
-                    SafeErrorCodeV1::ArtifactRevoked,
-                    SafeErrorCodeV1::ClosureIncomplete,
-                    SafeErrorCodeV1::ProfileClassMismatch,
-                    SafeErrorCodeV1::ProfileUnsupported,
-                    SafeErrorCodeV1::ProvenanceMissing,
-                    SafeErrorCodeV1::ResourceLimitExceeded,
-                ] {
-                    consume(decode_safe_error(&enum_safe_error(code)));
-                }
-                consume(decode_safe_error(&uint(99)));
-                for value in [
-                    VerificationOutcomeV1::VerifiedExact,
-                    VerificationOutcomeV1::Diverged,
-                    VerificationOutcomeV1::InvalidManifest,
-                    VerificationOutcomeV1::UnverifiableArtifactsMissing,
-                    VerificationOutcomeV1::IncompatibleProfile,
-                    VerificationOutcomeV1::ResourceLimitExceeded,
-                ] {
-                    consume(decode_verification_outcome(&enum_verification_outcome(
-                        value,
-                    )));
-                }
-                consume(decode_verification_outcome(&uint(99)));
-
-                let mut report = DivergenceReportV1 {
-                    request_digest: [1; 32],
-                    manifest_digest: [2; 32],
-                    execution_profile_digest: [3; 32],
-                    fixture_digest: Some([4; 32]),
-                    evaluator_digest: [5; 32],
-                    reproducibility_class: ReproducibilityClassV1::CrossProfileConformance,
-                    replay_claim: ReplayClaimV1::StructuralOnly,
-                    location_kind: DivergenceLocationKindV1::DriverOutput,
-                    timeline_or_worldcut_id: [6; 16],
-                    timeline_seq_or_cut_ordinal: 3,
-                    tick: 2,
-                    scheduler_position: Some(1),
-                    driver_or_plugin_id: Some("proof".to_owned()),
-                    output_ordinal: Some(1),
-                    mismatch_kind: DivergenceMismatchKindV1::Artifact,
-                    expected: DigestSizeV1 {
-                        digest: Some([7; 32]),
-                        size: Some(8),
-                    },
-                    actual: DigestSizeV1 {
-                        digest: Some([9; 32]),
-                        size: Some(10),
-                    },
-                    prior_matching_checkpoint_digest: Some([11; 32]),
-                    follow_on_counts: vec![FollowOnMismatchV1 {
-                        kind: DivergenceMismatchKindV1::EventIdentity,
-                        count: 1,
-                    }],
-                    report_digest: [0; 32],
-                };
-                report.report_digest = report.digest().unwrap_or([29; 32]);
-                let mut zero_follow_on = report.clone();
-                zero_follow_on.follow_on_counts = vec![
-                    FollowOnMismatchV1 {
-                        kind: DivergenceMismatchKindV1::EventIdentity,
-                        count: 0,
-                    },
-                    FollowOnMismatchV1 {
-                        kind: DivergenceMismatchKindV1::EventOrder,
-                        count: 1,
-                    },
-                ];
-                consume(validate_divergence_report(&zero_follow_on));
-                zero_follow_on.follow_on_counts[0].count = 1;
-                zero_follow_on.follow_on_counts[1].count = 0;
-                consume(validate_divergence_report(&zero_follow_on));
-                let report_value = encode_divergence_report_value(&report, true);
-                if let Value::Array(fields) = &report_value {
-                    consume(decode_divergence_report_fields(fields));
-                }
-                reject_each_field(&report_value, |value| {
-                    array(value, "divergence_report", 22).and_then(decode_divergence_report_fields)
-                });
-                reject_each_encoded_field(&report_value, decode_divergence_report);
-                consume(encode_divergence_report(&report));
-                if let Ok(bytes) = report.to_canonical_cbor() {
-                    consume(decode_divergence_report(&bytes));
-                }
-                for value in [
-                    DivergenceLocationKindV1::TimelineSeq,
-                    DivergenceLocationKindV1::WorldCut,
-                    DivergenceLocationKindV1::TickBoundary,
-                    DivergenceLocationKindV1::Scheduler,
-                    DivergenceLocationKindV1::DriverOutput,
-                ] {
-                    consume(decode_divergence_location(&enum_divergence_location(value)));
-                }
-                consume(decode_divergence_location(&uint(99)));
-                for value in [
-                    DivergenceMismatchKindV1::EventIdentity,
-                    DivergenceMismatchKindV1::EventOrder,
-                    DivergenceMismatchKindV1::CanonicalBytes,
-                    DivergenceMismatchKindV1::ProjectionCheckpoint,
-                    DivergenceMismatchKindV1::TypedFailure,
-                    DivergenceMismatchKindV1::Artifact,
-                    DivergenceMismatchKindV1::SchemaOrUpcaster,
-                    DivergenceMismatchKindV1::NumericProfile,
-                    DivergenceMismatchKindV1::ProhibitedOperationalInput,
-                ] {
-                    consume(decode_divergence_mismatch(&enum_divergence_mismatch(value)));
-                }
-                consume(decode_divergence_mismatch(&uint(99)));
-                consume(decode_digest_size(
-                    &encode_digest_size(&report.expected),
-                    "digest_size",
-                ));
-                consume(decode_digest_size(
-                    &encode_digest_size(&DigestSizeV1 {
-                        digest: None,
-                        size: None,
-                    }),
-                    "digest_size",
-                ));
-                let digest_size_value = encode_digest_size(&report.expected);
-                reject_each_field(&digest_size_value, |value| {
-                    decode_digest_size(value, "digest_size")
-                });
-                let follow_on_count = Value::Array(vec![
-                    enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                    uint(1),
-                ]);
-                reject_each_field(&follow_on_count, |value| {
-                    decode_follow_on_counts(&Value::Array(vec![value.clone()]))
-                });
-                consume(decode_follow_on_counts(&Value::Array(vec![Value::Array(
-                    vec![
-                        enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                        uint(u64::MAX),
-                    ],
-                )])));
-                consume(decode_follow_on_counts(&Value::Array(vec![Value::Map(
-                    Vec::new(),
-                )])));
-                consume(decode_follow_on_counts(&Value::Array(vec![
-                    Value::Array(vec![
-                        enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                        uint(1),
-                    ]),
-                    Value::Array(vec![
-                        enum_divergence_mismatch(DivergenceMismatchKindV1::EventIdentity),
-                        uint(1),
-                    ]),
-                ])));
-                consume(decode_optional_u32(&Value::Null, "optional_u32"));
-                consume(decode_optional_u32(&uint(u64::MAX), "optional_u32"));
-                consume(decode_optional_digest(&Value::Null, "optional_digest"));
-                consume(decode_optional_digest(
-                    &digest(&[30; 32]),
-                    "optional_digest",
-                ));
-
-                let mutations: [fn(&mut DivergenceReportV1); 6] = [
-                    |value: &mut DivergenceReportV1| value.timeline_seq_or_cut_ordinal = u64::MAX,
-                    |value: &mut DivergenceReportV1| value.tick = u64::MAX,
-                    |value: &mut DivergenceReportV1| value.scheduler_position = Some(u32::MAX),
-                    |value: &mut DivergenceReportV1| value.output_ordinal = Some(u32::MAX),
-                    |value: &mut DivergenceReportV1| {
-                        value.driver_or_plugin_id = Some(String::new())
-                    },
-                    |value: &mut DivergenceReportV1| value.report_digest = [0; 32],
-                ];
-                for mutate in mutations {
-                    let mut invalid_report = report.clone();
-                    mutate(&mut invalid_report);
-                    consume(validate_divergence_report(&invalid_report));
-                }
-                let mut invalid_report = report.clone();
-                invalid_report.follow_on_counts = (0..33)
-                    .map(|_| FollowOnMismatchV1 {
-                        kind: DivergenceMismatchKindV1::EventIdentity,
-                        count: 1,
-                    })
-                    .collect();
-                consume(validate_divergence_report(&invalid_report));
-                invalid_report = report;
-                invalid_report.follow_on_counts = vec![
-                    FollowOnMismatchV1 {
-                        kind: DivergenceMismatchKindV1::EventOrder,
-                        count: 1,
-                    },
-                    FollowOnMismatchV1 {
-                        kind: DivergenceMismatchKindV1::EventIdentity,
-                        count: 1,
-                    },
-                ];
-                consume(validate_divergence_report(&invalid_report));
-                invalid_report.follow_on_counts[1].kind = DivergenceMismatchKindV1::EventOrder;
-                consume(validate_divergence_report(&invalid_report));
-
-                consume(decode_value(&[0xff]));
-                consume(decode_value(&[0, 0]));
-                consume(decode_value(&[0x18, 0]));
-                consume(decode_value(&[0xa0]));
-                assert_eq!(
-                    encode_value(&Value::Map(Vec::new())),
-                    Err(StrictCborError::ForbiddenValue)
-                );
-                consume(encode_value(&Value::Tag(0, Box::new(Value::Null))));
-                consume(encode_value(&Value::Float(1.0)));
-                consume(validate_value(&Value::Array(vec![Value::Null])));
-                consume(validate_value(&Value::Integer((-1_i64).into())));
-                consume(array(&Value::Null, "array", 0));
-                consume(array(&Value::Array(Vec::new()), "array", 1));
-                consume(string(&Value::Null, "string"));
-                consume(bytes::<32>(&Value::Bytes(vec![1]), "bytes"));
-                consume(uint_value(&Value::Integer((-1_i64).into()), "uint"));
-                consume(bool_value(&Value::Null, "bool"));
-                consume(optional_u64(&Value::Null, "optional"));
-                consume(optional_string(&Value::Null, "optional"));
-
-                let all_enums = vec![
-                    enum_dependency_class(DependencyClassV1::ExogenousFrozen),
-                    enum_dependency_class(DependencyClassV1::InterventionAssigned),
-                    enum_dependency_class(DependencyClassV1::EndogenousRecomputed),
-                    enum_dependency_class(DependencyClassV1::FixedPolicy),
-                    enum_dependency_class(DependencyClassV1::PresentationOnly),
-                ];
-                for value in all_enums {
-                    consume(decode_dependency_class(&value));
-                }
-                consume(decode_dependency_class(&uint(99)));
-                for value in [
-                    PluginFailureClassV1::PluginCrash,
-                    PluginFailureClassV1::ResourceExhaustion,
-                ] {
-                    consume(decode_plugin_failure(&enum_plugin_failure(value)));
-                }
-                consume(decode_plugin_failure(&uint(99)));
-                for value in [
-                    UnknownEdgePolicyV1::Reject,
-                    UnknownEdgePolicyV1::FullSuffixFromCut,
-                ] {
-                    consume(decode_unknown_edge_policy(&enum_unknown_edge_policy(value)));
-                }
-                consume(decode_unknown_edge_policy(&uint(99)));
-                for value in [
-                    SuffixInvalidationReasonV1::NewIntervention,
-                    SuffixInvalidationReasonV1::ChangedIntervention,
-                    SuffixInvalidationReasonV1::UnknownEdgeFallback,
-                    SuffixInvalidationReasonV1::RetryAfterAtomicFailure,
-                    SuffixInvalidationReasonV1::TrustOrErasureChange,
-                ] {
-                    consume(decode_invalidation_reason(&enum_invalidation_reason(value)));
-                }
-                consume(decode_invalidation_reason(&uint(99)));
-                for value in [
-                    ExecutionModeV1::Local,
-                    ExecutionModeV1::AirGapped,
-                    ExecutionModeV1::Replay,
-                    ExecutionModeV1::Fork,
-                ] {
-                    consume(decode_mode(&enum_mode(value)));
-                }
-                consume(decode_mode(&uint(99)));
-                for value in [
-                    ClaimLayerV1::ArtifactIntegrity,
-                    ClaimLayerV1::ReplayConformance,
-                    ClaimLayerV1::KnowledgeNonInterference,
-                    ClaimLayerV1::GatewayClientConformance,
-                    ClaimLayerV1::PluginConformance,
-                    ClaimLayerV1::MetricConformance,
-                    ClaimLayerV1::EmpiricalEvaluation,
-                ] {
-                    consume(decode_claim_layer(&enum_claim_layer(value)));
-                }
-                consume(decode_claim_layer(&uint(99)));
-                for value in [
-                    CaseOutcomeStatusV1::Pass,
-                    CaseOutcomeStatusV1::Fail,
-                    CaseOutcomeStatusV1::Skip,
-                    CaseOutcomeStatusV1::Unavailable,
-                    CaseOutcomeStatusV1::NotApplicable,
-                ] {
-                    consume(decode_case_outcome(&enum_case_outcome(value)));
-                }
-                consume(decode_case_outcome(&uint(99)));
-                for value in [
-                    RedactionStateV1::None,
-                    RedactionStateV1::RedactedViews,
-                    RedactionStateV1::StructuralOnly,
-                    RedactionStateV1::EvidenceMissing,
-                ] {
-                    consume(decode_redaction_state(&enum_redaction_state(value)));
-                }
-                consume(decode_redaction_state(&uint(99)));
-                for value in [
-                    ReproducibilityClassV1::RecordedReplay,
-                    ReproducibilityClassV1::ProfileRecomputation,
-                    ReproducibilityClassV1::CrossProfileConformance,
-                    ReproducibilityClassV1::LiveUnverified,
-                ] {
-                    consume(decode_reproducibility(&enum_reproducibility(value)));
-                }
-                consume(decode_reproducibility(&uint(99)));
-                for value in [
-                    ReplayClaimV1::Exact,
-                    ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
-                    ReplayClaimV1::StructuralOnly,
-                    ReplayClaimV1::UnverifiableArtifactsMissing,
-                    ReplayClaimV1::IncompatibleProfile,
-                ] {
-                    consume(decode_replay_claim(&enum_replay_claim(value)));
-                }
-                consume(decode_replay_claim(&uint(99)));
-                for value in [
-                    NonInterferenceVariantV1::Success,
-                    NonInterferenceVariantV1::Denial,
-                    NonInterferenceVariantV1::WarmCache,
-                    NonInterferenceVariantV1::ColdCache,
-                ] {
-                    consume(decode_non_interference_variant(
-                        &enum_non_interference_variant(value),
-                    ));
-                }
-                consume(decode_non_interference_variant(&uint(99)));
-            }};
-        }
-
-        #[cfg_attr(coverage_nightly, coverage(off))]
-        pub fn exercise_for_coverage(evidence: &MoatProofEvidenceV1) {
-            strict_codec_coverage_cases!(evidence);
-        }
-    }
-
-    #[cfg(test)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     mod coverage_tests {
         use super::*;
@@ -4907,10 +3915,16 @@ pub mod strict_codec {
                     size: Some(10),
                 },
                 prior_matching_checkpoint_digest: Some([11; 32]),
-                follow_on_counts: vec![FollowOnMismatchV1 {
-                    kind: DivergenceMismatchKindV1::EventIdentity,
-                    count: 1,
-                }],
+                follow_on_counts: vec![
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::EventIdentity,
+                        count: 1,
+                    },
+                    FollowOnMismatchV1 {
+                        kind: DivergenceMismatchKindV1::SchemaOrUpcaster,
+                        count: 1,
+                    },
+                ],
                 report_digest: [0; 32],
             };
             report.report_digest = report.digest().map_err(|error| error.to_string())?;
@@ -4928,6 +3942,12 @@ pub mod strict_codec {
             let decoded = decode_value(&bytes);
             assert!(decoded.is_ok());
             let mut root = decoded.unwrap_or(Value::Null);
+            let wrong_version = replace_field(&root, 1, uint(2));
+            let wrong_version = encode_value(&wrong_version).unwrap_or_default();
+            assert_eq!(
+                decode_evidence(&wrong_version),
+                Err(StrictCborError::UnsupportedVersion)
+            );
             if let Value::Array(fields) = &mut root {
                 fields[0] = text("wrong");
             }
@@ -5032,8 +4052,8 @@ pub mod strict_codec {
                 ..error.clone()
             });
             assert!(validate_verification_result(&invalid_semantics).is_err());
-            invalid_semantics.result_digest =
-                verification_result_digest(&invalid_semantics).unwrap_or([0; 32]);
+            invalid_semantics.result_digest = verification_result_digest(&invalid_semantics)
+                .map_err(|error| error.to_string())?;
             let invalid_semantics_bytes =
                 encode_value(&encode_verification_result_value(&invalid_semantics, true))
                     .unwrap_or_default();
@@ -5047,6 +4067,45 @@ pub mod strict_codec {
             let encoded = encode_divergence_report_value(&report, true);
             let bytes = encode_value(&encoded).map_err(|error| error.to_string())?;
             assert!(decode_divergence_report(&bytes).is_ok());
+
+            let report_with_driver_length = |length| {
+                let mut candidate = report.clone();
+                candidate.driver_or_plugin_id = Some("x".repeat(length));
+                candidate
+            };
+            let mut low = 0_usize;
+            let mut high = 16 * 1024;
+            let mut exact_limit = None;
+            while low <= high {
+                let midpoint = low.midpoint(high);
+                let candidate = report_with_driver_length(midpoint);
+                let length = encode_value(&encode_divergence_report_value(&candidate, true))
+                    .map_err(|error| error.to_string())?
+                    .len();
+                match length.cmp(&(16 * 1024)) {
+                    std::cmp::Ordering::Less => low = midpoint + 1,
+                    std::cmp::Ordering::Equal => {
+                        exact_limit = Some(candidate);
+                        break;
+                    }
+                    std::cmp::Ordering::Greater => high = midpoint.saturating_sub(1),
+                }
+            }
+            let at_limit = exact_limit.ok_or("exact divergence-report limit is unreachable")?;
+            assert_eq!(
+                encode_divergence_report(&at_limit)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                16 * 1024
+            );
+            let over_limit = report_with_driver_length(
+                at_limit
+                    .driver_or_plugin_id
+                    .as_ref()
+                    .map_or(1, |driver| driver.len() + 1),
+            );
+            assert!(encode_divergence_report(&over_limit).is_err());
+
             let null_bytes = encode_value(&Value::Null).map_err(|error| error.to_string())?;
             assert!(decode_divergence_report(&null_bytes).is_err());
 
@@ -5206,11 +4265,13 @@ pub fn compare(
     } else {
         DivergenceClassV1::None
     };
-    Ok(ComparisonV1 {
-        equal: divergence == DivergenceClassV1::None,
-        divergence,
-        left_digest: left.digest()?,
-        right_digest: right.digest()?,
+    left.digest().and_then(|left_digest| {
+        right.digest().map(|right_digest| ComparisonV1 {
+            equal: divergence == DivergenceClassV1::None,
+            divergence,
+            left_digest,
+            right_digest,
+        })
     })
 }
 
@@ -5237,11 +4298,15 @@ pub fn compare_authoritative_outputs(
     } else {
         DivergenceClassV1::None
     };
-    Ok(ComparisonV1 {
-        equal: divergence == DivergenceClassV1::None,
-        divergence,
-        left_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &left_output)?,
-        right_digest: typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &right_output)?,
+    typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &left_output).and_then(|left_digest| {
+        typed_digest(b"PiglorOS.AuthoritativeOutput.v1", &right_output).map(|right_digest| {
+            ComparisonV1 {
+                equal: divergence == DivergenceClassV1::None,
+                divergence,
+                left_digest,
+                right_digest,
+            }
+        })
     })
 }
 
@@ -5904,7 +4969,7 @@ fn validate_conformance_report_shape(report: &ConformanceReportV1) -> Result<(),
                 report.unavailable,
                 report.not_applicable,
             )
-        || report.report_digest != report.digest()?
+        || report.digest().ok() != Some(report.report_digest)
     {
         return Err(EvidenceError::InvalidConformanceReport);
     }
@@ -6565,6 +5630,35 @@ pub fn hex_digest(bytes: &[u8; 32]) -> String {
     hash.to_hex().to_string()
 }
 
+/// Decode a fixed-width hexadecimal 256-bit digest.
+///
+/// Digest fields in the CPF1 and CFB1 wire representations use exactly 64
+/// lowercase hexadecimal characters.
+#[must_use]
+pub fn decode_hex_digest(value: &str) -> Option<[u8; 32]> {
+    let encoded = value.as_bytes();
+    if encoded.len() != 64
+        || !encoded
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in encoded.chunks_exact(2).enumerate() {
+        digest[index] = (lowercase_hex_nibble(pair[0]) << 4) | lowercase_hex_nibble(pair[1]);
+    }
+    Some(digest)
+}
+
+const fn lowercase_hex_nibble(byte: u8) -> u8 {
+    if byte.is_ascii_digit() {
+        byte - b'0'
+    } else {
+        byte - b'a' + 10
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod tests {
@@ -6680,22 +5774,6 @@ pub mod tests {
             },
             contract: test_contract(),
         }
-    }
-
-    #[test]
-    fn consent_audit_codec_round_trips_at_the_public_seam() {
-        let audit = ConsentAuditV1 {
-            subject: "subject-1".to_owned(),
-            requested_after_seq: 4,
-            effective_after_seq: 5,
-            revocation_event_seq: 6,
-            revocation_event_type: "consent.revoked.v1".to_owned(),
-            revocation_payload_digest: [7; 32],
-            halted_at_tick_boundary: true,
-        };
-        let encoded = strict_codec::encode_consent(&audit);
-        assert_eq!(strict_codec::decode_consent(&encoded), Ok(audit));
-        assert!(strict_codec::decode_consent(&Value::Array(Vec::new())).is_err());
     }
 
     #[test]
@@ -7557,19 +6635,22 @@ pub mod tests {
     fn compares_authoritative_outputs_by_event_and_projection() -> Result<(), pos_core::CoreError> {
         let left = evidence();
         let mut right = left.clone();
-        assert_eq!(
-            compare_authoritative_outputs(&left, &right)?.divergence,
-            DivergenceClassV1::None
-        );
+        let equal = compare_authoritative_outputs(&left, &right)?;
+        assert!(equal.equal);
+        assert_eq!(equal.divergence, DivergenceClassV1::None);
         right.authoritative_events[0].payload_digest = [8; 32];
+        let event_divergence = compare_authoritative_outputs(&left, &right)?;
+        assert!(!event_divergence.equal);
         assert_eq!(
-            compare_authoritative_outputs(&left, &right)?.divergence,
+            event_divergence.divergence,
             DivergenceClassV1::AuthoritativeEvents
         );
         right = left.clone();
         right.projections[0].state = serde_json::json!({"changed": true});
+        let projection_divergence = compare_authoritative_outputs(&left, &right)?;
+        assert!(!projection_divergence.equal);
         assert_eq!(
-            compare_authoritative_outputs(&left, &right)?.divergence,
+            projection_divergence.divergence,
             DivergenceClassV1::Projections
         );
         Ok(())
@@ -7930,57 +7011,74 @@ pub mod tests {
 
     #[test]
     fn verifier_accepts_host_closure_and_rejects_each_host_closure_boundary() {
-        fn host_fixture() -> (HostClosureAuditV1, Vec<AuthoritativeEventV1>) {
+        type HostClosureMutation = fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>);
+
+        fn host_fixture() -> MoatProofEvidenceV1 {
             let mut value = evidence();
             value.host_closure.closure_event_type =
                 "experiment.lifecycle.consent-closed.v1".to_owned();
             value.authoritative_events[2].event_type =
                 "experiment.lifecycle.consent-closed.v1".to_owned();
-            (value.host_closure, value.authoritative_events)
+            value
         }
 
-        let (valid_audit, valid_events) = host_fixture();
-        assert_eq!(verify_host_closure(&valid_audit, &valid_events), Ok(()));
-        let mut valid = evidence();
-        valid.host_closure.closure_event_type = "experiment.lifecycle.consent-closed.v1".to_owned();
-        valid.authoritative_events[2].event_type =
-            "experiment.lifecycle.consent-closed.v1".to_owned();
-        assert_eq!(verify_evidence(&valid), Ok(()));
+        assert_eq!(verify_evidence(&host_fixture()), Ok(()));
 
-        let cases: [fn(&mut HostClosureAuditV1, &mut Vec<AuthoritativeEventV1>); 9] = [
-            |audit, _| audit.subject.clear(),
-            |audit, _| audit.closure_payload_digest = [0; 32],
-            |audit, _| audit.requested_after_seq = audit.effective_after_seq,
-            |audit, events| {
-                audit.closure_event_seq = 2;
-                events[2].seq = 2;
-            },
-            |audit, _| audit.halted_at_tick_boundary = false,
-            |_, events| {
-                let duplicate = events[2].clone();
-                events.push(duplicate);
-            },
-            |_, events| {
-                events[2].event_type = "other".to_owned();
-                events.push(AuthoritativeEventV1 {
-                    seq: 4,
-                    tick: 3,
-                    entity: "host".to_owned(),
-                    event_type: "experiment.lifecycle.consent-closed.v1".to_owned(),
-                    payload_digest: [7; 32],
-                    causation_seq: None,
-                });
-            },
-            |_, events| events[2].seq = 4,
-            |_, events| events[2].payload_digest = [8; 32],
+        let cases: [(HostClosureMutation, EvidenceError); 9] = [
+            (
+                |audit, _| audit.subject.clear(),
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.closure_payload_digest = [0; 32],
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.requested_after_seq = audit.effective_after_seq,
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.closure_event_seq = 2,
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |audit, _| audit.halted_at_tick_boundary = false,
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |_, events| {
+                    let duplicate = events[2].clone();
+                    events.push(duplicate);
+                },
+                EvidenceError::NonContiguousEventSequence,
+            ),
+            (
+                |_, events| {
+                    events[2].event_type = "private.note".to_owned();
+                    events.push(AuthoritativeEventV1 {
+                        seq: 4,
+                        tick: 3,
+                        entity: "host".to_owned(),
+                        event_type: "experiment.lifecycle.consent-closed.v1".to_owned(),
+                        payload_digest: [7; 32],
+                        causation_seq: None,
+                    });
+                },
+                EvidenceError::InvalidConsentAudit,
+            ),
+            (
+                |_, events| events[2].seq = 4,
+                EvidenceError::NonContiguousEventSequence,
+            ),
+            (
+                |_, events| events[2].payload_digest = [8; 32],
+                EvidenceError::InvalidConsentAudit,
+            ),
         ];
-        for mutate in cases {
-            let (mut audit, mut events) = host_fixture();
-            mutate(&mut audit, &mut events);
-            assert_eq!(
-                verify_host_closure(&audit, &events),
-                Err(EvidenceError::InvalidConsentAudit)
-            );
+        for (mutate, expected) in cases {
+            let mut invalid = host_fixture();
+            mutate(&mut invalid.host_closure, &mut invalid.authoritative_events);
+            assert_eq!(verify_evidence(&invalid), Err(expected));
         }
     }
 
@@ -8292,7 +7390,7 @@ pub mod tests {
                 assert!(verify_wave8_contract(&invalid).is_err());
             }
 
-            let (_, mut with_intervention) = fork_pair();
+            let (fork_baseline, mut with_intervention) = fork_pair();
             with_intervention.authoritative_events[1].tick = 2;
             let action_event = with_intervention.authoritative_events[1].clone();
             let society_event = with_intervention.authoritative_events[2].clone();
@@ -8373,6 +7471,10 @@ pub mod tests {
             ];
             counterfactual.recomputed_event_seqs = vec![society_event.seq];
             assert_eq!(verify_wave8_contract(&with_intervention), Ok(()));
+            assert_eq!(
+                verify_counterfactual_fork(&fork_baseline, &with_intervention, "world.action.v1"),
+                Ok(())
+            );
 
             let mut missing_intervention = with_intervention.clone();
             if let Some(intervention) = missing_intervention
@@ -9069,13 +8171,17 @@ pub mod tests {
         assert_eq!(MoatProofEvidenceV1::from_json(&json)?, value);
         let cbor = value.to_canonical_cbor()?;
         assert_eq!(MoatProofEvidenceV1::from_canonical_cbor(&cbor)?, value);
-        assert_eq!(hex_digest(&value.digest()?).len(), 64);
+        let digest = value.digest()?;
+        let encoded = hex_digest(&digest);
+        assert_eq!(encoded.len(), 64);
+        assert_eq!(decode_hex_digest(&encoded), Some(digest));
+        assert_eq!(decode_hex_digest(&"0".repeat(64)), Some([0; 32]));
+        assert_eq!(decode_hex_digest(&"af".repeat(32)), Some([0xaf; 32]));
+        assert_eq!(decode_hex_digest(&"10".repeat(32)), Some([0x10; 32]));
+        assert_eq!(decode_hex_digest(&"0".repeat(63)), None);
+        assert_eq!(decode_hex_digest(&format!("{}g", "0".repeat(63))), None);
+        assert_eq!(decode_hex_digest(&format!("{}A", "0".repeat(63))), None);
         Ok(())
-    }
-
-    #[test]
-    fn strict_codec_exercises_closed_record_boundaries() {
-        strict_codec::coverage_helpers::exercise_for_coverage(&evidence());
     }
 
     #[test]
@@ -9083,6 +8189,10 @@ pub mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let value = evidence();
         let result = value.to_verification_result()?;
+        assert_eq!(result.checked_artifact_count, 5);
+        let mut changed_result = result.clone();
+        changed_result.request_digest = [0xff; 32];
+        assert_ne!(result.digest()?, changed_result.digest()?);
         let result_bytes = result.to_canonical_cbor()?;
         assert_eq!(
             VerificationResultV1::from_canonical_cbor(&result_bytes)?,

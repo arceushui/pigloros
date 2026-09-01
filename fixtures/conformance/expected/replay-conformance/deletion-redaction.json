@@ -1,0 +1,9 @@
+{
+  "claim_layer": "replay-conformance",
+  "case_id": "replay-conformance-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "fed17764c5f8b43af0509135021b292b453c3bc346e29afc55de2261a6b01f06",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

@@ -1,0 +1,119 @@
+{
+  "magic": "W8H1",
+  "version": 1,
+  "lifecycle": "Draft",
+  "digest_algorithm": "BLAKE3-256",
+  "source": "#172 wave8-execution-repro-handoff-v1",
+  "entries": [
+    {
+      "fixture_id": "RPL-001",
+      "execution_class": "RecordedReplay",
+      "expected_outcome": "VerifiedExact",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "PRF-001",
+      "execution_class": "ProfileRecomputation",
+      "expected_outcome": "VerifiedExact",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "PRF-002",
+      "execution_class": "CrossProfileConformance",
+      "expected_outcome": "VerifiedExact",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "DIV-001",
+      "execution_class": "ProfileRecomputation",
+      "expected_outcome": "Diverged",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "INV-001",
+      "execution_class": "DeterministicProfile",
+      "expected_outcome": "InvalidManifest",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "INV-002",
+      "execution_class": "DeterministicProfile",
+      "expected_outcome": "UnverifiableArtifactsMissing",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "INV-003",
+      "execution_class": "DeterministicProfile",
+      "expected_outcome": "IncompatibleProfile",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "RES-001",
+      "execution_class": "ProfileRecomputation",
+      "expected_outcome": "ResourceLimitExceeded",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "LIVE-001",
+      "execution_class": "LiveUnverified",
+      "expected_outcome": "NonDeterministicAdmission",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "ERA-001",
+      "execution_class": "RecordedReplay",
+      "expected_outcome": "OutcomePreservedReplayClaimDegraded",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    },
+    {
+      "fixture_id": "SEC-001",
+      "execution_class": "DeterministicProfile",
+      "expected_outcome": "TypedFailure",
+      "fixture_bytes_path": null,
+      "fixture_bytes_digest": null,
+      "expected_result_path": null,
+      "expected_result_digest": null,
+      "materialization_status": "pending"
+    }
+  ]
+}

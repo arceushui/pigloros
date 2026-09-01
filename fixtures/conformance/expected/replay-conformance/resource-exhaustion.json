@@ -1,0 +1,9 @@
+{
+  "claim_layer": "replay-conformance",
+  "case_id": "replay-conformance-resource-exhaustion",
+  "family": "resource-exhaustion",
+  "input_blake3_digest": "eac9ae89ed879db8051cbd01ea6b9502f1212a6f55ce24f82e809006fff4163f",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

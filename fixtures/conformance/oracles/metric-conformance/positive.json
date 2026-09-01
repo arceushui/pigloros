@@ -1,0 +1,1 @@
+{"case_id":"metric-conformance-positive","claim_layer":"metric-conformance","family":"positive","oracle":{"kind":"canonical-output"},"output":{"value_micros":900000,"unit":"ratio"}}

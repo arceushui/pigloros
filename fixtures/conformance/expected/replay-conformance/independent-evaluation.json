@@ -1,0 +1,9 @@
+{
+  "claim_layer": "replay-conformance",
+  "case_id": "replay-conformance-independent-evaluation",
+  "family": "independent-evaluation",
+  "input_blake3_digest": "d1d43fd4801aacd411baf63c2c1d51174c94a79c6670653c0253f6ae1c180349",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

@@ -1,0 +1,9 @@
+{
+  "claim_layer": "artifact-integrity",
+  "case_id": "artifact-integrity-malformed",
+  "family": "malformed",
+  "input_blake3_digest": "9445e0e8831b4dcab5bdb58f571494b10a88f111b5e3fcfbe297cb69497dd6b9",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

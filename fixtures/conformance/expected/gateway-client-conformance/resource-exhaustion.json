@@ -1,0 +1,9 @@
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-resource-exhaustion",
+  "family": "resource-exhaustion",
+  "input_blake3_digest": "67d2aecf3e1f1b68dff961718f6b6b527e3a039e704ab43dd5945ff648e2b996",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

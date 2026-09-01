@@ -1,0 +1,9 @@
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-malformed",
+  "family": "malformed",
+  "input_blake3_digest": "a4c50e9719f65c549ba5042752f83c92edd4640ac00df3f8fc9065051d1fc4b6",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

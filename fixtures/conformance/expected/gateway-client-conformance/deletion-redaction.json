@@ -1,0 +1,9 @@
+{
+  "claim_layer": "gateway-client-conformance",
+  "case_id": "gateway-client-conformance-deletion-redaction",
+  "family": "deletion-redaction",
+  "input_blake3_digest": "8a1a9e77e230e5f63aecc0e762dfd8d9bc67caa731bbec259bf454cc383bc2a5",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

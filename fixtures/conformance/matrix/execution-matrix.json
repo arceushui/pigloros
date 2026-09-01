@@ -1,0 +1,2551 @@
+{
+  "magic": "NIM1",
+  "version": 1,
+  "matrix_id": "adr-059-complete-required-matrix-v1",
+  "lifecycle": "Draft",
+  "source": "Accepted ADR-059",
+  "row_count": 12,
+  "variant_count": 4,
+  "mode_count": 4,
+  "case_count": 192,
+  "expected_result_policy": "Every executed case must carry a real BLAKE3 expected-result digest before Candidate; open slots are never a pass.",
+  "equality_predicates": [
+    {
+      "fixture_id": "NI-TOOL-001",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "count/category/digest, with provider text absent"
+    },
+    {
+      "fixture_id": "NI-CACHE-002",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "bounded hit-class counters after all key/value/latency fields are removed"
+    },
+    {
+      "fixture_id": "NI-STATE-003",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "migration phase/category; no canary bytes or canary-derived digest"
+    },
+    {
+      "fixture_id": "NI-OBS-004",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "schema/category/count/padded length; text, stack, path, raw IDs absent"
+    },
+    {
+      "fixture_id": "NI-TIME-005",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "after deleting wall timestamps/durations; watchdog cannot create an authoritative Event or change public error category"
+    },
+    {
+      "fixture_id": "NI-PUBLIC-006",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical including category, status order, cursor count, page count, and padded length; operational diagnostics omitted",
+      "OpEq": "operational diagnostics omitted"
+    },
+    {
+      "fixture_id": "NI-EVAL-007",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "evaluator input member names/order/bytes/digests and ordered case outcomes are identical in all four modes"
+    },
+    {
+      "fixture_id": "NI-FORK-008",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "all listed artifact bytes/digests/order and ADR-060 ReplayClaim are identical"
+    },
+    {
+      "fixture_id": "NI-ARCHIVE-009",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "member names/order/modes/lengths/decompressed bytes are identical; canonical archive mode also requires archive bytes identical"
+    },
+    {
+      "fixture_id": "NI-NET-010",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "identical category/count with endpoint/body/timing absent; zero live calls in deterministic Local, Air-Gapped, Replay, and Fork"
+    },
+    {
+      "fixture_id": "NI-SERVICE-011",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "request digests, call ordinals, projected response bytes, dependency edges, and outputs are identical"
+    },
+    {
+      "fixture_id": "NI-CRASH-012",
+      "AuthEq": "control and canary runs have byte-identical authoritative Events, Timeline Order, permitted Projections, Plugin-visible snapshots/state, typed outcome, and visible authorization/causal records in all four modes",
+      "PublicEq": "byte-identical public status/error/cursor/export/evaluator input after the row's declared normalization",
+      "OpEq": "safe category/count/padded length, with strings/stacks/dumps/paths absent"
+    }
+  ],
+  "rows": [
+    {
+      "fixture_id": "NI-TOOL-001",
+      "channel": "Host tools and imported services",
+      "sole_unauthorized_delta": "one denied tool/service response changes value, size, and error text behind the same denied capability",
+      "observable_surfaces": [
+        "Imported-service registry",
+        "tool result handle",
+        "Plugin imports",
+        "staged EventDrafts",
+        "public outcome",
+        "audit record"
+      ],
+      "classification": "tool bytes unauthorized; denial category authoritative; minimized diagnostics operational",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-CACHE-002",
+      "channel": "Authorization, materialization, schema, artifact, and query caches",
+      "sole_unauthorized_delta": "canary cache entry, hit/miss state, eviction order, and warm/cold latency differ",
+      "observable_surfaces": [
+        "Cache API return",
+        "snapshot bytes",
+        "Plugin inputs",
+        "typed errors",
+        "logs/metrics",
+        "evaluator bundle"
+      ],
+      "classification": "cache contents and timing operational; must not be authoritative inputs",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-STATE-003",
+      "channel": "Plugin state and migrations",
+      "sole_unauthorized_delta": "unauthorized state member and migration-only canary differ while authorized state digest is constant",
+      "observable_surfaces": [
+        "Migration request/result",
+        "activated state",
+        "PluginInvocation",
+        "PluginOutput",
+        "EventDrafts",
+        "quarantine/error"
+      ],
+      "classification": "authorized state/output authoritative; canary bytes and derived digest excluded",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-OBS-004",
+      "channel": "Logs, metrics, traces, and crash reports",
+      "sole_unauthorized_delta": "secret changes text, label, stack, path, cardinality, and payload length",
+      "observable_surfaces": [
+        "Structured logs",
+        "metric names/labels/counts",
+        "trace spans",
+        "crash artifact",
+        "public support bundle"
+      ],
+      "classification": "operational unless explicitly promoted; secret-bearing content prohibited",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-TIME-005",
+      "channel": "Wall clock, latency, cache timing, and watchdogs",
+      "sole_unauthorized_delta": "wall time, host latency, cache timing, watchdog firing point, and process scheduling differ",
+      "observable_surfaces": [
+        "Plugin imports",
+        "deterministic deadline",
+        "safe-stop record",
+        "status/error",
+        "logs/metrics",
+        "evaluator input"
+      ],
+      "classification": "Simulation Time and deterministic budget authoritative; wall duration operational",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-PUBLIC-006",
+      "channel": "Public errors, status, cursors, and padding",
+      "sole_unauthorized_delta": "denied object existence, secret length, and internal field ordinal differ",
+      "observable_surfaces": [
+        "HTTP/Plugin error",
+        "status transition",
+        "cursor bytes",
+        "page count",
+        "response length/padding"
+      ],
+      "classification": "closed error/status/cursor shape is public authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-EVAL-007",
+      "channel": "Evaluator inputs",
+      "sole_unauthorized_delta": "unauthorized subject field, hidden expected output, and private implementation hint differ",
+      "observable_surfaces": [
+        "Export bundle",
+        "manifest",
+        "fixture descriptor",
+        "evaluator stdin/files",
+        "ConformanceReport"
+      ],
+      "classification": "admitted evaluator bundle authoritative; hidden/private data prohibited",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-FORK-008",
+      "channel": "Fork artifacts",
+      "sole_unauthorized_delta": "unauthorized factual-suffix value and hidden participant field differ",
+      "observable_surfaces": [
+        "Fork parent/cut",
+        "CounterfactualPlan",
+        "RecomputationFrontier",
+        "SuffixInvalidation",
+        "snapshots",
+        "checkpoints",
+        "result",
+        "ReproManifest",
+        "exports"
+      ],
+      "classification": "parent prefix, intervention, authorized frozen inputs, and recomputed suffix authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-ARCHIVE-009",
+      "channel": "Archive ordering and compression",
+      "sole_unauthorized_delta": "secret changes source filename, insertion order, compressor metadata, block layout, and compressibility",
+      "observable_surfaces": [
+        "Member table",
+        "archive bytes",
+        "decompressed bundle",
+        "digest",
+        "evaluator import",
+        "logs"
+      ],
+      "classification": "canonical member table and decompressed bytes authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-NET-010",
+      "channel": "Network and tool-call sequence",
+      "sole_unauthorized_delta": "denied endpoint, DNS result, retry timing, response body, and hidden tool-call branch differ",
+      "observable_surfaces": [
+        "Capability checks",
+        "attempted-call records",
+        "retry count",
+        "Plugin output",
+        "Timeline",
+        "logs",
+        "evaluator bundle"
+      ],
+      "classification": "deterministic Local/Air-Gapped network absent; denied/live sequence cannot expose body",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-SERVICE-011",
+      "channel": "Frozen imported response sequence",
+      "sole_unauthorized_delta": "unauthorized field inside a digest-addressed admitted service fixture differs while permitted projection is identical",
+      "observable_surfaces": [
+        "Exact request digest",
+        "frozen response projection",
+        "call ordinal",
+        "PluginInvocation",
+        "generated dependency edges"
+      ],
+      "classification": "permitted projection and exact request identity authoritative",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    },
+    {
+      "fixture_id": "NI-CRASH-012",
+      "channel": "Failure and archive handoff",
+      "sole_unauthorized_delta": "unauthorized value changes guest diagnostic string, trap payload, core dump, or archive filename",
+      "observable_surfaces": [
+        "Guest error",
+        "host error mapping",
+        "quarantine",
+        "crash report",
+        "support archive",
+        "next Tick status"
+      ],
+      "classification": "deterministic closed error category authoritative; raw diagnostics operational",
+      "variants": [
+        "S",
+        "D",
+        "W",
+        "C"
+      ],
+      "modes": [
+        "L",
+        "A",
+        "R",
+        "F"
+      ],
+      "equality": "AuthEq=PublicEq=OpEq across L=A=R=F as declared by ADR-059",
+      "case_count": 16,
+      "executed_case_count": 0
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "NI-TOOL-001-S-L",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-S-A",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-S-R",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-S-F",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-D-L",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-D-A",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-D-R",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-D-F",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-W-L",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-W-A",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-W-R",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-W-F",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-C-L",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-C-A",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-C-R",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TOOL-001-C-F",
+      "fixture_id": "NI-TOOL-001",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-S-L",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-S-A",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-S-R",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-S-F",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-D-L",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-D-A",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-D-R",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-D-F",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-W-L",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-W-A",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-W-R",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-W-F",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-C-L",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-C-A",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-C-R",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CACHE-002-C-F",
+      "fixture_id": "NI-CACHE-002",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-S-L",
+      "fixture_id": "NI-STATE-003",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-S-A",
+      "fixture_id": "NI-STATE-003",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-S-R",
+      "fixture_id": "NI-STATE-003",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-S-F",
+      "fixture_id": "NI-STATE-003",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-D-L",
+      "fixture_id": "NI-STATE-003",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-D-A",
+      "fixture_id": "NI-STATE-003",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-D-R",
+      "fixture_id": "NI-STATE-003",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-D-F",
+      "fixture_id": "NI-STATE-003",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-W-L",
+      "fixture_id": "NI-STATE-003",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-W-A",
+      "fixture_id": "NI-STATE-003",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-W-R",
+      "fixture_id": "NI-STATE-003",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-W-F",
+      "fixture_id": "NI-STATE-003",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-C-L",
+      "fixture_id": "NI-STATE-003",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-C-A",
+      "fixture_id": "NI-STATE-003",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-C-R",
+      "fixture_id": "NI-STATE-003",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-STATE-003-C-F",
+      "fixture_id": "NI-STATE-003",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-S-L",
+      "fixture_id": "NI-OBS-004",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-S-A",
+      "fixture_id": "NI-OBS-004",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-S-R",
+      "fixture_id": "NI-OBS-004",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-S-F",
+      "fixture_id": "NI-OBS-004",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-D-L",
+      "fixture_id": "NI-OBS-004",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-D-A",
+      "fixture_id": "NI-OBS-004",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-D-R",
+      "fixture_id": "NI-OBS-004",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-D-F",
+      "fixture_id": "NI-OBS-004",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-W-L",
+      "fixture_id": "NI-OBS-004",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-W-A",
+      "fixture_id": "NI-OBS-004",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-W-R",
+      "fixture_id": "NI-OBS-004",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-W-F",
+      "fixture_id": "NI-OBS-004",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-C-L",
+      "fixture_id": "NI-OBS-004",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-C-A",
+      "fixture_id": "NI-OBS-004",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-C-R",
+      "fixture_id": "NI-OBS-004",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-OBS-004-C-F",
+      "fixture_id": "NI-OBS-004",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-S-L",
+      "fixture_id": "NI-TIME-005",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-S-A",
+      "fixture_id": "NI-TIME-005",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-S-R",
+      "fixture_id": "NI-TIME-005",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-S-F",
+      "fixture_id": "NI-TIME-005",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-D-L",
+      "fixture_id": "NI-TIME-005",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-D-A",
+      "fixture_id": "NI-TIME-005",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-D-R",
+      "fixture_id": "NI-TIME-005",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-D-F",
+      "fixture_id": "NI-TIME-005",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-W-L",
+      "fixture_id": "NI-TIME-005",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-W-A",
+      "fixture_id": "NI-TIME-005",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-W-R",
+      "fixture_id": "NI-TIME-005",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-W-F",
+      "fixture_id": "NI-TIME-005",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-C-L",
+      "fixture_id": "NI-TIME-005",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-C-A",
+      "fixture_id": "NI-TIME-005",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-C-R",
+      "fixture_id": "NI-TIME-005",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-TIME-005-C-F",
+      "fixture_id": "NI-TIME-005",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-S-L",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-S-A",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-S-R",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-S-F",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-D-L",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-D-A",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-D-R",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-D-F",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-W-L",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-W-A",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-W-R",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-W-F",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-C-L",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-C-A",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-C-R",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-PUBLIC-006-C-F",
+      "fixture_id": "NI-PUBLIC-006",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-S-L",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-S-A",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-S-R",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-S-F",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-D-L",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-D-A",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-D-R",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-D-F",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-W-L",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-W-A",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-W-R",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-W-F",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-C-L",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-C-A",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-C-R",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-EVAL-007-C-F",
+      "fixture_id": "NI-EVAL-007",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-S-L",
+      "fixture_id": "NI-FORK-008",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-S-A",
+      "fixture_id": "NI-FORK-008",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-S-R",
+      "fixture_id": "NI-FORK-008",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-S-F",
+      "fixture_id": "NI-FORK-008",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-D-L",
+      "fixture_id": "NI-FORK-008",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-D-A",
+      "fixture_id": "NI-FORK-008",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-D-R",
+      "fixture_id": "NI-FORK-008",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-D-F",
+      "fixture_id": "NI-FORK-008",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-W-L",
+      "fixture_id": "NI-FORK-008",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-W-A",
+      "fixture_id": "NI-FORK-008",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-W-R",
+      "fixture_id": "NI-FORK-008",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-W-F",
+      "fixture_id": "NI-FORK-008",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-C-L",
+      "fixture_id": "NI-FORK-008",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-C-A",
+      "fixture_id": "NI-FORK-008",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-C-R",
+      "fixture_id": "NI-FORK-008",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-FORK-008-C-F",
+      "fixture_id": "NI-FORK-008",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-S-L",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-S-A",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-S-R",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-S-F",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-D-L",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-D-A",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-D-R",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-D-F",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-W-L",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-W-A",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-W-R",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-W-F",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-C-L",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-C-A",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-C-R",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-ARCHIVE-009-C-F",
+      "fixture_id": "NI-ARCHIVE-009",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-S-L",
+      "fixture_id": "NI-NET-010",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-S-A",
+      "fixture_id": "NI-NET-010",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-S-R",
+      "fixture_id": "NI-NET-010",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-S-F",
+      "fixture_id": "NI-NET-010",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-D-L",
+      "fixture_id": "NI-NET-010",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-D-A",
+      "fixture_id": "NI-NET-010",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-D-R",
+      "fixture_id": "NI-NET-010",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-D-F",
+      "fixture_id": "NI-NET-010",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-W-L",
+      "fixture_id": "NI-NET-010",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-W-A",
+      "fixture_id": "NI-NET-010",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-W-R",
+      "fixture_id": "NI-NET-010",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-W-F",
+      "fixture_id": "NI-NET-010",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-C-L",
+      "fixture_id": "NI-NET-010",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-C-A",
+      "fixture_id": "NI-NET-010",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-C-R",
+      "fixture_id": "NI-NET-010",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-NET-010-C-F",
+      "fixture_id": "NI-NET-010",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-S-L",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-S-A",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-S-R",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-S-F",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-D-L",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-D-A",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-D-R",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-D-F",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-W-L",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-W-A",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-W-R",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-W-F",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-C-L",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-C-A",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-C-R",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-SERVICE-011-C-F",
+      "fixture_id": "NI-SERVICE-011",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-S-L",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "S",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-S-A",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "S",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-S-R",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "S",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-S-F",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "S",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-D-L",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "D",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-D-A",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "D",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-D-R",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "D",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-D-F",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "D",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-W-L",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "W",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-W-A",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "W",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-W-R",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "W",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-W-F",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "W",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-C-L",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "C",
+      "mode": "L",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-C-A",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "C",
+      "mode": "A",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-C-R",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "C",
+      "mode": "R",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    },
+    {
+      "case_id": "NI-CRASH-012-C-F",
+      "fixture_id": "NI-CRASH-012",
+      "variant": "C",
+      "mode": "F",
+      "executed": false,
+      "expected_result_digest": null,
+      "authority_fixture_id": null,
+      "authority_result_digest": null,
+      "expected_result": null
+    }
+  ],
+  "executed_case_count": 0
+}

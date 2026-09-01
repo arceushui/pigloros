@@ -1,0 +1,1 @@
+{"case_id":"artifact-integrity-positive","claim_layer":"artifact-integrity","family":"positive","provider_contract":"pigloros.fixture.artifact-integrity@1.0.0","subject_adapter":"exported-artifact","stimulus":{"operation":"verify-artifact-integrity","artifact":{"media_type":"application/cbor","bytes_hex":"a1617801"}},"expected":{"integrity":"verified","canonical":true}}

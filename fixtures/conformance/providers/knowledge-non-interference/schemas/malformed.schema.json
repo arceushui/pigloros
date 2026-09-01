@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "case_id",
+    "claim_layer",
+    "family",
+    "provider_contract",
+    "subject_adapter",
+    "stimulus",
+    "expected"
+  ],
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "claim_layer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family": {
+      "const": "malformed"
+    },
+    "provider_contract": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject_adapter": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stimulus": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected": {
+      "type": "object",
+      "required": [
+        "failure_code"
+      ],
+      "properties": {
+        "failure_code": {
+          "const": "malformed-payload"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,9 @@
+{
+  "claim_layer": "replay-conformance",
+  "case_id": "replay-conformance-malformed",
+  "family": "malformed",
+  "input_blake3_digest": "6ee014be9df6e6b36045104099c72234e18867727541c79734195a911bed1274",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}

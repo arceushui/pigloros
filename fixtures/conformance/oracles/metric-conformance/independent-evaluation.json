@@ -1,0 +1,1 @@
+{"case_id":"metric-conformance-independent-evaluation","claim_layer":"metric-conformance","family":"independent-evaluation","oracle":{"kind":"canonical-output"},"output":{"algorithm":"BLAKE3-256","expected_digest":"73abe8fabfc4adc8c208c0163719f461840b11f9c1b2ef4fd5f53ad18eb67069"}}

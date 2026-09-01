@@ -1,0 +1,9 @@
+{
+  "claim_layer": "plugin-conformance",
+  "case_id": "plugin-conformance-malformed",
+  "family": "malformed",
+  "input_blake3_digest": "4ddf064c226ad4c8097b49561e6e2544684ef6fe0d06c5d30abb61979266238f",
+  "status": "pending",
+  "execution_result": null,
+  "executed_at": null
+}
