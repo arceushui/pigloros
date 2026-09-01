@@ -147,6 +147,66 @@ pub struct SqliteStore {
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
 
+type ErasureSchemaColumn = (&'static str, &'static str, i64, i64);
+
+struct ErasureSchemaTable {
+    name: &'static str,
+    columns_query: &'static str,
+    columns: &'static [ErasureSchemaColumn],
+    markers: &'static [&'static str],
+}
+
+const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
+    ErasureSchemaTable {
+        name: "erasure_records",
+        columns_query: "PRAGMA table_info(erasure_records)",
+        columns: &[
+            ("request_digest", "BLOB", 1, 1),
+            ("state_digest", "BLOB", 1, 0),
+            ("record_cbor", "BLOB", 1, 0),
+        ],
+        markers: &[
+            "request_digest",
+            "state_digest",
+            "record_cbor",
+            "length(request_digest)=32",
+            "length(state_digest)=32",
+            "length(record_cbor)<=67108864",
+        ],
+    },
+    ErasureSchemaTable {
+        name: "erasure_evidence",
+        columns_query: "PRAGMA table_info(erasure_evidence)",
+        columns: &[
+            ("reference_digest", "BLOB", 1, 1),
+            ("object_cbor", "BLOB", 1, 0),
+        ],
+        markers: &[
+            "reference_digest",
+            "object_cbor",
+            "length(reference_digest)=32",
+            "length(object_cbor)<=16777216",
+        ],
+    },
+    ErasureSchemaTable {
+        name: "erasure_states",
+        columns_query: "PRAGMA table_info(erasure_states)",
+        columns: &[
+            ("state_digest", "BLOB", 1, 1),
+            ("request_digest", "BLOB", 1, 0),
+            ("state_cbor", "BLOB", 1, 0),
+        ],
+        markers: &[
+            "state_digest",
+            "request_digest",
+            "state_cbor",
+            "length(state_digest)=32",
+            "length(request_digest)=32",
+            "length(state_cbor)<=1048576",
+        ],
+    },
+];
+
 impl SqliteStore {
     fn configure_busy_timeout(conn: &Connection) -> rusqlite::Result<()> {
         #[cfg(test)]
@@ -629,111 +689,72 @@ impl SqliteStore {
     }
 
     fn validate_erasure_schema(&self) -> Result<(), CoreError> {
-        let tables: &[(&str, &str, &[(&str, &str, i64, i64)], &[&str])] = &[
-            (
-                "erasure_records",
-                "PRAGMA table_info(erasure_records)",
-                &[
-                    ("request_digest", "BLOB", 1_i64, 1_i64),
-                    ("state_digest", "BLOB", 1_i64, 0_i64),
-                    ("record_cbor", "BLOB", 1_i64, 0_i64),
-                ],
-                &[
-                    "request_digest",
-                    "state_digest",
-                    "record_cbor",
-                    "length(request_digest)=32",
-                    "length(state_digest)=32",
-                    "length(record_cbor)<=67108864",
-                ],
-            ),
-            (
-                "erasure_evidence",
-                "PRAGMA table_info(erasure_evidence)",
-                &[
-                    ("reference_digest", "BLOB", 1_i64, 1_i64),
-                    ("object_cbor", "BLOB", 1_i64, 0_i64),
-                ],
-                &[
-                    "reference_digest",
-                    "object_cbor",
-                    "length(reference_digest)=32",
-                    "length(object_cbor)<=16777216",
-                ],
-            ),
-            (
-                "erasure_states",
-                "PRAGMA table_info(erasure_states)",
-                &[
-                    ("state_digest", "BLOB", 1_i64, 1_i64),
-                    ("request_digest", "BLOB", 1_i64, 0_i64),
-                    ("state_cbor", "BLOB", 1_i64, 0_i64),
-                ],
-                &[
-                    "state_digest",
-                    "request_digest",
-                    "state_cbor",
-                    "length(state_digest)=32",
-                    "length(request_digest)=32",
-                    "length(state_cbor)<=1048576",
-                ],
-            ),
-        ];
-        for (table, columns_query, expected_columns, markers) in tables {
-            let sql = self
-                .conn
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                    params![table],
-                    |row| row.get::<_, String>(0),
+        ERASURE_SCHEMA_TABLES
+            .iter()
+            .try_for_each(|table| self.validate_erasure_schema_table(table))
+    }
+
+    fn validate_erasure_schema_table(&self, table: &ErasureSchemaTable) -> Result<(), CoreError> {
+        let sql = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table.name],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| Self::storage_error(&error))?
+            .ok_or_else(|| {
+                CoreError::Storage(format!("SQLite schema is missing {} table", table.name))
+            })?;
+        let normalized = sql
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        if table
+            .markers
+            .iter()
+            .any(|marker| !normalized.contains(*marker))
+        {
+            return Err(CoreError::Storage(format!(
+                "SQLite {} table has an incompatible schema",
+                table.name
+            )));
+        }
+        let mut statement = self
+            .conn
+            .prepare(table.columns_query)
+            .map_err(Self::into_storage_error)?;
+        let columns = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(Self::into_storage_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Self::into_storage_error)?;
+        let expected = table
+            .columns
+            .iter()
+            .map(|(name, kind, not_null, primary_key)| {
+                (
+                    (*name).to_owned(),
+                    (*kind).to_owned(),
+                    *not_null,
+                    *primary_key,
                 )
-                .optional()
-                .map_err(|error| Self::storage_error(&error))?
-                .ok_or_else(|| {
-                    CoreError::Storage(format!("SQLite schema is missing {table} table"))
-                })?;
-            let normalized = sql
-                .to_ascii_lowercase()
-                .chars()
-                .filter(|character| !character.is_whitespace())
-                .collect::<String>();
-            if markers.iter().any(|marker| !normalized.contains(*marker)) {
-                return Err(CoreError::Storage(format!(
-                    "SQLite {table} table has an incompatible schema"
-                )));
-            }
-            let mut statement = self
-                .conn
-                .prepare(columns_query)
-                .map_err(Self::into_storage_error)?;
-            let columns = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                })
-                .map_err(Self::into_storage_error)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(Self::into_storage_error)?;
-            let expected_columns = expected_columns
-                .iter()
-                .map(|(name, kind, not_null, primary_key)| {
-                    (
-                        (*name).to_owned(),
-                        (*kind).to_owned(),
-                        *not_null,
-                        *primary_key,
-                    )
-                })
-                .collect::<Vec<_>>();
-            if columns != expected_columns {
-                return Err(CoreError::Storage(format!(
-                    "SQLite {table} table has an incompatible schema: columns or key constraints"
-                )));
-            }
+            })
+            .collect::<Vec<_>>();
+        if columns != expected {
+            return Err(CoreError::Storage(format!(
+                "SQLite {} table has an incompatible schema: columns or key constraints",
+                table.name
+            )));
         }
         Ok(())
     }
