@@ -49,6 +49,26 @@ use pos_core::{
 };
 
 #[cfg(test)]
+struct TestFreezeAuthorizationVerifier;
+
+#[cfg(test)]
+const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
+    TestFreezeAuthorizationVerifier;
+
+#[cfg(test)]
+impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &pos_core::ErasureFreezeAdmissionEvidenceV1,
+        authorization: &pos_core::ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
+    }
+}
+
+#[cfg(test)]
 thread_local! {
     /// Test-only fault injection: force [`SqliteStore::open_in_memory`] to fail.
     pub(crate) static FAIL_OPEN_IN_MEMORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4754,23 +4774,6 @@ mod tests {
         CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };
-
-    struct TestFreezeAuthorizationVerifier;
-
-    const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
-        TestFreezeAuthorizationVerifier;
-
-    impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
-        fn validate_freeze_authorization(
-            &self,
-            admission: &pos_core::ErasureFreezeAdmissionEvidenceV1,
-            authorization: &pos_core::ErasureFreezeAuthorizationEvidenceV1,
-        ) -> Result<(), ErasureErrorV1> {
-            (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-                .then_some(())
-                .ok_or(ErasureErrorV1::Unauthorized)
-        }
-    }
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;

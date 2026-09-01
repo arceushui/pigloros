@@ -48,6 +48,26 @@ use pos_core::{
 };
 
 #[cfg(test)]
+struct TestFreezeAuthorizationVerifier;
+
+#[cfg(test)]
+const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
+    TestFreezeAuthorizationVerifier;
+
+#[cfg(test)]
+impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &pos_core::ErasureFreezeAdmissionEvidenceV1,
+        authorization: &pos_core::ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
+    }
+}
+
+#[cfg(test)]
 thread_local! {
     /// Test-only evidence that bounded reads inspect only selected Event slots.
     static BOUNDED_EVENTS_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2268,23 +2288,6 @@ mod tests {
         KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
     };
-
-    struct TestFreezeAuthorizationVerifier;
-
-    const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
-        TestFreezeAuthorizationVerifier;
-
-    impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
-        fn validate_freeze_authorization(
-            &self,
-            admission: &pos_core::ErasureFreezeAdmissionEvidenceV1,
-            authorization: &pos_core::ErasureFreezeAuthorizationEvidenceV1,
-        ) -> Result<(), ErasureErrorV1> {
-            (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-                .then_some(())
-                .ok_or(ErasureErrorV1::Unauthorized)
-        }
-    }
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
