@@ -165,4 +165,40 @@ replace_json "${unknown_authority_root}/support/draft-execution-authority.json" 
   '.undeclared_authority = true'
 expect_rejection "${unknown_authority_root}" "invalid Draft authority declaration fields"
 
+versioned_profile_id_root="$(new_fixture_copy versioned-profile-id)"
+replace_json "${versioned_profile_id_root}/profiles/artifact-integrity/profile.json" \
+  '.profile_id = "pigloros.w8.artifact-integrity.1.0.0"'
+expect_rejection "${versioned_profile_id_root}" \
+  "invalid public profile manifest for artifact-integrity"
+
+foreign_normative_root="$(new_fixture_copy foreign-profile-normative-requirements)"
+replace_json "${foreign_normative_root}/profiles/artifact-integrity/profile.json" \
+  '.normative_requirements = "profiles/replay-conformance/normative-requirements.md"'
+expect_rejection "${foreign_normative_root}" \
+  "invalid public profile manifest for artifact-integrity"
+
+divergent_positive_root="$(new_fixture_copy divergent-positive-oracle)"
+replace_json "${divergent_positive_root}/providers/empirical-evaluation/provider.json" \
+  '.fixture_contracts.positive.allowed_divergence = {
+    "classification": "canonical-bytes",
+    "first_coordinate": "expected/assessment"
+  }'
+expect_adapter_rejection "${divergent_positive_root}" \
+  "invalid pigloros-json-v1 fixture adapter declaration"
+
+short_plugin_id_root="$(new_fixture_copy short-plugin-invocation-id)"
+replace_json "${short_plugin_id_root}/providers/plugin-conformance/provider.json" \
+  '.fixture_adapter.config.payloads.denied.with_operation.stimulus.input["invocation-id"] |= .[:-1]'
+expect_adapter_rejection "${short_plugin_id_root}" \
+  "generated fixture does not satisfy its provider schema"
+
+publication_wrapper_prefix="${temporary_base}/publication-wrapper-prefix.sh"
+sed -n '1,/^first_fingerprint=/p' scripts/materialize-conformance-bundles.sh \
+  >"${publication_wrapper_prefix}"
+if grep -Eq '(\[\[.*publication_parent|mkdir .*publication_parent|realpath .*publication_parent|readlink .*publication_parent)' \
+  "${publication_wrapper_prefix}"; then
+  echo "materialization wrapper traverses the publication parent before Rust" >&2
+  exit 1
+fi
+
 echo "conformance fixture validator negative controls passed"

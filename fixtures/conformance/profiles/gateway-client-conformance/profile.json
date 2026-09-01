@@ -1,20 +1,22 @@
 {
-  "profile_id": "pigloros.w8.gateway-client-conformance.1.0.0",
+  "profile_id": "pigloros.w8.gateway-client-seam",
   "claim_layer": "gateway-client-conformance",
   "wire_code": 3,
   "subject_adapter": "public-gateway-protocol",
-  "fixture_providers": [{
-    "manifest": "providers/gateway-client-conformance/provider.json",
-    "fixture_case_ids": [
-      "gateway-client-conformance-positive",
-      "gateway-client-conformance-denied",
-      "gateway-client-conformance-malformed",
-      "gateway-client-conformance-resource-exhaustion",
-      "gateway-client-conformance-deletion-redaction",
-      "gateway-client-conformance-downgrade",
-      "gateway-client-conformance-independent-evaluation"
-    ]
-  }],
+  "fixture_providers": [
+    {
+      "manifest": "providers/gateway-client-conformance/provider.json",
+      "fixture_case_ids": [
+        "gateway-client-conformance-positive",
+        "gateway-client-conformance-denied",
+        "gateway-client-conformance-malformed",
+        "gateway-client-conformance-resource-exhaustion",
+        "gateway-client-conformance-deletion-redaction",
+        "gateway-client-conformance-downgrade",
+        "gateway-client-conformance-independent-evaluation"
+      ]
+    }
+  ],
   "fixture_root": "gateway-client-conformance",
   "fixtures": [
     {
@@ -82,7 +84,7 @@
     }
   ],
   "authority_inventory": "expected-authority/inventory.json",
-  "authority_inventory_sha256_digest": "486fe381a9a3e94b103428f9f58c4cfed7bb5875d3a4bb98a7e5868af9ea66ea",
+  "authority_inventory_sha256_digest": "7ced8a78a721e17b15ebce91f6fe583382f5eb31fd3c832db407819806470770",
   "execution_profiles": [
     "deterministic-local-v1",
     "deterministic-air-gapped-v1"
@@ -90,5 +92,7 @@
   "bundle_modes": [
     "local",
     "air-gapped"
-  ]
+  ],
+  "semantic_version": "1.0.0",
+  "normative_requirements": "profiles/gateway-client-conformance/normative-requirements.md"
 }

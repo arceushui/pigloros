@@ -23,10 +23,9 @@ output_root="${publication_parent}/${source_digest}"
 temporary_root="$(mktemp -d)"
 trap 'rm -rf -- "${temporary_root}"' EXIT
 
-# Atomic publication deliberately requires an existing trusted parent. The
-# orchestrator owns creation of that parent; the binary opens and retains it
-# before producing any bundle bytes.
-mkdir -p -- "${publication_parent}"
+# The wrapper deliberately performs no filesystem operation on the caller's
+# publication path. The Rust boundary opens the existing parent with
+# RESOLVE_NO_SYMLINKS before creating any output.
 
 first_fingerprint="$(
   cargo run --quiet -p pos-conformance --bin materialize-conformance-bundles \

@@ -225,11 +225,26 @@ jq -e '
     "INV-003", "RES-001", "LIVE-001", "ERA-001", "SEC-001"
   ]) and
   ([.entries[].fixture_id] | unique | length == 11) and
+  ([.entries[] | {
+    fixture_id, execution_classes, profiles, expected_outcome
+  }] == [
+    {fixture_id: "RPL-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "PRF-002", execution_classes: ["CrossProfileConformance"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "VerifiedExact"},
+    {fixture_id: "DIV-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "Diverged"},
+    {fixture_id: "INV-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "InvalidManifest"},
+    {fixture_id: "INV-002", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "UnverifiableArtifactsMissing"},
+    {fixture_id: "INV-003", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "IncompatibleProfile"},
+    {fixture_id: "RES-001", execution_classes: ["ProfileRecomputation"], profiles: ["deterministic-local-v1"], expected_outcome: "ResourceLimitExceeded"},
+    {fixture_id: "LIVE-001", execution_classes: ["LiveUnverified"], profiles: ["live-local-v1"], expected_outcome: "NonDeterministicAdmission"},
+    {fixture_id: "ERA-001", execution_classes: ["RecordedReplay"], profiles: ["replay-v1"], expected_outcome: "OutcomePreservedReplayClaimDegraded"},
+    {fixture_id: "SEC-001", execution_classes: ["CrossProfileConformance", "ProfileRecomputation"], profiles: ["deterministic-air-gapped-v1", "deterministic-local-v1"], expected_outcome: "TypedFailure"}
+  ]) and
   all(.entries[];
     (keys | sort) == ([
-      "execution_class", "expected_outcome", "expected_result_digest",
+      "execution_classes", "expected_outcome", "expected_result_digest",
       "expected_result_path", "fixture_bytes_digest", "fixture_bytes_path",
-      "fixture_id", "materialization_status"
+      "fixture_id", "materialization_status", "profiles"
     ] | sort) and
     (.fixture_bytes_path == null) and (.expected_result_path == null) and
     (.fixture_bytes_digest == null) and (.expected_result_digest == null) and
@@ -286,6 +301,15 @@ if (( ${#profile_layers[@]} != 7 )); then
   exit 1
 fi
 declare -A profile_wire_codes=()
+declare -A profile_ids=(
+  [artifact-integrity]="pigloros.w8.artifact-integrity"
+  [empirical-evaluation]="pigloros.w8.empirical-evaluation"
+  [gateway-client-conformance]="pigloros.w8.gateway-client-seam"
+  [knowledge-non-interference]="pigloros.w8.knowledge-non-interference"
+  [metric-conformance]="pigloros.w8.metric-computation"
+  [plugin-conformance]="pigloros.w8.plugin-host-seam"
+  [replay-conformance]="pigloros.w8.replay"
+)
 for layer in "${profile_layers[@]}"; do
   profile="${profile_root}/${layer}/profile.json"
   [[ -s "${profile}" ]] || {
@@ -300,6 +324,7 @@ for layer in "${profile_layers[@]}"; do
   profile_wire_codes["${wire_code}"]=1
   jq -e \
     --arg layer "${layer}" \
+    --arg profile_id "${profile_ids[${layer}]}" \
     --arg authority "expected-authority/inventory.json" \
     --arg authority_sha256 "${authority_inventory_sha256}" \
     --arg matrix "matrix/execution-matrix.json" \
@@ -313,13 +338,17 @@ for layer in "${profile_layers[@]}"; do
      ((keys | sort) == (([
         "authority_inventory", "authority_inventory_sha256_digest", "bundle_modes",
         "claim_layer", "execution_profiles", "fixture_providers", "fixture_root",
-        "fixtures", "profile_id", "subject_adapter", "wire_code"
+        "fixtures", "normative_requirements", "profile_id", "semantic_version",
+        "subject_adapter", "wire_code"
       ] + (if $layer == "knowledge-non-interference" then [
         "adr_059_execution_matrix", "adr_059_execution_matrix_blake3_digest",
         "adr_059_execution_matrix_status", "matrix", "matrix_blake3_digest", "matrix_size_bytes"
       ] else [] end)) | sort)) and
       .claim_layer == $layer and
+      .profile_id == $profile_id and
       .wire_code == $wire_code and .fixture_root == $layer and
+      .semantic_version == "1.0.0" and
+      .normative_requirements == ("profiles/" + $layer + "/normative-requirements.md") and
       (.subject_adapter | type == "string" and length > 0) and
       .authority_inventory == $authority and .authority_inventory_sha256_digest == $authority_sha256 and
       (.execution_profiles | length == 2) and (.bundle_modes | length == 2) and
@@ -640,11 +669,19 @@ for publishable_file in "${publishable_files[@]}"; do
   fi
 done
 
-mapfile -t profiles < <(find "${profile_root}" -type f -print | sort)
+mapfile -t profiles < <(find "${profile_root}" -type f -name profile.json -print | sort)
 if (( ${#profiles[@]} != 7 )); then
   echo "expected exactly seven public profile manifests" >&2
   exit 1
 fi
+for profile in "${profiles[@]}"; do
+  normative_requirements="$(jq -er '.normative_requirements' "${profile}")"
+  [[ "${normative_requirements}" == profiles/*/normative-requirements.md &&
+    -s "${fixture_root}/${normative_requirements}" ]] || {
+    echo "missing declared profile normative requirements for ${profile}" >&2
+    exit 1
+  }
+done
 
 mapfile -t support < <(find "${fixture_root}/support" -type f -print | sort)
 mapfile -t provider_files < <(find "${fixture_root}/providers" -type f -print | sort)
