@@ -50,6 +50,11 @@ use pos_core::{
 };
 
 #[cfg(test)]
+use crate::erasure_test_support::{
+    erasure_record, erasure_reference, verified_erasure_record, TEST_FREEZE_AUTHORIZATION_VERIFIER,
+};
+
+#[cfg(test)]
 thread_local! {
     /// Test-only fault injection: force [`SqliteStore::open_in_memory`] to fail.
     pub(crate) static FAIL_OPEN_IN_MEMORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4825,10 +4830,6 @@ use pos_core::geo_cell_admission::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::erasure_test_support::{
-        erasure_record, erasure_reference, verified_erasure_record,
-        TEST_FREEZE_AUTHORIZATION_VERIFIER,
-    };
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::GeoLocationAdmissionFenceV1,

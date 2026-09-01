@@ -49,6 +49,11 @@ use pos_core::{
 };
 
 #[cfg(test)]
+use crate::erasure_test_support::{
+    erasure_record, erasure_reference, verified_erasure_record, TEST_FREEZE_AUTHORIZATION_VERIFIER,
+};
+
+#[cfg(test)]
 thread_local! {
     /// Test-only evidence that bounded reads inspect only selected Event slots.
     static BOUNDED_EVENTS_EXAMINED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -2294,10 +2299,6 @@ impl MemoryStore {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::erasure_test_support::{
-        erasure_record, erasure_reference, verified_erasure_record,
-        TEST_FREEZE_AUTHORIZATION_VERIFIER,
-    };
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
         geo_admission::{
