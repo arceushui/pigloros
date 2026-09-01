@@ -25,10 +25,12 @@ impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
     }
 }
 
+#[must_use]
 pub const fn erasure_reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
+#[must_use]
 pub fn erasure_record() -> ErasureCoordinatorRecordV1 {
     let request = fixture(ErasureRequestV1::new(ErasureRequestInputV1 {
         request: erasure_reference(1),
@@ -66,6 +68,7 @@ pub fn erasure_record() -> ErasureCoordinatorRecordV1 {
     ))
 }
 
+#[must_use]
 pub fn verified_erasure_record(
     record: ErasureCoordinatorRecordV1,
 ) -> VerifiedErasureCoordinatorRecordV1 {
