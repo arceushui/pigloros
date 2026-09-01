@@ -5145,7 +5145,7 @@ impl ErasureAtomicFreezeAdmissionV1 {
                 }
                 let mut categories = [0_usize; ERASURE_INVENTORY_CATEGORY_COUNT];
                 for obligation in &input.obligations {
-                    if !input.targets.contains(&obligation.target())
+                    if input.targets.binary_search(&obligation.target()).is_err()
                         || obligation.command_identity()
                             != destruction_command_reference(
                                 input.scope.request,
@@ -5238,7 +5238,11 @@ fn validate_applicability_obligations(
     targets: &[ErasureRequiredTargetV1],
     obligations: &[ErasureObligationV1],
 ) -> Result<(), ErasureErrorV1> {
-    if matrix.len() != targets.len().saturating_mul(4) {
+    if matrix.len()
+        != targets
+            .len()
+            .saturating_mul(ERASURE_INVENTORY_CATEGORY_COUNT)
+    {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     let mut by_category_target = BTreeMap::new();
@@ -5787,21 +5791,24 @@ impl ErasureCoordinatorRecordV1 {
         if !acknowledgements_are_closure_subset(&self.targets, &self.acknowledgements) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
+        let obligation_identities = self
+            .supporting_records
+            .obligations()
+            .iter()
+            .map(|obligation| {
+                (
+                    obligation.reference(),
+                    obligation.target(),
+                    obligation.owner(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
         if !self.acknowledgements.iter().all(|acknowledgement| {
-            self.supporting_records
-                .obligations()
-                .iter()
-                .any(|obligation| {
-                    (
-                        obligation.reference(),
-                        obligation.target(),
-                        obligation.owner(),
-                    ) == (
-                        acknowledgement.obligation,
-                        acknowledgement.target,
-                        acknowledgement.owner,
-                    )
-                })
+            obligation_identities.contains(&(
+                acknowledgement.obligation,
+                acknowledgement.target,
+                acknowledgement.owner,
+            ))
         }) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -5915,7 +5922,7 @@ impl ErasureCoordinatorRecordV1 {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
             for obligation in self.supporting_records.obligations() {
-                if !self.targets.contains(&obligation.target())
+                if self.targets.binary_search(&obligation.target()).is_err()
                     || obligation.command_identity()
                         != destruction_command_reference(
                             self.request.reference(),
@@ -6965,15 +6972,18 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 return Err(ErasureErrorV1::PolicyConflict);
             }
             let obligations = Self::unresolved_obligation_references(&record);
+            let command_identities = record
+                .supporting_records
+                .obligations()
+                .iter()
+                .map(|obligation| (obligation.reference(), obligation.command_identity()))
+                .collect::<BTreeMap<_, _>>();
             obligations
                 .iter()
                 .map(|reference| {
-                    record
-                        .supporting_records
-                        .obligations()
-                        .iter()
-                        .find(|obligation| obligation.reference() == *reference)
-                        .map(ErasureObligationV1::command_identity)
+                    command_identities
+                        .get(reference)
+                        .copied()
                         .ok_or(ErasureErrorV1::ProvenanceMissing)
                 })
                 .collect::<Result<Vec<_>, _>>()
