@@ -32,17 +32,25 @@ production code or avoid writing a reachable behavior test.
 ## Change-risk policy
 
 The hosted coverage job publishes its completed LCOV report to a separate,
-required `cargo-crap` check running pinned v0.2.2. The verdict rejects any existing function whose
-CRAP score rises by more than the tool's 0.01 comparison tolerance and any new
-function whose score exceeds 30. Standard Cargo integration-test, benchmark,
-and example directories are excluded from complexity scoring; their execution
-still contributes coverage to production code.
+required `cargo-crap` check running pinned v0.2.2. The verdict uses zero
+comparison tolerance: every score increase fails, and every new function must
+score at most 30. Standard Cargo integration-test, benchmark, and example
+directories are excluded from complexity scoring; their execution still
+contributes coverage to production code. Repository `.cargo-crap.toml` files
+are prohibited so a change cannot suppress or truncate the report.
 
-The committed baseline records pre-existing scores; it is not a waiver file.
-Do not raise a baseline score to make a pull request pass. Regenerate it only
-from a green `main` coverage run when intentionally adopting a new tool/formula
-version or recording verified score reductions. The gate treats missing
-coverage pessimistically and bounds source analysis to two threads.
+Each successful `main` workflow publishes a 90-day baseline artifact named for
+its exact commit. A pull request downloads the artifact for its base SHA, so
+newly merged functions become existing baseline entries on the next change.
+If that trusted artifact has expired or the base never completed green CI, the
+pull request must rebase onto a green `main` commit.
+
+PR #58 has one explicit initialization exception for pre-gate base
+`45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,
+or cargo-crap configuration input changed may the hosted job generate the
+baseline directly from the same LCOV artifact. No other base SHA can use this
+path. The gate treats missing coverage pessimistically and bounds source
+analysis to two threads.
 
 ## Hardware-dependent startup
 

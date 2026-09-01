@@ -59,6 +59,10 @@ class CargoCrapReportTests(unittest.TestCase):
         with self.assertRaises(CHECKER.ReportError):
             CHECKER.policy_findings({"version": "9.9.9", "entries": [], "removed": []})
 
+    def test_empty_report_fails_closed(self) -> None:
+        with self.assertRaises(CHECKER.ReportError):
+            CHECKER.policy_findings(report())
+
     def test_unknown_status_fails_closed(self) -> None:
         with self.assertRaises(CHECKER.ReportError):
             CHECKER.policy_findings(report(entry(status="waived", crap=1)))

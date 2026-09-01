@@ -81,6 +81,50 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             )
         )
 
+    def test_rejects_required_arguments_hidden_in_a_comment(self) -> None:
+        def replace_analysis(workflow: dict) -> None:
+            step = self.cargo_crap_step(workflow, "Analyze CRAP score changes")
+            original = step["run"]
+            step["run"] = (
+                "python -c 'import json; "
+                'json.dump({\"version\":\"0.2.2\",\"entries\":[],\"removed\":[]}, '
+                'open(\"${RUNNER_TEMP}/cargo-crap-report.json\",\"w\"))\'\n'
+                f"# {original}"
+            )
+
+        self.assert_rejected(replace_analysis)
+
+    def test_rejects_nonzero_regression_epsilon(self) -> None:
+        def weaken_epsilon(workflow: dict) -> None:
+            step = self.cargo_crap_step(workflow, "Analyze CRAP score changes")
+            step["run"] = step["run"].replace("--epsilon 0 ", "--epsilon 0.01 ")
+
+        self.assert_rejected(weaken_epsilon)
+
+    def test_rejects_repository_configuration(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.cargo_crap_step(
+                workflow, "Reject repository cargo-crap configuration"
+            ).update({"run": "true"})
+        )
+
+    def test_rejects_unpinned_bootstrap_base(self) -> None:
+        def weaken_bootstrap(workflow: dict) -> None:
+            step = self.cargo_crap_step(
+                workflow, "Resolve trusted cargo-crap baseline"
+            )
+            step["run"] = step["run"].replace(
+                'test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"',
+                "true",
+            )
+
+        self.assert_rejected(weaken_bootstrap)
+
+    def test_requires_main_baseline_publication(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["cargo-crap"]["steps"].pop()
+        )
+
     def test_rejects_nonblocking_verdict(self) -> None:
         self.assert_rejected(
             lambda workflow: self.cargo_crap_step(
@@ -101,6 +145,20 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                 {"needs": "test"}
             )
         )
+
+    def test_requires_cargo_crap_in_aggregate_gate(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["ci-gate"]["needs"].remove(
+                "cargo-crap"
+            )
+        )
+
+    def test_requires_aggregate_verdict_to_read_cargo_crap(self) -> None:
+        def remove_result(workflow: dict) -> None:
+            step = workflow["jobs"]["ci-gate"]["steps"][0]
+            step["env"].pop("CARGO_CRAP_RESULT")
+
+        self.assert_rejected(remove_result)
 
 
 if __name__ == "__main__":

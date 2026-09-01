@@ -28,6 +28,7 @@ def validated_entries(report: Any) -> list[dict[str, Any]]:
     require(report.get("version") == REPORT_VERSION, "unsupported cargo-crap report version")
     entries = report.get("entries")
     require(isinstance(entries, list), "cargo-crap report entries must be an array")
+    require(bool(entries), "cargo-crap report must contain analyzed functions")
     require(isinstance(report.get("removed"), list), "cargo-crap removed must be an array")
 
     for index, entry in enumerate(entries):

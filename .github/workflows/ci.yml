@@ -34,6 +34,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -50,6 +51,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
@@ -291,25 +294,70 @@ jobs:
         with:
           name: coverage-lcov-${{ github.sha }}
           path: ${{ runner.temp }}
-      - name: Select trusted cargo-crap baseline
+      - name: Reject repository cargo-crap configuration
+        run: test ! -e .cargo-crap.toml
+      - name: Resolve trusted cargo-crap baseline
+        id: baseline
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          baseline="${RUNNER_TEMP}/cargo-crap-baseline.json"
-          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            if git cat-file -e "${BASE_SHA}:.cargo-crap-baseline.json"; then
-              git show "${BASE_SHA}:.cargo-crap-baseline.json" > "${baseline}"
-            else
-              # One-time bootstrap is safe only when no analyzed Rust input changed.
-              git diff --quiet "${BASE_SHA}...HEAD" -- \
-                '*.rs' Cargo.toml Cargo.lock rust-toolchain.toml
-              cp .cargo-crap-baseline.json "${baseline}"
-            fi
-          else
-            cp .cargo-crap-baseline.json "${baseline}"
+          if [[ "${EVENT_NAME}" != "pull_request" ]]; then
+            echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
+
+          run_ids="$(gh api --method GET --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f branch=main -f event=push -f status=success -f per_page=100 \
+            --jq ".workflow_runs[] | select(.head_sha == \"${BASE_SHA}\") | .id")"
+          run_id=''
+          while IFS= read -r candidate; do
+            [[ -n "${candidate}" ]] || continue
+            artifact_id="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts" \
+              --jq ".artifacts[] | select(.name == \"cargo-crap-baseline-${BASE_SHA}\") | .id")"
+            if [[ -n "${artifact_id}" ]]; then
+              run_id="${candidate}"
+              break
+            fi
+          done <<< "${run_ids}"
+          if [[ -n "${run_id}" ]]; then
+            echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
+            echo 'bootstrap=false' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # One-time initialization for this PR's pre-gate base. No future
+          # base may silently substitute a PR-controlled baseline.
+          test "${BASE_SHA}" = "45bdac85b29d273573583f846ba7acd2b3a12573"
+          git diff --quiet "${BASE_SHA}...HEAD" -- \
+            '*.rs' '**/Cargo.toml' Cargo.toml Cargo.lock rust-toolchain.toml \
+            .cargo/config.toml .cargo-crap.toml
+          echo 'bootstrap=true' >> "${GITHUB_OUTPUT}"
+      - name: Download trusted base baseline
+        if: ${{ steps.baseline.outputs.run-id != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cargo-crap-baseline-${{ github.event.pull_request.base.sha }}
+          path: ${{ runner.temp }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.baseline.outputs.run-id }}
+      - name: Generate trusted current baseline
+        if: ${{ steps.baseline.outputs.bootstrap == 'true' }}
+        run: >
+          cargo crap --workspace
+          --lcov "${{ runner.temp }}/coverage.lcov"
+          --missing pessimistic
+          --jobs 2
+          --exclude 'tests/**'
+          --exclude 'benches/**'
+          --exclude 'examples/**'
+          --format json
+          --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
         run: >
           cargo crap --workspace
@@ -320,7 +368,7 @@ jobs:
           --exclude 'benches/**'
           --exclude 'examples/**'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
-          --epsilon 0.01
+          --epsilon 0
           --format json
           --output "${{ runner.temp }}/cargo-crap-report.json"
       - name: Enforce cargo-crap policy
@@ -333,6 +381,14 @@ jobs:
           name: cargo-crap-report-${{ github.sha }}
           path: ${{ runner.temp }}/cargo-crap-report.json
           if-no-files-found: ignore
+      - name: Publish trusted main baseline
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cargo-crap-baseline-${{ github.sha }}
+          path: ${{ runner.temp }}/cargo-crap-baseline.json
+          retention-days: 90
+          if-no-files-found: error
 
 # ── Security & compliance ────────────────────────────────────────────────────
 
@@ -686,6 +742,7 @@ jobs:
       - conformance-non-linux
       - clippy
       - coverage
+      - cargo-crap
       - audit
       - deny
       - cargo-shear
@@ -707,6 +764,7 @@ jobs:
           CONFORMANCE_NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
+          CARGO_CRAP_RESULT: ${{ needs.cargo-crap.result }}
           AUDIT_RESULT: ${{ needs.audit.result }}
           DENY_RESULT: ${{ needs.deny.result }}
           CARGO_SHEAR_RESULT: ${{ needs.cargo-shear.result }}
@@ -721,7 +779,7 @@ jobs:
           for result_name in \
             FMT_RESULT RUSTDOC_RESULT TEST_RESULT CONFORMANCE_FIXTURES_RESULT \
             MATERIALIZE_CONFORMANCE_BUNDLES_RESULT CONFORMANCE_NON_LINUX_RESULT \
-            CLIPPY_RESULT COVERAGE_RESULT \
+            CLIPPY_RESULT COVERAGE_RESULT CARGO_CRAP_RESULT \
             AUDIT_RESULT DENY_RESULT CARGO_SHEAR_RESULT GEIGER_RESULT ASAN_RESULT \
             DOCKER_BUILD_RESULT WORLD_CLIENT_WASM_RESULT WORLD_CLIENT_BROWSER_PARITY_RESULT; do
             result="${!result_name}"
