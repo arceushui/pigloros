@@ -2267,16 +2267,5 @@ fn supporting_ledger_bounds_each_attempt_scoped_collection() -> Result<(), Erasu
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let acknowledgements = ErasureSupportingRecordsInputV1 {
-        acknowledgement_provenance: vec![
-            input.acknowledgement_provenance[0];
-            ERASURE_MAX_OBLIGATIONS + 1
-        ],
-        ..ErasureSupportingRecordsInputV1::default()
-    };
-    assert_eq!(
-        ErasureSupportingRecordsV1::new(acknowledgements),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
     Ok(())
 }

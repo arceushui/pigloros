@@ -1113,10 +1113,11 @@ pub(super) fn supporting_records_from_value(
         .iter()
         .map(|value| retry_admission_from_fields(exact_array(value, 12)?))
         .collect::<Result<Vec<_>, _>>()?;
-    let acknowledgement_provenance = array(&fields[12], ERASURE_MAX_OBLIGATIONS)?
-        .iter()
-        .map(|value| acknowledgement_provenance_from_fields(exact_array(value, 12)?))
-        .collect::<Result<Vec<_>, _>>()?;
+    let acknowledgement_provenance =
+        array(&fields[12], super::ERASURE_COORDINATOR_RECORD_MAX_BYTES)?
+            .iter()
+            .map(|value| acknowledgement_provenance_from_fields(exact_array(value, 12)?))
+            .collect::<Result<Vec<_>, _>>()?;
     let attempt_outcomes = array(&fields[13], super::ERASURE_MAX_ATTEMPT_OUTCOMES)?
         .iter()
         .map(|value| attempt_outcome_from_fields(exact_array(value, 11)?))
@@ -1256,7 +1257,7 @@ fn supporting_records_from_persistence_manifest(
         )?,
         acknowledgement_provenance: list!(
             12,
-            ERASURE_MAX_OBLIGATIONS,
+            super::ERASURE_COORDINATOR_RECORD_MAX_BYTES,
             ErasureAcknowledgementProvenanceV1,
             reference
         )?,

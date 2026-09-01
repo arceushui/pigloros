@@ -2321,7 +2321,8 @@ fn finalization_allows_partial_failure_after_the_attempt_deadline() -> Result<()
 }
 
 #[test]
-fn finalization_requires_deadline_or_administrative_closure() -> Result<(), ErasureErrorV1> {
+fn finalization_requires_deadline_even_after_administrative_closure() -> Result<(), ErasureErrorV1>
+{
     let target = target(10);
     let mut early = frozen_fixture(vec![target])?;
     let admission = retry_admission(early.request, target, 0, None, 20)?;
@@ -2381,20 +2382,17 @@ fn finalization_requires_deadline_or_administrative_closure() -> Result<(), Eras
         .machine
         .resolve_administratively(early.request, resolution)?;
     assert_eq!(
-        early
-            .machine
-            .finalize(
+        early.machine.finalize(
+            early.request,
+            receipt_input(
                 early.request,
-                receipt_input(
-                    early.request,
-                    target,
-                    negative,
-                    ErasureLifecycleV1::PartialFailure,
-                    10,
-                ),
-            )?
-            .lifecycle(),
-        ErasureLifecycleV1::PartialFailure
+                target,
+                negative,
+                ErasureLifecycleV1::PartialFailure,
+                10,
+            ),
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
 }

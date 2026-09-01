@@ -668,3 +668,31 @@ fn coordinator_acknowledgement_arrival_order_does_not_change_ers1_identity(
     assert_eq!(forward.state_digest(), reverse.state_digest());
     Ok(())
 }
+
+#[test]
+fn acknowledgement_order_is_target_major_even_when_obligation_digests_disagree() {
+    let first_target = target();
+    let second_target = second_target();
+    assert!(first_target < second_target);
+    let mut acknowledgements = vec![
+        ErasureAcknowledgementV1 {
+            obligation: reference(0),
+            target: second_target,
+            owner: second_target.replica_id,
+            evidence: reference(96),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        },
+        ErasureAcknowledgementV1 {
+            obligation: reference(u8::MAX),
+            target: first_target,
+            owner: first_target.replica_id,
+            evidence: reference(97),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        },
+    ];
+
+    acknowledgements.sort_unstable();
+
+    assert_eq!(acknowledgements[0].target, first_target);
+    assert_eq!(acknowledgements[1].target, second_target);
+}

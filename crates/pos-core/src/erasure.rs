@@ -2131,7 +2131,7 @@ impl ErasureSupportingRecordsV1 {
         decode_limited(
             bytes,
             ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-            ERASURE_MAX_INVENTORY_RESULTS,
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
         )
         .and_then(|value| supporting_records_from_value(&value))
     }
@@ -2381,19 +2381,13 @@ impl ErasureSupportingRecordsV1 {
         }
         self.validate_obligation_evidence()?;
         self.validate_scope_extension_evidence()?;
-        // Attempt-scoped collection lengths are already bounded by admission
-        // ordinals and the cardinality checks below. These two collections can
-        // grow independently, so enforce their bounds directly.
+        // Attempt-scoped collection lengths are bounded by admission ordinals
+        // and their per-attempt cardinality checks. Acknowledgement provenance
+        // is append-only across attempts, so its lifetime bound is the encoded
+        // coordinator-record limit rather than one attempt's obligation count.
         if self
             .administrative_resolutions
             .get(ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS)
-            .is_some()
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if self
-            .acknowledgement_provenance
-            .get(ERASURE_MAX_OBLIGATIONS)
             .is_some()
         {
             return Err(ErasureErrorV1::PolicyConflict);
@@ -4178,15 +4172,15 @@ pub struct ErasureAcknowledgementV1 {
 impl Ord for ErasureAcknowledgementV1 {
     fn cmp(&self, other: &Self) -> Ordering {
         (
-            self.obligation,
             self.target,
+            self.obligation,
             self.owner,
             self.evidence,
             self.outcome.code(),
         )
             .cmp(&(
-                other.obligation,
                 other.target,
+                other.obligation,
                 other.owner,
                 other.evidence,
                 other.outcome.code(),
@@ -5529,7 +5523,7 @@ impl ErasureCoordinatorRecordV1 {
         decode_limited(
             bytes,
             ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-            ERASURE_MAX_INVENTORY_RESULTS,
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
         )
         .and_then(|value| exact_array(&value, 13).and_then(record_from_fields))
     }
@@ -5591,7 +5585,7 @@ impl ErasureCoordinatorRecordV1 {
         decode_limited(
             manifest_cbor,
             ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-            ERASURE_MAX_INVENTORY_RESULTS,
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
         )
         .and_then(|value| {
             exact_array(&value, 13)
@@ -7479,20 +7473,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .effective_acknowledgements(&admission);
         let complete =
             acknowledgements_close_frozen_obligations(&record.acknowledgements, obligations);
-        let host_closed_negative = record
-            .supporting_records
-            .administrative_resolutions()
-            .iter()
-            .any(|resolution| {
-                resolution.action() == ErasureAdministrativeResolutionActionV1::CloseContainment
-                    && resolution
-                        .affected_digests()
-                        .contains(&admission.reference())
-            });
-        if !complete
-            && input.issue_position < admission.deadline_position()
-            && !host_closed_negative
-        {
+        if !complete && input.issue_position < admission.deadline_position() {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let lifecycle = if complete {
