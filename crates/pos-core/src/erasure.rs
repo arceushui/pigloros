@@ -5483,7 +5483,7 @@ impl ErasureCoordinatorRecordV1 {
     ) {
         self.supporting_records
             .acknowledgement_provenance
-            .push(provenance.clone());
+            .push(*provenance);
         self.supporting_records
             .acknowledgement_provenance
             .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
@@ -5501,13 +5501,9 @@ impl ErasureCoordinatorRecordV1 {
     ) {
         self.receipt_input = Some(input);
         self.receipt = Some(receipt.clone());
-        self.supporting_records
-            .attempt_outcomes
-            .push(outcome.clone());
+        self.supporting_records.attempt_outcomes.push(*outcome);
         self.supporting_records.receipts.push(receipt);
-        self.supporting_records
-            .receipt_provenance
-            .push(provenance.clone());
+        self.supporting_records.receipt_provenance.push(*provenance);
     }
 
     fn retain_scope_extension(
