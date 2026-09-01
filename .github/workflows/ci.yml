@@ -321,9 +321,15 @@ jobs:
 # ── Platform verification ────────────────────────────────────────────────────
 
   asan:
-    name: asan (address sanitizer)
+    name: asan shard (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - bundle-contracts
+          - remainder
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - run: rm -f rust-toolchain.toml
@@ -363,6 +369,7 @@ jobs:
           ! grep -F "bevy_reflect::utility::GenericTypeCell" "${log}"
       - name: cargo test with ASan
         env:
+          ASAN_SHARD: ${{ matrix.shard }}
           RUSTC_BOOTSTRAP: "1"
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/scripts/asan/bevy-reflect.lsan:print_suppressions=1
@@ -373,12 +380,46 @@ jobs:
         run: |
           set -euo pipefail
           test -x "/usr/bin/llvm-symbolizer-18"
-          ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
-            RUSTFLAGS="-Z sanitizer=address" \
-            cargo +nightly-2026-07-01 test --all-features --locked -Z build-std \
-              --target x86_64-unknown-linux-gnu --workspace --tests 2>&1 | \
-            tee "${RUNNER_TEMP}/asan.log"
+          cargo_args=(
+            +nightly-2026-07-01 test --all-features --locked -Z build-std
+            --target x86_64-unknown-linux-gnu
+          )
+          run_asan_tests() {
+            ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
+              RUSTFLAGS="-Z sanitizer=address" \
+              cargo "${cargo_args[@]}" "$@"
+          }
+          case "${ASAN_SHARD}" in
+            bundle-contracts)
+              run_asan_tests -p pos-conformance \
+                --test bundle_contract_coverage_public \
+                --test bundle_contract_public
+              ;;
+            remainder)
+              run_asan_tests --workspace --exclude pos-conformance --tests
+              run_asan_tests -p pos-conformance --lib --bins \
+                --test moat_proof_public \
+                --test profile_contract_public \
+                --test provider_contract_public
+              ;;
+            *)
+              printf 'unknown ASan shard: %s\n' "${ASAN_SHARD}" >&2
+              exit 2
+              ;;
+          esac 2>&1 | tee "${RUNNER_TEMP}/asan.log"
           python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
+
+  asan-gate:
+    name: asan (address sanitizer)
+    if: ${{ always() }}
+    needs: asan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every ASan shard
+        env:
+          ASAN_SHARDS_RESULT: ${{ needs.asan.result }}
+        run: test "${ASAN_SHARDS_RESULT}" = success
 
   docker-build:
     name: docker-build

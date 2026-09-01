@@ -17,11 +17,33 @@ EXPECTED_SUPPRESSION = (
 ).encode()
 EXPECTED_COMMAND = """set -euo pipefail
 test -x "/usr/bin/llvm-symbolizer-18"
-ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
-  RUSTFLAGS="-Z sanitizer=address" \\
-  cargo +nightly-2026-07-01 test --all-features --locked -Z build-std \\
-    --target x86_64-unknown-linux-gnu --workspace --tests 2>&1 | \\
-  tee "${RUNNER_TEMP}/asan.log"
+cargo_args=(
+  +nightly-2026-07-01 test --all-features --locked -Z build-std
+  --target x86_64-unknown-linux-gnu
+)
+run_asan_tests() {
+  ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
+    RUSTFLAGS="-Z sanitizer=address" \\
+    cargo "${cargo_args[@]}" "$@"
+}
+case "${ASAN_SHARD}" in
+  bundle-contracts)
+    run_asan_tests -p pos-conformance \\
+      --test bundle_contract_coverage_public \\
+      --test bundle_contract_public
+    ;;
+  remainder)
+    run_asan_tests --workspace --exclude pos-conformance --tests
+    run_asan_tests -p pos-conformance --lib --bins \\
+      --test moat_proof_public \\
+      --test profile_contract_public \\
+      --test provider_contract_public
+    ;;
+  *)
+    printf 'unknown ASan shard: %s\\n' "${ASAN_SHARD}" >&2
+    exit 2
+    ;;
+esac 2>&1 | tee "${RUNNER_TEMP}/asan.log"
 python scripts/check_lsan_suppression_report.py "${RUNNER_TEMP}/asan.log"
 """
 EXPECTED_WORKFLOW_ENV = {
@@ -29,6 +51,7 @@ EXPECTED_WORKFLOW_ENV = {
     "RUSTFLAGS": "-D warnings",
 }
 EXPECTED_STEP_ENV = {
+    "ASAN_SHARD": "${{ matrix.shard }}",
     "RUSTC_BOOTSTRAP": "1",
     "ASAN_OPTIONS": "detect_leaks=1:detect_odr_violation=0",
     "LSAN_OPTIONS": (
@@ -40,7 +63,25 @@ EXPECTED_STEP_ENV = {
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
-EXPECTED_JOB_KEYS = {"name", "runs-on", "timeout-minutes", "steps"}
+EXPECTED_JOB_KEYS = {"name", "runs-on", "timeout-minutes", "strategy", "steps"}
+EXPECTED_STRATEGY = {
+    "fail-fast": False,
+    "matrix": {"shard": ["bundle-contracts", "remainder"]},
+}
+EXPECTED_GATE_JOB = {
+    "name": "asan (address sanitizer)",
+    "if": "${{ always() }}",
+    "needs": "asan",
+    "runs-on": "ubuntu-24.04",
+    "timeout-minutes": 5,
+    "steps": [
+        {
+            "name": "Require every ASan shard",
+            "env": {"ASAN_SHARDS_RESULT": "${{ needs.asan.result }}"},
+            "run": 'test "${ASAN_SHARDS_RESULT}" = success',
+        }
+    ],
+}
 EXPECTED_SETUP_STEPS = [
     {"uses": "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"},
     {"run": "rm -f rust-toolchain.toml"},
@@ -123,11 +164,18 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     jobs = workflow.get("jobs")
     require(isinstance(jobs, dict), "workflow jobs must be a mapping")
     job = jobs.get("asan")
-    require(isinstance(job, dict), "missing ASan job")
-    require(set(job) == EXPECTED_JOB_KEYS, "ASan job graph or metadata changed")
-    require(job.get("name") == "asan (address sanitizer)", "ASan check name changed")
+    require(isinstance(job, dict), "missing ASan shard job")
+    require(set(job) == EXPECTED_JOB_KEYS, "ASan shard graph or metadata changed")
+    require(
+        job.get("name") == "asan shard (${{ matrix.shard }})",
+        "ASan shard check name changed",
+    )
     require(job.get("runs-on") == "ubuntu-24.04", "ASan runner changed")
     require(job.get("timeout-minutes") == 60, "ASan timeout changed")
+    require(
+        job.get("strategy") == EXPECTED_STRATEGY,
+        "ASan shard matrix must contain the exact complete partition",
+    )
     require("if" not in job, "ASan job must be unconditional")
     require("continue-on-error" not in job, "ASan job must fail the workflow")
     require("defaults" not in job, "ASan job must use the standard failing shell")
@@ -169,6 +217,13 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
     command = step.get("run")
     require(isinstance(command, str), "ASan test step must have a run command")
     require(command == EXPECTED_COMMAND, "ASan test command changed")
+
+    gate = jobs.get("asan-gate")
+    require(isinstance(gate, dict), "missing aggregate ASan gate")
+    require(
+        gate == EXPECTED_GATE_JOB,
+        "aggregate ASan gate must fail unless every shard succeeds",
+    )
 
 
 def main() -> int:
