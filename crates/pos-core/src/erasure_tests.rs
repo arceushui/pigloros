@@ -5406,7 +5406,7 @@ fn dispatch_rejects_an_empty_closure_after_freeze() -> Result<(), ErasureErrorV1
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
     assert_eq!(
         coordinator.dispatch_destruction(reference(1), reference(9)),
-        Err(ErasureErrorV1::PolicyConflict)
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
 }
