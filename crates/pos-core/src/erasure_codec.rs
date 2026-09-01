@@ -886,118 +886,80 @@ pub(super) fn persistence_manifest_value(record: &super::ErasureCoordinatorRecor
 
 fn supporting_record_references_value(records: &ErasureSupportingRecordsV1) -> Value {
     Value::Array(vec![
-        optional_digest(
-            records
-                .correction_provenance
-                .as_ref()
-                .map(ErasureCorrectionProvenanceV1::reference),
+        optional_evidence_reference(
+            records.correction_provenance.as_ref(),
+            ErasureCorrectionProvenanceV1::reference,
         ),
-        optional_digest(
-            records
-                .authorization_rejection
-                .as_ref()
-                .map(ErasureAuthorizationRejectionV1::reference),
+        optional_evidence_reference(
+            records.authorization_rejection.as_ref(),
+            ErasureAuthorizationRejectionV1::reference,
         ),
-        optional_digest(
-            records
-                .scope_commitment
-                .as_ref()
-                .map(ErasureScopeCommitmentV1::reference),
+        optional_evidence_reference(
+            records.scope_commitment.as_ref(),
+            ErasureScopeCommitmentV1::reference,
         ),
-        optional_digest(
-            records
-                .freeze_admission_evidence
-                .as_ref()
-                .map(ErasureFreezeAdmissionEvidenceV1::reference),
+        optional_evidence_reference(
+            records.freeze_admission_evidence.as_ref(),
+            ErasureFreezeAdmissionEvidenceV1::reference,
         ),
-        optional_digest(
-            records
-                .freeze_authorization_evidence
-                .as_ref()
-                .map(ErasureFreezeAuthorizationEvidenceV1::reference),
+        optional_evidence_reference(
+            records.freeze_authorization_evidence.as_ref(),
+            ErasureFreezeAuthorizationEvidenceV1::reference,
         ),
-        optional_digest(
-            records
-                .freeze_provenance
-                .as_ref()
-                .map(ErasureFreezeProvenanceV1::reference),
+        optional_evidence_reference(
+            records.freeze_provenance.as_ref(),
+            ErasureFreezeProvenanceV1::reference,
         ),
-        optional_digest(
-            records
-                .freeze_failure
-                .as_ref()
-                .map(ErasureFreezeFailureV1::reference),
+        optional_evidence_reference(
+            records.freeze_failure.as_ref(),
+            ErasureFreezeFailureV1::reference,
         ),
-        references_value(
-            &records
-                .obligations
-                .iter()
-                .map(ErasureObligationV1::reference)
-                .collect::<Vec<_>>(),
+        evidence_references(&records.obligations, ErasureObligationV1::reference),
+        optional_evidence_reference(
+            records.obligation_set.as_ref(),
+            ErasureObligationSetV1::reference,
         ),
-        optional_digest(
-            records
-                .obligation_set
-                .as_ref()
-                .map(ErasureObligationSetV1::reference),
+        evidence_references(
+            &records.scope_extensions,
+            ErasureScopeExtensionV1::reference,
         ),
-        references_value(
-            &records
-                .scope_extensions
-                .iter()
-                .map(ErasureScopeExtensionV1::reference)
-                .collect::<Vec<_>>(),
+        evidence_references(
+            &records.scope_extension_ledgers,
+            ErasureScopeExtensionLedgerV1::reference,
         ),
-        references_value(
-            &records
-                .scope_extension_ledgers
-                .iter()
-                .map(ErasureScopeExtensionLedgerV1::reference)
-                .collect::<Vec<_>>(),
+        evidence_references(
+            &records.retry_admissions,
+            ErasureRetryAdmissionV1::reference,
         ),
-        references_value(
-            &records
-                .retry_admissions
-                .iter()
-                .map(ErasureRetryAdmissionV1::reference)
-                .collect::<Vec<_>>(),
+        evidence_references(
+            &records.acknowledgement_provenance,
+            ErasureAcknowledgementProvenanceV1::reference,
         ),
-        references_value(
-            &records
-                .acknowledgement_provenance
-                .iter()
-                .map(ErasureAcknowledgementProvenanceV1::reference)
-                .collect::<Vec<_>>(),
+        evidence_references(
+            &records.attempt_outcomes,
+            ErasureAttemptOutcomeV1::reference,
         ),
-        references_value(
-            &records
-                .attempt_outcomes
-                .iter()
-                .map(ErasureAttemptOutcomeV1::reference)
-                .collect::<Vec<_>>(),
+        evidence_references(&records.receipts, ErasureReceiptV1::receipt_digest),
+        evidence_references(
+            &records.receipt_provenance,
+            ErasureReceiptProvenanceV1::reference,
         ),
-        references_value(
-            &records
-                .receipts
-                .iter()
-                .map(ErasureReceiptV1::receipt_digest)
-                .collect::<Vec<_>>(),
-        ),
-        references_value(
-            &records
-                .receipt_provenance
-                .iter()
-                .map(ErasureReceiptProvenanceV1::reference)
-                .collect::<Vec<_>>(),
-        ),
-        references_value(
-            &records
-                .administrative_resolutions
-                .iter()
-                .map(ErasureAdministrativeResolutionV1::reference)
-                .collect::<Vec<_>>(),
+        evidence_references(
+            &records.administrative_resolutions,
+            ErasureAdministrativeResolutionV1::reference,
         ),
     ])
+}
+
+fn optional_evidence_reference<T>(
+    value: Option<&T>,
+    reference: impl FnOnce(&T) -> ErasureReferenceV1,
+) -> Value {
+    optional_digest(value.map(reference))
+}
+
+fn evidence_references<T>(values: &[T], reference: impl Fn(&T) -> ErasureReferenceV1) -> Value {
+    references_value(&values.iter().map(reference).collect::<Vec<_>>())
 }
 
 pub(super) fn supporting_records_value(records: &ErasureSupportingRecordsV1) -> Value {
@@ -1239,117 +1201,88 @@ fn supporting_records_from_persistence_manifest(
     evidence: &mut dyn FnMut(ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1>,
 ) -> Result<ErasureSupportingRecordsV1, ErasureErrorV1> {
     let fields = exact_array(value, 17)?;
+    macro_rules! optional {
+        ($index:literal, $record:ty, $address:ident) => {
+            load_optional_persistence_evidence(
+                &fields[$index],
+                evidence,
+                <$record>::from_canonical_cbor,
+                <$record>::$address,
+            )
+        };
+    }
+    macro_rules! list {
+        ($index:literal, $maximum:expr_2021, $record:ty, $address:ident) => {
+            load_persistence_evidence_list(
+                &fields[$index],
+                $maximum,
+                evidence,
+                <$record>::from_canonical_cbor,
+                <$record>::$address,
+            )
+        };
+    }
     ErasureSupportingRecordsV1::from_canonical_input(ErasureSupportingRecordsInputV1 {
-        correction_provenance: load_optional_persistence_evidence(
-            &fields[0],
-            evidence,
-            ErasureCorrectionProvenanceV1::from_canonical_cbor,
-            ErasureCorrectionProvenanceV1::reference,
+        correction_provenance: optional!(0, ErasureCorrectionProvenanceV1, reference)?,
+        authorization_rejection: optional!(1, ErasureAuthorizationRejectionV1, reference)?,
+        scope_commitment: optional!(2, ErasureScopeCommitmentV1, reference)?,
+        freeze_admission_evidence: optional!(3, ErasureFreezeAdmissionEvidenceV1, reference)?,
+        freeze_authorization_evidence: optional!(
+            4,
+            ErasureFreezeAuthorizationEvidenceV1,
+            reference
         )?,
-        authorization_rejection: load_optional_persistence_evidence(
-            &fields[1],
-            evidence,
-            ErasureAuthorizationRejectionV1::from_canonical_cbor,
-            ErasureAuthorizationRejectionV1::reference,
-        )?,
-        scope_commitment: load_optional_persistence_evidence(
-            &fields[2],
-            evidence,
-            ErasureScopeCommitmentV1::from_canonical_cbor,
-            ErasureScopeCommitmentV1::reference,
-        )?,
-        freeze_admission_evidence: load_optional_persistence_evidence(
-            &fields[3],
-            evidence,
-            ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor,
-            ErasureFreezeAdmissionEvidenceV1::reference,
-        )?,
-        freeze_authorization_evidence: load_optional_persistence_evidence(
-            &fields[4],
-            evidence,
-            ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor,
-            ErasureFreezeAuthorizationEvidenceV1::reference,
-        )?,
-        freeze_provenance: load_optional_persistence_evidence(
-            &fields[5],
-            evidence,
-            ErasureFreezeProvenanceV1::from_canonical_cbor,
-            ErasureFreezeProvenanceV1::reference,
-        )?,
-        freeze_failure: load_optional_persistence_evidence(
-            &fields[6],
-            evidence,
-            ErasureFreezeFailureV1::from_canonical_cbor,
-            ErasureFreezeFailureV1::reference,
-        )?,
-        obligations: load_persistence_evidence_list(
-            &fields[7],
-            ERASURE_MAX_OBLIGATIONS,
-            evidence,
-            ErasureObligationV1::from_canonical_cbor,
-            ErasureObligationV1::reference,
-        )?,
-        obligation_set: load_optional_persistence_evidence(
-            &fields[8],
-            evidence,
-            ErasureObligationSetV1::from_canonical_cbor,
-            ErasureObligationSetV1::reference,
-        )?,
-        scope_extensions: load_persistence_evidence_list(
-            &fields[9],
+        freeze_provenance: optional!(5, ErasureFreezeProvenanceV1, reference)?,
+        freeze_failure: optional!(6, ErasureFreezeFailureV1, reference)?,
+        obligations: list!(7, ERASURE_MAX_OBLIGATIONS, ErasureObligationV1, reference)?,
+        obligation_set: optional!(8, ErasureObligationSetV1, reference)?,
+        scope_extensions: list!(
+            9,
             ERASURE_MAX_SCOPE_EXTENSIONS,
-            evidence,
-            ErasureScopeExtensionV1::from_canonical_cbor,
-            ErasureScopeExtensionV1::reference,
+            ErasureScopeExtensionV1,
+            reference
         )?,
-        scope_extension_ledgers: load_persistence_evidence_list(
-            &fields[10],
+        scope_extension_ledgers: list!(
+            10,
             ERASURE_MAX_SCOPE_EXTENSIONS.saturating_add(1),
-            evidence,
-            ErasureScopeExtensionLedgerV1::from_canonical_cbor,
-            ErasureScopeExtensionLedgerV1::reference,
+            ErasureScopeExtensionLedgerV1,
+            reference
         )?,
-        retry_admissions: load_persistence_evidence_list(
-            &fields[11],
+        retry_admissions: list!(
+            11,
             super::ERASURE_MAX_ATTEMPT_OUTCOMES,
-            evidence,
-            ErasureRetryAdmissionV1::from_canonical_cbor,
-            ErasureRetryAdmissionV1::reference,
+            ErasureRetryAdmissionV1,
+            reference
         )?,
-        acknowledgement_provenance: load_persistence_evidence_list(
-            &fields[12],
+        acknowledgement_provenance: list!(
+            12,
             ERASURE_MAX_OBLIGATIONS,
-            evidence,
-            ErasureAcknowledgementProvenanceV1::from_canonical_cbor,
-            ErasureAcknowledgementProvenanceV1::reference,
+            ErasureAcknowledgementProvenanceV1,
+            reference
         )?,
-        attempt_outcomes: load_persistence_evidence_list(
-            &fields[13],
+        attempt_outcomes: list!(
+            13,
             super::ERASURE_MAX_ATTEMPT_OUTCOMES,
-            evidence,
-            ErasureAttemptOutcomeV1::from_canonical_cbor,
-            ErasureAttemptOutcomeV1::reference,
+            ErasureAttemptOutcomeV1,
+            reference
         )?,
-        receipts: load_persistence_evidence_list(
-            &fields[14],
+        receipts: list!(
+            14,
             super::ERASURE_MAX_ATTEMPT_OUTCOMES,
-            evidence,
-            ErasureReceiptV1::from_canonical_cbor,
-            ErasureReceiptV1::receipt_digest,
+            ErasureReceiptV1,
+            receipt_digest
         )?,
-        receipt_provenance: load_persistence_evidence_list(
-            &fields[15],
+        receipt_provenance: list!(
+            15,
             super::ERASURE_MAX_ATTEMPT_OUTCOMES,
-            evidence,
-            ErasureReceiptProvenanceV1::from_canonical_cbor,
-            ErasureReceiptProvenanceV1::reference,
+            ErasureReceiptProvenanceV1,
+            reference
         )?,
-        administrative_resolutions: load_persistence_evidence_list(
-            &fields[16],
+        administrative_resolutions: list!(
+            16,
             super::ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
-            evidence,
-            ErasureAdministrativeResolutionV1::from_canonical_cbor,
-            ErasureAdministrativeResolutionV1::reference,
+            ErasureAdministrativeResolutionV1,
+            reference
         )?,
     })
 }
