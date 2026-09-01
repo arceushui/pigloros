@@ -1690,21 +1690,18 @@ pub(super) fn weakest_inventory_claim(
     .max_by_key(|claim| claim.rank())
     .unwrap_or(ErasureReplayClaimV1::UnverifiableArtifactsMissing)
 }
-pub(super) fn inventories_match_closure(
+pub(super) fn inventories_are_within_closure(
     frozen_targets: &[ErasureRequiredTargetV1],
     inventories: &ErasureReceiptInventoriesV1,
 ) -> bool {
-    let mut targets = inventories
+    inventories
         .artifacts
         .iter()
         .chain(&inventories.keys)
         .chain(&inventories.replicas)
         .chain(&inventories.backups)
         .map(|entry| entry.target)
-        .collect::<Vec<_>>();
-    targets.sort_unstable();
-    targets.dedup();
-    targets == frozen_targets
+        .all(|target| frozen_targets.binary_search(&target).is_ok())
 }
 pub(super) fn has_duplicate_acknowledgement_identity(
     acknowledgements: &[ErasureAcknowledgementV1],

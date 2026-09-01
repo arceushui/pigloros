@@ -4261,7 +4261,7 @@ pub struct ErasureReceiptInputV1 {
     pub freeze_position: u64,
     /// Owner acknowledgements, canonicalized independently of arrival order.
     pub acknowledgements: Vec<ErasureAcknowledgementV1>,
-    /// Frozen closure: each target must be resolved exactly once.
+    /// Frozen target closure; inventory rows cover only applicable obligations.
     pub frozen_targets: Vec<ErasureRequiredTargetV1>,
     /// Missing and failed owners.
     pub pending_owners: Vec<ErasureReferenceV1>,
@@ -4346,12 +4346,18 @@ impl ErasureReceiptV1 {
         if !acknowledgements_are_closure_subset(&input.frozen_targets, &input.acknowledgements) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
+        if !acknowledgements_reference_inventory_entries(
+            &input.inventories,
+            &input.acknowledgements,
+        ) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
         let (derived_pending, derived_failed) =
             derived_inventory_outcome_owners(&input.inventories, &input.acknowledgements);
         if input.pending_owners != derived_pending || input.failed_owners != derived_failed {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        if !inventories_match_closure(&input.frozen_targets, &input.inventories) {
+        if !inventories_are_within_closure(&input.frozen_targets, &input.inventories) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
         // The caller's claim is descriptive input only.  ERC1 records the
@@ -4553,6 +4559,25 @@ fn acknowledgements_cover_inventory_entries(
     inventory_pairs.sort_unstable();
     acknowledgement_pairs.sort_unstable();
     inventory_pairs == acknowledgement_pairs
+}
+
+fn acknowledgements_reference_inventory_entries(
+    inventories: &ErasureReceiptInventoriesV1,
+    acknowledgements: &[ErasureAcknowledgementV1],
+) -> bool {
+    let inventory_pairs = [
+        &inventories.artifacts,
+        &inventories.keys,
+        &inventories.replicas,
+        &inventories.backups,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|entry| (entry.target, entry.transition.owner))
+    .collect::<BTreeSet<_>>();
+    acknowledgements.iter().all(|acknowledgement| {
+        inventory_pairs.contains(&(acknowledgement.target, acknowledgement.owner))
+    })
 }
 
 fn inventories_match_frozen_obligations(
@@ -7812,8 +7837,8 @@ use codec::{
     freeze_authorization_evidence_from_fields, freeze_authorization_evidence_value,
     freeze_failure_from_fields, freeze_failure_value, freeze_is_monotonic,
     freeze_provenance_from_fields, freeze_provenance_value, has_duplicate,
-    has_duplicate_acknowledgement_identity, invalid_owner_sets, inventories_exceed_bound,
-    inventories_have_duplicate_targets, inventories_match_closure, inventory_categories_match,
+    has_duplicate_acknowledgement_identity, invalid_owner_sets, inventories_are_within_closure,
+    inventories_exceed_bound, inventories_have_duplicate_targets, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, obligation_from_fields, obligation_set_from_fields,
     obligation_set_value, obligation_value, persistence_manifest_value, receipt_core_value,
     receipt_from_fields, receipt_provenance_from_fields, receipt_provenance_value, receipt_value,
