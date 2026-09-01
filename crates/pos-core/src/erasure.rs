@@ -7828,4 +7828,4 @@ use codec::{
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "erasure_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
