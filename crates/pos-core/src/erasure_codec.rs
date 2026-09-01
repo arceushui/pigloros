@@ -1837,7 +1837,13 @@ pub(super) fn decode_limited(
         return Err(ErasureErrorV1::ScopeInvalid);
     }
     cbor_shape_is_bounded(bytes, maximum_array)?;
-    ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)
+    let value = ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let canonical = encode_canonical(&value)?;
+    if canonical == bytes {
+        Ok(value)
+    } else {
+        Err(ErasureErrorV1::InvalidEncoding)
+    }
 }
 pub(super) fn cbor_shape_is_bounded(
     bytes: &[u8],

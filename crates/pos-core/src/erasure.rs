@@ -4354,9 +4354,7 @@ impl ErasureReceiptV1 {
                     .all(|ack| ack.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged);
         let unresolved =
             !complete || !input.pending_owners.is_empty() || !input.failed_owners.is_empty();
-        if input.lifecycle == ErasureLifecycleV1::Complete
-            && (input.frozen_targets.is_empty() || !complete)
-        {
+        if input.lifecycle == ErasureLifecycleV1::Complete && !complete {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         if input.lifecycle == ErasureLifecycleV1::PartialFailure && !unresolved {
@@ -6976,8 +6974,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         self.record(request).and_then(|mut record| {
-            if record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements
-                && record.supporting_records.retry_admissions.last() == Some(admission)
+            if matches!(
+                record.state.lifecycle(),
+                ErasureLifecycleV1::DestructionDispatched
+                    | ErasureLifecycleV1::AwaitingAcknowledgements
+            ) && record.supporting_records.retry_admissions.last() == Some(admission)
             {
                 return Ok(record.state);
             }
@@ -7033,45 +7034,49 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                                 if ordinal != 0 {
                                     return Ok(record.state);
                                 }
-                                let freeze_position = record.state.freeze_position();
-                                let replay_claim = record.state.replay_claim();
-                                record
-                                    .state
-                                    .transition(ErasureStateTransitionV1 {
-                                        lifecycle: ErasureLifecycleV1::DestructionDispatched,
-                                        freeze_position,
-                                        pending_owners: Vec::new(),
-                                        failed_owners: Vec::new(),
-                                        acknowledged_targets: Vec::new(),
-                                        replay_claim,
-                                        provenance: admission.reference(),
-                                    })
-                                    .and_then(|dispatched| {
-                                        record.state = dispatched;
-                                        let dispatched_record = record.clone();
-                                        record
-                                            .state
-                                            .transition(ErasureStateTransitionV1 {
-                                                lifecycle:
-                                                    ErasureLifecycleV1::AwaitingAcknowledgements,
-                                                freeze_position,
-                                                pending_owners: Vec::new(),
-                                                failed_owners: Vec::new(),
-                                                acknowledged_targets: Vec::new(),
-                                                replay_claim,
-                                                provenance: admission.reference(),
-                                            })
-                                            .map(|awaiting| (dispatched_record, awaiting))
-                                    })
-                                    .and_then(|(dispatched_record, awaiting)| {
-                                        record.state = awaiting;
-                                        self.commit_records(&[dispatched_record, record.clone()])
-                                            .map(|()| record.state.clone())
-                                    })
+                                self.persist_initial_dispatch(
+                                    &mut record,
+                                    admission,
+                                    !commands.is_empty(),
+                                )
                             })
                     })
                 })
         })
+    }
+
+    fn persist_initial_dispatch(
+        &mut self,
+        record: &mut ErasureCoordinatorRecordV1,
+        admission: &ErasureRetryAdmissionV1,
+        await_acknowledgements: bool,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
+        let freeze_position = record.state.freeze_position();
+        let replay_claim = record.state.replay_claim();
+        record.state = record.state.transition(ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::DestructionDispatched,
+            freeze_position,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim,
+            provenance: admission.reference(),
+        })?;
+        if !await_acknowledgements {
+            return self.commit(record.clone()).map(|()| record.state.clone());
+        }
+        let dispatched_record = record.clone();
+        record.state = record.state.transition(ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::AwaitingAcknowledgements,
+            freeze_position,
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim,
+            provenance: admission.reference(),
+        })?;
+        self.commit_records(&[dispatched_record, record.clone()])
+            .map(|()| record.state.clone())
     }
 
     fn unresolved_obligation_references(
@@ -7142,7 +7147,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         provenance: ErasureReferenceV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         self.record(request).and_then(|record| {
-            if record.state.lifecycle() == ErasureLifecycleV1::AwaitingAcknowledgements {
+            if matches!(
+                record.state.lifecycle(),
+                ErasureLifecycleV1::DestructionDispatched
+                    | ErasureLifecycleV1::AwaitingAcknowledgements
+            ) {
                 return record
                     .supporting_records
                     .retry_admissions()

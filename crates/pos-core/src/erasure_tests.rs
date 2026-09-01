@@ -1683,6 +1683,11 @@ fn all_inapplicable_matrix_admits_an_empty_obligation_set() -> Result<(), Erasur
     );
     assert_eq!(attempts.borrow()[0].unresolved_obligations(), &[]);
     assert_eq!(attempts.borrow()[0].command_identities(), &[]);
+    assert_eq!(
+        coordinator.dispatch_destruction(request_reference, reference(10))?,
+        dispatched
+    );
+    assert_eq!(attempts.borrow().len(), 1);
     Ok(())
 }
 

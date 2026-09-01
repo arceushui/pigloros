@@ -1192,6 +1192,9 @@ impl ErasurePersistencePortV1 for MemoryStore {
         &mut self,
         records: &[VerifiedErasureCoordinatorRecordV1],
     ) -> Result<(), ErasureErrorV1> {
+        if records.is_empty() {
+            return Ok(());
+        }
         let mut staged_records = self.erasure_records.clone();
         let mut staged_evidence = self.erasure_evidence.clone();
         let mut staged_states = self.erasure_states.clone();
