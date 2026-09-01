@@ -2278,14 +2278,14 @@ impl ErasureSupportingRecordsV1 {
     fn persistence_evidence(&self) -> Result<Vec<(ErasureReferenceV1, Vec<u8>)>, ErasureErrorV1> {
         let mut evidence = Vec::new();
         macro_rules! push_optional {
-            ($value:expr) => {
+            ($value:expr_2021) => {
                 if let Some(value) = $value {
                     evidence.push((value.reference(), value.to_canonical_cbor()?));
                 }
             };
         }
         macro_rules! push_records {
-            ($values:expr) => {
+            ($values:expr_2021) => {
                 for value in $values {
                     evidence.push((value.reference(), value.to_canonical_cbor()?));
                 }
@@ -5550,7 +5550,7 @@ impl ErasureCoordinatorRecordV1 {
             )?;
             let mut evidence = BTreeMap::new();
             self.supporting_records
-                .persistence_evidence()
+                .persistence_evidence()?
                 .into_iter()
                 .try_for_each(|(reference, canonical_cbor)| {
                     match evidence.entry(reference) {
