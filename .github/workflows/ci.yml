@@ -262,7 +262,9 @@ jobs:
           --lcov "${{ runner.temp }}/coverage.lcov"
           --missing pessimistic
           --jobs 2
-          --sort file
+          --exclude 'tests/**'
+          --exclude 'benches/**'
+          --exclude 'examples/**'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Upload cargo-crap bootstrap baseline
