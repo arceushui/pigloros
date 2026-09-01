@@ -165,6 +165,18 @@ replace_json "${unknown_authority_root}/support/draft-execution-authority.json" 
   '.undeclared_authority = true'
 expect_rejection "${unknown_authority_root}" "invalid Draft authority declaration fields"
 
+versioned_profile_id_root="$(new_fixture_copy versioned-profile-id)"
+replace_json "${versioned_profile_id_root}/profiles/artifact-integrity/profile.json" \
+  '.profile_id = "pigloros.w8.artifact-integrity.1.0.0"'
+expect_rejection "${versioned_profile_id_root}" \
+  "invalid public profile manifest for artifact-integrity"
+
+foreign_normative_root="$(new_fixture_copy foreign-profile-normative-requirements)"
+replace_json "${foreign_normative_root}/profiles/artifact-integrity/profile.json" \
+  '.normative_requirements = "profiles/replay-conformance/normative-requirements.md"'
+expect_rejection "${foreign_normative_root}" \
+  "invalid public profile manifest for artifact-integrity"
+
 divergent_positive_root="$(new_fixture_copy divergent-positive-oracle)"
 replace_json "${divergent_positive_root}/providers/empirical-evaluation/provider.json" \
   '.fixture_contracts.positive.allowed_divergence = {

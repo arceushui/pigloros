@@ -1,20 +1,22 @@
 {
-  "profile_id": "pigloros.w8.gateway-client-conformance.1.0.0",
+  "profile_id": "pigloros.w8.gateway-client-seam",
   "claim_layer": "gateway-client-conformance",
   "wire_code": 3,
   "subject_adapter": "public-gateway-protocol",
-  "fixture_providers": [{
-    "manifest": "providers/gateway-client-conformance/provider.json",
-    "fixture_case_ids": [
-      "gateway-client-conformance-positive",
-      "gateway-client-conformance-denied",
-      "gateway-client-conformance-malformed",
-      "gateway-client-conformance-resource-exhaustion",
-      "gateway-client-conformance-deletion-redaction",
-      "gateway-client-conformance-downgrade",
-      "gateway-client-conformance-independent-evaluation"
-    ]
-  }],
+  "fixture_providers": [
+    {
+      "manifest": "providers/gateway-client-conformance/provider.json",
+      "fixture_case_ids": [
+        "gateway-client-conformance-positive",
+        "gateway-client-conformance-denied",
+        "gateway-client-conformance-malformed",
+        "gateway-client-conformance-resource-exhaustion",
+        "gateway-client-conformance-deletion-redaction",
+        "gateway-client-conformance-downgrade",
+        "gateway-client-conformance-independent-evaluation"
+      ]
+    }
+  ],
   "fixture_root": "gateway-client-conformance",
   "fixtures": [
     {
@@ -90,5 +92,7 @@
   "bundle_modes": [
     "local",
     "air-gapped"
-  ]
+  ],
+  "semantic_version": "1.0.0",
+  "normative_requirements": "profiles/gateway-client-conformance/normative-requirements.md"
 }

@@ -4,16 +4,16 @@ use ed25519_dalek::SigningKey;
 use pos_conformance::{
     draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
     draft_trust_policy_snapshot_bytes_v1, expected_result_member_path,
-    verify_archive_release_filename, verify_release_tree_independently, AllowedDivergenceV1,
-    ArtifactDescriptorV1, BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1,
-    CapabilityPolicyV1, ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1,
-    ConformanceProfileV1, DeterministicBudgetV1, DivergenceMismatchKindV1, EvaluatorHardCapsV1,
-    EvaluatorProtocolV1, FixtureContractTransitionV1, FixtureDescriptorV1, FixtureFamilyV1,
-    FixtureProvenanceV1, FixtureProviderEntryV1, FixtureProviderKeyV1, FixtureProviderPackageV1,
-    FixtureProviderRegistryBindingV1, FixtureProviderRegistryV1, IndependenceRequirementsV1,
-    NamespacedFailureV1, OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1,
-    RedactionStateV1, ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1,
-    VerificationOutcomeV1, FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
+    verify_archive_release_filename, verify_release_tree_independently, ArtifactDescriptorV1,
+    BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
+    ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1,
+    DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureContractTransitionV1,
+    FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderEntryV1,
+    FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryBindingV1,
+    FixtureProviderRegistryV1, IndependenceRequirementsV1, NamespacedFailureV1,
+    OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1, RedactionStateV1,
+    ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::error::Error;
@@ -164,10 +164,6 @@ enum CatalogStrictOracle {
         contract_version: &'static str,
         code_id: &'static str,
     },
-    Divergence {
-        classification: DivergenceMismatchKindV1,
-        first_coordinate: &'static [u8],
-    },
 }
 
 struct FixtureProvider {
@@ -231,6 +227,8 @@ struct FixtureExpectation {
 struct LayerCatalogEntry {
     claim_layer: ClaimLayerV1,
     profile_id: &'static str,
+    semantic_version: &'static str,
+    normative_requirements: &'static [u8],
     subject_adapter: SubjectAdapterKindV1,
     profile_record: &'static [u8],
     fixture_providers: Vec<CatalogFixtureProvider>,
@@ -810,8 +808,7 @@ fn output_checksum_inventory(files: &[MaterializedFile]) -> MaterializedFile {
     }
 }
 
-fn fixture_context(claim_layer: ClaimLayerV1) -> FixtureContext {
-    let normative = MATERIALIZATION_SUPPORT_NORMATIVE_REQUIREMENTS_MD_BYTES;
+fn fixture_context(layer: &LayerCatalogEntry) -> FixtureContext {
     let notice = MATERIALIZATION_SUPPORT_NOTICE_BYTES;
     let sbom = MATERIALIZATION_SUPPORT_SBOM_JSON_BYTES;
     let source_provenance = MATERIALIZATION_SUPPORT_SOURCE_PROVENANCE_JSON_BYTES;
@@ -822,14 +819,14 @@ fn fixture_context(claim_layer: ClaimLayerV1) -> FixtureContext {
     let sbom_digest = *blake3::hash(sbom).as_bytes();
     let limitations_digest = *blake3::hash(limitations).as_bytes();
     FixtureContext {
-        claim_layer,
+        claim_layer: layer.claim_layer,
         source_provenance_digest: *blake3::hash(source_provenance).as_bytes(),
         build_provenance_digest: *blake3::hash(build_provenance).as_bytes(),
         publication_review_digest: *blake3::hash(publication_review).as_bytes(),
         notice_digest,
         sbom_digest,
         limitations_digest,
-        normative_spec_digest: *blake3::hash(normative).as_bytes(),
+        normative_spec_digest: *blake3::hash(layer.normative_requirements).as_bytes(),
     }
 }
 
@@ -886,7 +883,7 @@ fn profile_from_catalog(
     layer: &LayerCatalogEntry,
     providers: &ProviderCatalog,
 ) -> Result<ConformanceProfileV1, Box<dyn Error>> {
-    let context = fixture_context(layer.claim_layer);
+    let context = fixture_context(layer);
     let provider_keys = layer
         .fixture_providers
         .iter()
@@ -911,15 +908,6 @@ fn profile_from_catalog(
                     fixture.modes.clone(),
                 )
             });
-            let mut allowed_divergences = fixtures
-                .iter()
-                .filter_map(|fixture| fixture.strict_oracle.divergence.clone())
-                .collect::<Vec<_>>();
-            allowed_divergences.sort_by(|left, right| {
-                (left.classification, left.first_coordinate.as_slice())
-                    .cmp(&(right.classification, right.first_coordinate.as_slice()))
-            });
-            allowed_divergences.dedup();
             DRAFT_EXECUTION_PROFILES
                 .iter()
                 .map(execution_profile_digest)
@@ -931,14 +919,14 @@ fn profile_from_catalog(
                             *blake3::hash(MATERIALIZATION_EXECUTION_MATRIX_BYTES).as_bytes();
                         let mut profile = ConformanceProfileV1 {
                             profile_id: layer.profile_id.to_owned(),
-                            semantic_version: "1.0.0".to_owned(),
+                            semantic_version: layer.semantic_version.to_owned(),
                             lifecycle: ProfileLifecycleV1::Draft,
                             normative_spec_digest: context.normative_spec_digest,
                             execution_matrix_digest,
                             execution_profile_digests,
                             fixture_provider_registry: providers.binding_for(provider_keys),
                             fixtures,
-                            allowed_divergences,
+                            allowed_divergences: Vec::new(),
                             evaluator_protocol: evaluator_protocol(),
                             independence_requirements: IndependenceRequirementsV1 {
                                 technical_independence_required: true,
@@ -1119,25 +1107,6 @@ fn fixture_expectation(
                 Some(failure),
             )
         }
-        CatalogStrictOracle::Divergence {
-            classification,
-            first_coordinate,
-        } => {
-            let divergence = AllowedDivergenceV1 {
-                classification: *classification,
-                first_coordinate: first_coordinate.to_vec(),
-            };
-            (
-                StrictOracleV1 {
-                    kind: StrictOracleKindV1::Divergence,
-                    output: None,
-                    failure: None,
-                    divergence: Some(divergence),
-                },
-                VerificationOutcomeV1::Diverged,
-                None,
-            )
-        }
     };
     FixtureExpectation {
         strict_oracle,
@@ -1265,17 +1234,30 @@ fn bundle_inputs_from_profile(
         }
     }
     expected_results.sort();
-    append_supporting_members(&mut members, inventory_bytes, providers, profile, mode)
-        .map(|()| (members, expected_results))
+    append_supporting_members(
+        layer,
+        &mut members,
+        inventory_bytes,
+        providers,
+        profile,
+        mode,
+    )
+    .map(|()| (members, expected_results))
 }
 
 fn append_supporting_members(
+    layer: &LayerCatalogEntry,
     members: &mut Vec<BundleMemberV1>,
     inventory_bytes: &[u8],
     providers: &ProviderCatalog,
     profile: &ConformanceProfileV1,
     mode: CatalogBundleMode,
 ) -> Result<(), Box<dyn Error>> {
+    members.push(BundleMemberV1::supporting(
+        "support/normative-requirements.md",
+        layer.normative_requirements.to_vec(),
+        BundleMemberRoleV1::NormativeSpecification,
+    ));
     members.extend(MATERIALIZATION_SUPPORT_ARTIFACTS.iter().map(|artifact| {
         BundleMemberV1::supporting(artifact.path, artifact.bytes.to_vec(), artifact.role)
     }));

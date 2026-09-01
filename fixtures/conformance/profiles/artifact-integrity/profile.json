@@ -1,20 +1,22 @@
 {
-  "profile_id": "pigloros.w8.artifact-integrity.1.0.0",
+  "profile_id": "pigloros.w8.artifact-integrity",
   "claim_layer": "artifact-integrity",
   "wire_code": 0,
   "subject_adapter": "exported-artifact",
-  "fixture_providers": [{
-    "manifest": "providers/artifact-integrity/provider.json",
-    "fixture_case_ids": [
-      "artifact-integrity-positive",
-      "artifact-integrity-denied",
-      "artifact-integrity-malformed",
-      "artifact-integrity-resource-exhaustion",
-      "artifact-integrity-deletion-redaction",
-      "artifact-integrity-downgrade",
-      "artifact-integrity-independent-evaluation"
-    ]
-  }],
+  "fixture_providers": [
+    {
+      "manifest": "providers/artifact-integrity/provider.json",
+      "fixture_case_ids": [
+        "artifact-integrity-positive",
+        "artifact-integrity-denied",
+        "artifact-integrity-malformed",
+        "artifact-integrity-resource-exhaustion",
+        "artifact-integrity-deletion-redaction",
+        "artifact-integrity-downgrade",
+        "artifact-integrity-independent-evaluation"
+      ]
+    }
+  ],
   "fixture_root": "artifact-integrity",
   "fixtures": [
     {
@@ -90,5 +92,7 @@
   "bundle_modes": [
     "local",
     "air-gapped"
-  ]
+  ],
+  "semantic_version": "1.0.0",
+  "normative_requirements": "profiles/artifact-integrity/normative-requirements.md"
 }
