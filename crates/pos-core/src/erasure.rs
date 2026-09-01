@@ -1922,19 +1922,21 @@ pub struct ErasureSupportingRecordsV1 {
     administrative_resolutions: Vec<ErasureAdministrativeResolutionV1>,
 }
 
+type ErasureObligationOwnerV1 = (ErasureReferenceV1, ErasureReferenceV1);
+type ErasureSelectedPositiveProvenanceV1<'a> = (
+    (u64, ErasureReferenceV1),
+    &'a ErasureAcknowledgementProvenanceV1,
+);
+type ErasurePositiveProvenanceIndexV1<'a> =
+    BTreeMap<ErasureObligationOwnerV1, ErasureSelectedPositiveProvenanceV1<'a>>;
+
 struct ErasureEvidenceIndex<'a> {
     obligations: BTreeMap<ErasureReferenceV1, &'a ErasureObligationV1>,
     admissions: BTreeMap<ErasureReferenceV1, &'a ErasureRetryAdmissionV1>,
     admitted_commands: BTreeSet<(ErasureReferenceV1, ErasureReferenceV1, ErasureReferenceV1)>,
     provenance_by_attempt:
         BTreeMap<ErasureReferenceV1, Vec<&'a ErasureAcknowledgementProvenanceV1>>,
-    earliest_positive: BTreeMap<
-        (ErasureReferenceV1, ErasureReferenceV1),
-        (
-            (u64, ErasureReferenceV1),
-            &'a ErasureAcknowledgementProvenanceV1,
-        ),
-    >,
+    earliest_positive: ErasurePositiveProvenanceIndexV1<'a>,
     current_provenance: BTreeMap<
         (ErasureReferenceV1, ErasureReferenceV1, ErasureReferenceV1),
         &'a ErasureAcknowledgementProvenanceV1,
@@ -2034,13 +2036,7 @@ impl<'a> ErasureEvidenceIndex<'a> {
     fn advance_effective_references(
         &self,
         admission: &ErasureRetryAdmissionV1,
-        carried: &mut BTreeMap<
-            (ErasureReferenceV1, ErasureReferenceV1),
-            (
-                (u64, ErasureReferenceV1),
-                &'a ErasureAcknowledgementProvenanceV1,
-            ),
-        >,
+        carried: &mut ErasurePositiveProvenanceIndexV1<'a>,
     ) -> Vec<ErasureReferenceV1> {
         let mut current = BTreeMap::new();
         for provenance in self
@@ -5483,11 +5479,11 @@ impl ErasureCoordinatorRecordV1 {
     fn retain_acknowledgement(
         &mut self,
         admission: &ErasureRetryAdmissionV1,
-        provenance: ErasureAcknowledgementProvenanceV1,
+        provenance: &ErasureAcknowledgementProvenanceV1,
     ) {
         self.supporting_records
             .acknowledgement_provenance
-            .push(provenance);
+            .push(provenance.clone());
         self.supporting_records
             .acknowledgement_provenance
             .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
@@ -5499,15 +5495,19 @@ impl ErasureCoordinatorRecordV1 {
     fn retain_terminal_receipt(
         &mut self,
         input: ErasureReceiptInputV1,
-        outcome: ErasureAttemptOutcomeV1,
+        outcome: &ErasureAttemptOutcomeV1,
         receipt: ErasureReceiptV1,
-        provenance: ErasureReceiptProvenanceV1,
+        provenance: &ErasureReceiptProvenanceV1,
     ) {
         self.receipt_input = Some(input);
         self.receipt = Some(receipt.clone());
-        self.supporting_records.attempt_outcomes.push(outcome);
+        self.supporting_records
+            .attempt_outcomes
+            .push(outcome.clone());
         self.supporting_records.receipts.push(receipt);
-        self.supporting_records.receipt_provenance.push(provenance);
+        self.supporting_records
+            .receipt_provenance
+            .push(provenance.clone());
     }
 
     fn retain_scope_extension(
@@ -7099,7 +7099,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     self.port
                         .admit_acknowledgement(&acknowledgement_provenance)
                         .and_then(|()| {
-                            record.retain_acknowledgement(&admission, acknowledgement_provenance);
+                            record.retain_acknowledgement(&admission, &acknowledgement_provenance);
                             let state = record.state.clone();
                             self.commit(record).map(|()| state)
                         })
@@ -7363,9 +7363,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .map(|(normalized, receipt_provenance, receipt)| {
                         record.retain_terminal_receipt(
                             normalized,
-                            outcome,
+                            &outcome,
                             receipt.clone(),
-                            receipt_provenance,
+                            &receipt_provenance,
                         );
                         (record.clone(), receipt)
                     })
