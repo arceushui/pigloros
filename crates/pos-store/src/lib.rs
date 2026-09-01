@@ -40,7 +40,7 @@ pub mod stitch;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod erasure_test_support;
+pub mod erasure_test_support;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
