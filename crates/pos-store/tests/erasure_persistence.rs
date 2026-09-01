@@ -15,9 +15,10 @@ use pos_core::{
     ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
-    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
+    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
@@ -28,6 +29,35 @@ use pos_core::{
 use pos_store::memory::MemoryStore;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+struct TestFreezeAuthorizationVerifier;
+
+const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
+    TestFreezeAuthorizationVerifier;
+
+impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
+    }
+}
+
+struct RejectingFreezeAuthorizationVerifier;
+
+impl ErasureFreezeAuthorizationVerifierV1 for RejectingFreezeAuthorizationVerifier {
+    fn validate_freeze_authorization(
+        &self,
+        _admission: &ErasureFreezeAdmissionEvidenceV1,
+        _authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Err(ErasureErrorV1::Unauthorized)
+    }
+}
 
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;
@@ -111,12 +141,12 @@ fn rejected_and_corrected_records() -> Result<
     coordinator.submit(request, reference(7))?;
     let submitted = source
         .borrow()
-        .load_record(request_digest)?
+        .load_record(request_digest, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     coordinator.reject(reference(1), reference(30))?;
     let predecessor = source
         .borrow()
-        .load_record(request_digest)?
+        .load_record(request_digest, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
         rejected_request: predecessor.request().reference(),
@@ -140,7 +170,7 @@ fn rejected_and_corrected_records() -> Result<
     coordinator.submit_corrected(request, correction)?;
     let corrected = source
         .borrow()
-        .load_record(corrected_request)?
+        .load_record(corrected_request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     Ok((submitted, predecessor, corrected))
 }
@@ -157,7 +187,10 @@ fn assert_correction_chain<S: ErasurePersistencePortV1>(
     store.commit_record(submitted)?;
     store.commit_record(predecessor)?;
     store.commit_record(corrected.clone())?;
-    assert_eq!(store.load_record(corrected_request)?, Some(corrected));
+    assert_eq!(
+        store.load_record(corrected_request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        Some(corrected)
+    );
     Ok(())
 }
 
@@ -353,8 +386,9 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for CoordinatorHost<S
     fn load_record(
         &self,
         request: ErasureReferenceV1,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
-        self.store.borrow().load_record(request)
+        self.store.borrow().load_record(request, verifier)
     }
 
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
@@ -388,6 +422,18 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for CoordinatorHost<S
         self.store
             .borrow_mut()
             .compare_and_swap_administrative_resolution(request, expected_head, record)
+    }
+}
+
+impl<S: ErasurePersistencePortV1> ErasureFreezeAuthorizationVerifierV1 for CoordinatorHost<S> {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 }
 
@@ -469,16 +515,6 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for CoordinatorHost<S
         Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)))
     }
 
-    fn validate_freeze_authorization(
-        &self,
-        admission: &ErasureFreezeAdmissionEvidenceV1,
-        authorization: &ErasureFreezeAuthorizationEvidenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
-    }
-
     fn dispatch_destruction(
         &self,
         _request: ErasureReferenceV1,
@@ -531,6 +567,19 @@ fn run_frozen_lifecycle<S: ErasurePersistencePortV1>(
     coordinator.authorize(reference(1), reference(8))?;
     coordinator.freeze_inventory(reference(1), transition())?;
     Ok(shared)
+}
+
+fn assert_recovery_requires_freeze_authorization<S: ErasurePersistencePortV1>(
+    store: S,
+) -> Result<(), ErasureErrorV1> {
+    let shared = run_frozen_lifecycle(store)?;
+    assert_eq!(
+        shared
+            .borrow()
+            .load_record(reference(1), &RejectingFreezeAuthorizationVerifier),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
 }
 
 fn scope_extension(
@@ -653,7 +702,7 @@ fn assert_scope_extension_cas<S: ErasurePersistencePortV1>(store: S) -> Result<(
     let shared = run_frozen_lifecycle(store)?;
     let record = shared
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let expected_ledger = record
         .scope_extension_ledger()
@@ -679,7 +728,12 @@ fn assert_scope_extension_cas<S: ErasurePersistencePortV1>(store: S) -> Result<(
         ),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    assert_eq!(shared.borrow().load_record(reference(1))?, Some(winner));
+    assert_eq!(
+        shared
+            .borrow()
+            .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        Some(winner)
+    );
     Ok(())
 }
 
@@ -689,7 +743,7 @@ fn assert_administrative_resolution_cas<S: ErasurePersistencePortV1>(
     let shared = run_frozen_lifecycle(store)?;
     let record = shared
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let winner = administrative_resolution_successor(
         &record,
@@ -712,7 +766,12 @@ fn assert_administrative_resolution_cas<S: ErasurePersistencePortV1>(
             .compare_and_swap_administrative_resolution(reference(1), None, competing),
         Err(ErasureErrorV1::PolicyConflict)
     );
-    assert_eq!(shared.borrow().load_record(reference(1))?, Some(winner));
+    assert_eq!(
+        shared
+            .borrow()
+            .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        Some(winner)
+    );
     Ok(())
 }
 
@@ -864,11 +923,17 @@ fn assert_public_contract<S: ErasurePersistencePortV1>(
     let request = record.request().reference();
     let state_digest = record.state().state_digest();
     store.commit_records(&[])?;
-    assert_eq!(store.load_record(request)?, None);
+    assert_eq!(
+        store.load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        None
+    );
     assert_eq!(store.resolve_state(state_digest)?, None);
 
     store.commit_record(record.clone())?;
-    assert_eq!(store.load_record(request)?, Some(record.clone()));
+    assert_eq!(
+        store.load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        Some(record.clone())
+    );
     assert_eq!(
         store.resolve_state(state_digest)?,
         Some(record.state().clone())
@@ -876,7 +941,10 @@ fn assert_public_contract<S: ErasurePersistencePortV1>(
 
     // Exact retries are idempotent and do not alter the loaded record.
     store.commit_record(record.clone())?;
-    assert_eq!(store.load_record(request)?, Some(record));
+    assert_eq!(
+        store.load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        Some(record)
+    );
     Ok(())
 }
 
@@ -907,11 +975,16 @@ fn memory_erasure_cas_rejects_a_missing_record() -> Result<(), ErasureErrorV1> {
 }
 
 #[test]
+fn memory_erasure_recovery_requires_freeze_authorization() -> Result<(), ErasureErrorV1> {
+    assert_recovery_requires_freeze_authorization(MemoryStore::new())
+}
+
+#[test]
 fn memory_erasure_persistence_recovers_supporting_records() -> Result<(), ErasureErrorV1> {
     let store = run_frozen_lifecycle(MemoryStore::new())?;
     let initial = store
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let expected = administrative_resolution_successor(
         &initial,
@@ -927,7 +1000,7 @@ fn memory_erasure_persistence_recovers_supporting_records() -> Result<(), Erasur
     let expected_supporting_records = expected.supporting_records().clone();
     let loaded = store
         .borrow()
-        .load_record(request)?
+        .load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(loaded.supporting_records(), &expected_supporting_records);
     assert_eq!(loaded.administrative_resolution_head(), Some(expected_head));
@@ -960,7 +1033,7 @@ fn memory_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
     let (store, receipt) = run_full_lifecycle(MemoryStore::new())?;
     let record = store
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(record.state().lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(record.receipt(), Some(&receipt));
@@ -990,7 +1063,7 @@ fn memory_erasure_persistence_commits_intermediate_and_partial_receipt_atomicall
     let (store, receipt) = run_partial_lifecycle(MemoryStore::new())?;
     let record = store
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(
         record.state().lifecycle(),
@@ -1007,7 +1080,7 @@ fn memory_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
     let (completed, receipt) = run_full_lifecycle(MemoryStore::new())?;
     let terminal = completed
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     drop(completed);
     let mut store = MemoryStore::new();
@@ -1015,14 +1088,20 @@ fn memory_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
         store.commit_record(terminal.clone()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    assert_eq!(store.load_record(reference(1))?, None);
+    assert_eq!(
+        store.load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        None
+    );
 
     let root = submitted_record()?;
     assert_eq!(
         store.commit_records(&[root, terminal]),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    assert_eq!(store.load_record(reference(1))?, None);
+    assert_eq!(
+        store.load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        None
+    );
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     Ok(())
 }
@@ -1032,7 +1111,7 @@ fn memory_erasure_persistence_rejects_a_conflicting_terminal_retry() -> Result<(
     let (shared, _) = run_full_lifecycle(MemoryStore::new())?;
     let record = shared
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let mut parts = record_parts(&record);
     let input = parts
@@ -1058,7 +1137,7 @@ fn sqlite_erasure_persistence_rejects_a_conflicting_terminal_retry() -> Result<(
     let (shared, _) = run_full_lifecycle(store)?;
     let record = shared
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let mut parts = record_parts(&record);
     let input = parts
@@ -1083,7 +1162,7 @@ fn memory_erasure_persistence_rejects_noncanonical_acknowledgement_and_provenanc
     let (store, _) = run_full_lifecycle(MemoryStore::new())?;
     let record = store
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
 
     let mut unsorted = record_parts(&record);
@@ -1119,6 +1198,13 @@ fn sqlite_erasure_cas_rejects_a_missing_record() -> Result<(), ErasureErrorV1> {
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn sqlite_erasure_recovery_requires_freeze_authorization() -> Result<(), ErasureErrorV1> {
+    let store = SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    assert_recovery_requires_freeze_authorization(store)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn sqlite_erasure_persistence_validates_correction_predecessors() -> Result<(), ErasureErrorV1> {
     let store = SqliteStore::open_in_memory().map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
     assert_correction_chain(store)
@@ -1147,7 +1233,7 @@ fn sqlite_erasure_persistence_commits_canonical_acknowledgement_and_receipt_stat
     let (store, receipt) = run_full_lifecycle(store)?;
     let record = store
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(record.state().lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(record.receipt(), Some(&receipt));
@@ -1171,7 +1257,7 @@ fn sqlite_erasure_persistence_commits_intermediate_and_partial_receipt_atomicall
     let (store, receipt) = run_partial_lifecycle(store)?;
     let record = store
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(
         record.state().lifecycle(),
@@ -1191,7 +1277,7 @@ fn sqlite_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
     )?;
     let terminal_record = completed
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     drop(completed);
     let mut store =
@@ -1200,14 +1286,20 @@ fn sqlite_erasure_persistence_rejects_orphans_and_keeps_batches_atomic(
         store.commit_record(terminal_record.clone()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    assert_eq!(store.load_record(reference(1))?, None);
+    assert_eq!(
+        store.load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        None
+    );
 
     let root = submitted_record()?;
     assert_eq!(
         store.commit_records(&[root, terminal_record]),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
-    assert_eq!(store.load_record(reference(1))?, None);
+    assert_eq!(
+        store.load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        None
+    );
     assert_eq!(terminal.lifecycle(), ErasureLifecycleV1::Complete);
     Ok(())
 }
@@ -1228,7 +1320,10 @@ fn sqlite_erasure_persistence_survives_reopen() -> Result<(), Box<dyn std::error
     drop(store);
 
     let reopened = SqliteStore::open(path)?;
-    assert_eq!(reopened.load_record(request)?, Some(record));
+    assert_eq!(
+        reopened.load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?,
+        Some(record)
+    );
     Ok(())
 }
 
@@ -1244,7 +1339,7 @@ fn sqlite_erasure_persistence_recovers_supporting_records_after_reopen(
     let store = run_frozen_lifecycle(SqliteStore::open(path)?)?;
     let initial = store
         .borrow()
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let record = administrative_resolution_successor(
         &initial,
@@ -1259,7 +1354,7 @@ fn sqlite_erasure_persistence_recovers_supporting_records_after_reopen(
 
     let reopened = SqliteStore::open(path)?;
     let loaded = reopened
-        .load_record(request)?
+        .load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(loaded.supporting_records(), &expected);
     Ok(())
@@ -1278,7 +1373,7 @@ fn sqlite_erasure_lifecycle_and_receipt_survive_reopen() -> Result<(), Box<dyn s
 
     let reopened = SqliteStore::open(path)?;
     let record = reopened
-        .load_record(reference(1))?
+        .load_record(reference(1), &TEST_FREEZE_AUTHORIZATION_VERIFIER)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(record.receipt(), Some(&receipt));
     assert_eq!(record.state().lifecycle(), ErasureLifecycleV1::Complete);

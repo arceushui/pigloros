@@ -1424,7 +1424,9 @@ pub(super) fn inventories_match_closure(
     targets.dedup();
     targets == frozen_targets
 }
-pub(super) fn has_duplicate_by_target(acknowledgements: &[ErasureAcknowledgementV1]) -> bool {
+pub(super) fn has_duplicate_acknowledgement_identity(
+    acknowledgements: &[ErasureAcknowledgementV1],
+) -> bool {
     acknowledgements
         .windows(2)
         .any(|pair| (pair[0].obligation, pair[0].owner) == (pair[1].obligation, pair[1].owner))

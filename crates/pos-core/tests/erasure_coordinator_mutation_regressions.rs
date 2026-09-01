@@ -18,17 +18,17 @@ use pos_core::{
     ErasureCoordinatorPortV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
     ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
     ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeFailureInputV1, ErasureFreezeFailureV1,
-    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
-    ERASURE_MAX_TARGETS,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureFreezeFailureInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
+    ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1,
+    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureSupportingRecordsInputV1,
+    ErasureSupportingRecordsV1, ERASURE_MAX_TARGETS,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -454,17 +454,25 @@ impl ErasurePersistencePortV1 for SharedPort {
     fn load_record(
         &self,
         request: ErasureReferenceV1,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
         if let Some(error) = self.state.borrow().load_error {
             return Err(error);
         }
-        Ok(self
-            .state
+        self.state
             .borrow()
             .records
             .iter()
             .find(|record| record.request().reference() == request)
-            .cloned())
+            .cloned()
+            .map(|record| {
+                record
+                    .state()
+                    .verify_predecessor_chain(self)
+                    .and_then(|()| record.verify_recovered_freeze_authorization(verifier))
+                    .map(|()| record)
+            })
+            .transpose()
     }
 
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
@@ -520,7 +528,7 @@ impl ErasurePersistencePortV1 for SharedPort {
             return Err(error);
         }
         if self
-            .load_record(request)?
+            .load_record(request, self)?
             .and_then(|current| current.scope_extension_ledger())
             != Some(expected_ledger)
         {
@@ -539,13 +547,28 @@ impl ErasurePersistencePortV1 for SharedPort {
             return Err(error);
         }
         if self
-            .load_record(request)?
+            .load_record(request, self)?
             .and_then(|current| current.administrative_resolution_head())
             != expected_head
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         self.commit_record(record)
+    }
+}
+
+impl ErasureFreezeAuthorizationVerifierV1 for SharedPort {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if let Some(error) = self.state.borrow().freeze_authorization_error {
+            return Err(error);
+        }
+        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 }
 
@@ -603,19 +626,6 @@ impl ErasureCoordinatorPortV1 for SharedPort {
         )
         .map(Box::new)
         .map(ErasureAtomicFreezeResultV1::Admitted)
-    }
-
-    fn validate_freeze_authorization(
-        &self,
-        admission: &ErasureFreezeAdmissionEvidenceV1,
-        authorization: &ErasureFreezeAuthorizationEvidenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        if let Some(error) = self.state.borrow().freeze_authorization_error {
-            return Err(error);
-        }
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn dispatch_destruction(

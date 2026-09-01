@@ -107,6 +107,18 @@ impl ErasureStateResolverV1 for FailingPredecessorResolver {
         }
     }
 }
+impl ErasureFreezeAuthorizationVerifierV1 for TestCoordinatorPort {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
+    }
+}
+
 impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
         if self.accepted {
@@ -212,15 +224,6 @@ impl ErasureCoordinatorPortV1 for TestCoordinatorPort {
             .replace(admission.clone());
         Ok(ErasureAtomicFreezeResultV1::Admitted(Box::new(admission)))
     }
-    fn validate_freeze_authorization(
-        &self,
-        admission: &ErasureFreezeAdmissionEvidenceV1,
-        authorization: &ErasureFreezeAuthorizationEvidenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
-    }
     fn dispatch_destruction(
         &self,
         _request: ErasureReferenceV1,
@@ -273,16 +276,24 @@ impl ErasurePersistencePortV1 for TestCoordinatorPort {
     fn load_record(
         &self,
         request: ErasureReferenceV1,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
         if let Some(error) = self.load_error {
             return Err(error);
         }
-        Ok(self
-            .records
+        self.records
             .borrow()
             .iter()
             .find(|record| record.request.reference() == request)
-            .cloned())
+            .cloned()
+            .map(|record| {
+                record
+                    .state()
+                    .verify_predecessor_chain(self)
+                    .and_then(|()| record.verify_recovered_freeze_authorization(verifier))
+                    .map(|()| record)
+            })
+            .transpose()
     }
 
     fn commit_records(
@@ -333,7 +344,7 @@ impl ErasurePersistencePortV1 for TestCoordinatorPort {
         expected_ledger: ErasureReferenceV1,
         record: ErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
-        let current = self.load_record(request)?;
+        let current = self.load_record(request, self)?;
         if current.and_then(|saved| saved.scope_extension_ledger()) != Some(expected_ledger) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -346,7 +357,7 @@ impl ErasurePersistencePortV1 for TestCoordinatorPort {
         expected_head: Option<ErasureReferenceV1>,
         record: ErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
-        let current = self.load_record(request)?;
+        let current = self.load_record(request, self)?;
         if current.and_then(|saved| saved.administrative_resolution_head()) != expected_head {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -872,7 +883,7 @@ pub(super) fn record_after_dispatch_intent(
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
     persisted
-        .load_record(reference(1))?
+        .load_record(reference(1), &persisted)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
@@ -2405,7 +2416,7 @@ fn dispatch_intent_is_persisted_before_host_dispatch() -> Result<(), ErasureErro
         Err(ErasureErrorV1::KeyDestructionFailed)
     );
     let persisted = restart_port
-        .load_record(reference(1))?
+        .load_record(reference(1), &restart_port)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     assert_eq!(
         persisted.state().lifecycle(),
@@ -5605,7 +5616,7 @@ fn awaiting_record() -> Result<ErasureCoordinatorRecordV1, ErasureErrorV1> {
     )?;
     coordinator.dispatch_destruction(reference(1), reference(9))?;
     persisted
-        .load_record(reference(1))?
+        .load_record(reference(1), &persisted)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
@@ -5664,7 +5675,7 @@ fn replacement_validation_rejects_invalid_lifecycle_and_target_updates(
         )?;
         coordinator.dispatch_destruction(reference(1), reference(9))?;
         persisted
-            .load_record(reference(1))?
+            .load_record(reference(1), &persisted)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?
     };
     assert_eq!(

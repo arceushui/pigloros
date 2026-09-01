@@ -43,9 +43,9 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     ConsentAppendPermit, CoreError, ErasureCoordinatorRecordV1, ErasureErrorV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, GEOGRAPHIC_EVENT_TYPE,
+    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, ErasureReferenceV1,
+    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -4125,37 +4125,7 @@ impl ErasureStateResolverV1 for SqliteStore {
         &self,
         digest: ErasureReferenceV1,
     ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
-        let bytes = self
-            .conn
-            .query_row(
-                "SELECT request_digest, state_cbor
-                 FROM erasure_states WHERE state_digest = ?1",
-                params![digest.digest().as_slice()],
-                |row| {
-                    row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
-                        row.get::<_, Vec<u8>>(1)
-                            .map(|state_cbor| (request_digest, state_cbor))
-                    })
-                },
-            )
-            .optional()
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        bytes
-            .map(|(request_digest, bytes)| {
-                let request_digest: [u8; 32] = request_digest
-                    .try_into()
-                    .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-                pos_core::ErasureStateV1::from_canonical_cbor(&bytes).and_then(|state| {
-                    if state.state_digest() == digest
-                        && state.request() == ErasureReferenceV1::from_digest(request_digest)
-                    {
-                        Ok(state)
-                    } else {
-                        Err(ErasureErrorV1::ProvenanceMissing)
-                    }
-                })
-            })
-            .transpose()
+        resolve_sqlite_erasure_state(&self.conn, digest)
     }
 }
 
@@ -4163,48 +4133,17 @@ impl ErasurePersistencePortV1 for SqliteStore {
     fn load_record(
         &self,
         request: ErasureReferenceV1,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
-        let bytes = self
-            .conn
-            .query_row(
-                "SELECT state_digest, record_cbor
-                 FROM erasure_records WHERE request_digest = ?1",
-                params![request.digest().as_slice()],
-                |row| {
-                    row.get::<_, Vec<u8>>(0).and_then(|state_digest| {
-                        row.get::<_, Vec<u8>>(1)
-                            .map(|record_cbor| (state_digest, record_cbor))
-                    })
-                },
-            )
-            .optional()
-            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        bytes
-            .map(|(state_digest, bytes)| {
-                ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).and_then(|record| {
-                    if record.request().reference() == request {
-                        let metadata_digest: [u8; 32] = state_digest
-                            .try_into()
-                            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-                        let expected_digest = ErasureReferenceV1::from_digest(metadata_digest);
-                        if expected_digest != record.state().state_digest() {
-                            return Err(ErasureErrorV1::ProvenanceMissing);
-                        }
-                        self.resolve_state(expected_digest).and_then(|state| {
-                            state.map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| {
-                                record
-                                    .state()
-                                    .verify_predecessor_chain(self)
-                                    .and_then(|()| validate_sqlite_correction(&self.conn, &record))
-                                    .map(|()| record)
-                            })
-                        })
-                    } else {
-                        Err(ErasureErrorV1::ProvenanceMissing)
-                    }
+        load_sqlite_erasure_record(&self.conn, request).and_then(|record| {
+            record
+                .map(|record| {
+                    record
+                        .verify_recovered_freeze_authorization(verifier)
+                        .map(|()| record)
                 })
-            })
-            .transpose()
+                .transpose()
+        })
     }
 
     fn commit_records(
@@ -4309,13 +4248,85 @@ fn load_sqlite_erasure_record(
     request: ErasureReferenceV1,
 ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
     conn.query_row(
-        "SELECT record_cbor FROM erasure_records WHERE request_digest = ?1",
+        "SELECT state_digest, record_cbor
+         FROM erasure_records WHERE request_digest = ?1",
         params![request.digest().as_slice()],
-        |row| row.get::<_, Vec<u8>>(0),
+        |row| {
+            row.get::<_, Vec<u8>>(0).and_then(|state_digest| {
+                row.get::<_, Vec<u8>>(1)
+                    .map(|record_cbor| (state_digest, record_cbor))
+            })
+        },
     )
     .optional()
     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-    .map(|bytes| ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes))
+    .map(|(state_digest, bytes)| {
+        ErasureCoordinatorRecordV1::from_canonical_cbor(&bytes).and_then(|record| {
+            let metadata_digest: [u8; 32] = state_digest
+                .try_into()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            let expected_digest = ErasureReferenceV1::from_digest(metadata_digest);
+            if record.request().reference() != request
+                || record.state().state_digest() != expected_digest
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let resolver = SqliteErasureStateResolver { conn };
+            resolver
+                .resolve_state(expected_digest)
+                .and_then(|state| state.ok_or(ErasureErrorV1::ProvenanceMissing))
+                .and_then(|_| record.state().verify_predecessor_chain(&resolver))
+                .and_then(|()| validate_sqlite_correction(conn, &record))
+                .map(|()| record)
+        })
+    })
+    .transpose()
+}
+
+struct SqliteErasureStateResolver<'a> {
+    conn: &'a Connection,
+}
+
+impl ErasureStateResolverV1 for SqliteErasureStateResolver<'_> {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
+        resolve_sqlite_erasure_state(self.conn, digest)
+    }
+}
+
+fn resolve_sqlite_erasure_state(
+    conn: &Connection,
+    digest: ErasureReferenceV1,
+) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT request_digest, state_cbor
+         FROM erasure_states WHERE state_digest = ?1",
+        params![digest.digest().as_slice()],
+        |row| {
+            row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
+                row.get::<_, Vec<u8>>(1)
+                    .map(|state_cbor| (request_digest, state_cbor))
+            })
+        },
+    )
+    .optional()
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+    .map(|(request_digest, bytes)| {
+        let request_digest: [u8; 32] = request_digest
+            .try_into()
+            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+        pos_core::ErasureStateV1::from_canonical_cbor(&bytes).and_then(|state| {
+            if state.state_digest() == digest
+                && state.request() == ErasureReferenceV1::from_digest(request_digest)
+            {
+                Ok(state)
+            } else {
+                Err(ErasureErrorV1::ProvenanceMissing)
+            }
+        })
+    })
     .transpose()
 }
 
@@ -4743,6 +4754,23 @@ mod tests {
         CoreError, KeyRegistrationV1, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStatusV1,
         OwnTracksEnrollmentStore,
     };
+
+    struct TestFreezeAuthorizationVerifier;
+
+    const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
+        TestFreezeAuthorizationVerifier;
+
+    impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
+        fn validate_freeze_authorization(
+            &self,
+            admission: &pos_core::ErasureFreezeAdmissionEvidenceV1,
+            authorization: &pos_core::ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+                .then_some(())
+                .ok_or(ErasureErrorV1::Unauthorized)
+        }
+    }
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -12779,7 +12807,9 @@ pub(super) mod key_registry_coverage {
                 .conn
                 .execute_batch("DROP TABLE erasure_records"),
         );
-        assert!(record_query_error.load_record(request).is_err());
+        assert!(record_query_error
+            .load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)
+            .is_err());
 
         let malformed_record_metadata = tests::new_store();
         fixture(
@@ -12792,7 +12822,9 @@ pub(super) mod key_registry_coverage {
              (request_digest, state_digest, record_cbor) VALUES (?1, X'01', ?2)",
             params![request.digest().as_slice(), record_bytes],
         ));
-        assert!(malformed_record_metadata.load_record(request).is_err());
+        assert!(malformed_record_metadata
+            .load_record(request, &TEST_FREEZE_AUTHORIZATION_VERIFIER)
+            .is_err());
 
         for (stored_request, stored_state) in [
             (request, erasure_reference(90)),
@@ -12809,7 +12841,7 @@ pub(super) mod key_registry_coverage {
                 ],
             ));
             assert_eq!(
-                mismatched_record.load_record(stored_request),
+                mismatched_record.load_record(stored_request, &TEST_FREEZE_AUTHORIZATION_VERIFIER),
                 Err(ErasureErrorV1::ProvenanceMissing)
             );
         }
@@ -12900,6 +12932,28 @@ pub(super) mod key_registry_coverage {
                 Err(ErasureErrorV1::ProvenanceMissing)
             );
         }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn erasure_exact_cas_retries_reject_a_missing_state_row() {
+        let record = erasure_record();
+        let request = record.request().reference();
+        let state_digest = record.state().state_digest();
+        let mut store = tests::new_store();
+        fixture(store.commit_record(record.clone()));
+        fixture(store.conn.execute(
+            "DELETE FROM erasure_states WHERE state_digest = ?1",
+            params![state_digest.digest().as_slice()],
+        ));
+        assert_eq!(
+            store.compare_and_swap_scope_extension(request, erasure_reference(90), record.clone(),),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            store.compare_and_swap_administrative_resolution(request, None, record),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]

@@ -5,10 +5,11 @@ use pos_core::{
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1,
     ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
 };
 
 use crate::erasure_support::freeze_evidence_fixture;
@@ -56,12 +57,20 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
     fn load_record(
         &self,
         request: ErasureReferenceV1,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
-        Ok(self
-            .records
+        self.records
             .iter()
             .find(|record| record.request().reference() == request)
-            .cloned())
+            .cloned()
+            .map(|record| {
+                record
+                    .state()
+                    .verify_predecessor_chain(self)
+                    .and_then(|()| record.verify_recovered_freeze_authorization(verifier))
+                    .map(|()| record)
+            })
+            .transpose()
     }
 
     fn commit_record(&mut self, record: ErasureCoordinatorRecordV1) -> Result<(), ErasureErrorV1> {
@@ -105,20 +114,50 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
 
     fn compare_and_swap_scope_extension(
         &mut self,
-        _request: ErasureReferenceV1,
-        _expected_ledger: ErasureReferenceV1,
+        request: ErasureReferenceV1,
+        expected_ledger: ErasureReferenceV1,
         record: ErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
+        let current = self
+            .load_record(request, self)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if current == record {
+            return Ok(());
+        }
+        if current.scope_extension_ledger() != Some(expected_ledger) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         self.commit_record(record)
     }
 
     fn compare_and_swap_administrative_resolution(
         &mut self,
-        _request: ErasureReferenceV1,
-        _expected_head: Option<ErasureReferenceV1>,
+        request: ErasureReferenceV1,
+        expected_head: Option<ErasureReferenceV1>,
         record: ErasureCoordinatorRecordV1,
     ) -> Result<(), ErasureErrorV1> {
+        let current = self
+            .load_record(request, self)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if current == record {
+            return Ok(());
+        }
+        if current.administrative_resolution_head() != expected_head {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         self.commit_record(record)
+    }
+}
+
+impl ErasureFreezeAuthorizationVerifierV1 for PublicCoordinatorPort {
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+            .then_some(())
+            .ok_or(ErasureErrorV1::Unauthorized)
     }
 }
 
@@ -199,16 +238,6 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
         })
         .map(Box::new)
         .map(ErasureAtomicFreezeResultV1::Admitted)
-    }
-
-    fn validate_freeze_authorization(
-        &self,
-        admission: &ErasureFreezeAdmissionEvidenceV1,
-        authorization: &ErasureFreezeAuthorizationEvidenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        (authorization.admission_body_digest() == admission.authorization_body_digest()?)
-            .then_some(())
-            .ok_or(ErasureErrorV1::Unauthorized)
     }
 
     fn dispatch_destruction(

@@ -42,8 +42,9 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, ErasureCoordinatorRecordV1, ErasureErrorV1, ErasurePersistencePortV1,
-    ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, ErasureCoordinatorRecordV1, ErasureErrorV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, ErasureReferenceV1,
+    ErasureStateResolverV1, KeyRegistryStateV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -1157,24 +1158,16 @@ impl ErasurePersistencePortV1 for MemoryStore {
     fn load_record(
         &self,
         request: ErasureReferenceV1,
+        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
     ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
         self.erasure_records
             .get(&request)
             .map(|bytes| {
                 ErasureCoordinatorRecordV1::from_canonical_cbor(bytes).and_then(|record| {
                     if record.request().reference() == request {
-                        let state_digest = record.state().state_digest();
-                        self.resolve_state(state_digest).and_then(|state| {
-                            state.map_or(Err(ErasureErrorV1::ProvenanceMissing), |_| {
-                                record
-                                    .state()
-                                    .verify_predecessor_chain(self)
-                                    .and_then(|()| {
-                                        validate_memory_correction(&record, &self.erasure_records)
-                                    })
-                                    .map(|()| record)
-                            })
-                        })
+                        validate_memory_loaded_record(self, &record)
+                            .and_then(|()| record.verify_recovered_freeze_authorization(verifier))
+                            .map(|()| record)
                     } else {
                         Err(ErasureErrorV1::ProvenanceMissing)
                     }
@@ -1208,6 +1201,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<(), ErasureErrorV1> {
         let current = load_memory_erasure_record(&self.erasure_records, request)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        validate_memory_loaded_record(self, &current)?;
         if current == record {
             return Ok(());
         }
@@ -1225,6 +1219,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<(), ErasureErrorV1> {
         let current = load_memory_erasure_record(&self.erasure_records, request)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        validate_memory_loaded_record(self, &current)?;
         if current == record {
             return Ok(());
         }
@@ -1233,6 +1228,17 @@ impl ErasurePersistencePortV1 for MemoryStore {
         }
         self.commit_record(record)
     }
+}
+
+fn validate_memory_loaded_record(
+    store: &MemoryStore,
+    record: &ErasureCoordinatorRecordV1,
+) -> Result<(), ErasureErrorV1> {
+    store
+        .resolve_state(record.state().state_digest())
+        .and_then(|state| state.ok_or(ErasureErrorV1::ProvenanceMissing))
+        .and_then(|_| record.state().verify_predecessor_chain(store))
+        .and_then(|()| validate_memory_correction(record, &store.erasure_records))
 }
 
 fn load_memory_erasure_record(
@@ -2262,6 +2268,23 @@ mod tests {
         KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
         OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, PublicKey,
     };
+
+    struct TestFreezeAuthorizationVerifier;
+
+    const TEST_FREEZE_AUTHORIZATION_VERIFIER: TestFreezeAuthorizationVerifier =
+        TestFreezeAuthorizationVerifier;
+
+    impl ErasureFreezeAuthorizationVerifierV1 for TestFreezeAuthorizationVerifier {
+        fn validate_freeze_authorization(
+            &self,
+            admission: &pos_core::ErasureFreezeAdmissionEvidenceV1,
+            authorization: &pos_core::ErasureFreezeAuthorizationEvidenceV1,
+        ) -> Result<(), ErasureErrorV1> {
+            (authorization.admission_body_digest() == admission.authorization_body_digest()?)
+                .then_some(())
+                .ok_or(ErasureErrorV1::Unauthorized)
+        }
+    }
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
@@ -5428,7 +5451,7 @@ mod coverage_entrypoints {
             .erasure_records
             .insert(mismatched_request, record_bytes.clone());
         assert_eq!(
-            mismatched_record.load_record(mismatched_request),
+            mismatched_record.load_record(mismatched_request, &TEST_FREEZE_AUTHORIZATION_VERIFIER),
             Err(ErasureErrorV1::ProvenanceMissing)
         );
 
@@ -5490,6 +5513,25 @@ mod coverage_entrypoints {
         assert_eq!(
             idempotent.compare_and_swap_administrative_resolution(request, None, record),
             Ok(())
+        );
+
+        let record = erasure_record();
+        let request = record.request().reference();
+        let state_digest = record.state().state_digest();
+        let mut missing_state = MemoryStore::new();
+        ok(missing_state.commit_record(record.clone()));
+        missing_state.erasure_states.remove(&state_digest);
+        assert_eq!(
+            missing_state.compare_and_swap_scope_extension(
+                request,
+                erasure_reference(90),
+                record.clone(),
+            ),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+        assert_eq!(
+            missing_state.compare_and_swap_administrative_resolution(request, None, record),
+            Err(ErasureErrorV1::ProvenanceMissing)
         );
     }
 
