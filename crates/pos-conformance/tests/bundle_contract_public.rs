@@ -26,19 +26,10 @@ use pos_conformance::{
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
 use support::{
     ArchiveField, ArtifactDescriptorField, DescriptorField, FixtureField, ManifestField,
     MemberField, ProfileField, ProviderBindingField, TemporaryOutput,
 };
-
-static MATERIALIZER_PROCESS_LOCK: Mutex<()> = Mutex::new(());
-
-fn materializer_process_guard() -> MutexGuard<'static, ()> {
-    MATERIALIZER_PROCESS_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
@@ -2762,7 +2753,6 @@ fn current_bundle_pair_requires_profile_parity() -> TestResult {
 
 #[test]
 fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> TestResult {
-    let _guard = materializer_process_guard();
     let root = temporary_root("conformance-cli")?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
@@ -2912,7 +2902,6 @@ fn privileged_materializer_test_drops_identity_and_rejects_foreign_parent() -> T
     let uid = std::str::from_utf8(&user_identity.stdout)?.trim();
     let gid = std::str::from_utf8(&group_identity.stdout)?.trim();
 
-    let _guard = materializer_process_guard();
     let root = temporary_root("unprivileged-materializer")?;
     let _cleanup = TemporaryOutput(root.clone());
     fs::create_dir_all(&root)?;
@@ -2976,7 +2965,6 @@ fn privileged_materializer_test_drops_identity_and_rejects_foreign_parent() -> T
 
 #[test]
 fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> TestResult {
-    let _guard = materializer_process_guard();
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
@@ -3054,7 +3042,6 @@ fn public_materializer_fingerprint_is_stable_and_invalid_invocations_fail() -> T
 #[cfg(target_os = "linux")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn assert_live_staging_rejections(cases: &[(StagingMutation, &str)]) -> TestResult {
-    let _guard = materializer_process_guard();
     let materializer = std::env::var_os("CARGO_BIN_EXE_materialize-conformance-bundles")
         .ok_or("materializer binary path is unavailable")?;
     let key = "0707070707070707070707070707070707070707070707070707070707070707";
