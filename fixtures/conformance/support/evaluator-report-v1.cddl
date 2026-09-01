@@ -1,4 +1,4 @@
-# CNR1 conformance report (deterministic, definite-length CBOR array)
+; CNR1 conformance report (deterministic, definite-length CBOR array)
 
 conformance-report-v1 = [
   magic: "CNR1",
@@ -14,7 +14,7 @@ conformance-report-v1 = [
   evaluator-protocol-digest: digest,
   implementation: implementation-identity,
   independence: independence-evidence,
-  cases: [* case-outcome],
+  cases: [1*65536 case-outcome],
   passed: uint,
   failed: uint,
   skipped: uint,
@@ -42,7 +42,8 @@ independence-evidence = [
   organizational-independent: bool,
   declaration-digest: digest,
   shared-code-audit-digest: digest,
-  reviewer-ids: [* identifier]
+  ; Entries are additionally required to be strictly ordered and unique.
+  reviewer-ids: [1*32 identifier]
 ]
 
 case-outcome = [

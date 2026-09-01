@@ -1,4 +1,4 @@
-# CPF1 public conformance schema (deterministic, definite-length CBOR arrays)
+; CPF1 public conformance schema (deterministic, definite-length CBOR arrays)
 
 cpf1 = [
   magic: "CPF1",
@@ -130,9 +130,10 @@ release-admission = [
   from-provider: provider-key, to-provider: provider-key,
   allow-fallback: false, signer-key-id: identifier, signature: bstr .size 64
 ]
-strict-oracle = [kind: 0..2, output: null / artifact-descriptor,
-                 failure: null / namespaced-failure,
-                 divergence: null / divergence]
+strict-oracle =
+  [kind: 0, output: artifact-descriptor, failure: null, divergence: null] /
+  [kind: 1, output: null, failure: namespaced-failure, divergence: null] /
+  [kind: 2, output: null, failure: null, divergence: divergence]
 namespaced-failure = [owner-id: identifier,
                       contract-version: tstr .size (1..64), code-id: identifier]
 divergence = [classification: 0..6, first-coordinate: bstr .size (1..128)]
