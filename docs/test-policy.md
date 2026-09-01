@@ -33,11 +33,13 @@ production code or avoid writing a reachable behavior test.
 
 The hosted coverage job publishes its completed LCOV report to a separate,
 required `cargo-crap` check running pinned v0.2.2. The verdict uses zero
-comparison tolerance: every score increase fails, and every new function must
-score at most 30. Standard Cargo integration-test, benchmark, and example
-directories are excluded from complexity scoring; their execution still
-contributes coverage to production code. Repository `.cargo-crap.toml` files
-are prohibited so a change cannot suppress or truncate the report.
+tool tolerance and treats one IEEE-754 representation step (one ULP) as
+numerical equality; every larger score increase fails, including increases on
+moved functions. Every new function must score at most 30. Standard Cargo
+integration-test, benchmark, and example directories are excluded from
+complexity scoring; their execution still contributes coverage to production
+code. Repository `.cargo-crap.toml` files are prohibited so a change cannot
+suppress or truncate the report.
 
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so

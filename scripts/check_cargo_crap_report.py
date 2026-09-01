@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 import sys
 from typing import Any
@@ -45,14 +46,46 @@ def validated_entries(report: Any) -> list[dict[str, Any]]:
         )
         crap = entry.get("crap")
         require(
-            isinstance(crap, (int, float)) and not isinstance(crap, bool) and crap >= 1,
+            isinstance(crap, (int, float))
+            and not isinstance(crap, bool)
+            and math.isfinite(crap)
+            and crap >= 1,
             f"entry {index} CRAP score must be a number at least 1",
         )
-        require(
-            entry.get("status") in ALLOWED_STATUSES,
-            f"entry {index} has an unsupported status",
-        )
+        status = entry.get("status")
+        require(status in ALLOWED_STATUSES, f"entry {index} has an unsupported status")
+        baseline = entry.get("baseline_crap")
+        delta = entry.get("delta")
+        if status == "new":
+            require(
+                baseline is None and delta is None,
+                f"entry {index} new function must not have baseline values",
+            )
+        else:
+            require(
+                isinstance(baseline, (int, float))
+                and not isinstance(baseline, bool)
+                and math.isfinite(baseline)
+                and baseline >= 1,
+                f"entry {index} baseline CRAP score must be a number at least 1",
+            )
+            require(
+                isinstance(delta, (int, float))
+                and not isinstance(delta, bool)
+                and math.isfinite(delta),
+                f"entry {index} delta must be a finite number",
+            )
     return entries
+
+
+def score_regressed(entry: dict[str, Any]) -> bool:
+    """Treat one floating-point representation step as numerical equality."""
+    baseline = entry["baseline_crap"]
+    if baseline is None:
+        return False
+    difference = entry["crap"] - baseline
+    numerical_ulp = max(math.ulp(entry["crap"]), math.ulp(baseline))
+    return difference > numerical_ulp
 
 
 def policy_findings(report: Any) -> list[dict[str, Any]]:
@@ -60,7 +93,7 @@ def policy_findings(report: Any) -> list[dict[str, Any]]:
     return [
         entry
         for entry in entries
-        if entry["status"] == "regressed"
+        if score_regressed(entry)
         or (entry["status"] == "new" and entry["crap"] > NEW_FUNCTION_THRESHOLD)
     ]
 
@@ -75,7 +108,7 @@ def check_report(path: pathlib.Path) -> None:
     for entry in findings:
         reason = (
             "CRAP score regressed"
-            if entry["status"] == "regressed"
+            if score_regressed(entry)
             else f"new function exceeds CRAP {NEW_FUNCTION_THRESHOLD:g}"
         )
         print(

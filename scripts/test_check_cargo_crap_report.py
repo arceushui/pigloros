@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import pathlib
 import unittest
 
@@ -18,6 +19,18 @@ SPEC.loader.exec_module(CHECKER)
 
 
 def entry(*, status: str, crap: float) -> dict:
+    if status == "new":
+        baseline_crap = None
+        delta = None
+    elif status == "regressed":
+        baseline_crap = crap - 1
+        delta = 1.0
+    elif status == "improved":
+        baseline_crap = crap + 1
+        delta = -1.0
+    else:
+        baseline_crap = crap
+        delta = 0.0
     return {
         "file": "src/lib.rs",
         "function": "example",
@@ -25,8 +38,8 @@ def entry(*, status: str, crap: float) -> dict:
         "cyclomatic": 2,
         "coverage": 100.0,
         "crap": crap,
-        "baseline_crap": None if status == "new" else crap,
-        "delta": None if status == "new" else 0.0,
+        "baseline_crap": baseline_crap,
+        "delta": delta,
         "status": status,
     }
 
@@ -42,6 +55,32 @@ class CargoCrapReportTests(unittest.TestCase):
     def test_regression_below_absolute_ceiling_fails(self) -> None:
         findings = CHECKER.policy_findings(report(entry(status="regressed", crap=12)))
         self.assertEqual(len(findings), 1)
+
+    def test_one_ulp_round_trip_noise_is_not_a_regression(self) -> None:
+        current = math.nextafter(12.0, math.inf)
+        value = entry(status="regressed", crap=current)
+        value["baseline_crap"] = 12.0
+        value["delta"] = current - 12.0
+        self.assertEqual(CHECKER.policy_findings(report(value)), [])
+
+    def test_two_ulp_increase_is_a_regression(self) -> None:
+        current = math.nextafter(math.nextafter(12.0, math.inf), math.inf)
+        value = entry(status="regressed", crap=current)
+        value["baseline_crap"] = 12.0
+        value["delta"] = current - 12.0
+        self.assertEqual(len(CHECKER.policy_findings(report(value))), 1)
+
+    def test_moved_function_score_increase_is_a_regression(self) -> None:
+        value = entry(status="moved", crap=9.0)
+        value["baseline_crap"] = 8.0
+        value["delta"] = 1.0
+        self.assertEqual(len(CHECKER.policy_findings(report(value))), 1)
+
+    def test_status_cannot_hide_a_score_increase(self) -> None:
+        value = entry(status="unchanged", crap=9.0)
+        value["baseline_crap"] = 8.0
+        value["delta"] = 1.0
+        self.assertEqual(len(CHECKER.policy_findings(report(value))), 1)
 
     def test_new_function_above_ceiling_fails(self) -> None:
         findings = CHECKER.policy_findings(report(entry(status="new", crap=30.01)))
