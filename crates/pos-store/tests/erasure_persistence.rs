@@ -260,6 +260,7 @@ const fn target(value: u8) -> ErasureRequiredTargetV1 {
     }
 }
 
+#[derive(Clone, Copy)]
 struct FreezeEvidenceFixtureInput<'a> {
     request: ErasureReferenceV1,
     scope: &'a ErasureScopeCommitmentInputV1,

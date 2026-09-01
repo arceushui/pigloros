@@ -413,6 +413,7 @@ fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
+#[derive(Clone, Copy)]
 struct FreezeEvidenceFixtureInput<'a> {
     request: ErasureReferenceV1,
     scope_commitment: ErasureReferenceV1,

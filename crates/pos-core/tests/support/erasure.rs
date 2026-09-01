@@ -15,6 +15,7 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
 }
 
 /// Named inputs for one mutually bound admission/authorization fixture.
+#[derive(Clone, Copy)]
 pub struct FreezeEvidenceFixtureInput<'a> {
     pub request: ErasureReferenceV1,
     pub scope_commitment: ErasureReferenceV1,
