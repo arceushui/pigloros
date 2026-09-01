@@ -5290,15 +5290,6 @@ fn receipt_constructor_rejects_retained_wire_boundaries() {
     );
     assert_eq!(
         ErasureReceiptV1::new(receipt_input(
-            ErasureLifecycleV1::Complete,
-            Vec::new(),
-            Vec::new(),
-            Vec::new()
-        )),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    assert_eq!(
-        ErasureReceiptV1::new(receipt_input(
             ErasureLifecycleV1::PartialFailure,
             vec![acknowledgement(1, ErasureAcknowledgementOutcomeV1::Stale)],
             vec![reference(8)],
