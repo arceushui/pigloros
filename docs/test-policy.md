@@ -46,12 +46,19 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 
 ## Resource-intensive sanitizer jobs
 
-The complete workspace ASan gate retains `--all-features`, `--workspace`, and
-`--tests`, but serializes Cargo build/link jobs on hosted runners. ASan plus
+The complete workspace ASan gate retains all features and test targets, but
+partitions their execution across two hosted shards because Cargo runs separate
+test executables serially. The `bundle-contracts` shard runs the two
+`pos-conformance` bundle integration targets. The `remainder` shard runs
+`--workspace --exclude pos-conformance --tests`, then the `pos-conformance`
+library, binaries, and remaining three integration targets. Each shard
+serializes Cargo build/link jobs and bounds test threads at two. The required
+`asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
+every shard succeeds. Partitioning changes throughput only: it does not remove
+a package, feature, test target, sanitizer, or coverage requirement. ASan plus
 `build-std` produces unusually large test-binary links; concurrent lld workers
 can exhaust the runner's available resources and crash with `SIGBUS` before any
-test executes. Serialization changes throughput only: it does not remove a
-package, feature, test target, sanitizer, or coverage requirement.
+test executes.
 
 The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
 nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled
@@ -70,14 +77,15 @@ backtraces without full type and variable metadata. This changes artifact size
 only; sanitizer instrumentation, debug assertions, packages, features, test
 targets, and execution scope remain.
 
-`scripts/check-asan-ci-policy.sh` enforces both the serialization setting and
-the unchanged ASan workspace test command by parsing the workflow's executable
-YAML semantics. Adversarial fixtures prove that disabled/non-failing steps,
-environment-based test runners, detached sanitizer flags, `--no-run`, shell
-success overrides, skipped prerequisites, injected setup steps, and test-skip
-arguments are rejected. The ASan job graph and pinned setup-step sequence must
-match exactly, and the final test step may contain only `name`, `env`, and
-`run` so it cannot select a nested Cargo configuration.
+`scripts/check-asan-ci-policy.sh` enforces the exact shard matrix, target
+partition, per-shard resource settings, fail-closed aggregate, and complete
+ASan scope by parsing the workflow's executable YAML semantics. Adversarial
+fixtures prove that disabled/non-failing steps, environment-based test runners,
+detached sanitizer flags, `--no-run`, shell success overrides, skipped
+prerequisites, injected setup steps, and test-skip arguments are rejected. The
+ASan job graph and pinned setup-step sequence must match exactly, and each test
+step may contain only `name`, `env`, and `run` so it cannot select a nested
+Cargo configuration.
 
 ### Controlled Bevy reflection metadata roots
 
@@ -92,10 +100,11 @@ different process tables are aggregated only for diagnostics. Root and byte
 counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
-The complete workspace/all-features/all-test-target ASan command and
-`detect_leaks=1` remain unchanged. A separate 1,234-byte intentional leak runs
-under the same sanitizer, symbolizer, suppression file, and options; it must
-exit nonzero, report exactly one allocation, and match neither approved rule.
+The complete workspace/all-features/all-test-target ASan scope and
+`detect_leaks=1` remain unchanged across the two shards. A separate 1,234-byte
+intentional leak runs under the same sanitizer, symbolizer, suppression file,
+and options; it must exit nonzero, report exactly one allocation, and match
+neither approved rule.
 Any unexpected or malformed suppression row/table, duplicate template within
 one process table, zero measurement, unrelated leak, or negative-control
 success fails CI. Bevy, Rust nightly, LLVM, sanitizer, or runner-image upgrades
