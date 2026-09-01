@@ -684,7 +684,7 @@ fn exercise_scalar_boundaries<T, E>(
             let displaced = replace_at_path(&mut mutant, &path, replacement);
             let bytes = encode_value(&mutant);
             if let Ok(canonical) = decode(&bytes).and_then(|decoded| encode(&decoded)) {
-                drop(decode(&canonical));
+                assert_eq!(canonical, bytes, "accepted mutation must remain canonical");
             }
             drop(replace_at_path(&mut mutant, &path, displaced));
             exercised += 1;

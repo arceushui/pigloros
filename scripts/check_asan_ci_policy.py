@@ -36,7 +36,7 @@ EXPECTED_STEP_ENV = {
         "print_suppressions=1"
     ),
     "CARGO_BUILD_JOBS": "1",
-    "RUST_TEST_THREADS": "4",
+    "RUST_TEST_THREADS": "2",
     "CARGO_INCREMENTAL": "0",
     "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
 }
