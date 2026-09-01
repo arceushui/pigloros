@@ -156,6 +156,8 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Check formatting on the changed files themselves.** `cargo fmt --all` covers Cargo's discovered target graph, which can omit a changed Rust fixture or integration target that repository-wide Trunk checks format directly. Run the repository formatter and the pinned rustfmt check on every changed Rust file before pushing; keep the hosted formatter authoritative.
 
+- **Distinguish formatter findings from formatter execution failures.** A hosted rustfmt timeout that reports no issue is not evidence that source needs reformatting. Re-run the exact failed job once on a fresh runner before editing; if the same command times out again, isolate its file batch and tool/cache state as a CI defect rather than making speculative source changes.
+
 - **Keep required workflows alive while scoping expensive gates.** Use a pinned path-filter action with its filter configuration loaded from the pull request’s trusted base revision and a conservative documentation-only allowlist to drive job-level `needs`/`if` conditions; keep required workflow triggers broad because top-level path filters can leave checks pending. Ensure unknown, deleted, renamed, generated, and policy inputs run the full suite, and keep pushes, schedules, and manual runs full.
 
 - **Give every fixture one owner and lifecycle.** Shipped conformance fixtures, test-only fixtures, public authority bytes, and mutation reports have different audiences and validity. Keep them separate, bind reports to the commit that produced them, and remove embedded sample data when its product owner is removed.
