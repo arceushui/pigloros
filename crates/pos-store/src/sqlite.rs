@@ -12782,5 +12782,4 @@ pub(super) mod key_registry_coverage {
         FAIL_REGISTRY_SERIALIZATION.with(|flag| flag.set(false));
         assert!(matches!(serialization, Err(CoreError::Serialization(_))));
     }
-
 }

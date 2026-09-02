@@ -616,6 +616,6 @@ fn bounded_predicates_keep_raw_collections_canonical() {
             replicas: Vec::new(),
             backups: Vec::new(),
         }),
-        ErasureReplayClaimV1::Exact
+        ErasureReplayClaimV1::UnverifiableArtifactsMissing
     );
 }
