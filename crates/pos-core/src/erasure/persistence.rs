@@ -7,17 +7,19 @@ use super::codec::{
 use super::{
     acknowledgement_inventory_reference, decode_limited, domain_digest, encode_limited,
     erasure_evidence_set_reference, exact_array, selected_obligations_reference,
-    verify_predecessor_chain, BTreeMap, BTreeSet, ErasureAcknowledgementOutcomeV1,
-    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
+    target_closure_digest, verify_predecessor_chain, BTreeMap, BTreeSet,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionV1,
-    ErasureCasEffectV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureCasEffectV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceV1,
-    ErasureIndexInsertV1, ErasureObligationSetV1, ErasureObligationV1, ErasurePersistedStateV1,
-    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReceiptProvenanceV1,
-    ErasureReceiptV1, ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateV1,
-    PreparedErasureCasV1, StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+    ErasureIndexInsertV1, ErasureLifecycleV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateV1, PreparedErasureCasV1,
+    StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
     ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
     ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
@@ -693,7 +695,9 @@ impl RecoveredErasureV1 {
         validate_fixed_graph(&FixedGraphV1 {
             requested,
             erq: &foundation.request,
+            state: &foundation.state,
             targets: &foundation.targets,
+            correction: evidence.correction.as_ref(),
             rejection: evidence.rejection.as_ref(),
             scope: evidence.scope.as_ref(),
             admission: evidence.freeze_admission.as_ref(),
@@ -702,8 +706,10 @@ impl RecoveredErasureV1 {
             failure: evidence.freeze_failure.as_ref(),
             obligation_set: evidence.obligation_set.as_ref(),
             obligations: &evidence.obligations,
+            authorize_provenance: manifest.authorize_provenance,
             verifier,
         })?;
+        validate_correction(port, &foundation.request, evidence.correction.as_ref())?;
 
         let RecoveredFoundationV1 {
             request,
@@ -1196,6 +1202,7 @@ impl RecoveredErasureV1 {
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
+            self.validate_attempt_effect(port, &admission)?;
             self.effective.retain(|_, value| {
                 value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged
             });
@@ -1245,6 +1252,7 @@ impl RecoveredErasureV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        self.validate_attempt_effect(port, &admission)?;
         self.effective
             .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
         let admitted_values = self.load_acknowledgements(port, &admission, &admitted.references)?;
@@ -1308,6 +1316,13 @@ impl RecoveredErasureV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        self.validate_effect_subject(
+            port,
+            receipt.receipt_digest(),
+            &ErasureCasEffectV1::ReceiptAdmission {
+                receipt: receipt.receipt_digest(),
+            },
+        )?;
         receipt.validate_frozen_obligations(&self.obligations)?;
         Ok(receipt.receipt_digest())
     }
@@ -1330,14 +1345,122 @@ impl RecoveredErasureV1 {
                 ErasureAcknowledgementProvenanceV1::reference,
             )?;
             let key = (acknowledgement.obligation(), acknowledgement.owner());
-            if acknowledgement.request() != self.request.reference()
-                || acknowledgement.attempt() != admission.reference()
+            if !self.acknowledgement_matches_admission(&acknowledgement, admission)
                 || values.insert(key, acknowledgement).is_some()
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
+            self.validate_effect_subject(
+                port,
+                *reference,
+                &ErasureCasEffectV1::AcknowledgementAdmission {
+                    acknowledgement: *reference,
+                },
+            )?;
         }
         Ok(values)
+    }
+
+    fn validate_attempt_effect(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let obligation_set = self
+            .obligation_set
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let acknowledged = self
+            .effective
+            .values()
+            .filter(|value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged)
+            .map(ErasureAcknowledgementProvenanceV1::obligation)
+            .collect::<BTreeSet<_>>();
+        let unresolved = self
+            .obligations
+            .iter()
+            .filter(|obligation| !acknowledged.contains(&obligation.reference()))
+            .collect::<Vec<_>>();
+        let expected_obligations = unresolved
+            .iter()
+            .map(|obligation| obligation.reference())
+            .collect::<Vec<_>>();
+        let expected_identities = unresolved
+            .iter()
+            .map(|obligation| obligation.command_identity())
+            .collect::<Vec<_>>();
+        if admission.policy() != obligation_set.policy()
+            || admission.trust() != obligation_set.trust()
+            || admission.unresolved_obligations() != expected_obligations.as_slice()
+            || admission.command_identities() != expected_identities.as_slice()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let expected_commands = unresolved
+            .into_iter()
+            .map(|obligation| {
+                ErasureDestructionCommandV1::from_obligation(obligation, admission.reference())
+            })
+            .collect::<Vec<_>>();
+        let manifest = port
+            .effect_manifest(admission.reference())?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        match port.read_effect(manifest)? {
+            ErasureCasEffectV1::AttemptAdmission {
+                reservation,
+                commands,
+            } if reservation.admission() == admission.reference()
+                && commands == expected_commands =>
+            {
+                Ok(())
+            }
+            _ => Err(ErasureErrorV1::ProvenanceMissing),
+        }
+    }
+
+    fn validate_effect_subject(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        subject: ErasureReferenceV1,
+        expected: &ErasureCasEffectV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let manifest = port
+            .effect_manifest(subject)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if &port.read_effect(manifest)? == expected {
+            Ok(())
+        } else {
+            Err(ErasureErrorV1::ProvenanceMissing)
+        }
+    }
+
+    fn acknowledgement_matches_admission(
+        &self,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> bool {
+        let Some(scope) = self.scope.as_ref() else {
+            return false;
+        };
+        let Some(obligation) = self
+            .obligations
+            .iter()
+            .find(|value| value.reference() == acknowledgement.obligation())
+        else {
+            return false;
+        };
+        let selected = admission
+            .unresolved_obligations()
+            .binary_search(&acknowledgement.obligation())
+            .is_ok_and(|index| admission.command_identities()[index] == acknowledgement.command());
+        acknowledgement.request() == self.request.reference()
+            && acknowledgement.attempt() == admission.reference()
+            && acknowledgement.scope() == scope.reference()
+            && acknowledgement.policy() == admission.policy()
+            && acknowledgement.trust() == admission.trust()
+            && acknowledgement.owner() == obligation.owner()
+            && acknowledgement.command() == obligation.command_identity()
+            && selected
     }
 
     fn apply_acknowledgements(
@@ -1472,7 +1595,9 @@ fn canonical_acknowledgement_references(
 struct FixedGraphV1<'a> {
     requested: ErasureReferenceV1,
     erq: &'a ErasureRequestV1,
+    state: &'a ErasureStateV1,
     targets: &'a [ErasureRequiredTargetV1],
+    correction: Option<&'a ErasureCorrectionProvenanceV1>,
     rejection: Option<&'a ErasureAuthorizationRejectionV1>,
     scope: Option<&'a ErasureScopeCommitmentV1>,
     admission: Option<&'a ErasureFreezeAdmissionEvidenceV1>,
@@ -1481,11 +1606,16 @@ struct FixedGraphV1<'a> {
     failure: Option<&'a ErasureFreezeFailureV1>,
     obligation_set: Option<&'a ErasureObligationSetV1>,
     obligations: &'a [ErasureObligationV1],
+    authorize_provenance: Option<ErasureReferenceV1>,
     verifier: &'a dyn ErasureFreezeAuthorizationVerifierV1,
 }
 
 fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> {
     if graph.erq.reference() != graph.requested
+        || graph.state.request() != graph.requested
+        || graph
+            .correction
+            .is_some_and(|value| graph.erq.provenance() != value.reference())
         || graph
             .rejection
             .is_some_and(|value| value.request() != graph.requested)
@@ -1522,22 +1652,45 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> 
         graph.freeze,
         graph.obligation_set,
     ) {
-        if admission.scope_commitment() != scope.reference()
-            || admission.obligation_set() != set.reference()
+        let reconstructed =
+            ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+                targets: graph.targets.to_vec(),
+                scope: ErasureScopeCommitmentInputV1 {
+                    request: scope.request(),
+                    scope_members: scope.scope_members().to_vec(),
+                    target_closure: scope.target_closure(),
+                    lineage_rule: scope.lineage_rule(),
+                },
+                obligations: graph.obligations.to_vec(),
+                obligation_set: set.clone(),
+                freeze_position: admission.freeze_position(),
+                freeze_admission_evidence: admission.clone(),
+                freeze_authorization_evidence: graph
+                    .authorization
+                    .cloned()
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+            })?;
+        if reconstructed.targets() != graph.targets
+            || scope.target_closure() != target_closure_digest(graph.targets)
             || freeze.scope_commitment() != scope.reference()
             || freeze.obligation_set() != set.reference()
             || freeze.host_evidence() != admission.reference()
+            || freeze.freeze_position() != admission.freeze_position()
+            || graph.state.freeze_position() != Some(admission.freeze_position())
             || set.policy() != graph.erq.policy()
-            || graph.obligations.len() != set.obligations().len()
-            || graph
-                .obligations
-                .iter()
-                .zip(set.obligations())
-                .any(|(object, reference)| object.reference() != *reference)
-            || graph
-                .obligations
-                .iter()
-                .any(|obligation| !graph.targets.contains(&obligation.target()))
+            || graph.authorize_provenance.is_none()
+            || graph.rejection.is_some()
+            || graph.failure.is_some()
+            || !matches!(
+                graph.state.lifecycle(),
+                ErasureLifecycleV1::AccessFrozen
+                    | ErasureLifecycleV1::DestructionDispatched
+                    | ErasureLifecycleV1::AwaitingAcknowledgements
+                    | ErasureLifecycleV1::PartialFailure
+                    | ErasureLifecycleV1::Complete
+            )
+            || (graph.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
+                && graph.state.provenance() != freeze.reference())
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -1550,5 +1703,63 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> 
     {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
+    validate_unfrozen_graph(graph)?;
     Ok(())
+}
+
+fn validate_unfrozen_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> {
+    if graph.freeze.is_some() {
+        return Ok(());
+    }
+    match (graph.rejection, graph.failure, graph.state.lifecycle()) {
+        (Some(rejection), None, ErasureLifecycleV1::Rejected)
+            if graph.authorize_provenance.is_none()
+                && graph.state.provenance() == rejection.reference() =>
+        {
+            Ok(())
+        }
+        (None, Some(failure), ErasureLifecycleV1::Rejected)
+            if graph.authorize_provenance == Some(failure.authorization_provenance())
+                && graph.state.provenance() == failure.reference() =>
+        {
+            Ok(())
+        }
+        (None, None, ErasureLifecycleV1::Submitted)
+            if graph.authorize_provenance.is_none()
+                && graph.state.provenance() == graph.erq.provenance() =>
+        {
+            Ok(())
+        }
+        (None, None, ErasureLifecycleV1::Authorized)
+            if graph.authorize_provenance == Some(graph.state.provenance()) =>
+        {
+            Ok(())
+        }
+        _ => Err(ErasureErrorV1::ProvenanceMissing),
+    }
+}
+
+fn validate_correction(
+    port: &dyn ErasurePersistencePortV1,
+    request: &ErasureRequestV1,
+    correction: Option<&ErasureCorrectionProvenanceV1>,
+) -> Result<(), ErasureErrorV1> {
+    let Some(correction) = correction else {
+        return Ok(());
+    };
+    if request.provenance() != correction.reference()
+        || request.reference() == correction.rejected_request()
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    let rejected = port
+        .resolve_state(correction.rejected_terminal_state())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    if rejected.request() == correction.rejected_request()
+        && rejected.lifecycle() == ErasureLifecycleV1::Rejected
+    {
+        Ok(())
+    } else {
+        Err(ErasureErrorV1::ProvenanceMissing)
+    }
 }

@@ -43,7 +43,7 @@ pub(super) fn cas_effect_value(effect: &ErasureCasEffectV1) -> Value {
             digest(reservation.admission()),
             Value::Array(vec![
                 digest(reservation.reference()),
-                Value::Array(commands.iter().copied().map(command_value).collect()),
+                Value::Array(commands.iter().map(command_value).collect()),
             ]),
         ),
         ErasureCasEffectV1::AcknowledgementAdmission { acknowledgement } => {
@@ -103,7 +103,7 @@ pub(super) fn cas_effect_from_fields(
     }
 }
 
-fn command_value(command: ErasureDestructionCommandV1) -> Value {
+fn command_value(command: &ErasureDestructionCommandV1) -> Value {
     Value::Array(vec![
         digest(command.obligation),
         uint(command.category.code()),
