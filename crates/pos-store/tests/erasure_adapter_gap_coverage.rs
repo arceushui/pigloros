@@ -734,6 +734,40 @@ fn sqlite_public_attempt_history_recovers_across_partial_retry(
 }
 
 #[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_public_reads_map_missing_schema_to_closed_storage_errors(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for operation in [
+        SqliteReadOperation::Manifest,
+        SqliteReadOperation::Object,
+        SqliteReadOperation::Effect,
+        SqliteReadOperation::EffectManifest,
+        SqliteReadOperation::AttemptRef,
+        SqliteReadOperation::AttemptCount,
+        SqliteReadOperation::ScopeRef,
+        SqliteReadOperation::ScopeCount,
+        SqliteReadOperation::ResolutionRef,
+        SqliteReadOperation::ResolutionCount,
+        SqliteReadOperation::State,
+    ] {
+        let database = tempfile::NamedTempFile::new()?;
+        let path = database
+            .path()
+            .to_str()
+            .ok_or(ErasureErrorV1::InvalidEncoding)?;
+        let store = SqliteStore::open(path)?;
+        let connection = rusqlite::Connection::open(path)?;
+        let table = operation.table();
+        connection.execute_batch(&format!("DROP TABLE {table}"))?;
+        assert_eq!(
+            operation.invoke(&store),
+            Err(ErasureErrorV1::ReceiptCommitFailed)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 #[derive(Clone, Copy)]
 enum SqliteFaultKind {
     MissingObject,
@@ -741,6 +775,57 @@ enum SqliteFaultKind {
     MissingIndex,
     MismatchedEffect,
     ApplyWithMismatchedState,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Copy)]
+enum SqliteReadOperation {
+    Manifest,
+    Object,
+    Effect,
+    EffectManifest,
+    AttemptRef,
+    AttemptCount,
+    ScopeRef,
+    ScopeCount,
+    ResolutionRef,
+    ResolutionCount,
+    State,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteReadOperation {
+    const fn table(self) -> &'static str {
+        match self {
+            Self::Manifest => "erasure_records",
+            Self::Object => "erasure_evidence",
+            Self::Effect | Self::EffectManifest => "erasure_effects",
+            Self::AttemptRef | Self::AttemptCount => "erasure_attempt_pages",
+            Self::ScopeRef | Self::ScopeCount => "erasure_scope_nodes",
+            Self::ResolutionRef | Self::ResolutionCount => "erasure_administrative_resolutions",
+            Self::State => "erasure_states",
+        }
+    }
+
+    fn invoke(self, store: &SqliteStore) -> Result<(), ErasureErrorV1> {
+        match self {
+            Self::Manifest => store.read_manifest(reference(1)).map(|_| ()),
+            Self::Object => store.read_object(reference(1)).map(|_| ()),
+            Self::Effect => store.read_effect(reference(1)).map(|_| ()),
+            Self::EffectManifest => store.effect_manifest(reference(1)).map(|_| ()),
+            Self::AttemptRef => store.attempt_page_ref(reference(1), 0).map(|_| ()),
+            Self::AttemptCount => store.attempt_index_count(reference(1)).map(|_| ()),
+            Self::ScopeRef => store.scope_node_ref(reference(1), 0).map(|_| ()),
+            Self::ScopeCount => store.scope_index_count(reference(1)).map(|_| ()),
+            Self::ResolutionRef => store
+                .administrative_resolution_ref(reference(1), 0)
+                .map(|_| ()),
+            Self::ResolutionCount => store
+                .administrative_resolution_index_count(reference(1))
+                .map(|_| ()),
+            Self::State => store.resolve_state(reference(1)).map(|_| ()),
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]

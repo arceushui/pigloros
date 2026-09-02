@@ -411,6 +411,34 @@ fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     request(ErasureScopeV1::PrivateSubjectData, vec![reference(20)])
 }
 
+fn corrected_request(provenance: ErasureReferenceV1) -> Result<ErasureRequestV1, ErasureErrorV1> {
+    ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(50),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
+        request_position: 11,
+        horizon_position: 20,
+        provenance,
+    })
+}
+
+fn correction_for(
+    rejected_request: ErasureReferenceV1,
+    rejected_terminal_state: ErasureReferenceV1,
+    correction_reason: ErasureReferenceV1,
+) -> Result<ErasureCorrectionProvenanceV1, ErasureErrorV1> {
+    ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request,
+        rejected_terminal_state,
+        correction_reason,
+        authorization_provenance: reference(23),
+    })
+}
+
 fn coordinator_port(
     targets: Vec<ErasureRequiredTargetV1>,
     lineage_rule: Option<ErasureReferenceV1>,
@@ -1053,24 +1081,8 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     coordinator.submit(original.clone(), original.provenance())?;
     let rejected = coordinator.reject(original.reference(), reference(21))?;
-    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-        rejected_request: original.reference(),
-        rejected_terminal_state: rejected.state_digest(),
-        correction_reason: reference(22),
-        authorization_provenance: reference(23),
-    })?;
-    let corrected = ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(50),
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(20)],
-        requester: reference(3),
-        authorization: reference(4),
-        policy: reference(5),
-        request_position: 11,
-        horizon_position: 20,
-        provenance: correction.reference(),
-    })?;
+    let correction = correction_for(original.reference(), rejected.state_digest(), reference(22))?;
+    let corrected = corrected_request(correction.reference())?;
     let mut faulted = ErasureCoordinatorStateMachineV1::new(
         adapter.with_operation_fault(PublicCoordinatorFault {
             operation: PublicCoordinatorOperation::AdmitCorrectedSubmission,
@@ -1082,24 +1094,8 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         faulted.submit_corrected(corrected.clone(), correction.clone()),
         Err(ErasureErrorV1::TrustSnapshotInvalid)
     );
-    let wrong_terminal = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-        rejected_request: original.reference(),
-        rejected_terminal_state: reference(99),
-        correction_reason: reference(22),
-        authorization_provenance: reference(23),
-    })?;
-    let wrong_terminal_request = ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(50),
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(20)],
-        requester: reference(3),
-        authorization: reference(4),
-        policy: reference(5),
-        request_position: 11,
-        horizon_position: 20,
-        provenance: wrong_terminal.reference(),
-    })?;
+    let wrong_terminal = correction_for(original.reference(), reference(99), reference(22))?;
+    let wrong_terminal_request = corrected_request(wrong_terminal.reference())?;
     let api: &mut dyn ErasureCoordinator = &mut coordinator;
     assert_eq!(
         api.submit_corrected(wrong_terminal_request, wrong_terminal),
@@ -1108,28 +1104,12 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     let corrected_state = api.submit_corrected(corrected.clone(), correction.clone())?;
     assert_eq!(corrected_state.lifecycle(), ErasureLifecycleV1::Submitted);
     assert_eq!(
-        api.submit_corrected(corrected.clone(), correction.clone())?,
+        api.submit_corrected(corrected, correction.clone())?,
         corrected_state
     );
     let conflicting_correction =
-        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-            rejected_request: original.reference(),
-            rejected_terminal_state: rejected.state_digest(),
-            correction_reason: reference(98),
-            authorization_provenance: reference(23),
-        })?;
-    let conflicting_request = ErasureRequestV1::new(ErasureRequestInputV1 {
-        request: reference(50),
-        subject: reference(2),
-        scope: ErasureScopeV1::PrivateSubjectData,
-        selectors: vec![reference(20)],
-        requester: reference(3),
-        authorization: reference(4),
-        policy: reference(5),
-        request_position: 11,
-        horizon_position: 20,
-        provenance: conflicting_correction.reference(),
-    })?;
+        correction_for(original.reference(), rejected.state_digest(), reference(98))?;
+    let conflicting_request = corrected_request(conflicting_correction.reference())?;
     assert_eq!(
         api.submit_corrected(conflicting_request, conflicting_correction),
         Err(ErasureErrorV1::PolicyConflict)

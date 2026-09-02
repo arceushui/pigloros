@@ -4378,20 +4378,20 @@ impl ErasurePersistencePortV1 for SqliteStore {
         request: ErasureReferenceV1,
         ordinal: u64,
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        sqlite_index_ref(&self.conn, "erasure_attempt_pages", request, ordinal)
+        sqlite_index_ref(&self.conn, SqliteErasureIndex::Attempt, request, ordinal)
     }
     fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        sqlite_index_count(&self.conn, "erasure_attempt_pages", request)
+        sqlite_index_count(&self.conn, SqliteErasureIndex::Attempt, request)
     }
     fn scope_node_ref(
         &self,
         request: ErasureReferenceV1,
         ordinal: u64,
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-        sqlite_index_ref(&self.conn, "erasure_scope_nodes", request, ordinal)
+        sqlite_index_ref(&self.conn, SqliteErasureIndex::Scope, request, ordinal)
     }
     fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
-        sqlite_index_count(&self.conn, "erasure_scope_nodes", request)
+        sqlite_index_count(&self.conn, SqliteErasureIndex::Scope, request)
     }
     fn administrative_resolution_ref(
         &self,
@@ -4400,7 +4400,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
         sqlite_index_ref(
             &self.conn,
-            "erasure_administrative_resolutions",
+            SqliteErasureIndex::AdministrativeResolution,
             request,
             ordinal,
         )
@@ -4409,7 +4409,11 @@ impl ErasurePersistencePortV1 for SqliteStore {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<u64, ErasureErrorV1> {
-        sqlite_index_count(&self.conn, "erasure_administrative_resolutions", request)
+        sqlite_index_count(
+            &self.conn,
+            SqliteErasureIndex::AdministrativeResolution,
+            request,
+        )
     }
     fn compare_and_swap(
         &mut self,
@@ -4430,22 +4434,45 @@ fn reference_from_sql(bytes: Vec<u8>) -> Result<ErasureReferenceV1, ErasureError
         .map_err(|_| ErasureErrorV1::ProvenanceMissing)
 }
 
+#[derive(Clone, Copy)]
+enum SqliteErasureIndex {
+    Attempt,
+    Scope,
+    AdministrativeResolution,
+}
+
+impl SqliteErasureIndex {
+    const fn reference_query(self) -> &'static str {
+        match self {
+            Self::Attempt => "SELECT reference_digest FROM erasure_attempt_pages WHERE request_digest=?1 AND ordinal=?2",
+            Self::Scope => "SELECT reference_digest FROM erasure_scope_nodes WHERE request_digest=?1 AND ordinal=?2",
+            Self::AdministrativeResolution => "SELECT reference_digest FROM erasure_administrative_resolutions WHERE request_digest=?1 AND ordinal=?2",
+        }
+    }
+
+    const fn count_query(self) -> &'static str {
+        match self {
+            Self::Attempt => "SELECT COUNT(*) FROM erasure_attempt_pages WHERE request_digest=?1",
+            Self::Scope => "SELECT COUNT(*) FROM erasure_scope_nodes WHERE request_digest=?1",
+            Self::AdministrativeResolution => {
+                "SELECT COUNT(*) FROM erasure_administrative_resolutions WHERE request_digest=?1"
+            }
+        }
+    }
+}
+
 fn sqlite_index_ref(
     conn: &Connection,
-    table: &str,
+    index: SqliteErasureIndex,
     request: ErasureReferenceV1,
     ordinal: u64,
 ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
-    let sql = match table {
-        "erasure_attempt_pages" => "SELECT reference_digest FROM erasure_attempt_pages WHERE request_digest=?1 AND ordinal=?2",
-        "erasure_scope_nodes" => "SELECT reference_digest FROM erasure_scope_nodes WHERE request_digest=?1 AND ordinal=?2",
-        "erasure_administrative_resolutions" => "SELECT reference_digest FROM erasure_administrative_resolutions WHERE request_digest=?1 AND ordinal=?2",
-        _ => return Err(ErasureErrorV1::ReceiptCommitFailed),
-    };
     let ordinal = i64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?;
-    conn.query_row(sql, params![request.digest().as_slice(), ordinal], |row| {
-        row.get::<_, Vec<u8>>(0)
-    })
+    conn.query_row(
+        index.reference_query(),
+        params![request.digest().as_slice(), ordinal],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
     .optional()
     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
     .map(reference_from_sql)
@@ -4454,23 +4481,15 @@ fn sqlite_index_ref(
 
 fn sqlite_index_count(
     conn: &Connection,
-    table: &str,
+    index: SqliteErasureIndex,
     request: ErasureReferenceV1,
 ) -> Result<u64, ErasureErrorV1> {
-    let sql = match table {
-        "erasure_attempt_pages" => {
-            "SELECT COUNT(*) FROM erasure_attempt_pages WHERE request_digest=?1"
-        }
-        "erasure_scope_nodes" => "SELECT COUNT(*) FROM erasure_scope_nodes WHERE request_digest=?1",
-        "erasure_administrative_resolutions" => {
-            "SELECT COUNT(*) FROM erasure_administrative_resolutions WHERE request_digest=?1"
-        }
-        _ => return Err(ErasureErrorV1::ReceiptCommitFailed),
-    };
     let count = conn
-        .query_row(sql, params![request.digest().as_slice()], |row| {
-            row.get::<_, i64>(0)
-        })
+        .query_row(
+            index.count_query(),
+            params![request.digest().as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
     u64::try_from(count).map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
 }
@@ -4565,22 +4584,22 @@ fn insert_sqlite_index(
     request: ErasureReferenceV1,
     index: ErasureIndexInsertV1,
 ) -> Result<(), ErasureErrorV1> {
-    let (sql, table, ordinal, reference) = match index {
+    let (sql, index, ordinal, reference) = match index {
         ErasureIndexInsertV1::AttemptPage { ordinal, reference } => (
             "INSERT INTO erasure_attempt_pages(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            "erasure_attempt_pages",
+            SqliteErasureIndex::Attempt,
             ordinal,
             reference,
         ),
         ErasureIndexInsertV1::ScopeNode { ordinal, reference } => (
             "INSERT INTO erasure_scope_nodes(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            "erasure_scope_nodes",
+            SqliteErasureIndex::Scope,
             ordinal,
             reference,
         ),
         ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
             "INSERT INTO erasure_administrative_resolutions(request_digest,ordinal,reference_digest) VALUES(?1,?2,?3) ON CONFLICT(request_digest,ordinal) DO NOTHING",
-            "erasure_administrative_resolutions",
+            SqliteErasureIndex::AdministrativeResolution,
             ordinal,
             reference,
         ),
@@ -4594,7 +4613,7 @@ fn insert_sqlite_index(
         ],
     )
     .map_err(|_| ErasureErrorV1::PolicyConflict)?;
-    (sqlite_index_ref(conn, table, request, ordinal)? == Some(reference))
+    (sqlite_index_ref(conn, index, request, ordinal)? == Some(reference))
         .then_some(())
         .ok_or(ErasureErrorV1::PolicyConflict)
 }
@@ -4652,18 +4671,20 @@ fn sqlite_mutation_is_exact(
         }
     }
     for index in mutation.index_inserts() {
-        let (table, ordinal, reference) = match *index {
+        let (index, ordinal, reference) = match *index {
             ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
-                ("erasure_attempt_pages", ordinal, reference)
+                (SqliteErasureIndex::Attempt, ordinal, reference)
             }
             ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
-                ("erasure_scope_nodes", ordinal, reference)
+                (SqliteErasureIndex::Scope, ordinal, reference)
             }
-            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
-                ("erasure_administrative_resolutions", ordinal, reference)
-            }
+            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+                SqliteErasureIndex::AdministrativeResolution,
+                ordinal,
+                reference,
+            ),
         };
-        if sqlite_index_ref(conn, table, mutation.request(), ordinal)? != Some(reference) {
+        if sqlite_index_ref(conn, index, mutation.request(), ordinal)? != Some(reference) {
             return Ok(false);
         }
     }
