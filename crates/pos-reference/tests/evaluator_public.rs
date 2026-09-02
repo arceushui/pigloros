@@ -693,6 +693,34 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
 }
 
 #[test]
+fn evaluator_rejects_wrong_types_at_each_required_archive_field() -> TestResult {
+    let mutations = (0..6)
+        .map(BundleMutation::RawManifestField)
+        .chain((0..4).map(BundleMutation::RawDescriptorField))
+        .chain((0..3).map(BundleMutation::RawMemberField))
+        .chain((0..6).map(BundleMutation::RawExpectedField))
+        .chain((0..4).map(BundleMutation::RawArchiveField));
+    for mutation in mutations {
+        let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
     let mutations = [
         TrustMutation::Magic,
@@ -720,6 +748,32 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
         TrustMutation::PreviousInvalid,
         TrustMutation::Signature,
     ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_trust_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_wrong_types_at_each_required_trust_policy_field() -> TestResult {
+    let mutations = (0..10)
+        .map(TrustMutation::RawField)
+        .chain((0..4).map(TrustMutation::RawRootField))
+        .chain((0..2).map(TrustMutation::RawMinimumVersionField));
     for mutation in mutations {
         let corpus = support::corpus_with_trust_mutation(mutation)?;
         let mut adapter = PublicAdapter {
