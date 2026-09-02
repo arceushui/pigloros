@@ -19,13 +19,25 @@ pub(crate) struct Corpus {
 type TestResult<T> = Result<T, Box<dyn Error>>;
 
 pub(crate) fn corpus() -> TestResult<Corpus> {
+    corpus_with_extra(None)
+}
+
+pub(crate) fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
+    corpus_with_extra(Some(secret))
+}
+
+fn corpus_with_extra(extra: Option<&[u8]>) -> TestResult<Corpus> {
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let trust_policy = trust_policy(&signing_key)?;
     let trust_digest = hash(&trust_policy);
-    let execution_profile = canonical(&array(vec![text("EPF1"), uint(1), text("test-profile")]))?;
+    let execution_profile = execution_profile()?;
     let execution_digest = hash(&execution_profile);
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
+    add_provider_contracts(&mut members)?;
+    if let Some(bytes) = extra {
+        members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
+    }
     let hard_caps = hard_caps();
     let fixtures = fixtures(
         &mut members,
@@ -94,11 +106,7 @@ fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>,
             (b"{}".to_vec(), 11),
         ),
         (
-            "authority/fixture-provider-registry.fpr1".to_owned(),
-            (b"registry".to_vec(), 12),
-        ),
-        (
-            "authority/test-profile.epf1".to_owned(),
+            "authority/execution-profiles/test-profile.epf1".to_owned(),
             (execution.to_vec(), 14),
         ),
         (
@@ -139,11 +147,10 @@ fn fixtures(
     trust: [u8; 32],
     expected: &[u8],
 ) -> TestResult<Vec<Value>> {
-    let schema_path = "fixtures/schema.json";
-    members.insert(schema_path.to_owned(), (b"schema".to_vec(), 4));
     (0_u64..=6)
         .map(|family| -> TestResult<Value> {
             let case_id = format!("case-{family}");
+            let schema_path = format!("providers/test-provider/schema-{family}.json");
             let payload_path = format!("fixtures/{case_id}.input");
             let evidence_path = format!("fixtures/{case_id}.evidence");
             let output_path = format!("fixtures/{case_id}.expected");
@@ -175,7 +182,7 @@ fn fixtures(
                 uint(0),
                 bytes(&execution),
                 array(vec![uint(0), uint(1)]),
-                descriptor(members, schema_path)?,
+                descriptor(members, &schema_path)?,
                 descriptor(members, &payload_path)?,
                 array(vec![descriptor(members, &evidence_path)?]),
                 array(vec![
@@ -203,6 +210,100 @@ fn fixtures(
         .collect()
 }
 
+fn add_provider_contracts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<()> {
+    let support = [
+        (
+            "providers/test-provider/LICENSE",
+            b"Apache-2.0".as_slice(),
+            5,
+        ),
+        (
+            "providers/test-provider/NOTICE",
+            b"test notice".as_slice(),
+            6,
+        ),
+        ("providers/test-provider/sbom.json", b"{}".as_slice(), 7),
+        (
+            "providers/test-provider/provenance.json",
+            b"{}".as_slice(),
+            8,
+        ),
+        (
+            "providers/test-provider/limitations.md",
+            b"none".as_slice(),
+            9,
+        ),
+    ];
+    for (path, contents, role) in support {
+        members.insert(path.to_owned(), (contents.to_vec(), role));
+    }
+    for family in 0_u64..=6 {
+        members.insert(
+            format!("providers/test-provider/schema-{family}.json"),
+            (format!("{{\"family\":{family}}}").into_bytes(), 4),
+        );
+    }
+
+    let schemas = (0_u64..=6)
+        .map(|family| -> TestResult<Value> {
+            Ok(array(vec![
+                uint(family),
+                descriptor(
+                    members,
+                    &format!("providers/test-provider/schema-{family}.json"),
+                )?,
+            ]))
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+    let mut package_fields = vec![
+        text("FPP1"),
+        uint(1),
+        provider_key(1),
+        uint(0),
+        uint(0),
+        array(schemas),
+        descriptor(members, "providers/test-provider/LICENSE")?,
+        descriptor(members, "providers/test-provider/NOTICE")?,
+        descriptor(members, "providers/test-provider/sbom.json")?,
+        descriptor(members, "providers/test-provider/provenance.json")?,
+        descriptor(members, "providers/test-provider/limitations.md")?,
+    ];
+    let package_digest = hash_contract(
+        "PiglorOS.Conformance.ProviderPackage.v1",
+        &array(package_fields.clone()),
+    )?;
+    package_fields.push(bytes(&package_digest));
+    let package_path = "providers/test-provider/package.cbor";
+    members.insert(
+        package_path.to_owned(),
+        (canonical(&array(package_fields))?, 13),
+    );
+
+    let mut registry_fields = vec![
+        text("FPR1"),
+        uint(1),
+        array(vec![array(vec![
+            text("test-provider"),
+            text("1.0.0"),
+            uint(1),
+            uint(1),
+            uint(0),
+            uint(0),
+            descriptor_with_media(members, package_path, "application/cbor")?,
+        ])]),
+    ];
+    let registry_digest = hash_contract(
+        "PiglorOS.Conformance.ProviderRegistry.v1",
+        &array(registry_fields.clone()),
+    )?;
+    registry_fields.push(bytes(&registry_digest));
+    members.insert(
+        "authority/fixture-provider-registry.cbor".to_owned(),
+        (canonical(&array(registry_fields))?, 12),
+    );
+    Ok(())
+}
+
 fn profile(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     fixtures: Vec<Value>,
@@ -222,7 +323,7 @@ fn profile(
         array(vec![
             descriptor_with_media(
                 members,
-                "authority/fixture-provider-registry.fpr1",
+                "authority/fixture-provider-registry.cbor",
                 "application/cbor",
             )?,
             array(vec![provider_key(1)]),
@@ -360,6 +461,30 @@ fn provider_key(minor: u64) -> Value {
         uint(1),
         uint(minor),
     ])
+}
+
+fn execution_profile() -> TestResult<Vec<u8>> {
+    let mut fields = vec![
+        text("EPF1"),
+        uint(1),
+        text("test-profile"),
+        text("1.0.0"),
+        array(vec![uint(0), uint(1)]),
+        array(vec![text("fixed-architecture")]),
+        array(vec![text("integer-arithmetic")]),
+        array(vec![text("canonical-driver-order")]),
+        text("logical-ticks"),
+        array(vec![text("explicit-schema-version")]),
+        array(vec![text("digest-bound-artifacts")]),
+        array(vec![Value::Bool(false), array(Vec::new())]),
+        array(vec![uint(100); 8]),
+        array(Vec::new()),
+        array(vec![text("1.0.0"), text("1.0.0")]),
+        Value::Null,
+    ];
+    let digest = hash_contract("PiglorOS.ExecutionProfile.v1", &array(fields.clone()))?;
+    fields.push(bytes(&digest));
+    canonical(&array(fields))
 }
 
 fn hard_caps() -> Value {

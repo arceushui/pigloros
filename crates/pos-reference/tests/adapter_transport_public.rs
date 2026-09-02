@@ -6,7 +6,7 @@ use pos_reference::adapter_transport::{
     decode_attempt, decode_observation, encode_attempt, encode_observation, TransportError,
 };
 use pos_reference::evaluator::{
-    AdapterError, CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult,
+    AdapterError, CaseAttempt, ResourceUsage, SubjectAdapter, SubjectObservation, SubjectResult,
 };
 use pos_reference::evaluator_protocol::SubjectAdapterKind;
 use pos_reference::process_adapter::ProcessAdapter;
@@ -299,4 +299,39 @@ fn process_adapter_requires_an_absolute_subject_executable() {
         ),
         Err(AdapterError::ProtocolFailure)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestResult {
+    let mut crashed = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/false",
+        Vec::new(),
+    )?;
+    assert_eq!(crashed.execute(&attempt()), Err(AdapterError::Unavailable));
+
+    let mut timed_out = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/sleep",
+        vec![OsString::from("1")],
+    )?;
+    assert_eq!(
+        timed_out.execute(&attempt()),
+        Err(AdapterError::WatchdogExpired)
+    );
+
+    let mut malformed = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/cat",
+        Vec::new(),
+    )?;
+    assert_eq!(
+        malformed.execute(&attempt()),
+        Err(AdapterError::ProtocolFailure)
+    );
+    Ok(())
 }

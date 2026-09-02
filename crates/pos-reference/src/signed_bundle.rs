@@ -6,8 +6,8 @@ use ciborium::value::Value;
 use ed25519_dalek::Verifier;
 
 use crate::evaluator_protocol::{
-    array, array_values, decode_canonical, decode_canonical_with_limit, encode, fixed_bytes, text,
-    uint, EvaluationRequest, ProtocolError,
+    array, array_values, decode_canonical, decode_canonical_with_limit, encode, fixed_bytes,
+    preflight_cbor, text, uint, EvaluationRequest, ProtocolError,
 };
 
 const MAX_ARCHIVE_BYTES: usize = 1024 * 1024 * 1024;
@@ -34,6 +34,8 @@ pub enum BundleError {
     SignatureInvalid,
     #[error("trusted policy does not match the request")]
     TrustPolicyMismatch,
+    #[error("archive contains prohibited secret material")]
+    ProhibitedMaterial,
 }
 
 impl From<ProtocolError> for BundleError {
@@ -166,6 +168,12 @@ pub fn verify_signed_bundle(
         &ed25519_dalek::Signature::from_bytes(&signature),
     )
     .map_err(|_| BundleError::SignatureInvalid)?;
+    if members
+        .values()
+        .any(|member| prohibited_secret_material(&member.bytes))
+    {
+        return Err(BundleError::ProhibitedMaterial);
+    }
 
     let expected_results = expected
         .into_iter()
@@ -177,6 +185,124 @@ pub fn verify_signed_bundle(
         archive_digest,
         members,
         expected_results,
+    })
+}
+
+fn sensitive_name(value: &str) -> bool {
+    matches!(
+        value,
+        "api_key"
+            | "apikey"
+            | "password"
+            | "credential"
+            | "credentials"
+            | "access_token"
+            | "refresh_token"
+            | "authorization"
+            | "bearer_token"
+            | "client_secret"
+            | "subject_secret"
+            | "private_key"
+            | "privatekey"
+            | "secret"
+            | "token"
+    )
+}
+
+fn sensitive_key(value: &str) -> (bool, bool) {
+    let normalized = value.to_ascii_lowercase().replace('-', "_");
+    match normalized.strip_suffix("_digest") {
+        Some(name) => (sensitive_name(name), true),
+        None => (sensitive_name(&normalized), false),
+    }
+}
+
+fn json_secret(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            let (sensitive, digest) = sensitive_key(key);
+            (sensitive && (digest || !value.is_null() && value.as_str() != Some("")))
+                || json_secret(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(json_secret),
+        _ => false,
+    }
+}
+
+const fn cbor_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Text(text) => text.is_empty(),
+        Value::Bytes(bytes) => bytes.is_empty(),
+        _ => false,
+    }
+}
+
+fn cbor_secret(value: &Value) -> bool {
+    match value {
+        Value::Map(fields) => fields.iter().any(|(key, value)| {
+            let sensitive = key.as_text().map(sensitive_key);
+            sensitive.is_some_and(|(sensitive, digest)| sensitive && (digest || !cbor_empty(value)))
+                || cbor_secret(value)
+        }),
+        Value::Array(values) => values.iter().any(cbor_secret),
+        Value::Tag(_, value) => cbor_secret(value),
+        _ => false,
+    }
+}
+
+fn prohibited_secret_material(bytes: &[u8]) -> bool {
+    const TOKEN_PREFIXES: &[(&str, usize)] = &[
+        ("bearer ", 16),
+        ("basic ", 16),
+        ("akia", 16),
+        ("asia", 16),
+        ("ghp_", 16),
+        ("gho_", 16),
+        ("ghu_", 16),
+        ("ghs_", 16),
+        ("ghr_", 16),
+        ("github_pat_", 16),
+        ("glpat-", 16),
+        ("xoxb-", 16),
+        ("xoxa-", 16),
+        ("xoxp-", 16),
+        ("xoxr-", 16),
+        ("xoxs-", 16),
+        ("sk_live_", 16),
+        ("sk_test_", 16),
+        ("aiza", 16),
+        ("eyj", 20),
+    ];
+    if serde_json::from_slice(bytes).is_ok_and(|value| json_secret(&value)) {
+        return true;
+    }
+    let mut cursor = std::io::Cursor::new(bytes);
+    let cbor = preflight_cbor(bytes, bytes.len(), true)
+        .and_then(|()| {
+            ciborium::from_reader::<Value, _>(&mut cursor)
+                .map_err(|_| ProtocolError::InvalidEncoding)
+        })
+        .ok();
+    if u64::try_from(bytes.len()).is_ok_and(|length| cursor.position() == length)
+        && cbor.is_some_and(|value| cbor_secret(&value))
+    {
+        return true;
+    }
+    let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
+    let text = String::from_utf8_lossy(&lowercase);
+    if text.contains("-----begin") && text.contains("private key-----") {
+        return true;
+    }
+    TOKEN_PREFIXES.iter().any(|(prefix, minimum)| {
+        text.match_indices(prefix).any(|(offset, _)| {
+            text[offset + prefix.len()..]
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(byte))
+                .take(*minimum)
+                .count()
+                == *minimum
+        })
     })
 }
 
@@ -342,9 +468,16 @@ fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, Bun
     }
     let mut members = BTreeMap::new();
     let mut total = 0_usize;
+    let mut previous_path: Option<String> = None;
     for value in values {
         let fields = array(value, 3)?;
         let path = validated_path(text(&fields[0])?)?;
+        if previous_path
+            .as_ref()
+            .is_some_and(|previous| previous.as_bytes() >= path.as_bytes())
+        {
+            return Err(BundleError::NonCanonicalOrder);
+        }
         let raw = match &fields[1] {
             Value::Bytes(bytes) => bytes.clone(),
             _ => return Err(BundleError::InvalidEncoding),
@@ -361,17 +494,10 @@ fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, Bun
             digest: *blake3::hash(&raw).as_bytes(),
             bytes: raw,
         };
+        previous_path = Some(path.clone());
         if members.insert(path, member).is_some() {
             return Err(BundleError::NonCanonicalOrder);
         }
-    }
-    if !strictly_ordered(values.iter().map(|value| {
-        array(value, 3)
-            .and_then(|fields| text(&fields[0]))
-            .unwrap_or("")
-            .as_bytes()
-    })) {
-        return Err(BundleError::NonCanonicalOrder);
     }
     Ok(members)
 }

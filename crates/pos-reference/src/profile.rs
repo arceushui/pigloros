@@ -234,7 +234,8 @@ impl From<BundleError> for ProfileError {
             BundleError::ClosureIncomplete => Self::ClosureIncomplete,
             BundleError::InvalidEncoding
             | BundleError::SignatureInvalid
-            | BundleError::TrustPolicyMismatch => Self::InvalidEncoding,
+            | BundleError::TrustPolicyMismatch
+            | BundleError::ProhibitedMaterial => Self::InvalidEncoding,
         }
     }
 }
@@ -278,6 +279,7 @@ impl Profile {
             &required_providers,
             &execution_profile_digests,
             &allowed_divergences,
+            u8::try_from(uint(&fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?,
         )?;
         validate_selected_caps(
             bytes.len(),
@@ -291,6 +293,7 @@ impl Profile {
             bundle,
             fields,
             &registry,
+            &fixtures,
             &execution_profile_digests,
             evaluator_artifact_digests,
             trust_policy_snapshot_digest,
@@ -309,6 +312,13 @@ impl Profile {
         };
         profile.validate_request(request)?;
         profile.validate_bundle_closure(bundle, &registry)?;
+        validate_provider_contracts(
+            bundle,
+            &registry,
+            &required_providers,
+            u8::try_from(uint(&fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?,
+            &profile.fixtures,
+        )?;
         Ok(profile)
     }
 
@@ -644,6 +654,7 @@ fn validate_profile_relationships(
     required_providers: &[ProviderKey],
     execution_profiles: &[[u8; 32]],
     allowed_divergences: &[AllowedDivergence],
+    profile_claim_layer: u8,
 ) -> Result<(), ProfileError> {
     let claim_layer = fixtures
         .first()
@@ -690,9 +701,10 @@ fn validate_profile_relationships(
         }
     }
     let required_families = BTreeSet::from([0, 1, 2, 3, 4, 5, 6]);
-    if inventory
-        .values()
-        .any(|families| families != &required_families)
+    if claim_layer != profile_claim_layer
+        || inventory
+            .values()
+            .any(|families| families != &required_families)
     {
         return Err(ProfileError::ClosureIncomplete);
     }
@@ -910,11 +922,12 @@ fn validate_support_closure(
     bundle: &VerifiedBundle,
     profile_fields: &[Value],
     registry: &ArtifactDescriptor,
+    fixtures: &[Fixture],
     execution_profiles: &[[u8; 32]],
     evaluator_artifacts: [[u8; 32]; 3],
     trust_policy_digest: [u8; 32],
 ) -> Result<(), ProfileError> {
-    if registry.member_path != "authority/fixture-provider-registry.fpr1"
+    if registry.member_path != "authority/fixture-provider-registry.cbor"
         || registry.media_type != "application/cbor"
     {
         return Err(ProfileError::ClosureIncomplete);
@@ -972,10 +985,13 @@ fn validate_support_closure(
     }
     let actual_execution_profiles = bundle
         .members
-        .values()
-        .filter(|member| member.role == 14)
-        .map(|member| member.digest)
-        .collect::<BTreeSet<_>>();
+        .iter()
+        .filter(|(_, member)| member.role == 14)
+        .map(|(path, member)| {
+            validate_execution_profile(path, &member.bytes, member.digest).map(|()| member.digest)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    validate_execution_profile_budgets(bundle, execution_profiles, fixtures)?;
     let declared_execution_profiles = execution_profiles.iter().copied().collect::<BTreeSet<_>>();
     if actual_execution_profiles == declared_execution_profiles
         && actual_execution_profiles.len() == execution_profiles.len()
@@ -984,6 +1000,124 @@ fn validate_support_closure(
     } else {
         Err(ProfileError::ClosureIncomplete)
     }
+}
+
+fn validate_execution_profile(
+    path: &str,
+    bytes: &[u8],
+    member_digest: [u8; 32],
+) -> Result<(), ProfileError> {
+    let value = decode_canonical(bytes)?;
+    let fields = array(&value, 17)?;
+    let profile_id = text(&fields[2])?;
+    if text(&fields[0])? != "EPF1"
+        || uint(&fields[1])? != 1
+        || !valid_identifier(profile_id)
+        || path != format!("authority/execution-profiles/{profile_id}.epf1")
+        || !semantic_version(text(&fields[3])?, None)
+        || fields[4]
+            != Value::Array(vec![
+                Value::Integer(0_u64.into()),
+                Value::Integer(1_u64.into()),
+            ])
+        || !valid_text_list(&fields[5], false)?
+        || !valid_text_list(&fields[6], false)?
+        || !valid_text_list(&fields[7], false)?
+        || !valid_identifier(text(&fields[8])?)
+        || !valid_text_list(&fields[9], false)?
+        || !valid_text_list(&fields[10], false)?
+        || !valid_text_list(&fields[13], true)?
+        || fields[15] != Value::Null
+    {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    let network = array(&fields[11], 2)?;
+    if bool_value(&network[0])? || !valid_text_list(&network[1], true)? {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    execution_budget(&fields[12])?;
+    let versions = array(&fields[14], 2)?;
+    if !semantic_version(text(&versions[0])?, None) || !semantic_version(text(&versions[1])?, None)
+    {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    let expected = contract_digest(
+        b"PiglorOS.ExecutionProfile.v1",
+        &Value::Array(fields[..16].to_vec()),
+    )?;
+    if fixed_bytes::<32>(&fields[16])? != expected
+        || member_digest != *blake3::hash(bytes).as_bytes()
+    {
+        return Err(ProfileError::DigestMismatch);
+    }
+    Ok(())
+}
+
+fn validate_execution_profile_budgets(
+    bundle: &VerifiedBundle,
+    declared: &[[u8; 32]],
+    fixtures: &[Fixture],
+) -> Result<(), ProfileError> {
+    bundle
+        .members
+        .values()
+        .filter(|member| member.role == 14 && declared.contains(&member.digest))
+        .try_for_each(|member| {
+            let value = decode_canonical(&member.bytes)?;
+            let fields = array(&value, 17)?;
+            let maximum = execution_budget(&fields[12])?;
+            for fixture in fixtures
+                .iter()
+                .filter(|fixture| fixture.execution_profile_digest == member.digest)
+            {
+                let requested = [
+                    fixture.deterministic_budget.memory_bytes,
+                    fixture.deterministic_budget.cpu_fuel,
+                    fixture.deterministic_budget.host_calls,
+                    fixture.deterministic_budget.event_count,
+                    fixture.deterministic_budget.output_bytes,
+                    fixture.deterministic_budget.storage_bytes,
+                    fixture.deterministic_budget.execution_steps,
+                    fixture.deterministic_budget.simulation_time_ns,
+                ];
+                if requested
+                    .iter()
+                    .zip(maximum)
+                    .any(|(requested, maximum)| *requested > maximum)
+                {
+                    return Err(ProfileError::FieldOutOfBounds);
+                }
+            }
+            Ok(())
+        })
+}
+
+fn execution_budget(value: &Value) -> Result<[u64; 8], ProfileError> {
+    let values = array(value, 8)?;
+    let mut budget = [0_u64; 8];
+    for (target, value) in budget.iter_mut().zip(values) {
+        *target = uint(value)?;
+    }
+    if budget.contains(&0) {
+        Err(ProfileError::FieldOutOfBounds)
+    } else {
+        Ok(budget)
+    }
+}
+
+fn valid_text_list(value: &Value, empty_allowed: bool) -> Result<bool, ProfileError> {
+    let values = array_values(value)?;
+    if values.len() > 256 || !empty_allowed && values.is_empty() {
+        return Ok(false);
+    }
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let item = text(value)?;
+        if !valid_identifier(item) || !seen.insert(item) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn validate_member_binding(
@@ -1188,6 +1322,187 @@ fn validate_expected_results(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProviderRecord {
+    key: ProviderKey,
+    claim_layer: u8,
+    adapter: SubjectAdapterKind,
+    package: ArtifactDescriptor,
+    schemas: Vec<ArtifactDescriptor>,
+}
+
+fn validate_provider_contracts(
+    bundle: &VerifiedBundle,
+    registry_descriptor: &ArtifactDescriptor,
+    required: &[ProviderKey],
+    profile_claim_layer: u8,
+    fixtures: &[Fixture],
+) -> Result<(), ProfileError> {
+    let registry_member = bundle
+        .member(&registry_descriptor.member_path)
+        .ok_or(ProfileError::ClosureIncomplete)?;
+    let value = decode_canonical(&registry_member.bytes)?;
+    let fields = array(&value, 4)?;
+    if text(&fields[0])? != "FPR1" || uint(&fields[1])? != 1 {
+        return Err(ProfileError::UnsupportedVersion);
+    }
+    let expected_digest = contract_digest(
+        b"PiglorOS.Conformance.ProviderRegistry.v1",
+        &Value::Array(fields[..3].to_vec()),
+    )?;
+    if fixed_bytes::<32>(&fields[3])? != expected_digest {
+        return Err(ProfileError::DigestMismatch);
+    }
+    let entries = array_values(&fields[2])?;
+    if entries.is_empty() || entries.len() > 256 {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    let providers = entries
+        .iter()
+        .map(|entry| decode_provider_record(entry, bundle))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !providers.windows(2).all(|pair| pair[0].key < pair[1].key) {
+        return Err(ProfileError::NonCanonicalOrder);
+    }
+    let selected = providers
+        .iter()
+        .filter(|provider| provider.claim_layer == profile_claim_layer)
+        .map(|provider| provider.key.clone())
+        .collect::<Vec<_>>();
+    if selected != required {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    let declared_packages = providers
+        .iter()
+        .map(|provider| provider.package.member_path.as_str())
+        .collect::<BTreeSet<_>>();
+    if bundle
+        .members
+        .iter()
+        .any(|(path, member)| member.role == 13 && !declared_packages.contains(path.as_str()))
+    {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    for fixture in fixtures {
+        let provider = providers
+            .iter()
+            .find(|provider| {
+                provider.key == fixture.provider
+                    && provider.claim_layer == fixture.claim_layer
+                    && provider.adapter == fixture.subject_adapter
+            })
+            .ok_or(ProfileError::ClosureIncomplete)?;
+        if provider
+            .schemas
+            .get(usize::from(fixture.family))
+            .is_none_or(|schema| schema != &fixture.schema)
+        {
+            return Err(ProfileError::ClosureIncomplete);
+        }
+    }
+    Ok(())
+}
+
+fn decode_provider_record(
+    value: &Value,
+    bundle: &VerifiedBundle,
+) -> Result<ProviderRecord, ProfileError> {
+    let fields = array(value, 7)?;
+    let key = decode_provider_key(&Value::Array(fields[..4].to_vec()))?;
+    let claim_layer =
+        u8::try_from(uint(&fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?;
+    if claim_layer > 6 {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    let adapter = decode_adapter(&fields[5])?;
+    let package = decode_descriptor(&fields[6])?;
+    if package.media_type != "application/cbor" {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    validate_descriptor_roles(bundle, &package, &[13])?;
+    let schemas = validate_provider_package(bundle, &package, &key, claim_layer, adapter)?;
+    Ok(ProviderRecord {
+        key,
+        claim_layer,
+        adapter,
+        package,
+        schemas,
+    })
+}
+
+fn validate_provider_package(
+    bundle: &VerifiedBundle,
+    descriptor: &ArtifactDescriptor,
+    key: &ProviderKey,
+    claim_layer: u8,
+    adapter: SubjectAdapterKind,
+) -> Result<Vec<ArtifactDescriptor>, ProfileError> {
+    let package = bundle
+        .member(&descriptor.member_path)
+        .ok_or(ProfileError::ClosureIncomplete)?;
+    let value = decode_canonical(&package.bytes)?;
+    let fields = array(&value, 12)?;
+    if text(&fields[0])? != "FPP1"
+        || uint(&fields[1])? != 1
+        || decode_provider_key(&fields[2])? != *key
+        || uint(&fields[3])? != u64::from(claim_layer)
+        || decode_adapter(&fields[4])? != adapter
+    {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    let schema_values = array(&fields[5], 7)?;
+    let schemas = schema_values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let fields = array(value, 2)?;
+            if uint(&fields[0])?
+                != u64::try_from(index).map_err(|_| ProfileError::FieldOutOfBounds)?
+            {
+                return Err(ProfileError::NonCanonicalOrder);
+            }
+            let descriptor = decode_descriptor(&fields[1])?;
+            validate_descriptor_roles(bundle, &descriptor, &[4])?;
+            Ok(descriptor)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let support_roles = [5, 6, 7, 8, 9];
+    let support = fields[6..11]
+        .iter()
+        .zip(support_roles)
+        .map(|(value, role)| {
+            let descriptor = decode_descriptor(value)?;
+            validate_descriptor_roles(bundle, &descriptor, &[role])?;
+            Ok(descriptor)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let unique_paths = schemas
+        .iter()
+        .chain(&support)
+        .map(|artifact| artifact.member_path.as_str())
+        .collect::<BTreeSet<_>>();
+    if unique_paths.len() != schemas.len() + support.len() {
+        return Err(ProfileError::NonCanonicalOrder);
+    }
+    let expected_digest = contract_digest(
+        b"PiglorOS.Conformance.ProviderPackage.v1",
+        &Value::Array(fields[..11].to_vec()),
+    )?;
+    if fixed_bytes::<32>(&fields[11])? != expected_digest {
+        return Err(ProfileError::DigestMismatch);
+    }
+    Ok(schemas)
+}
+
+fn decode_adapter(value: &Value) -> Result<SubjectAdapterKind, ProfileError> {
+    match uint(value)? {
+        0 => Ok(SubjectAdapterKind::ExportedArtifact),
+        1 => Ok(SubjectAdapterKind::PublicGatewayProtocol),
+        2 => Ok(SubjectAdapterKind::PublicPluginProtocol),
+        _ => Err(ProfileError::FieldOutOfBounds),
+    }
 }
 
 fn fixture_key(value: &Fixture) -> ((&[u8], &[u8], u16, u16), u8, &[u8], [u8; 32], &[u8]) {
