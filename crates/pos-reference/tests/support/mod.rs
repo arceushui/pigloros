@@ -25,6 +25,7 @@ pub enum ProfileMutation {
     FixtureSemanticBoundary(u8),
     ProvenanceBoundary(u8),
     DescriptorValueBoundary(u8),
+    MemberClosureBoundary(u8),
     IdentifierBoundary(u8),
     SemanticVersionBoundary(u8),
     MemberPathBoundary(u8),
@@ -151,6 +152,17 @@ pub enum ProfileMutation {
 pub enum BundleMutation {
     PathBoundary(u8),
     ExpectedCaseBoundary(u8),
+    DescriptorEmpty,
+    DescriptorRoleOverflow,
+    DescriptorMissingPath,
+    MemberEmpty,
+    MemberRoleOverflow,
+    ExpectedClaimLayerOverflow,
+    ExpectedModeOverflow,
+    ExpectedClaimLayerAbove,
+    ExpectedModeAbove,
+    ExpectedMissingPath,
+    ExpectedDigest,
     RawManifestField(u8),
     RawDescriptorField(u8),
     RawMemberField(u8),
@@ -367,10 +379,7 @@ fn corpus_for_mode(
     let profile_digest = hash_contract("PiglorOS.ConformanceProfile.v1", &profile)?;
     let mut profile_fields = fields(profile)?;
     profile_fields.push(bytes(&profile_digest));
-    members.insert(
-        "profile/CPF1.cbor".to_owned(),
-        (canonical(&array(profile_fields))?, 2),
-    );
+    insert_profile_member(&mut members, profile_fields, profile_mutation)?;
     let archive = archive(
         &signing_key,
         &members,
@@ -418,6 +427,21 @@ fn corpus_for_mode(
     })
 }
 
+fn insert_profile_member(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    profile_fields: Vec<Value>,
+    mutation: Option<ProfileMutation>,
+) -> TestResult<()> {
+    members.insert(
+        "profile/CPF1.cbor".to_owned(),
+        (canonical(&array(profile_fields))?, 2),
+    );
+    if let Some(ProfileMutation::MemberClosureBoundary(index)) = mutation {
+        mutate_member_closure(members, index);
+    }
+    Ok(())
+}
+
 fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>, u8)> {
     BTreeMap::from([
         (
@@ -458,6 +482,46 @@ fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>,
             (b"review".to_vec(), 8),
         ),
     ])
+}
+
+fn mutate_member_closure(members: &mut BTreeMap<String, (Vec<u8>, u8)>, index: u8) {
+    const PATHS: [&str; 8] = [
+        "authority/fixture-provider-registry.cbor",
+        "providers/test-provider/schema-0.json",
+        "fixtures/case-0.input",
+        "fixtures/case-0.evidence",
+        "authority/execution-profiles/test-profile.epf1",
+        "providers/test-provider/package.cbor",
+        "support/normative-requirements.md",
+        "providers/test-provider/LICENSE",
+    ];
+    match index {
+        0..=7 => {
+            members.remove(PATHS[usize::from(index)]);
+        }
+        8..=15 => {
+            if let Some((_, role)) = members.get_mut(PATHS[usize::from(index - 8)]) {
+                *role = if *role == 0 { 4 } else { 0 };
+            }
+        }
+        16 => {
+            if let Some((bytes, _)) = members.get_mut("fixtures/case-0.expected") {
+                *bytes = b"changed".to_vec();
+            }
+        }
+        17 => {
+            if let Some((bytes, _)) =
+                members.get_mut("authority/execution-profiles/test-profile.epf1")
+            {
+                *bytes = vec![0xff];
+            }
+        }
+        _ => {
+            if let Some((bytes, _)) = members.get_mut("providers/test-provider/package.cbor") {
+                *bytes = vec![0xff];
+            }
+        }
+    }
 }
 
 fn fixtures(
@@ -1425,6 +1489,39 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[0] = text(&expected_case_boundary(index));
         }
+        BundleMutation::DescriptorEmpty => fields[4] = array(Vec::new()),
+        BundleMutation::DescriptorRoleOverflow => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[3] = uint(256);
+        }
+        BundleMutation::DescriptorMissingPath => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[0] = text("aaa");
+        }
+        BundleMutation::ExpectedClaimLayerOverflow => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[1] = uint(256);
+        }
+        BundleMutation::ExpectedModeOverflow => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[3] = uint(256);
+        }
+        BundleMutation::ExpectedClaimLayerAbove => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[1] = uint(7);
+        }
+        BundleMutation::ExpectedModeAbove => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[3] = uint(2);
+        }
+        BundleMutation::ExpectedMissingPath => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[4] = text("fixtures/missing.expected");
+        }
+        BundleMutation::ExpectedDigest => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[5] = bytes(&[99; 32]);
+        }
         BundleMutation::RawManifestField(index) => fields[usize::from(index)] = Value::Null,
         BundleMutation::RawDescriptorField(index) => {
             let descriptors = array_fields_mut(&mut fields[4])?;
@@ -1462,6 +1559,8 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         }
         BundleMutation::RawMemberField(_)
         | BundleMutation::RawArchiveField(_)
+        | BundleMutation::MemberEmpty
+        | BundleMutation::MemberRoleOverflow
         | BundleMutation::MemberOrder
         | BundleMutation::MemberDuplicate
         | BundleMutation::MemberBytes
@@ -1479,6 +1578,11 @@ fn mutate_archive_root(root: &mut Value, mutation: BundleMutation) -> TestResult
         BundleMutation::RawMemberField(index) => {
             let members = array_fields_mut(&mut fields[1])?;
             array_fields_mut(&mut members[0])?[usize::from(index)] = Value::Null;
+        }
+        BundleMutation::MemberEmpty => fields[1] = array(Vec::new()),
+        BundleMutation::MemberRoleOverflow => {
+            let members = array_fields_mut(&mut fields[1])?;
+            array_fields_mut(&mut members[0])?[2] = uint(256);
         }
         BundleMutation::MemberOrder => array_fields_mut(&mut fields[1])?.swap(0, 1),
         BundleMutation::MemberDuplicate => {

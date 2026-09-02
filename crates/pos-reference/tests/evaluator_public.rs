@@ -679,7 +679,8 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
         .chain((0..10).map(ProfileMutation::ExecutionContractBoundary))
         .chain((0..9).map(ProfileMutation::FixtureSemanticBoundary))
         .chain((0..8).map(ProfileMutation::ProvenanceBoundary))
-        .chain((0..3).map(ProfileMutation::DescriptorValueBoundary));
+        .chain((0..3).map(ProfileMutation::DescriptorValueBoundary))
+        .chain((0..19).map(ProfileMutation::MemberClosureBoundary));
     for mutation in mutations {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let mut adapter = PublicAdapter {
@@ -744,11 +745,22 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
         BundleMutation::DescriptorSize,
         BundleMutation::DescriptorDigest,
         BundleMutation::DescriptorRole,
+        BundleMutation::DescriptorEmpty,
+        BundleMutation::DescriptorRoleOverflow,
+        BundleMutation::DescriptorMissingPath,
         BundleMutation::MemberOrder,
         BundleMutation::MemberDuplicate,
         BundleMutation::MemberBytes,
+        BundleMutation::MemberEmpty,
+        BundleMutation::MemberRoleOverflow,
         BundleMutation::ExpectedOrder,
         BundleMutation::ExpectedDuplicate,
+        BundleMutation::ExpectedClaimLayerOverflow,
+        BundleMutation::ExpectedModeOverflow,
+        BundleMutation::ExpectedClaimLayerAbove,
+        BundleMutation::ExpectedModeAbove,
+        BundleMutation::ExpectedMissingPath,
+        BundleMutation::ExpectedDigest,
         BundleMutation::Signer,
         BundleMutation::Signature,
         BundleMutation::ArchiveShape,
