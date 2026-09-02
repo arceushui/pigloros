@@ -195,11 +195,27 @@ fn encode_value(value: &Value) -> CanonicalBytes {
     CanonicalBytes::from_vec(bytes)
 }
 
+fn array_fields(value: Value) -> Vec<Value> {
+    match value {
+        Value::Array(fields) => fields,
+        _ => std::panic::resume_unwind(Box::new(
+            "public authority encoding must be an array".to_owned(),
+        )),
+    }
+}
+
+fn array_fields_mut(value: &mut Value) -> &mut Vec<Value> {
+    match value {
+        Value::Array(fields) => fields,
+        _ => std::panic::resume_unwind(Box::new(
+            "nested authority encoding must be an array".to_owned(),
+        )),
+    }
+}
+
 fn changed_array(encoded: &CanonicalBytes, change: impl FnOnce(&mut Vec<Value>)) -> CanonicalBytes {
     let value: Value = ok(ciborium::from_reader(encoded.as_slice()));
-    let Value::Array(mut fields) = value else {
-        panic!("public authority encoding must be an array");
-    };
+    let mut fields = array_fields(value);
     change(&mut fields);
     encode_value(&Value::Array(fields))
 }
@@ -491,9 +507,7 @@ fn capability_decoder_rejects_every_malformed_public_field() {
 
     for scope_field in 0..10 {
         let malformed = changed_array(&encoded, |fields| {
-            let Value::Array(scope_fields) = &mut fields[5] else {
-                panic!("capability scope encoding must be an array");
-            };
+            let scope_fields = array_fields_mut(&mut fields[5]);
             scope_fields[scope_field] = Value::Text("wrong-type".to_owned());
         });
         assert_eq!(
@@ -511,9 +525,7 @@ fn capability_decoder_rejects_every_malformed_public_field() {
         Err(AuthorityErrorV1::WrongArrayLength)
     );
     let wrong_principal_grantee_tag = changed_array(&encoded, |fields| {
-        let Value::Array(grantee) = &mut fields[4] else {
-            panic!("capability grantee encoding must be an array");
-        };
+        let grantee = array_fields_mut(&mut fields[4]);
         grantee[0] = Value::Integer(1.into());
     });
     assert_eq!(
@@ -541,9 +553,7 @@ fn capability_decoder_rejects_every_malformed_public_field() {
     )));
     let plugin_encoded = ok(plugin_grant.encode());
     let wrong_plugin_grantee_tag = changed_array(&plugin_encoded, |fields| {
-        let Value::Array(grantee) = &mut fields[4] else {
-            panic!("plugin grantee encoding must be an array");
-        };
+        let grantee = array_fields_mut(&mut fields[4]);
         grantee[0] = Value::Integer(0.into());
     });
     assert_eq!(
