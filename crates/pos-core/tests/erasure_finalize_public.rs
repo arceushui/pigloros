@@ -1,15 +1,20 @@
+//! Public lifecycle coverage over the raw ERCRP1 persistence seam.
+
 #[path = "support/coordinator.rs"]
-pub mod coordinator_support;
+mod coordinator_support;
 #[path = "support/erasure.rs"]
-pub mod erasure_support;
+mod erasure_support;
 
 use coordinator_support::{PublicCoordinatorPort as PublicPort, PublicCoordinatorPortConfig};
+use pos_core::erasure::destruction_command_reference;
 use pos_core::{
-    ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureCoordinatorStateMachineV1,
-    ErasureErrorV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureScopeV1, ErasureStateTransitionV1,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
+    ErasureArtifactTransitionV1, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasureObligationInputV1, ErasureObligationV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateTransitionV1,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -42,16 +47,28 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
-const fn transition(lifecycle: ErasureLifecycleV1) -> ErasureStateTransitionV1 {
-    ErasureStateTransitionV1 {
-        lifecycle,
-        freeze_position: Some(10),
-        pending_owners: Vec::new(),
-        failed_owners: Vec::new(),
-        acknowledged_targets: Vec::new(),
-        replay_claim: ErasureReplayClaimV1::Exact,
-        provenance: reference(9),
-    }
+fn admission(
+    request: ErasureReferenceV1,
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: target.replica_id,
+        command_identity: destruction_command_reference(request, target),
+    })?;
+    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![obligation.reference()],
+        command_identities: vec![obligation.command_identity()],
+        policy: reference(5),
+        trust: reference(3),
+        admitted_position: 11,
+        deadline_position: 20,
+        authorization_provenance: reference(9),
+    })
 }
 
 const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 {
@@ -71,36 +88,81 @@ const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 
 }
 
 #[test]
-fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(), ErasureErrorV1> {
+fn public_lifecycle_persists_raw_manifest_objects_and_attempt_index() -> Result<(), ErasureErrorV1>
+{
     let target = target();
     let request = request()?;
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
-        PublicPort::new(PublicCoordinatorPortConfig {
-            targets: vec![target],
-            fail_commits: false,
-            policy: reference(5),
-            trust: reference(3),
-            scope_member: reference(7),
-            freeze_evidence: reference(9),
-        }),
-        reference(2),
+    let port = PublicPort::new(PublicCoordinatorPortConfig {
+        targets: vec![target],
+        fail_commits: false,
+        policy: reference(5),
+        trust: reference(3),
+        scope_member: reference(7),
+        freeze_evidence: reference(9),
+        lineage_rule: None,
+    });
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));
+
+    let submitted = coordinator.submit(request.clone(), request.provenance())?;
+    assert_eq!(submitted.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert!(adapter.current_manifest(request.reference()).is_some());
+
+    let authorized = coordinator.authorize(request.reference(), reference(9))?;
+    assert_eq!(authorized.lifecycle(), ErasureLifecycleV1::Authorized);
+    let frozen = coordinator.freeze_inventory(
+        request.reference(),
+        ErasureStateTransitionV1 {
+            lifecycle: ErasureLifecycleV1::AccessFrozen,
+            freeze_position: Some(10),
+            pending_owners: Vec::new(),
+            failed_owners: Vec::new(),
+            acknowledged_targets: Vec::new(),
+            replay_claim: ErasureReplayClaimV1::Exact,
+            provenance: reference(9),
+        },
+    )?;
+    assert_eq!(frozen.lifecycle(), ErasureLifecycleV1::AccessFrozen);
+
+    let retry = admission(request.reference(), target)?;
+    let awaiting = coordinator.dispatch_destruction(request.reference(), retry.clone())?;
+    assert_eq!(
+        awaiting.lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
     );
-    coordinator.submit(request, reference(3))?;
-    coordinator.authorize(reference(1), reference(9))?;
-    coordinator.freeze_inventory(reference(1), transition(ErasureLifecycleV1::AccessFrozen))?;
-    coordinator.dispatch_destruction(reference(1), reference(9))?;
+    assert_eq!(
+        coordinator.dispatch_destruction(request.reference(), retry)?,
+        awaiting
+    );
+
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: target.replica_id,
+        command_identity: destruction_command_reference(request.reference(), target),
+    })?;
+    coordinator.acknowledge(
+        request.reference(),
+        ErasureAcknowledgementV1 {
+            obligation: obligation.reference(),
+            target,
+            owner: target.replica_id,
+            evidence: reference(21),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        },
+    )?;
 
     let receipt = coordinator.finalize(
-        reference(1),
+        request.reference(),
         ErasureReceiptInputV1 {
-            request: reference(1),
-            terminal_state: reference(99),
-            coordinator: reference(2),
-            lifecycle: ErasureLifecycleV1::PartialFailure,
+            request: reference(0),
+            terminal_state: reference(0),
+            coordinator: reference(0),
+            lifecycle: ErasureLifecycleV1::Complete,
             freeze_position: 10,
             acknowledgements: Vec::new(),
             frozen_targets: vec![target],
-            pending_owners: vec![target.replica_id],
+            pending_owners: Vec::new(),
             failed_owners: Vec::new(),
             inventories: ErasureReceiptInventoriesV1 {
                 artifacts: vec![inventory(target)],
@@ -109,14 +171,18 @@ fn public_finalize_covers_successful_awaiting_and_terminal_commits() -> Result<(
                 backups: Vec::new(),
             },
             replay_claim: ErasureReplayClaimV1::Exact,
-            policy: reference(2),
-            trust: reference(3),
-            provenance: reference(4),
-            issue_position: 11,
-            signature: reference(5),
-            receipt_digest: reference(99),
+            policy: reference(0),
+            trust: reference(0),
+            provenance: reference(0),
+            issue_position: 21,
+            signature: reference(25),
+            receipt_digest: reference(0),
         },
     )?;
-    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(receipt.request(), request.reference());
+    assert_eq!(adapter.attempt_index_count(request.reference())?, 1);
+    assert!(adapter.attempt_page_ref(request.reference(), 0)?.is_some());
+    assert!(adapter.current_manifest(request.reference()).is_some());
     Ok(())
 }

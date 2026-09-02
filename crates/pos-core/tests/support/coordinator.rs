@@ -1,19 +1,28 @@
-//! Shared coordinator port for public ADR-060 integration tests.
+//! Shared raw persistence and host-port fixture for ADR-060 public tests.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
+    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
-    ErasureAtomicFreezeResultV1, ErasureCoordinatorPortV1, ErasureCoordinatorRecordV1,
-    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureInventoryCategoryV1, ErasureObligationInputV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReferenceV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
+    ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
+    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReferenceV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
     ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
 };
 
 use crate::erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
 
+/// Configuration for the host side of the public coordinator fixture.
+#[derive(Clone)]
 pub struct PublicCoordinatorPortConfig {
     pub targets: Vec<ErasureRequiredTargetV1>,
     pub fail_commits: bool,
@@ -21,23 +30,151 @@ pub struct PublicCoordinatorPortConfig {
     pub trust: ErasureReferenceV1,
     pub scope_member: ErasureReferenceV1,
     pub freeze_evidence: ErasureReferenceV1,
+    pub lineage_rule: Option<ErasureReferenceV1>,
 }
 
+#[derive(Default)]
+struct RawStorage {
+    manifests: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
+    objects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    states: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    attempts: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    scopes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    effects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+}
+
+/// In-memory implementation of the raw persistence and host capability SPIs.
+///
+/// The storage is shared by clones so tests can retain an adapter handle while
+/// a state machine owns another handle. The last prepared delta is also kept
+/// for an explicit exact-retry assertion without exposing coordinator state.
+#[derive(Clone)]
 pub struct PublicCoordinatorPort {
-    records: Vec<ErasureCoordinatorRecordV1>,
-    states: Vec<ErasureStateV1>,
+    storage: Rc<RefCell<RawStorage>>,
+    last_mutation: Rc<RefCell<Option<pos_core::PreparedErasureCasV1>>>,
     config: PublicCoordinatorPortConfig,
 }
 
 impl PublicCoordinatorPort {
     #[must_use]
-    pub const fn new(config: PublicCoordinatorPortConfig) -> Self {
+    pub fn new(config: PublicCoordinatorPortConfig) -> Self {
         Self {
-            records: Vec::new(),
-            states: Vec::new(),
+            storage: Rc::new(RefCell::new(RawStorage::default())),
+            last_mutation: Rc::new(RefCell::new(None)),
             config,
         }
     }
+
+    #[must_use]
+    pub fn current_manifest(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Option<pos_core::StoredErasureManifestV1> {
+        self.storage
+            .borrow()
+            .manifests
+            .get(&request)
+            .map(|(digest, bytes)| {
+                pos_core::StoredErasureManifestV1::new(*digest, bytes.clone())
+                    .expect("fixture stores authenticated manifests")
+            })
+    }
+
+    #[must_use]
+    pub fn last_mutation(&self) -> Option<pos_core::PreparedErasureCasV1> {
+        self.last_mutation.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn effect(&self, manifest: ErasureReferenceV1) -> Option<ErasureReferenceV1> {
+        self.storage.borrow().effects.get(&manifest).copied()
+    }
+
+    fn verify_delta_exists(
+        storage: &RawStorage,
+        mutation: &pos_core::PreparedErasureCasV1,
+    ) -> Result<(), ErasureErrorV1> {
+        for object in mutation.new_objects() {
+            if storage.objects.get(&object.reference()).map(Vec::as_slice)
+                != Some(object.canonical_cbor())
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        for state in mutation.new_states() {
+            if storage.states.get(&state.reference()).map(Vec::as_slice)
+                != Some(state.canonical_cbor())
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        for index in mutation.index_inserts() {
+            let (map, ordinal, reference) = match *index {
+                ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+                    (&storage.attempts, ordinal, reference)
+                }
+                ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+                    (&storage.scopes, ordinal, reference)
+                }
+                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
+                    (&storage.resolutions, ordinal, reference)
+                }
+            };
+            if map.get(&(mutation.request(), ordinal)) != Some(&reference) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+        }
+        if storage.effects.get(&mutation.next_manifest().digest())
+            != Some(&mutation.effect().identity())
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(())
+    }
+}
+
+fn insert_exact(
+    map: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    reference: ErasureReferenceV1,
+    bytes: &[u8],
+) -> Result<(), ErasureErrorV1> {
+    match map.get(&reference) {
+        Some(existing) if existing.as_slice() != bytes => Err(ErasureErrorV1::ProvenanceMissing),
+        Some(_) => Ok(()),
+        None => {
+            map.insert(reference, bytes.to_vec());
+            Ok(())
+        }
+    }
+}
+
+fn insert_index(
+    map: &mut BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    reference: ErasureReferenceV1,
+) -> Result<(), ErasureErrorV1> {
+    match map.get(&(request, ordinal)) {
+        Some(existing) if *existing != reference => Err(ErasureErrorV1::PolicyConflict),
+        Some(_) => Ok(()),
+        None => {
+            map.insert((request, ordinal), reference);
+            Ok(())
+        }
+    }
+}
+
+fn index_count(
+    map: &BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    request: ErasureReferenceV1,
+) -> u64 {
+    u64::try_from(
+        map.keys()
+            .filter(|(candidate, _)| *candidate == request)
+            .count(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 impl ErasureStateResolverV1 for PublicCoordinatorPort {
@@ -45,104 +182,172 @@ impl ErasureStateResolverV1 for PublicCoordinatorPort {
         &self,
         digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
-        Ok(self
+        self.storage
+            .borrow()
             .states
-            .iter()
-            .find(|state| state.state_digest() == digest)
-            .cloned())
+            .get(&digest)
+            .map(|bytes| {
+                ErasureStateV1::from_canonical_cbor(bytes).and_then(|state| {
+                    (state.state_digest() == digest)
+                        .then_some(state)
+                        .ok_or(ErasureErrorV1::ProvenanceMissing)
+                })
+            })
+            .transpose()
     }
 }
 
 impl ErasurePersistencePortV1 for PublicCoordinatorPort {
-    fn load_record(
+    fn read_manifest(
         &self,
         request: ErasureReferenceV1,
-        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
-    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
-        self.records
-            .iter()
-            .find(|record| record.request().reference() == request)
-            .cloned()
-            .map(|record| {
-                record
-                    .state()
-                    .verify_predecessor_chain(self)
-                    .and_then(|()| record.verify_recovered_freeze_authorization(verifier))
-                    .map(|()| record)
-            })
-            .transpose()
+    ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
+        Ok(self.current_manifest(request))
     }
 
-    fn commit_records(
+    fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+        self.storage
+            .borrow()
+            .objects
+            .get(&reference)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn attempt_page_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self
+            .storage
+            .borrow()
+            .attempts
+            .get(&(request, ordinal))
+            .copied())
+    }
+
+    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        Ok(index_count(&self.storage.borrow().attempts, request))
+    }
+
+    fn scope_node_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self
+            .storage
+            .borrow()
+            .scopes
+            .get(&(request, ordinal))
+            .copied())
+    }
+
+    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        Ok(index_count(&self.storage.borrow().scopes, request))
+    }
+
+    fn administrative_resolution_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self
+            .storage
+            .borrow()
+            .resolutions
+            .get(&(request, ordinal))
+            .copied())
+    }
+
+    fn administrative_resolution_index_count(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<u64, ErasureErrorV1> {
+        Ok(index_count(&self.storage.borrow().resolutions, request))
+    }
+
+    fn compare_and_swap(
         &mut self,
-        records: &[pos_core::VerifiedErasureCoordinatorRecordV1],
-    ) -> Result<(), ErasureErrorV1> {
+        mutation: pos_core::PreparedErasureCasV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        *self.last_mutation.borrow_mut() = Some(mutation.clone());
         if self.config.fail_commits {
             return Err(ErasureErrorV1::ReceiptCommitFailed);
         }
-        let mut staged_records = self.records.clone();
-        let mut staged_states = self.states.clone();
-        for verified in records {
-            let record = verified.record();
-            if let Some(existing) = staged_records
-                .iter()
-                .find(|existing| existing.request() == record.request())
-            {
-                if existing != record {
-                    existing.validate_replacement(record)?;
+        let request = mutation.request();
+        let next = mutation.next_manifest();
+        let mut storage = self.storage.borrow_mut();
+        if storage
+            .manifests
+            .get(&request)
+            .is_some_and(|(digest, bytes)| {
+                *digest == next.digest() && bytes.as_slice() == next.canonical_cbor()
+            })
+        {
+            Self::verify_delta_exists(&storage, &mutation)?;
+            return Ok(ErasureCasOutcomeV1::ExactRetry);
+        }
+        if storage.manifests.get(&request).map(|value| value.0)
+            != mutation.expected_manifest_digest()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+
+        let mut staged = RawStorage {
+            manifests: storage.manifests.clone(),
+            objects: storage.objects.clone(),
+            states: storage.states.clone(),
+            attempts: storage.attempts.clone(),
+            scopes: storage.scopes.clone(),
+            resolutions: storage.resolutions.clone(),
+            effects: storage.effects.clone(),
+        };
+        for object in mutation.new_objects() {
+            insert_exact(
+                &mut staged.objects,
+                object.reference(),
+                object.canonical_cbor(),
+            )?;
+        }
+        for state in mutation.new_states() {
+            if let Some(previous) = state.state().previous_state() {
+                let bytes = staged
+                    .states
+                    .get(&previous)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                state
+                    .state()
+                    .validate_predecessor(&ErasureStateV1::from_canonical_cbor(bytes)?)?;
+            }
+            insert_exact(
+                &mut staged.states,
+                state.reference(),
+                state.canonical_cbor(),
+            )?;
+        }
+        for index in mutation.index_inserts() {
+            match *index {
+                ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+                    insert_index(&mut staged.attempts, request, ordinal, reference)?;
                 }
-            } else if record.state().previous_state().is_some() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
+                ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+                    insert_index(&mut staged.scopes, request, ordinal, reference)?;
+                }
+                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
+                    insert_index(&mut staged.resolutions, request, ordinal, reference)?;
+                }
             }
-            if let Some(existing) = staged_records
-                .iter_mut()
-                .find(|existing| existing.request() == record.request())
-            {
-                *existing = record.clone();
-            } else {
-                staged_records.push(record.clone());
-            }
-            staged_states.push(record.state().clone());
         }
-        self.records = staged_records;
-        self.states = staged_states;
-        Ok(())
-    }
-
-    fn compare_and_swap_scope_extension(
-        &mut self,
-        request: ErasureReferenceV1,
-        expected_ledger: ErasureReferenceV1,
-        record: pos_core::VerifiedErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1> {
-        let current = self
-            .load_record(request, self)?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if current == *record.record() {
-            return Ok(());
-        }
-        if current.scope_extension_ledger() != Some(expected_ledger) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.commit_record(record)
-    }
-
-    fn compare_and_swap_administrative_resolution(
-        &mut self,
-        request: ErasureReferenceV1,
-        expected_head: Option<ErasureReferenceV1>,
-        record: pos_core::VerifiedErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1> {
-        let current = self
-            .load_record(request, self)?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if current == *record.record() {
-            return Ok(());
-        }
-        if current.administrative_resolution_head() != expected_head {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.commit_record(record)
+        staged
+            .manifests
+            .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
+        staged
+            .effects
+            .insert(next.digest(), mutation.effect().identity());
+        *storage = staged;
+        Ok(ErasureCasOutcomeV1::Applied)
     }
 }
 
@@ -193,7 +398,9 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
                     category: ErasureInventoryCategoryV1::Artifact,
                     target,
                     owner: target.replica_id,
-                    command_identity: pos_core::destruction_command_reference(request, target),
+                    command_identity: pos_core::erasure::destruction_command_reference(
+                        request, target,
+                    ),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -211,17 +418,19 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
             request,
             scope_members: vec![self.config.scope_member],
             target_closure: target_closure_digest(&self.config.targets),
-            lineage_rule: None,
+            lineage_rule: self.config.lineage_rule,
         };
+        let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
+        let evidence = self.config.freeze_evidence.digest();
         let (freeze_admission_evidence, freeze_authorization_evidence) =
             freeze_evidence_fixture(FreezeEvidenceFixtureInput {
                 request,
-                scope_commitment: ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
+                scope_commitment: scope_reference,
                 obligation_set: &obligation_set,
                 targets: &self.config.targets,
                 obligations: &obligations,
                 freeze_position: 10,
-                evidence: &self.config.freeze_evidence.digest(),
+                evidence: &evidence,
             })?;
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: self.config.targets.clone(),
@@ -236,43 +445,46 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
         .map(ErasureAtomicFreezeResultV1::Admitted)
     }
 
-    fn dispatch_destruction(
-        &self,
-        _request: ErasureReferenceV1,
-        _commands: &[pos_core::ErasureDestructionCommandV1],
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_attempt(
-        &self,
-        _admission: &pos_core::ErasureRetryAdmissionV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_acknowledgement(
-        &self,
-        _acknowledgement: &pos_core::ErasureAcknowledgementProvenanceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
-    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
-        Ok(())
-    }
-
     fn admit_scope_extension(
         &self,
-        _extension: &pos_core::ErasureScopeExtensionV1,
+        _extension: &ErasureScopeExtensionV1,
     ) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 
     fn admit_administrative_resolution(
         &self,
-        _resolution: &pos_core::ErasureAdministrativeResolutionV1,
+        _resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn dispatch_destruction(
+        &self,
+        _request: ErasureReferenceV1,
+        _commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_attempt(
+        &self,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+        Ok(ErasureAttemptQuotaReservationV1::new(
+            admission.reference(),
+            admission.reference(),
+        ))
+    }
+
+    fn admit_acknowledgement(
+        &self,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
         Ok(())
     }
 }
