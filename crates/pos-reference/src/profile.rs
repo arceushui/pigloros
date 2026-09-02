@@ -241,6 +241,7 @@ impl Profile {
         let value = decode_canonical(bytes)?;
         let fields = array(&value, 18)?;
         validate_profile_header(fields)?;
+        let profile_claim_layer = 0;
         let actual_digest = contract_digest(
             b"PiglorOS.ConformanceProfile.v1",
             &Value::Array(fields[..17].to_vec()),
@@ -265,7 +266,7 @@ impl Profile {
             &required_providers,
             &execution_profile_digests,
             &allowed_divergences,
-            u8::try_from(uint(&fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?,
+            profile_claim_layer,
         )?;
         validate_selected_caps(
             bytes.len(),
@@ -303,7 +304,7 @@ impl Profile {
             bundle,
             &registry,
             &required_providers,
-            u8::try_from(uint(&fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?,
+            profile_claim_layer,
             &profile.fixtures,
         )?;
         Ok(profile)
@@ -940,13 +941,11 @@ fn validate_selected_caps(
             validate_artifact_caps(output, caps, &mut member_count, &mut total_bytes, true)?;
         }
     }
-    let coordinate_limit =
-        usize::try_from(caps.values[8]).map_err(|_| ProfileError::FieldOutOfBounds)?;
     if member_count > caps.values[2]
         || total_bytes > caps.values[5]
         || allowed
             .iter()
-            .any(|item| item.first_coordinate.len() > coordinate_limit)
+            .any(|item| item.first_coordinate.len() as u64 > caps.values[8])
     {
         Err(ProfileError::FieldOutOfBounds)
     } else {
@@ -1520,9 +1519,7 @@ fn validate_provider_package(
         .enumerate()
         .map(|(index, value)| {
             let fields = array(value, 2)?;
-            if uint(&fields[0])?
-                != u64::try_from(index).map_err(|_| ProfileError::FieldOutOfBounds)?
-            {
+            if uint(&fields[0])? != index as u64 {
                 return Err(ProfileError::NonCanonicalOrder);
             }
             let descriptor = decode_descriptor(&fields[1])?;

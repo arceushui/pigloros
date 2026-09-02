@@ -263,10 +263,12 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
 #[cfg(unix)]
 #[test]
 fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
-    let directory = tempfile::tempdir()?;
-    let mut missing_input = complete_command(directory.path())?;
-    fs::remove_file(directory.path().join("request.cbor"))?;
-    assert!(!missing_input.output()?.status.success());
+    for input in ["request.cbor", "bundle.cfb1", "policy.tps1"] {
+        let directory = tempfile::tempdir()?;
+        let mut missing_input = complete_command(directory.path())?;
+        fs::remove_file(directory.path().join(input))?;
+        assert!(!missing_input.output()?.status.success());
+    }
 
     let directory = tempfile::tempdir()?;
     assert!(
