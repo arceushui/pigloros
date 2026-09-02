@@ -22,10 +22,11 @@
 #   --include-ignored: ensures #[ignore] tests run in CI; none may silently skip.
 #
 # Pull requests that change only documentation or other non-Rust content run the
-# lightweight scope job plus Trunk/CodeQL policy workflows; Rust build, test,
-# coverage, security, platform, and report jobs are skipped successfully. Any
-# Rust, manifest, dependency, script, workflow, or build-policy change keeps
-# the complete gate set.
+# lightweight scope job plus Trunk/CodeQL policy workflows. Coverage and its
+# cargo-crap consumer remain unconditional; the other Rust build, test,
+# security, platform, and report jobs are skipped successfully. Any Rust,
+# manifest, dependency, script, workflow, or build-policy change keeps the
+# complete gate set.
 
 name: ci
 
@@ -261,8 +262,6 @@ jobs:
 
   coverage:
     name: coverage
-    needs: ci_change_scope
-    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
