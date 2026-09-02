@@ -2876,6 +2876,46 @@ fn coordinator_freezes_closure_and_commits_only_derived_terminal_outcomes(
 }
 
 #[test]
+fn coordinator_rejects_conflicting_non_positive_acknowledgements_before_host_admission(
+) -> Result<(), ErasureErrorV1> {
+    for outcome in [
+        ErasureAcknowledgementOutcomeV1::Negative,
+        ErasureAcknowledgementOutcomeV1::Stale,
+    ] {
+        let acknowledgement = acknowledgement(1, outcome);
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+            test_port(true, vec![acknowledgement.target]),
+            reference(2),
+        );
+        coordinator.submit(request()?, reference(3))?;
+        coordinator.authorize(reference(1), reference(9))?;
+        coordinator.freeze_inventory(
+            reference(1),
+            state_transition(
+                ErasureLifecycleV1::AccessFrozen,
+                Some(10),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )?;
+        coordinator.dispatch_destruction(reference(1), reference(9))?;
+        coordinator.acknowledge(reference(1), acknowledgement)?;
+
+        let mut conflicting = acknowledgement;
+        conflicting.evidence = reference(99);
+        assert_eq!(
+            coordinator.acknowledge(reference(1), conflicting),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
+        assert_eq!(
+            coordinator.port.acknowledgement_admissions.borrow().len(),
+            1
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn coordinator_normalizes_core_derived_finalize_fields_and_retries() -> Result<(), ErasureErrorV1> {
     let ack = acknowledgement(1, ErasureAcknowledgementOutcomeV1::Acknowledged);
     let mut coordinator =

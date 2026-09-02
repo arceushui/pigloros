@@ -7284,14 +7284,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     }
                 })
                 .and_then(|command| {
-                    if record.acknowledgements.iter().any(|existing| {
-                        existing.obligation == acknowledgement.obligation
-                            && existing.outcome == ErasureAcknowledgementOutcomeV1::Acknowledged
-                            && acknowledgement.outcome
-                                != ErasureAcknowledgementOutcomeV1::Acknowledged
-                    }) {
-                        return Err(ErasureErrorV1::PolicyConflict);
-                    }
                     record
                         .supporting_records
                         .retry_admissions
@@ -7332,6 +7324,21 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .map(|provenance| (admission, provenance))
                 })
                 .and_then(|(admission, acknowledgement_provenance)| {
+                    let identity_exists = record
+                        .supporting_records
+                        .acknowledgement_provenance
+                        .iter()
+                        .any(|existing| {
+                            (existing.command(), existing.attempt(), existing.owner())
+                                == (
+                                    acknowledgement_provenance.command(),
+                                    acknowledgement_provenance.attempt(),
+                                    acknowledgement_provenance.owner(),
+                                )
+                        });
+                    if identity_exists {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
                     self.port
                         .admit_acknowledgement(&acknowledgement_provenance)
                         .and_then(|()| {
