@@ -114,6 +114,11 @@ pub enum ProfileMutation {
 
 #[derive(Clone, Copy)]
 pub enum BundleMutation {
+    RawManifestField(u8),
+    RawDescriptorField(u8),
+    RawMemberField(u8),
+    RawExpectedField(u8),
+    RawArchiveField(u8),
     Magic,
     Version,
     Mode,
@@ -135,6 +140,9 @@ pub enum BundleMutation {
 
 #[derive(Clone, Copy)]
 pub enum TrustMutation {
+    RawField(u8),
+    RawRootField(u8),
+    RawMinimumVersionField(u8),
     Magic,
     Version,
     PolicyId,
@@ -1099,6 +1107,15 @@ fn archive(
 fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult<()> {
     let fields = array_fields_mut(manifest)?;
     match mutation {
+        BundleMutation::RawManifestField(index) => fields[usize::from(index)] = Value::Null,
+        BundleMutation::RawDescriptorField(index) => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[usize::from(index)] = Value::Null;
+        }
+        BundleMutation::RawExpectedField(index) => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[usize::from(index)] = Value::Null;
+        }
         BundleMutation::Magic => fields[0] = text("CFB0"),
         BundleMutation::Version => fields[1] = uint(1),
         BundleMutation::Mode => fields[2] = uint(2),
@@ -1125,7 +1142,9 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
             let expected = array_fields_mut(&mut fields[5])?;
             expected.push(expected[0].clone());
         }
-        BundleMutation::MemberOrder
+        BundleMutation::RawMemberField(_)
+        | BundleMutation::RawArchiveField(_)
+        | BundleMutation::MemberOrder
         | BundleMutation::MemberDuplicate
         | BundleMutation::MemberBytes
         | BundleMutation::Signer
@@ -1138,6 +1157,11 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
 fn mutate_archive_root(root: &mut Value, mutation: BundleMutation) -> TestResult<()> {
     let fields = array_fields_mut(root)?;
     match mutation {
+        BundleMutation::RawArchiveField(index) => fields[usize::from(index)] = Value::Null,
+        BundleMutation::RawMemberField(index) => {
+            let members = array_fields_mut(&mut fields[1])?;
+            array_fields_mut(&mut members[0])?[usize::from(index)] = Value::Null;
+        }
         BundleMutation::MemberOrder => array_fields_mut(&mut fields[1])?.swap(0, 1),
         BundleMutation::MemberDuplicate => {
             let members = array_fields_mut(&mut fields[1])?;
@@ -1200,6 +1224,15 @@ fn mutate_trust_policy(
     revoked_artifact: [u8; 32],
 ) -> TestResult<()> {
     match mutation {
+        TrustMutation::RawField(index) => fields[usize::from(index)] = Value::Null,
+        TrustMutation::RawRootField(index) => {
+            let roots = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut roots[0])?[usize::from(index)] = Value::Null;
+        }
+        TrustMutation::RawMinimumVersionField(index) => {
+            let versions = array_fields_mut(&mut fields[8])?;
+            array_fields_mut(&mut versions[0])?[usize::from(index)] = Value::Null;
+        }
         TrustMutation::Magic => fields[0] = text("TPS0"),
         TrustMutation::Version => fields[1] = uint(2),
         TrustMutation::PolicyId => fields[2] = text("Invalid"),
