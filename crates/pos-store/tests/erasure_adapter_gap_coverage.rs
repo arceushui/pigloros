@@ -12,13 +12,15 @@ use std::rc::Rc;
 mod erasure_support;
 
 use erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
-use pos_core::erasure::{destruction_command_reference, target_closure_digest};
+use pos_core::erasure::{
+    destruction_command_reference, target_closure_digest, ErasureAuthorizationDecisionV1,
+};
 use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
-    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
-    ErasureCasOutcomeV1, ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
+    ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
     ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
