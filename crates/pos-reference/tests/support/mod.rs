@@ -847,7 +847,7 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             profile_fields[7] = array(vec![bytes(&[2; 32]), bytes(&[1; 32])]);
         }
         ProfileMutation::ProvidersEmpty => {
-            array_fields_mut(&mut profile_fields[8])?[1] = array(Vec::new())
+            array_fields_mut(&mut profile_fields[8])?[1] = array(Vec::new());
         }
         ProfileMutation::ProvidersUnsorted => {
             let binding = array_fields_mut(&mut profile_fields[8])?;
@@ -870,7 +870,7 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[])])]);
         }
         ProfileMutation::ProtocolId => {
-            array_fields_mut(&mut profile_fields[11])?[0] = text("Invalid")
+            array_fields_mut(&mut profile_fields[11])?[0] = text("Invalid");
         }
         ProfileMutation::ProtocolDigest => {
             array_fields_mut(&mut profile_fields[11])?[1] = bytes(&[0; 32]);
