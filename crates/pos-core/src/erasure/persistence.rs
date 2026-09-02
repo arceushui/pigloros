@@ -16,7 +16,8 @@ use super::{
     ErasureReceiptV1, ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1,
     ErasureRetryAdmissionV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateV1,
     PreparedErasureCasV1, StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
-    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
+    ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
+    ERASURE_ATTEMPT_HISTORY_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
     ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
     ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
     ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
@@ -26,7 +27,7 @@ use super::{
     ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, ERQ1, VERSION,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERC1, ERCRP1, ERQ1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -975,6 +976,85 @@ impl RecoveredErasureV1 {
         Ok((
             object,
             ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
+        ))
+    }
+
+    pub(crate) fn finish_attempt(
+        &mut self,
+        outcome: ErasureAttemptOutcomeV1,
+        receipt_provenance: ErasureReceiptProvenanceV1,
+        receipt: ErasureReceiptV1,
+    ) -> Result<(Vec<ErasurePersistenceObjectV1>, ErasureIndexInsertV1), ErasureErrorV1> {
+        let active = self
+            .active
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let ordinal = active.ordinal;
+        let admitted = InventoryV1::new(
+            self.request.reference(),
+            ordinal,
+            INVENTORY_ADMITTED,
+            canonical_acknowledgement_references(active.admitted.values().cloned()),
+        )?;
+        let effective = InventoryV1::new(
+            self.request.reference(),
+            ordinal,
+            INVENTORY_EFFECTIVE,
+            canonical_acknowledgement_references(self.effective.values().cloned()),
+        )?;
+        let page = AttemptPageV1 {
+            request: self.request.reference(),
+            ordinal,
+            retry_admission: active.admission.reference(),
+            admitted_inventory: admitted.reference,
+            effective_inventory: effective.reference,
+            outcome: outcome.reference(),
+            receipt: receipt.receipt_digest(),
+            receipt_provenance: receipt_provenance.reference(),
+            terminal_state: self.state.state_digest(),
+            predecessor: self.attempt_history_head,
+            reference: super::reference_zero(),
+        };
+        let page_bytes = page.canonical_cbor()?;
+        let page_reference = addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, &page_bytes);
+        let objects = vec![
+            persistence_object(
+                ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+                admitted.reference,
+                admitted.canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+                effective.reference,
+                effective.canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+                outcome.reference(),
+                outcome.to_canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_RECEIPT_PROVENANCE_TAG_V1,
+                receipt_provenance.reference(),
+                receipt_provenance.to_canonical_cbor()?,
+            ),
+            persistence_object(ERC1, receipt.receipt_digest(), receipt.to_canonical_cbor()?),
+            persistence_object(ERASURE_ATTEMPT_HISTORY_TAG_V1, page_reference, page_bytes),
+        ];
+        self.manifest.active = None;
+        self.manifest.attempt_history_head = Some(page_reference);
+        self.manifest.completed_attempt_count = ordinal + 1;
+        self.manifest.latest_receipt = Some(receipt.receipt_digest());
+        self.active = None;
+        self.attempt_history_head = Some(page_reference);
+        self.completed_attempt_count = ordinal + 1;
+        self.latest_receipt = Some(receipt.receipt_digest());
+        Ok((
+            objects,
+            ErasureIndexInsertV1::AttemptPage {
+                ordinal,
+                reference: page_reference,
+            },
         ))
     }
 
