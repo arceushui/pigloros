@@ -4,7 +4,10 @@ use std::collections::BTreeMap;
 
 use ciborium::value::Value;
 
-use super::persistence::{AttemptPageV1, InventoryV1, ManifestV1, ScopeNodeV1, TargetClosureV1};
+use super::persistence::{
+    AttemptPageV1, InventoryV1, ManifestV1, RecoveredErasureV1, RecoveredScopeHeadV1, ScopeNodeV1,
+    TargetClosureV1,
+};
 use super::*;
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -34,6 +37,51 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
         request_position: 9,
         horizon_position: 10,
         provenance: reference(6),
+    })
+}
+
+fn recovered_record() -> Result<RecoveredErasureV1, ErasureErrorV1> {
+    let request = request()?;
+    let state =
+        ErasureStateV1::submitted(request.reference(), reference(20), request.provenance())?;
+    Ok(RecoveredErasureV1::initial(request, state))
+}
+
+fn retry_admission(
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    source_receipt: Option<ErasureReferenceV1>,
+) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request,
+        attempt_ordinal: ordinal,
+        source_receipt,
+        unresolved_obligations: vec![reference(21)],
+        command_identities: vec![reference(22)],
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(23),
+    })
+}
+
+fn acknowledgement(
+    request: ErasureReferenceV1,
+    attempt: ErasureReferenceV1,
+    owner: ErasureReferenceV1,
+) -> Result<ErasureAcknowledgementProvenanceV1, ErasureErrorV1> {
+    ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+        request,
+        command: reference(22),
+        attempt,
+        obligation: reference(21),
+        owner,
+        scope: reference(24),
+        outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        evidence: reference(25),
+        policy: reference(5),
+        trust: reference(6),
     })
 }
 
@@ -730,6 +778,152 @@ fn private_persistence_shapes_fail_closed() -> Result<(), ErasureErrorV1> {
     assert_eq!(
         InventoryV1::new(reference(1), 0, 2, Vec::new()),
         Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovered_record_serializes_core_mutations() -> Result<(), ErasureErrorV1> {
+    let mut record = recovered_record()?;
+    assert_eq!(record.state().request(), record.request.reference());
+    record.request_object()?;
+    record.state_object()?;
+    record.prepare(
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        ErasureCasEffectV1::None,
+    )?;
+    record.set_authorize_provenance(reference(30));
+
+    let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request: record.request.reference(),
+        authorization_provenance: reference(30),
+    })?;
+    record.set_authorization_rejection(rejection)?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: reference(31),
+        rejected_terminal_state: reference(32),
+        correction_reason: reference(33),
+        authorization_provenance: reference(34),
+    })?;
+    record.set_correction(correction)?;
+    let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request: record.request.reference(),
+        error: ErasureErrorV1::AccessFreezeFailed,
+        authorization_provenance: reference(30),
+        evidence: reference(35),
+    })?;
+    record.set_freeze_failure(failure)?;
+    Ok(())
+}
+
+#[test]
+fn recovered_record_attempts_reject_relative_conflicts() -> Result<(), ErasureErrorV1> {
+    let request_reference = request()?.reference();
+    let mut wrong_request = recovered_record()?;
+    assert_eq!(
+        wrong_request.begin_attempt(retry_admission(reference(40), 0, None)?),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let mut wrong_ordinal = recovered_record()?;
+    assert_eq!(
+        wrong_ordinal.begin_attempt(retry_admission(request_reference, 1, Some(reference(41)))?),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let mut wrong_source = recovered_record()?;
+    wrong_source.latest_receipt = Some(reference(42));
+    assert_eq!(
+        wrong_source.begin_attempt(retry_admission(request_reference, 0, None)?),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut active = recovered_record()?;
+    let admission = retry_admission(request_reference, 0, None)?;
+    active.begin_attempt(admission.clone())?;
+    assert_eq!(
+        active.begin_attempt(admission.clone()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let mut no_attempt = recovered_record()?;
+    let ack = acknowledgement(request_reference, admission.reference(), reference(43))?;
+    assert_eq!(
+        no_attempt.retain_acknowledgement(&ack),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let wrong_request_ack = acknowledgement(reference(44), admission.reference(), reference(43))?;
+    assert_eq!(
+        active.retain_acknowledgement(&wrong_request_ack),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let wrong_attempt_ack = acknowledgement(request_reference, reference(45), reference(43))?;
+    assert_eq!(
+        active.retain_acknowledgement(&wrong_attempt_ack),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    active.retain_acknowledgement(&ack)?;
+    assert_eq!(
+        active.retain_acknowledgement(&ack),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovered_record_indexes_are_bounded() -> Result<(), ErasureErrorV1> {
+    let request_reference = request()?.reference();
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: request_reference,
+        scope_commitment: reference(46),
+        fork: reference(47),
+        lineage_rule: reference(48),
+        predecessor_extension: None,
+        admission_provenance: reference(49),
+    })?;
+    recovered_record()?.append_scope_extension(extension.clone())?;
+    let mut scope_limit = recovered_record()?;
+    scope_limit.scope_head = Some(RecoveredScopeHeadV1 {
+        node: reference(50),
+        extension: reference(51),
+        ordinal: ERASURE_MAX_SCOPE_EXTENSIONS as u64 - 1,
+    });
+    assert_eq!(
+        scope_limit.append_scope_extension(extension.clone()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    scope_limit.scope_head = Some(RecoveredScopeHeadV1 {
+        node: reference(50),
+        extension: reference(51),
+        ordinal: u64::MAX,
+    });
+    assert_eq!(
+        scope_limit.append_scope_extension(extension),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: request_reference,
+            affected_digests: vec![reference(52)],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: reference(46),
+            policy: reference(5),
+            trust: reference(6),
+            principal: reference(53),
+            authorization_provenance: reference(54),
+            reason: reference(55),
+            issue_position: 30,
+            predecessor_resolution: None,
+        })?;
+    recovered_record()?.append_administrative_resolution(&resolution)?;
+    let mut resolution_limit = recovered_record()?;
+    resolution_limit.administrative_resolution_count =
+        ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64;
+    assert_eq!(
+        resolution_limit.append_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
 }
