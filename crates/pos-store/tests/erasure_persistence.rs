@@ -112,7 +112,7 @@ const fn inventory(target: ErasureRequiredTargetV1) -> ErasureInventoryResultV1 
     }
 }
 
-fn transition() -> ErasureStateTransitionV1 {
+const fn transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle: ErasureLifecycleV1::AccessFrozen,
         freeze_position: Some(10),
