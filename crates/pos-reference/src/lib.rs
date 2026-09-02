@@ -136,7 +136,7 @@ pub fn reproduce_fixture_json(value: &str) -> Result<ReferenceFixtureResultV1, R
         .filter_map(|event| event.causation_seq.map(|cause| (cause, event.seq)))
         .collect();
     Ok(ReferenceFixtureResultV1 {
-        event_count: u64::try_from(events.len()).unwrap_or(u64::MAX),
+        event_count: events.len() as u64,
         event_type_counts: counts.into_iter().collect(),
         causal_edges,
     })

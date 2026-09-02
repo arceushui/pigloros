@@ -920,11 +920,9 @@ fn validate_selected_caps(
     allowed: &[AllowedDivergence],
     caps: EvaluatorHardCaps,
 ) -> Result<(), ProfileError> {
-    if u64::try_from(encoded_len).map_err(|_| ProfileError::FieldOutOfBounds)? > caps.values[0]
-        || u64::try_from(value_depth(value)).map_err(|_| ProfileError::FieldOutOfBounds)?
-            > caps.values[7]
-        || u64::try_from(fixtures.len()).map_err(|_| ProfileError::FieldOutOfBounds)?
-            > caps.values[1]
+    if encoded_len as u64 > caps.values[0]
+        || value_depth(value) as u64 > caps.values[7]
+        || fixtures.len() as u64 > caps.values[1]
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
@@ -971,10 +969,7 @@ fn validate_artifact_caps(
     } else {
         *total_bytes
     };
-    if u64::try_from(artifact.member_path.len()).map_err(|_| ProfileError::FieldOutOfBounds)?
-        > caps.values[3]
-        || artifact.byte_length > caps.values[4]
-    {
+    if artifact.member_path.len() as u64 > caps.values[3] || artifact.byte_length > caps.values[4] {
         Err(ProfileError::FieldOutOfBounds)
     } else {
         Ok(())
@@ -1323,10 +1318,7 @@ fn validate_descriptor(
     let member = bundle
         .member(&descriptor.member_path)
         .ok_or(ProfileError::ClosureIncomplete)?;
-    if u64::try_from(member.bytes.len()).map_err(|_| ProfileError::FieldOutOfBounds)?
-        != descriptor.byte_length
-        || member.digest != descriptor.digest
-    {
+    if member.bytes.len() as u64 != descriptor.byte_length || member.digest != descriptor.digest {
         Err(ProfileError::DigestMismatch)
     } else {
         Ok(())
@@ -1374,8 +1366,7 @@ fn validate_expected_results(
             return Err(ProfileError::ClosureIncomplete);
         }
         let member = bundle.member(path).ok_or(ProfileError::ClosureIncomplete)?;
-        let member_length =
-            u64::try_from(member.bytes.len()).map_err(|_| ProfileError::FieldOutOfBounds)?;
+        let member_length = member.bytes.len() as u64;
         let bound = fixture.auxiliary.iter().any(|artifact| {
             artifact.member_path == path.as_str()
                 && artifact.digest == member.digest

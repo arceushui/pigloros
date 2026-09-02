@@ -356,6 +356,31 @@ fn request_decoder_rejects_protocol_shapes_codes_and_noncanonical_bytes() -> Tes
 }
 
 #[test]
+fn public_decoders_reject_each_canonical_cbor_framing_boundary() -> TestResult {
+    let mut excessive_depth = vec![0x81; 66];
+    excessive_depth.push(0x00);
+    let malformed = [
+        Vec::new(),
+        vec![0xff],
+        vec![0x81],
+        vec![0x58, 0x02, 0x01],
+        vec![0x78, 0x02, b'a'],
+        vec![0x9a, 0x00, 0x01, 0x00, 0x01],
+        vec![0xa0],
+        vec![0xc0, 0x00],
+        vec![0xfa, 0x00, 0x00, 0x00, 0x00],
+        vec![0x18, 0x00],
+        vec![0x80, 0x00],
+        excessive_depth,
+    ];
+    for bytes in malformed {
+        assert!(EvaluationRequest::from_canonical_cbor(&bytes).is_err());
+        assert!(ConformanceReport::from_canonical_cbor(&bytes).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn request_and_report_decoders_reject_wrong_types_at_every_required_field() -> TestResult {
     let request_bytes = valid_request()?.to_canonical_cbor()?;
     let request = decoded_value(&request_bytes)?;
@@ -525,6 +550,75 @@ fn report_rejects_invalid_identity_order_aggregate_and_case_contracts() -> TestR
     assert_eq!(
         ConformanceReport::from_canonical_cbor(&canonical(&encoded)?),
         Err(ProtocolError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn report_rejects_public_identity_reviewer_and_case_identifier_boundaries() -> TestResult {
+    let valid = valid_report()?;
+
+    assert_report_rejected(
+        &valid,
+        |report| report.implementation.implementation_id = "Invalid".to_owned(),
+        ProtocolError::FieldOutOfBounds,
+    );
+    assert_report_rejected(
+        &valid,
+        |report| report.independence.reviewer_ids[0] = "Invalid".to_owned(),
+        ProtocolError::FieldOutOfBounds,
+    );
+    assert_report_rejected(
+        &valid,
+        |report| report.cases[0].case_id = "Invalid".to_owned(),
+        ProtocolError::FieldOutOfBounds,
+    );
+    Ok(())
+}
+
+#[test]
+fn report_decoder_rejects_each_outer_and_nested_contract_shape() -> TestResult {
+    let encoded = valid_report()?.to_canonical_cbor()?;
+    let valid = decoded_value(&encoded)?;
+    for (path, replacement, expected) in [
+        (
+            vec![0],
+            Value::Text("CNR0".to_owned()),
+            ProtocolError::UnsupportedVersion,
+        ),
+        (
+            vec![1],
+            Value::Integer(2_u64.into()),
+            ProtocolError::UnsupportedVersion,
+        ),
+        (
+            vec![13, 0],
+            Value::Array(Vec::new()),
+            ProtocolError::InvalidEncoding,
+        ),
+        (
+            vec![13, 0, 5],
+            Value::Integer(5_u64.into()),
+            ProtocolError::InvalidEncoding,
+        ),
+        (vec![12, 5, 0], Value::Null, ProtocolError::InvalidEncoding),
+    ] {
+        let mut changed = valid.clone();
+        replace_path(&mut changed, &path, replacement)?;
+        assert_eq!(
+            ConformanceReport::from_canonical_cbor(&canonical(&changed)?),
+            Err(expected)
+        );
+    }
+
+    let mut wrong_width = valid;
+    let Value::Array(fields) = &mut wrong_width else {
+        return Err("report is not an array".into());
+    };
+    fields.pop();
+    assert_eq!(
+        ConformanceReport::from_canonical_cbor(&canonical(&wrong_width)?),
+        Err(ProtocolError::InvalidEncoding)
     );
     Ok(())
 }

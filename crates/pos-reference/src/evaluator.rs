@@ -214,9 +214,7 @@ pub fn evaluate(
     let report_bytes = report
         .to_canonical_cbor()
         .map_err(|_| EvaluatorError::ReportVerification)?;
-    if u64::try_from(report_bytes.len()).map_err(|_| EvaluatorError::OutputLimit)?
-        > request.output_capability.report_bytes_limit
-    {
+    if report_bytes.len() as u64 > request.output_capability.report_bytes_limit {
         return Err(EvaluatorError::OutputLimit);
     }
     let verified = ConformanceReport::from_canonical_cbor(&report_bytes)
@@ -344,9 +342,7 @@ fn case_outcome(
         (StrictOracle::Output(expected), SubjectResult::Output(actual)) => {
             let actual_digest = *blake3::hash(&actual).as_bytes();
             outcome.actual_digest = Some(actual_digest);
-            outcome.outcome = if u64::try_from(actual.len())
-                .map_err(|_| EvaluatorError::OutputLimit)?
-                == expected.byte_length
+            outcome.outcome = if actual.len() as u64 == expected.byte_length
                 && actual_digest == expected.digest
             {
                 CaseStatus::Pass
@@ -395,7 +391,7 @@ fn case_outcome(
 fn failure_digest(value: &NamespacedFailure) -> Result<[u8; 32], EvaluatorError> {
     let mut bytes = b"PiglorOS.NamespacedFailure.v1\0".to_vec();
     for field in [&value.owner_id, &value.contract_version, &value.code_id] {
-        let length = u64::try_from(field.len()).map_err(|_| EvaluatorError::OutputLimit)?;
+        let length = field.len() as u64;
         bytes.extend_from_slice(&length.to_be_bytes());
         bytes.extend_from_slice(field.as_bytes());
     }
@@ -431,7 +427,7 @@ fn divergence_digest(
 ) -> Result<[u8; 32], EvaluatorError> {
     let mut bytes = domain.to_vec();
     bytes.push(classification);
-    let length = u64::try_from(coordinate.len()).map_err(|_| EvaluatorError::OutputLimit)?;
+    let length = coordinate.len() as u64;
     bytes.extend_from_slice(&length.to_be_bytes());
     bytes.extend_from_slice(coordinate);
     Ok(*blake3::hash(&bytes).as_bytes())
@@ -470,7 +466,7 @@ fn diagnostics(report: &ConformanceReport, limit: u64) -> Result<Option<Vec<u8>>
         "unavailable_case_ids": unavailable,
     });
     let bytes = serde_json::to_vec(&value).map_err(|_| EvaluatorError::ReportVerification)?;
-    if u64::try_from(bytes.len()).map_err(|_| EvaluatorError::OutputLimit)? > limit {
+    if bytes.len() as u64 > limit {
         Err(EvaluatorError::OutputLimit)
     } else {
         Ok(Some(bytes))
