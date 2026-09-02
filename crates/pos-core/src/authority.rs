@@ -1867,7 +1867,10 @@ fn digest_optional_fixed<const N: usize>(hasher: &mut blake3::Hasher, value: Opt
 }
 
 fn digest_optional_hash(hasher: &mut blake3::Hasher, value: Option<Hash>) {
-    digest_optional_bytes(hasher, value.as_ref().map(Hash::as_bytes));
+    digest_optional_bytes(
+        hasher,
+        value.as_ref().map(|hash| hash.as_bytes().as_slice()),
+    );
 }
 
 fn digest_optional_principal(hasher: &mut blake3::Hasher, value: Option<&PrincipalRefV1>) {
