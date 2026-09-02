@@ -716,6 +716,7 @@ pub(crate) fn decode_canonical_with_limit(
     if bytes.is_empty() || bytes.len() > maximum_bytes {
         return Err(ProtocolError::FieldOutOfBounds);
     }
+    preflight_cbor(bytes, maximum_bytes)?;
     let mut cursor = Cursor::new(bytes);
     let value: Value =
         ciborium::from_reader(&mut cursor).map_err(|_| ProtocolError::InvalidEncoding)?;
@@ -729,6 +730,86 @@ pub(crate) fn decode_canonical_with_limit(
         return Err(ProtocolError::InvalidEncoding);
     }
     Ok(value)
+}
+
+fn preflight_cbor(bytes: &[u8], maximum_bytes: usize) -> Result<(), ProtocolError> {
+    fn read_length(bytes: &[u8], index: &mut usize, additional: u8) -> Result<u64, ProtocolError> {
+        let width = match additional {
+            value @ 0..=23 => return Ok(u64::from(value)),
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return Err(ProtocolError::InvalidEncoding),
+        };
+        let end = index
+            .checked_add(width)
+            .ok_or(ProtocolError::FieldOutOfBounds)?;
+        let encoded = bytes
+            .get(*index..end)
+            .ok_or(ProtocolError::InvalidEncoding)?;
+        *index = end;
+        let mut value = [0_u8; 8];
+        value[8 - width..].copy_from_slice(encoded);
+        Ok(u64::from_be_bytes(value))
+    }
+
+    fn item(
+        bytes: &[u8],
+        index: &mut usize,
+        depth: usize,
+        maximum_bytes: usize,
+    ) -> Result<(), ProtocolError> {
+        if depth > MAX_NESTING {
+            return Err(ProtocolError::FieldOutOfBounds);
+        }
+        let initial = bytes
+            .get(*index)
+            .copied()
+            .ok_or(ProtocolError::InvalidEncoding)?;
+        *index = index
+            .checked_add(1)
+            .ok_or(ProtocolError::FieldOutOfBounds)?;
+        let major = initial >> 5;
+        let additional = initial & 0x1f;
+        let length = read_length(bytes, index, additional)?;
+        match major {
+            0 | 1 => Ok(()),
+            2 | 3 => {
+                let length =
+                    usize::try_from(length).map_err(|_| ProtocolError::FieldOutOfBounds)?;
+                if length > maximum_bytes {
+                    return Err(ProtocolError::FieldOutOfBounds);
+                }
+                let end = index
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FieldOutOfBounds)?;
+                bytes
+                    .get(*index..end)
+                    .ok_or(ProtocolError::InvalidEncoding)?;
+                *index = end;
+                Ok(())
+            }
+            4 => {
+                let item_count =
+                    usize::try_from(length).map_err(|_| ProtocolError::FieldOutOfBounds)?;
+                if item_count > MAX_CASES {
+                    return Err(ProtocolError::FieldOutOfBounds);
+                }
+                (0..item_count).try_for_each(|_| item(bytes, index, depth + 1, maximum_bytes))
+            }
+            7 if matches!(additional, 20..=22) => Ok(()),
+            _ => Err(ProtocolError::InvalidEncoding),
+        }
+    }
+
+    let mut index = 0;
+    item(bytes, &mut index, 0, maximum_bytes)?;
+    if index == bytes.len() {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidEncoding)
+    }
 }
 
 fn validate_value_shape(

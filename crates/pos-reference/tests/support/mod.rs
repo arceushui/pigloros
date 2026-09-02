@@ -8,7 +8,7 @@ use pos_reference::evaluator_protocol::{
     EvaluationRequest, ImplementationIdentity, OutputCapability, SubjectAdapterKind,
 };
 
-pub struct Corpus {
+pub(crate) struct Corpus {
     pub request: Vec<u8>,
     pub archive: Vec<u8>,
     pub trust_policy: Vec<u8>,
@@ -18,7 +18,7 @@ pub struct Corpus {
 
 type TestResult<T> = Result<T, Box<dyn Error>>;
 
-pub fn corpus() -> TestResult<Corpus> {
+pub(crate) fn corpus() -> TestResult<Corpus> {
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let trust_policy = trust_policy(&signing_key)?;
     let trust_digest = hash(&trust_policy);

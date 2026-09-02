@@ -191,6 +191,35 @@ fn attempt_transport_rejects_wrong_versions_shapes_types_and_codes() -> TestResu
 }
 
 #[test]
+fn transport_preflights_untrusted_cbor_before_decoding() {
+    let oversized_bytes = [0x5a, 0xff, 0xff, 0xff, 0xff];
+    assert_eq!(
+        decode_attempt(&oversized_bytes),
+        Err(TransportError::FieldOutOfBounds)
+    );
+
+    let mut excessive_depth = vec![0x81; 66];
+    excessive_depth.push(0x00);
+    assert_eq!(
+        decode_attempt(&excessive_depth),
+        Err(TransportError::FieldOutOfBounds)
+    );
+
+    for malformed in [
+        &[0x98][..],
+        &[0x9f, 0xff][..],
+        &[0xa0][..],
+        &[0x80, 0x00][..],
+        &[0x98, 0x00][..],
+    ] {
+        assert_eq!(
+            decode_attempt(malformed),
+            Err(TransportError::InvalidEncoding)
+        );
+    }
+}
+
+#[test]
 fn observation_transport_round_trips_every_closed_result() -> TestResult {
     let results = [
         SubjectResult::Output(vec![1, 2, 3]),
