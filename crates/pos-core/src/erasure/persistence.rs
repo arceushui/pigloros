@@ -21,8 +21,7 @@ use super::{
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateV1, PreparedErasureCasV1,
     StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
     ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
-    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
-    ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
+    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
     ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
     ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
     ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
@@ -30,7 +29,7 @@ use super::{
     ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERC1, ERCRP1, ERQ1, VERSION,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERC1, ERCRP1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -710,6 +709,7 @@ impl RecoveredErasureV1 {
             verifier,
         })?;
         validate_correction(port, &foundation.request, evidence.correction.as_ref())?;
+        validate_state_provenance(port, &foundation.state, &manifest)?;
 
         let RecoveredFoundationV1 {
             request,
@@ -1200,6 +1200,9 @@ impl RecoveredErasureV1 {
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
+            if active.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
             self.validate_attempt_effect(port, &admission)?;
             self.effective.retain(|_, value| {
                 value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged
@@ -1248,6 +1251,9 @@ impl RecoveredErasureV1 {
             || (effective.request, effective.ordinal, effective.kind)
                 != (self.request.reference(), page.ordinal, INVENTORY_EFFECTIVE)
         {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        if page.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         self.validate_attempt_effect(port, &admission)?;
@@ -1387,10 +1393,13 @@ impl RecoveredErasureV1 {
             .iter()
             .map(|obligation| obligation.command_identity())
             .collect::<Vec<_>>();
+        let obligations_match =
+            admission.unresolved_obligations() == expected_obligations.as_slice();
+        let identities_match = admission.command_identities() == expected_identities.as_slice();
         let admission_matches = admission.policy() == obligation_set.policy()
             && admission.trust() == obligation_set.trust()
-            && admission.unresolved_obligations() == expected_obligations.as_slice()
-            && admission.command_identities() == expected_identities.as_slice();
+            && obligations_match
+            && identities_match;
         if !admission_matches {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -1762,4 +1771,33 @@ fn validate_correction(
     } else {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
+}
+
+fn validate_state_provenance(
+    port: &dyn ErasurePersistencePortV1,
+    state: &ErasureStateV1,
+    manifest: &ManifestV1,
+) -> Result<(), ErasureErrorV1> {
+    let mut current = state.clone();
+    let mut authorization = None;
+    let mut dispatch = None;
+    for _ in 0..ERASURE_MAX_ATTEMPT_OUTCOMES.saturating_add(8) {
+        match current.lifecycle() {
+            ErasureLifecycleV1::Authorized => authorization = Some(current.provenance()),
+            ErasureLifecycleV1::DestructionDispatched => dispatch = Some(current.provenance()),
+            _ => {}
+        }
+        let Some(previous) = current.previous_state() else {
+            if authorization == manifest.authorize_provenance
+                && dispatch == manifest.dispatch_provenance
+            {
+                return Ok(());
+            }
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        };
+        current = port
+            .resolve_state(previous)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    }
+    Err(ErasureErrorV1::ProvenanceMissing)
 }
