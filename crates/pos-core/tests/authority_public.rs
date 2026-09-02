@@ -195,7 +195,10 @@ fn principal_and_adapter_results_are_canonical_public_contracts() {
     let principal = principal(1);
     assert_eq!(principal.principal_id(), &[1; 16]);
     assert_eq!(principal.trust_domain(), "local.test");
-    assert_eq!(ok(PrincipalRefV1::decode(&ok(principal.encode()))), principal);
+    assert_eq!(
+        ok(PrincipalRefV1::decode(&ok(principal.encode()))),
+        principal
+    );
 
     let authenticated = authenticated(principal.clone());
     assert_eq!(authenticated.principal(), &principal);
@@ -205,11 +208,16 @@ fn principal_and_adapter_results_are_canonical_public_contracts() {
     assert_eq!(authenticated.expires_at_micros(), 100);
     assert_eq!(authenticated.binding_digest(), hash(7));
     assert_eq!(
-        ok(AuthenticatedPrincipalResultV1::decode(&ok(authenticated.encode()))),
+        ok(AuthenticatedPrincipalResultV1::decode(&ok(
+            authenticated.encode()
+        ))),
         authenticated
     );
 
-    assert_eq!(AssuranceLevelV1::try_new(0), Err(AuthorityErrorV1::WrongFieldType));
+    assert_eq!(
+        AssuranceLevelV1::try_new(0),
+        Err(AuthorityErrorV1::WrongFieldType)
+    );
     assert_eq!(
         PrincipalRefV1::try_new([0; 16], "local.test"),
         Err(AuthorityErrorV1::ZeroIdentity)
@@ -249,16 +257,16 @@ fn principal_and_adapter_results_are_canonical_public_contracts() {
 
 #[test]
 fn one_principal_can_act_through_multiple_explicit_entity_contexts() {
-    let principal = principal(1);
+    let principal_ref = principal(1);
     let actors = vec![entity(10), entity(11)];
-    let grant = root_grant(principal.clone(), actors.clone());
+    let grant = root_grant(principal_ref.clone(), actors.clone());
 
     for actor in actors {
-        let request = request(principal.clone(), actor);
+        let request = request(principal_ref.clone(), actor);
         let decision = decision_for(&request, std::slice::from_ref(&grant));
         assert!(decision.is_allowed());
         assert_eq!(decision.outcome(), AuthorizationOutcomeV1::Active);
-        assert_eq!(decision.principal(), &principal);
+        assert_eq!(decision.principal(), &principal_ref);
         assert_eq!(decision.actor_entity_id(), actor);
         assert_eq!(decision.grant_id(), Some(hash(1)));
         assert_eq!(decision.policy_revision(), hash(9));
@@ -266,7 +274,10 @@ fn one_principal_can_act_through_multiple_explicit_entity_contexts() {
         assert_eq!(decision.at_position(), 50);
         assert_ne!(decision.request_digest(), Hash::zero());
         assert_ne!(decision.decision_digest(), Hash::zero());
-        assert_eq!(ok(AuthorizationDecisionV1::decode(&ok(decision.encode()))), decision);
+        assert_eq!(
+            ok(AuthorizationDecisionV1::decode(&ok(decision.encode()))),
+            decision
+        );
     }
 
     let other_principal = principal(2);
@@ -283,13 +294,22 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
     let principal = principal(1);
     let grant = root_grant(principal.clone(), vec![entity(10)]);
     let cases = [
-        (ConsentEvidenceV1::Missing, AuthorizationOutcomeV1::ConsentMissing),
-        (ConsentEvidenceV1::NotRequired, AuthorizationOutcomeV1::ConsentMissing),
+        (
+            ConsentEvidenceV1::Missing,
+            AuthorizationOutcomeV1::ConsentMissing,
+        ),
+        (
+            ConsentEvidenceV1::NotRequired,
+            AuthorizationOutcomeV1::ConsentMissing,
+        ),
         (
             ConsentEvidenceV1::RevokedAtFence,
             AuthorizationOutcomeV1::ConsentRevokedAtFence,
         ),
-        (ConsentEvidenceV1::Expired, AuthorizationOutcomeV1::ConsentExpired),
+        (
+            ConsentEvidenceV1::Expired,
+            AuthorizationOutcomeV1::ConsentExpired,
+        ),
         (
             ConsentEvidenceV1::Indeterminate,
             AuthorizationOutcomeV1::IndeterminateFailClosed,
@@ -315,7 +335,11 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
     indeterminate.subject_id = None;
     indeterminate.consent = ConsentEvidenceV1::Indeterminate;
     assert_eq!(
-        decision_for(&ok(AuthorizationRequestV1::try_from_draft(indeterminate)), &[]).outcome(),
+        decision_for(
+            &ok(AuthorizationRequestV1::try_from_draft(indeterminate)),
+            &[]
+        )
+        .outcome(),
         AuthorizationOutcomeV1::IndeterminateFailClosed
     );
 }
@@ -330,7 +354,11 @@ fn valid_delegation_is_bounded_and_strictly_attenuated() {
         1,
         root,
         AuthorityGranteeV1::Principal(delegate.clone()),
-        scope(vec![actor, entity(11)], vec![DELEGATE_ACTION_V1, "read"], None),
+        scope(
+            vec![actor, entity(11)],
+            vec![DELEGATE_ACTION_V1, "read"],
+            None,
+        ),
     )));
     let mut child_draft = grant_draft(
         2,
@@ -486,7 +514,10 @@ fn scope_and_request_fields_are_explicit_and_every_dimension_is_enforced() {
     assert_eq!(request.policy_revision(), hash(9));
     assert_eq!(request.revocation_epoch(), 3);
     assert!(request.revocation_state_current());
-    assert_eq!(request.consent(), ConsentEvidenceV1::Active { reference: hash(8) });
+    assert_eq!(
+        request.consent(),
+        ConsentEvidenceV1::Active { reference: hash(8) }
+    );
     assert_eq!(
         request.environment_constraints(),
         &["device-bound".to_owned(), "local-only".to_owned()]
@@ -783,7 +814,9 @@ fn malformed_requests_are_rejected_before_evaluation() {
         Err(AuthorityErrorV1::InvalidScope)
     );
     let mut invalid = base;
-    invalid.consent = ConsentEvidenceV1::Active { reference: Hash::zero() };
+    invalid.consent = ConsentEvidenceV1::Active {
+        reference: Hash::zero(),
+    };
     assert_eq!(
         AuthorizationRequestV1::try_from_draft(invalid),
         Err(AuthorityErrorV1::ZeroIdentity)
