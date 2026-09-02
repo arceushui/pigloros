@@ -2881,9 +2881,10 @@ pub struct ErasureStateV1 {
 }
 
 mod receipt;
+pub use receipt::target_closure_digest;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
-    inventories_match_frozen_obligations, target_closure_digest,
+    inventories_match_frozen_obligations,
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureAcknowledgementV1 {
