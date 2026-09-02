@@ -1485,10 +1485,12 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     let correction = correction_for(original.reference(), rejected.state_digest(), reference(22))?;
     let corrected = corrected_request(correction.reference())?;
     let mut faulted = ErasureCoordinatorStateMachineV1::new(
-        adapter.with_operation_fault(PublicCoordinatorFault {
-            operation: PublicCoordinatorOperation::AdmitCorrectedSubmission,
-            occurrence: 0,
-        }),
+        adapter
+            .clone()
+            .with_operation_fault(PublicCoordinatorFault {
+                operation: PublicCoordinatorOperation::AdmitCorrectedSubmission,
+                occurrence: 0,
+            }),
         COORDINATOR,
     );
     assert_eq!(
@@ -1506,6 +1508,14 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     assert_eq!(corrected_state.lifecycle(), ErasureLifecycleV1::Submitted);
     assert_eq!(
         api.submit_corrected(corrected, correction.clone())?,
+        corrected_state
+    );
+    let mut recovered = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+    assert_eq!(
+        recovered.submit_corrected(
+            corrected_request(correction.reference())?,
+            correction.clone(),
+        )?,
         corrected_state
     );
     let conflicting_correction =
@@ -1845,6 +1855,7 @@ fn coordinator_recovery_rejects_mismatched_persisted_effects() -> Result<(), Era
 fn coordinator_recovery_rejects_retry_admission_commitment_mismatches() -> Result<(), ErasureErrorV1>
 {
     for (field, replacement) in [
+        (2, Value::Bytes(reference(240).digest().to_vec())),
         (
             6,
             Value::Array(vec![Value::Bytes(reference(240).digest().to_vec())]),
@@ -2353,8 +2364,20 @@ fn coordinator_recovery_rejects_missing_scope_and_resolution_indexes() -> Result
     let target = target(10);
     let scope = coordinator_scope(graph.request.reference(), target, lineage_rule)?;
     let extension = coordinator_extension(graph.request.reference(), &scope, lineage_rule, None)?;
-    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
-        .append_scope_extension(graph.request.reference(), extension)?;
+    let extension_reference = extension.reference();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
+    coordinator.append_scope_extension(graph.request.reference(), extension)?;
+    coordinator.append_scope_extension(
+        graph.request.reference(),
+        ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+            request: graph.request.reference(),
+            scope_commitment: scope.reference(),
+            fork: reference(162),
+            lineage_rule,
+            predecessor_extension: Some(extension_reference),
+            admission_provenance: reference(163),
+        })?,
+    )?;
     graph
         .adapter
         .remove_scope_node(graph.request.reference(), 0);
@@ -2376,12 +2399,87 @@ fn coordinator_recovery_rejects_missing_scope_and_resolution_indexes() -> Result
             issue_position: 31,
             predecessor_resolution: None,
         })?;
-    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
-        .resolve_administratively(graph.request.reference(), &resolution)?;
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR);
+    coordinator.resolve_administratively(graph.request.reference(), &resolution)?;
+    coordinator.resolve_administratively(
+        graph.request.reference(),
+        &ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: graph.request.reference(),
+            affected_digests: vec![graph.receipt.terminal_state()],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: scope.reference(),
+            policy: reference(5),
+            trust: reference(6),
+            principal: reference(176),
+            authorization_provenance: reference(177),
+            reason: reference(178),
+            issue_position: 32,
+            predecessor_resolution: Some(resolution.reference()),
+        })?,
+    )?;
     graph
         .adapter
         .remove_resolution(graph.request.reference(), 0);
     assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_propagates_index_reference_failures() -> Result<(), ErasureErrorV1> {
+    let graph = complete_persisted_graph(None)?;
+    let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::AttemptPageRef,
+        occurrence: 0,
+    });
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(faulted, COORDINATOR)
+            .submit(graph.request.clone(), graph.request.provenance()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+
+    let lineage_rule = reference(170);
+    let graph = complete_persisted_graph(Some(lineage_rule))?;
+    let scope = coordinator_scope(graph.request.reference(), target(10), lineage_rule)?;
+    let extension = coordinator_extension(graph.request.reference(), &scope, lineage_rule, None)?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .append_scope_extension(graph.request.reference(), extension)?;
+    let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::ScopeNodeRef,
+        occurrence: 0,
+    });
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(faulted, COORDINATOR)
+            .submit(graph.request.clone(), graph.request.provenance()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+
+    let graph = complete_persisted_graph(Some(lineage_rule))?;
+    let scope = coordinator_scope(graph.request.reference(), target(10), lineage_rule)?;
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: graph.request.reference(),
+            affected_digests: vec![graph.receipt.terminal_state()],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: scope.reference(),
+            policy: reference(5),
+            trust: reference(6),
+            principal: reference(173),
+            authorization_provenance: reference(174),
+            reason: reference(175),
+            issue_position: 31,
+            predecessor_resolution: None,
+        })?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .resolve_administratively(graph.request.reference(), &resolution)?;
+    let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::ResolutionRef,
+        occurrence: 0,
+    });
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(faulted, COORDINATOR)
+            .submit(graph.request.clone(), graph.request.provenance()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
     Ok(())
 }
 
