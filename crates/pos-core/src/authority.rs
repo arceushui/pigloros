@@ -342,13 +342,7 @@ impl CapabilityScopeV1 {
             .and_then(|()| validate_entity_set(&draft.participant_ids))
             .and_then(|()| validate_optional_plugin_id(draft.plugin_id))
             .and_then(|()| validate_text_set(&draft.environment_constraints, false))
-            .and_then(|()| {
-                if draft.max_uses == 0 || draft.budget == 0 {
-                    Err(AuthorityErrorV1::InvalidScope)
-                } else {
-                    Ok(())
-                }
-            })
+            .and(validate_usage_limits(draft.max_uses, draft.budget))
             .map(|()| Self {
                 resources: draft.resources,
                 actions: draft.actions,
@@ -414,25 +408,30 @@ impl CapabilityScopeV1 {
     }
 
     fn permits(&self, request: &AuthorizationRequestV1) -> bool {
+        let identity_matches = self
+            .actor_entity_ids
+            .binary_search(&request.actor_entity_id)
+            .is_ok();
+        let participant_matches = request.participant_id.map_or_else(
+            || self.participant_ids.is_empty(),
+            |participant| self.participant_ids.binary_search(&participant).is_ok(),
+        );
+        let usage_is_bounded = request.use_count <= self.max_uses;
+        let budget_is_bounded = request.budget <= self.budget;
+        let environment_matches = is_subset(
+            &self.environment_constraints,
+            &request.environment_constraints,
+        );
         self.resources.binary_search(&request.resource).is_ok()
             && self.actions.binary_search(&request.action).is_ok()
             && self.purposes.binary_search(&request.purpose).is_ok()
             && self.audiences.binary_search(&request.audience).is_ok()
-            && self
-                .actor_entity_ids
-                .binary_search(&request.actor_entity_id)
-                .is_ok()
-            && request.participant_id.map_or_else(
-                || self.participant_ids.is_empty(),
-                |participant| self.participant_ids.binary_search(&participant).is_ok(),
-            )
+            && identity_matches
+            && participant_matches
             && self.plugin_id == request.plugin_id
-            && request.use_count <= self.max_uses
-            && request.budget <= self.budget
-            && is_subset(
-                &self.environment_constraints,
-                &request.environment_constraints,
-            )
+            && usage_is_bounded
+            && budget_is_bounded
+            && environment_matches
     }
 
     fn is_attenuation_of(&self, parent: &Self) -> bool {
@@ -660,13 +659,7 @@ impl AuthorizationRequestV1 {
             .and_then(|()| validate_optional_plugin_id(draft.plugin_id))
             .and_then(|()| validate_timeline_id(draft.authority_timeline))
             .and_then(|()| validate_text_set(&draft.environment_constraints, false))
-            .and_then(|()| {
-                if draft.use_count == 0 || draft.budget == 0 {
-                    Err(AuthorityErrorV1::InvalidScope)
-                } else {
-                    Ok(())
-                }
-            })
+            .and(validate_usage_limits(draft.use_count, draft.budget))
             .and_then(|()| match draft.consent {
                 ConsentEvidenceV1::Active { reference } => validate_hash(reference),
                 _ => Ok(()),
@@ -778,7 +771,7 @@ impl AuthorizationOutcomeV1 {
         }
     }
 
-    fn from_code(code: u8) -> Result<Self, AuthorityErrorV1> {
+    const fn from_code(code: u8) -> Result<Self, AuthorityErrorV1> {
         match code {
             0 => Ok(Self::Active),
             1 => Ok(Self::AuthenticationExpired),
@@ -915,10 +908,10 @@ fn authorization_outcome(
     if !request.revocation_state_current {
         return AuthorizationOutcomeV1::RevocationStateStale;
     }
-    if request.authority_timeline != leaf.issuance_timeline
-        || request.revocation_epoch != leaf.revocation_epoch
-        || request.policy_revision != leaf.policy_revision
-    {
+    let timeline_is_current = request.authority_timeline == leaf.issuance_timeline;
+    let revocation_epoch_is_current = request.revocation_epoch == leaf.revocation_epoch;
+    let policy_is_current = request.policy_revision == leaf.policy_revision;
+    if !timeline_is_current || !revocation_epoch_is_current || !policy_is_current {
         return AuthorizationOutcomeV1::IndeterminateFailClosed;
     }
     match validate_temporal_chain(request, grant_chain) {
@@ -928,7 +921,7 @@ fn authorization_outcome(
     }
 }
 
-fn evaluate_consent(request: &AuthorizationRequestV1) -> AuthorizationOutcomeV1 {
+const fn evaluate_consent(request: &AuthorizationRequestV1) -> AuthorizationOutcomeV1 {
     if request.subject_id.is_none() {
         return match request.consent {
             ConsentEvidenceV1::Indeterminate => AuthorizationOutcomeV1::IndeterminateFailClosed,
@@ -972,10 +965,13 @@ fn validate_delegation_chain(
         }
         seen_grants.push(grant.grant_id);
         let is_leaf = index + 1 == chain.len();
+        let parent_timeline_is_current = grant.issuance_timeline == request.authority_timeline;
+        let parent_policy_is_current = grant.policy_revision == request.policy_revision;
+        let parent_revocation_is_current = grant.revocation_epoch == request.revocation_epoch;
         if !is_leaf
-            && (grant.issuance_timeline != request.authority_timeline
-                || grant.policy_revision != request.policy_revision
-                || grant.revocation_epoch != request.revocation_epoch)
+            && (!parent_timeline_is_current
+                || !parent_policy_is_current
+                || !parent_revocation_is_current)
         {
             return ChainValidity::ParentInvalid;
         }
@@ -1015,14 +1011,18 @@ fn validate_temporal_chain(
 }
 
 fn valid_child(parent: &CapabilityGrantV1, child: &CapabilityGrantV1) -> bool {
-    child.parent_grant_id == Some(parent.grant_id)
-        && child.delegation_depth == parent.delegation_depth.saturating_add(1)
-        && child.delegation_depth <= parent.max_delegation_depth
-        && child.max_delegation_depth <= parent.max_delegation_depth
-        && matches!(
+    let depth_is_next = child.delegation_depth == parent.delegation_depth.saturating_add(1);
+    let depth_is_bounded = child.delegation_depth <= parent.max_delegation_depth;
+    let descendants_are_bounded = child.max_delegation_depth <= parent.max_delegation_depth;
+    let grantor_is_delegate = matches!(
             &parent.grantee,
             AuthorityGranteeV1::Principal(principal) if child.grantor == *principal
-        )
+        );
+    child.parent_grant_id == Some(parent.grant_id)
+        && depth_is_next
+        && depth_is_bounded
+        && descendants_are_bounded
+        && grantor_is_delegate
         && parent
             .scope
             .actions
@@ -1051,7 +1051,7 @@ fn is_subset<T: Ord>(child: &[T], parent: &[T]) -> bool {
     child.iter().all(|value| parent.binary_search(value).is_ok())
 }
 
-fn validate_text(value: &str) -> Result<(), AuthorityErrorV1> {
+const fn validate_text(value: &str) -> Result<(), AuthorityErrorV1> {
     if value.is_empty() || value.len() > MAX_AUTHORITY_TEXT_BYTES {
         Err(AuthorityErrorV1::InvalidText)
     } else {
@@ -1150,7 +1150,7 @@ fn validate_grantee(value: &AuthorityGranteeV1) -> Result<(), AuthorityErrorV1> 
     }
 }
 
-fn validate_interval(start: u64, end: u64) -> Result<(), AuthorityErrorV1> {
+const fn validate_interval(start: u64, end: u64) -> Result<(), AuthorityErrorV1> {
     if start < end {
         Ok(())
     } else {
@@ -1158,12 +1158,22 @@ fn validate_interval(start: u64, end: u64) -> Result<(), AuthorityErrorV1> {
     }
 }
 
-fn validate_delegation_depth(draft: &CapabilityGrantDraftV1) -> Result<(), AuthorityErrorV1> {
+const fn validate_delegation_depth(
+    draft: &CapabilityGrantDraftV1,
+) -> Result<(), AuthorityErrorV1> {
     if draft.max_delegation_depth > MAX_AUTHORITY_DELEGATION_DEPTH
         || draft.delegation_depth > draft.max_delegation_depth
         || (draft.delegation_depth == 0) != draft.parent_grant_id.is_none()
     {
         Err(AuthorityErrorV1::InvalidDelegationDepth)
+    } else {
+        Ok(())
+    }
+}
+
+const fn validate_usage_limits(max_uses: u64, budget: u64) -> Result<(), AuthorityErrorV1> {
+    if max_uses == 0 || budget == 0 {
+        Err(AuthorityErrorV1::InvalidScope)
     } else {
         Ok(())
     }
