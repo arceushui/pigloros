@@ -45,11 +45,8 @@ struct Options {
     adapter_arguments: Vec<OsString>,
 }
 
-fn main() {
-    if let Err(error) = run() {
-        let _ = writeln!(io::stderr().lock(), "{error}");
-        std::process::exit(2);
-    }
+fn main() -> Result<(), CommandError> {
+    run()
 }
 
 fn run() -> Result<(), CommandError> {
