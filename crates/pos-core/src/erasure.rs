@@ -265,6 +265,7 @@ impl ErasureScopeV1 {
 }
 
 /// The ADR-060 lifecycle. No edge is backward.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErasureLifecycleV1 {
     /// Request recorded.
@@ -324,7 +325,7 @@ impl ErasureLifecycleV1 {
             0b0110_0000,
             0,
         ];
-        PERMITTED_SUCCESSORS[self.code() as usize] & (1_u8 << next.code()) != 0
+        PERMITTED_SUCCESSORS[usize::from(self as u8)] & (1_u8 << (next as u8)) != 0
     }
     /// Report whether the request itself has reached a terminal outcome.
     #[must_use]
