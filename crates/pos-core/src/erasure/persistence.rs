@@ -790,7 +790,7 @@ impl RecoveredErasureV1 {
     pub(super) fn request_object(&self) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
         self.request
             .to_canonical_cbor()
-            .map(|bytes| ErasurePersistenceObjectV1::new(ERQ1, self.request.reference(), bytes))
+            .map(|bytes| ErasurePersistenceObjectV1::new(self.request.reference(), bytes))
     }
 
     pub(super) fn state_object(&self) -> Result<ErasurePersistedStateV1, ErasureErrorV1> {
@@ -817,7 +817,6 @@ impl RecoveredErasureV1 {
         self.manifest.rejection = Some(rejection.reference());
         self.rejection = Some(rejection);
         Ok(ErasurePersistenceObjectV1::new(
-            ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
             self.rejection
                 .as_ref()
                 .map(ErasureAuthorizationRejectionV1::reference)
@@ -834,7 +833,6 @@ impl RecoveredErasureV1 {
         self.manifest.correction = Some(correction.reference());
         self.correction = Some(correction);
         Ok(ErasurePersistenceObjectV1::new(
-            ERASURE_CORRECTION_PROVENANCE_TAG_V1,
             self.correction
                 .as_ref()
                 .map(ErasureCorrectionProvenanceV1::reference)
@@ -1316,7 +1314,7 @@ impl RecoveredErasureV1 {
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        self.validate_effect_subject(
+        Self::validate_effect_subject(
             port,
             receipt.receipt_digest(),
             &ErasureCasEffectV1::ReceiptAdmission {
@@ -1350,7 +1348,7 @@ impl RecoveredErasureV1 {
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            self.validate_effect_subject(
+            Self::validate_effect_subject(
                 port,
                 *reference,
                 &ErasureCasEffectV1::AcknowledgementAdmission {
@@ -1389,11 +1387,11 @@ impl RecoveredErasureV1 {
             .iter()
             .map(|obligation| obligation.command_identity())
             .collect::<Vec<_>>();
-        if admission.policy() != obligation_set.policy()
-            || admission.trust() != obligation_set.trust()
-            || admission.unresolved_obligations() != expected_obligations.as_slice()
-            || admission.command_identities() != expected_identities.as_slice()
-        {
+        let admission_matches = admission.policy() == obligation_set.policy()
+            && admission.trust() == obligation_set.trust()
+            && admission.unresolved_obligations() == expected_obligations.as_slice()
+            && admission.command_identities() == expected_identities.as_slice();
+        if !admission_matches {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let expected_commands = unresolved
@@ -1409,17 +1407,19 @@ impl RecoveredErasureV1 {
             ErasureCasEffectV1::AttemptAdmission {
                 reservation,
                 commands,
-            } if reservation.admission() == admission.reference()
-                && commands == expected_commands =>
-            {
-                Ok(())
+            } => {
+                let reservation_matches = reservation.admission() == admission.reference();
+                if reservation_matches && commands == expected_commands {
+                    Ok(())
+                } else {
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                }
             }
             _ => Err(ErasureErrorV1::ProvenanceMissing),
         }
     }
 
     fn validate_effect_subject(
-        &self,
         port: &dyn ErasurePersistencePortV1,
         subject: ErasureReferenceV1,
         expected: &ErasureCasEffectV1,
@@ -1564,11 +1564,11 @@ impl RecoveredErasureV1 {
 }
 
 const fn persistence_object(
-    tag: &'static str,
+    _tag: &'static str,
     reference: ErasureReferenceV1,
     canonical_cbor: Vec<u8>,
 ) -> ErasurePersistenceObjectV1 {
-    ErasurePersistenceObjectV1::new(tag, reference, canonical_cbor)
+    ErasurePersistenceObjectV1::new(reference, canonical_cbor)
 }
 
 fn canonical_acknowledgement_references(

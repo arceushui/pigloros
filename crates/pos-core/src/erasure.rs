@@ -3071,27 +3071,16 @@ impl StoredErasureManifestV1 {
 /// One immutable addressed object inserted by a core-prepared delta.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ErasurePersistenceObjectV1 {
-    kind: &'static str,
     reference: ErasureReferenceV1,
     canonical_cbor: Vec<u8>,
 }
 
 impl ErasurePersistenceObjectV1 {
-    pub(crate) const fn new(
-        kind: &'static str,
-        reference: ErasureReferenceV1,
-        canonical_cbor: Vec<u8>,
-    ) -> Self {
+    pub(crate) const fn new(reference: ErasureReferenceV1, canonical_cbor: Vec<u8>) -> Self {
         Self {
-            kind,
             reference,
             canonical_cbor,
         }
-    }
-
-    #[must_use]
-    pub const fn kind(&self) -> &'static str {
-        self.kind
     }
     #[must_use]
     pub const fn reference(&self) -> ErasureReferenceV1 {

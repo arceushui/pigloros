@@ -1,12 +1,9 @@
 //! Backend parity for the raw ERCRP1 manifest/CAS persistence port.
 
-#[path = "../../pos-core/tests/support/erasure.rs"]
-pub mod erasure_support;
-
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
 use pos_core::erasure::{
     destruction_command_reference, target_closure_digest, ErasureAuthorizationDecisionV1,
 };
@@ -15,15 +12,17 @@ use pos_core::{
     ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
     ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1,
-    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
-    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
-    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
-    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureErrorV1, ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
+    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -32,6 +31,71 @@ use pos_store::sqlite::SqliteStore;
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
+}
+
+fn freeze_evidence(
+    request: ErasureReferenceV1,
+    scope_commitment: ErasureReferenceV1,
+    obligation_set: &ErasureObligationSetV1,
+    targets: &[ErasureRequiredTargetV1],
+    obligations: &[ErasureObligationV1],
+    freeze_position: u64,
+    evidence: &[u8],
+) -> Result<
+    (
+        ErasureFreezeAdmissionEvidenceV1,
+        ErasureFreezeAuthorizationEvidenceV1,
+    ),
+    ErasureErrorV1,
+> {
+    let owners = obligations
+        .iter()
+        .map(|obligation| {
+            (
+                (obligation.category(), obligation.target()),
+                obligation.owner(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut matrix = Vec::with_capacity(targets.len().saturating_mul(4));
+    for category in ErasureInventoryCategoryV1::CANONICAL {
+        for (target_index, target) in targets.iter().enumerate() {
+            let owner = owners.get(&(category, *target)).copied();
+            matrix.push(ErasureFreezeApplicabilityRowV1::new(
+                category,
+                target_index as u64,
+                if owner.is_some() {
+                    pos_core::ErasureApplicabilityDecisionV1::Applicable
+                } else {
+                    pos_core::ErasureApplicabilityDecisionV1::Inapplicable
+                },
+                owner,
+            )?);
+        }
+    }
+    let input = ErasureFreezeAdmissionEvidenceInputV1 {
+        request,
+        scope_commitment,
+        obligation_set: obligation_set.reference(),
+        applicability_matrix: matrix,
+        freeze_position,
+        policy: obligation_set.policy(),
+        trust: obligation_set.trust(),
+        authorization_provenance: reference(0),
+    };
+    let provisional = ErasureFreezeAdmissionEvidenceV1::new(input.clone())?;
+    let authorization =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: provisional.authorization_body_digest()?,
+            policy: obligation_set.policy(),
+            trust: obligation_set.trust(),
+            evidence: evidence.to_vec(),
+        })?;
+    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        authorization_provenance: authorization.reference(),
+        ..input
+    })?;
+    Ok((admission, authorization))
 }
 
 const fn target() -> ErasureRequiredTargetV1 {
@@ -284,22 +348,22 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
         };
         let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
         let evidence = requested.provenance.digest();
-        let (freeze_admission_evidence, freeze_authorization_evidence) =
-            freeze_evidence_fixture(FreezeEvidenceFixtureInput {
-                request,
-                scope_commitment: scope_reference,
-                obligation_set: &obligation_set,
-                targets: &targets,
-                obligations: &obligations,
-                freeze_position: requested.freeze_position.unwrap_or(10),
-                evidence: &evidence,
-            })?;
+        let freeze_position = requested.freeze_position.unwrap_or(10);
+        let (freeze_admission_evidence, freeze_authorization_evidence) = freeze_evidence(
+            request,
+            scope_reference,
+            &obligation_set,
+            &targets,
+            &obligations,
+            freeze_position,
+            &evidence,
+        )?;
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets,
             scope,
             obligations,
             obligation_set,
-            freeze_position: requested.freeze_position.unwrap_or(10),
+            freeze_position,
             freeze_admission_evidence,
             freeze_authorization_evidence,
         })
