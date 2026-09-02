@@ -41,7 +41,8 @@ struct RawStorage {
     attempts: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     scopes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
-    effects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    effects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
 }
 
 /// In-memory implementation of the raw persistence and host capability SPIs.
@@ -89,7 +90,12 @@ impl PublicCoordinatorPort {
 
     #[must_use]
     pub fn effect(&self, manifest: ErasureReferenceV1) -> Option<ErasureReferenceV1> {
-        self.storage.borrow().effects.get(&manifest).copied()
+        self.storage
+            .borrow()
+            .effects
+            .get(&manifest)
+            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes).ok())
+            .map(|effect| effect.identity())
     }
 
     #[must_use]
@@ -131,8 +137,15 @@ impl PublicCoordinatorPort {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
-        if storage.effects.get(&mutation.next_manifest().digest())
-            != Some(&mutation.effect().identity())
+        let effect = storage
+            .effects
+            .get(&mutation.next_manifest().digest())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes))?;
+        if &effect != mutation.effect()
+            || mutation.effect().subject().is_some_and(|subject| {
+                storage.effect_subjects.get(&subject) != Some(&mutation.next_manifest().digest())
+            })
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
@@ -218,6 +231,25 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             .get(&reference)
             .cloned()
             .ok_or(ErasureErrorV1::ProvenanceMissing)
+    }
+
+    fn read_effect(
+        &self,
+        manifest: ErasureReferenceV1,
+    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+        self.storage
+            .borrow()
+            .effects
+            .get(&manifest)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes))
+    }
+
+    fn effect_manifest(
+        &self,
+        subject: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self.storage.borrow().effect_subjects.get(&subject).copied())
     }
 
     fn attempt_page_ref(
@@ -309,6 +341,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             scopes: storage.scopes.clone(),
             resolutions: storage.resolutions.clone(),
             effects: storage.effects.clone(),
+            effect_subjects: storage.effect_subjects.clone(),
         };
         for object in mutation.new_objects() {
             insert_exact(
@@ -349,9 +382,22 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         staged
             .manifests
             .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
-        staged
-            .effects
-            .insert(next.digest(), mutation.effect().identity());
+        insert_exact(
+            &mut staged.effects,
+            next.digest(),
+            &mutation.effect().to_canonical_cbor()?,
+        )?;
+        if let Some(subject) = mutation.effect().subject() {
+            match staged.effect_subjects.get(&subject) {
+                Some(existing) if *existing != next.digest() => {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
+                Some(_) => {}
+                None => {
+                    staged.effect_subjects.insert(subject, next.digest());
+                }
+            }
+        }
         *storage = staged;
         Ok(ErasureCasOutcomeV1::Applied)
     }

@@ -314,8 +314,26 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
                 not_null: true,
                 primary_key: false,
             },
+            ErasureSchemaColumn {
+                name: "subject_digest",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: false,
+            },
+            ErasureSchemaColumn {
+                name: "effect_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
         ],
-        required_sql_fragments: &["length(manifest_digest)=32", "length(effect_digest)=32"],
+        required_sql_fragments: &[
+            "length(manifest_digest)=32",
+            "length(effect_digest)=32",
+            "subject_digestisnullorlength(subject_digest)=32",
+            "length(effect_cbor)<=16777216",
+            "unique(subject_digest)",
+        ],
     },
 ];
 
@@ -727,7 +745,12 @@ impl SqliteStore {
              );
              CREATE TABLE IF NOT EXISTS erasure_effects (
                  manifest_digest BLOB NOT NULL PRIMARY KEY CHECK (length(manifest_digest) = 32),
-                 effect_digest BLOB NOT NULL CHECK (length(effect_digest) = 32)
+                 effect_digest BLOB NOT NULL CHECK (length(effect_digest) = 32),
+                 subject_digest BLOB CHECK (
+                     subject_digest IS NULL OR length(subject_digest) = 32
+                 ),
+                 effect_cbor BLOB NOT NULL CHECK (length(effect_cbor) <= 16777216),
+                 UNIQUE (subject_digest)
              );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
              CREATE TABLE IF NOT EXISTS append_identities (
@@ -4329,6 +4352,27 @@ impl ErasurePersistencePortV1 for SqliteStore {
     fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
         load_sqlite_erasure_evidence(&self.conn, reference)
     }
+    fn read_effect(
+        &self,
+        manifest: ErasureReferenceV1,
+    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+        load_sqlite_erasure_effect(&self.conn, manifest)
+    }
+    fn effect_manifest(
+        &self,
+        subject: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.conn
+            .query_row(
+                "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
+                params![subject.digest().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .map(reference_from_sql)
+            .transpose()
+    }
     fn attempt_page_ref(
         &self,
         request: ErasureReferenceV1,
@@ -4482,11 +4526,18 @@ fn apply_sqlite_erasure_cas(
     for index in mutation.index_inserts() {
         insert_sqlite_index(conn, mutation.request(), *index)?;
     }
+    let effect_cbor = mutation.effect().to_canonical_cbor()?;
+    let effect_subject = mutation
+        .effect()
+        .subject()
+        .map(|subject| subject.digest().to_vec());
     conn.execute(
-        "INSERT INTO erasure_effects(manifest_digest,effect_digest) VALUES(?1,?2)",
+        "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor) VALUES(?1,?2,?3,?4)",
         params![
             mutation.next_manifest().digest().digest().as_slice(),
-            mutation.effect().identity().digest().as_slice()
+            mutation.effect().identity().digest().as_slice(),
+            effect_subject,
+            effect_cbor,
         ],
     )
     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
@@ -4616,17 +4667,46 @@ fn sqlite_mutation_is_exact(
             return Ok(false);
         }
     }
-    let effect = conn
+    let effect = load_sqlite_erasure_effect(conn, mutation.next_manifest().digest());
+    if effect.as_ref() != Ok(mutation.effect()) {
+        return Ok(false);
+    }
+    let subject_manifest = mutation
+        .effect()
+        .subject()
+        .map(|subject| {
+            conn.query_row(
+                "SELECT manifest_digest FROM erasure_effects WHERE subject_digest=?1",
+                params![subject.digest().as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .map(reference_from_sql)
+            .transpose()
+        })
+        .transpose()?;
+    Ok(subject_manifest.is_none_or(|manifest| manifest == Some(mutation.next_manifest().digest())))
+}
+
+fn load_sqlite_erasure_effect(
+    conn: &Connection,
+    manifest: ErasureReferenceV1,
+) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+    let (digest, bytes) = conn
         .query_row(
-            "SELECT effect_digest FROM erasure_effects WHERE manifest_digest=?1",
-            params![mutation.next_manifest().digest().digest().as_slice()],
-            |row| row.get::<_, Vec<u8>>(0),
+            "SELECT effect_digest,effect_cbor FROM erasure_effects WHERE manifest_digest=?1",
+            params![manifest.digest().as_slice()],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
         .optional()
         .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-        .map(reference_from_sql)
-        .transpose()?;
-    Ok(effect == Some(mutation.effect().identity()))
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let digest = reference_from_sql(digest)?;
+    let effect = pos_core::ErasureCasEffectV1::from_canonical_cbor(&bytes)?;
+    (effect.identity() == digest)
+        .then_some(effect)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
 fn load_sqlite_erasure_evidence(

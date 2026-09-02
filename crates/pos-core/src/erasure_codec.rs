@@ -4,8 +4,9 @@ use super::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
     ErasureArtifactTransitionV1, ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1,
-    ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1,
-    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureAttemptQuotaReservationV1, ErasureAuthorizationRejectionInputV1,
+    ErasureAuthorizationRejectionV1, ErasureCasEffectV1, ErasureCorrectionProvenanceInputV1,
+    ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
     ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
     ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeFailureInputV1, ErasureFreezeFailureV1,
@@ -19,16 +20,111 @@ use super::{
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
     ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
-    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
-    ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
-    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
-    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
-    ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES,
-    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_TAG_V1,
-    ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
-    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1, ERC1, ERQ1, ERS1, VERSION,
+    ERASURE_CAS_EFFECT_TAG_V1, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
+    ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1, ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
+    ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
+    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS,
+    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
+    ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1,
+    ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERC1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
+
+pub(super) fn cas_effect_value(effect: &ErasureCasEffectV1) -> Value {
+    let (kind, subject, payload) = match effect {
+        ErasureCasEffectV1::None => (0, Value::Null, Value::Array(Vec::new())),
+        ErasureCasEffectV1::AttemptAdmission {
+            reservation,
+            commands,
+        } => (
+            1,
+            digest(reservation.admission()),
+            Value::Array(vec![
+                digest(reservation.reference()),
+                Value::Array(commands.iter().copied().map(command_value).collect()),
+            ]),
+        ),
+        ErasureCasEffectV1::AcknowledgementAdmission { acknowledgement } => {
+            (2, digest(*acknowledgement), Value::Array(Vec::new()))
+        }
+        ErasureCasEffectV1::ReceiptAdmission { receipt } => {
+            (3, digest(*receipt), Value::Array(Vec::new()))
+        }
+    };
+    Value::Array(vec![
+        text(ERASURE_CAS_EFFECT_TAG_V1),
+        uint(VERSION),
+        uint(kind),
+        subject,
+        payload,
+    ])
+}
+
+pub(super) fn cas_effect_from_fields(
+    fields: &[Value],
+) -> Result<ErasureCasEffectV1, ErasureErrorV1> {
+    header(fields, ERASURE_CAS_EFFECT_TAG_V1)?;
+    match unsigned(&fields[2])? {
+        0 if matches!(&fields[3], Value::Null) && exact_array(&fields[4], 0).is_ok() => {
+            Ok(ErasureCasEffectV1::None)
+        }
+        1 => {
+            let admission = bytes32(&fields[3])?;
+            let payload = exact_array(&fields[4], 2)?;
+            let reservation =
+                ErasureAttemptQuotaReservationV1::new(admission, bytes32(&payload[0])?);
+            let commands = array(&payload[1], super::ERASURE_MAX_OBLIGATIONS)?
+                .iter()
+                .map(command_from_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            if commands
+                .iter()
+                .all(|command| command.provenance == admission)
+            {
+                Ok(ErasureCasEffectV1::AttemptAdmission {
+                    reservation,
+                    commands,
+                })
+            } else {
+                Err(ErasureErrorV1::ProvenanceMissing)
+            }
+        }
+        2 if exact_array(&fields[4], 0).is_ok() => {
+            Ok(ErasureCasEffectV1::AcknowledgementAdmission {
+                acknowledgement: bytes32(&fields[3])?,
+            })
+        }
+        3 if exact_array(&fields[4], 0).is_ok() => Ok(ErasureCasEffectV1::ReceiptAdmission {
+            receipt: bytes32(&fields[3])?,
+        }),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
+}
+
+fn command_value(command: ErasureDestructionCommandV1) -> Value {
+    Value::Array(vec![
+        digest(command.obligation),
+        uint(command.category.code()),
+        target_value(command.target),
+        digest(command.owner),
+        digest(command.command),
+        digest(command.provenance),
+    ])
+}
+
+fn command_from_value(value: &Value) -> Result<ErasureDestructionCommandV1, ErasureErrorV1> {
+    let fields = exact_array(value, 6)?;
+    Ok(ErasureDestructionCommandV1 {
+        obligation: bytes32(&fields[0])?,
+        category: ErasureInventoryCategoryV1::from_code(unsigned(&fields[1])?)?,
+        target: target_from_value(&fields[2])?,
+        owner: bytes32(&fields[3])?,
+        command: bytes32(&fields[4])?,
+        provenance: bytes32(&fields[5])?,
+    })
+}
 
 pub(super) fn request_value(input: &ErasureRequestInputV1) -> Value {
     Value::Array(vec![

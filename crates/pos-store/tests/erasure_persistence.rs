@@ -150,6 +150,20 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
         self.store.borrow().read_object(reference)
     }
 
+    fn read_effect(
+        &self,
+        manifest: ErasureReferenceV1,
+    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+        self.store.borrow().read_effect(manifest)
+    }
+
+    fn effect_manifest(
+        &self,
+        subject: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().effect_manifest(subject)
+    }
+
     fn attempt_page_ref(
         &self,
         request: ErasureReferenceV1,
@@ -339,7 +353,14 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
 
 fn complete<S: ErasurePersistencePortV1>(
     store: S,
-) -> Result<(Rc<RefCell<S>>, ErasureRequestV1), ErasureErrorV1> {
+) -> Result<
+    (
+        Rc<RefCell<S>>,
+        ErasureRequestV1,
+        Vec<(ErasureReferenceV1, pos_core::ErasureCasEffectV1)>,
+    ),
+    ErasureErrorV1,
+> {
     let shared = Rc::new(RefCell::new(store));
     let request = request()?;
     let target = target();
@@ -353,10 +374,22 @@ fn complete<S: ErasurePersistencePortV1>(
     coordinator.submit(request.clone(), request.provenance())?;
     coordinator.authorize(request.reference(), reference(31))?;
     coordinator.freeze_inventory(request.reference(), &transition())?;
-    coordinator.dispatch_attempt(
-        request.reference(),
-        &admission(request.reference(), target)?,
-    )?;
+    let admission = admission(request.reference(), target)?;
+    coordinator.dispatch_attempt(request.reference(), &admission)?;
+    let mut effects = vec![retained_effect(&shared, request.reference())?];
+    assert_eq!(
+        effects[0].1,
+        pos_core::ErasureCasEffectV1::AttemptAdmission {
+            reservation: ErasureAttemptQuotaReservationV1::new(
+                admission.reference(),
+                admission.reference(),
+            ),
+            commands: vec![ErasureDestructionCommandV1::from_obligation(
+                &obligation(request.reference(), target)?,
+                admission.reference(),
+            )],
+        }
+    );
     let obligation = obligation(request.reference(), target)?;
     coordinator.acknowledge(
         request.reference(),
@@ -368,7 +401,12 @@ fn complete<S: ErasurePersistencePortV1>(
             outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
         },
     )?;
-    coordinator.finalize(
+    effects.push(retained_effect(&shared, request.reference())?);
+    assert!(matches!(
+        &effects[1].1,
+        pos_core::ErasureCasEffectV1::AcknowledgementAdmission { .. }
+    ));
+    let receipt = coordinator.finalize(
         request.reference(),
         ErasureReceiptInputV1 {
             request: reference(0),
@@ -395,13 +433,38 @@ fn complete<S: ErasurePersistencePortV1>(
             receipt_digest: reference(0),
         },
     )?;
-    Ok((shared, request))
+    effects.push(retained_effect(&shared, request.reference())?);
+    assert_eq!(
+        effects[2].1,
+        pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: receipt.receipt_digest(),
+        }
+    );
+    Ok((shared, request, effects))
+}
+
+fn retained_effect<S: ErasurePersistencePortV1>(
+    store: &Rc<RefCell<S>>,
+    request: ErasureReferenceV1,
+) -> Result<(ErasureReferenceV1, pos_core::ErasureCasEffectV1), ErasureErrorV1> {
+    let store = store.borrow();
+    let manifest = store
+        .read_manifest(request)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let effect = store.read_effect(manifest)?;
+    if let Some(subject) = effect.subject() {
+        if store.effect_manifest(subject)? != Some(manifest) {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    }
+    Ok((manifest, effect))
 }
 
 fn assert_raw_backend<S: ErasurePersistencePortV1>(
     store: S,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (shared, request) = complete(store)?;
+    let (shared, request, _) = complete(store)?;
     let backend = shared.borrow();
     let manifest = backend
         .read_manifest(request.reference())?
@@ -476,6 +539,39 @@ fn sqlite_manifest_cas_survives_restart_and_retains_indexes(
 #[test]
 fn sqlite_manifest_cas_rejects_a_stale_head() -> Result<(), Box<dyn std::error::Error>> {
     assert_stale_head(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, effects) = complete(SqliteStore::open(path)?)?;
+    drop(shared);
+
+    let reopened = SqliteStore::open(path)?;
+    for (manifest, expected) in effects {
+        assert_eq!(reopened.read_effect(manifest)?, expected);
+        if let Some(subject) = expected.subject() {
+            assert_eq!(reopened.effect_manifest(subject)?, Some(manifest));
+        }
+    }
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(reopened)),
+            targets: vec![target()],
+        },
+        reference(30),
+    );
+    let provenance = request.provenance();
+    assert_eq!(
+        coordinator.submit(request, provenance)?.lifecycle(),
+        ErasureLifecycleV1::Complete
+    );
+    Ok(())
 }
 
 #[test]

@@ -161,7 +161,8 @@ pub struct MemoryStore {
     erasure_attempt_pages: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_scope_nodes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_administrative_resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
-    erasure_effects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    erasure_effects: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -462,6 +463,7 @@ impl MemoryStore {
             erasure_scope_nodes: BTreeMap::new(),
             erasure_administrative_resolutions: BTreeMap::new(),
             erasure_effects: BTreeMap::new(),
+            erasure_effect_subjects: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1181,6 +1183,21 @@ impl ErasurePersistencePortV1 for MemoryStore {
             .cloned()
             .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
+    fn read_effect(
+        &self,
+        manifest: ErasureReferenceV1,
+    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+        self.erasure_effects
+            .get(&manifest)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
+            .and_then(|bytes| pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes))
+    }
+    fn effect_manifest(
+        &self,
+        subject: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self.erasure_effect_subjects.get(&subject).copied())
+    }
     fn attempt_page_ref(
         &self,
         request: ErasureReferenceV1,
@@ -1244,6 +1261,8 @@ impl ErasurePersistencePortV1 for MemoryStore {
         let mut attempts = self.erasure_attempt_pages.clone();
         let mut scopes = self.erasure_scope_nodes.clone();
         let mut resolutions = self.erasure_administrative_resolutions.clone();
+        let mut effects = self.erasure_effects.clone();
+        let mut effect_subjects = self.erasure_effect_subjects.clone();
         for object in mutation.new_objects() {
             insert_exact(&mut evidence, object.reference(), object.canonical_cbor())?;
         }
@@ -1272,6 +1291,19 @@ impl ErasurePersistencePortV1 for MemoryStore {
             };
             insert_index(map, request, ordinal, reference)?;
         }
+        let effect_bytes = mutation.effect().to_canonical_cbor()?;
+        insert_exact(&mut effects, next.digest(), &effect_bytes)?;
+        if let Some(subject) = mutation.effect().subject() {
+            match effect_subjects.get(&subject) {
+                Some(existing) if *existing != next.digest() => {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
+                Some(_) => {}
+                None => {
+                    effect_subjects.insert(subject, next.digest());
+                }
+            }
+        }
         self.erasure_records
             .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
         self.erasure_evidence = evidence;
@@ -1279,8 +1311,8 @@ impl ErasurePersistencePortV1 for MemoryStore {
         self.erasure_attempt_pages = attempts;
         self.erasure_scope_nodes = scopes;
         self.erasure_administrative_resolutions = resolutions;
-        self.erasure_effects
-            .insert(next.digest(), mutation.effect().identity());
+        self.erasure_effects = effects;
+        self.erasure_effect_subjects = effect_subjects;
         Ok(ErasureCasOutcomeV1::Applied)
     }
 }
@@ -1316,7 +1348,13 @@ fn memory_mutation_is_exact(store: &MemoryStore, mutation: &PreparedErasureCasV1
     }) && store
         .erasure_effects
         .get(&mutation.next_manifest().digest())
-        == Some(&mutation.effect().identity())
+        .is_some_and(|bytes| {
+            pos_core::ErasureCasEffectV1::from_canonical_cbor(bytes).as_ref()
+                == Ok(mutation.effect())
+        })
+        && mutation.effect().subject().is_none_or(|subject| {
+            store.erasure_effect_subjects.get(&subject) == Some(&mutation.next_manifest().digest())
+        })
 }
 
 fn insert_exact(

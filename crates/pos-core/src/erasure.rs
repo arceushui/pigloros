@@ -48,6 +48,8 @@ pub const ERASURE_OBLIGATION_SET_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Largest encoded retry-admission record.
 pub const ERASURE_RETRY_ADMISSION_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Largest encoded adapter effect retained for crash-safe recovery.
+pub const ERASURE_CAS_EFFECT_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Independent ordinal ceiling for attempt outcomes or ERC1 receipts.
 pub const ERASURE_MAX_ATTEMPT_OUTCOMES: usize = 4_096;
 /// Maximum number of administrative resolutions per ERQ1.
@@ -107,6 +109,8 @@ pub const ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1: &str = "ERAI1";
 pub const ERASURE_ATTEMPT_HISTORY_TAG_V1: &str = "ERAH1";
 /// Domain tag for one immutable scope-extension head node.
 pub const ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1: &str = "ERSEH1";
+/// Domain tag for one durable adapter effect committed with an ERCRP1 advance.
+pub const ERASURE_CAS_EFFECT_TAG_V1: &str = "ERCE1";
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3164,6 +3168,36 @@ pub enum ErasureCasEffectV1 {
 }
 
 impl ErasureCasEffectV1 {
+    /// Encode the complete effect as canonical, bounded CBOR.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or size-bound error.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(&cas_effect_value(self), ERASURE_CAS_EFFECT_MAX_BYTES)
+    }
+
+    /// Decode and validate one complete durable adapter effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding, version, or size-bound error.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(bytes, ERASURE_CAS_EFFECT_MAX_BYTES, ERASURE_MAX_OBLIGATIONS)
+            .and_then(|value| exact_array(&value, 5).and_then(cas_effect_from_fields))
+    }
+
+    /// Return the durable subject used to recover an admitted external effect.
+    #[must_use]
+    pub const fn subject(&self) -> Option<ErasureReferenceV1> {
+        match self {
+            Self::None => None,
+            Self::AttemptAdmission { reservation, .. } => Some(reservation.admission()),
+            Self::AcknowledgementAdmission { acknowledgement } => Some(*acknowledgement),
+            Self::ReceiptAdmission { receipt } => Some(*receipt),
+        }
+    }
+
     /// Return a deterministic identity covering the complete adapter effect.
     #[must_use]
     pub fn identity(&self) -> ErasureReferenceV1 {
@@ -3331,6 +3365,25 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     ///
     /// Returns a closed adapter read error for an unavailable object.
     fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1>;
+    /// Return the complete adapter effect committed with one manifest advance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read or decoding error.
+    fn read_effect(
+        &self,
+        manifest: ErasureReferenceV1,
+    ) -> Result<ErasureCasEffectV1, ErasureErrorV1>;
+    /// Resolve an admitted attempt, acknowledgement, or receipt to the manifest
+    /// transaction that durably retained its complete adapter effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn effect_manifest(
+        &self,
+        subject: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
     /// Return the non-authoritative ERAH1 ordinal-index entry.
     ///
     /// # Errors
@@ -3929,13 +3982,13 @@ use codec::{
     acknowledgement_provenance_from_fields, acknowledgement_provenance_value,
     acknowledgements_are_closure_subset, administrative_resolution_from_fields,
     administrative_resolution_value, attempt_outcome_from_fields, attempt_outcome_value,
-    authorization_rejection_from_fields, authorization_rejection_value,
-    correction_provenance_from_fields, correction_provenance_value, decode_limited, domain_digest,
-    encode_canonical, encode_limited, exact_array, freeze_admission_authorization_value,
-    freeze_admission_evidence_from_fields, freeze_admission_evidence_value,
-    freeze_authorization_evidence_from_fields, freeze_authorization_evidence_value,
-    freeze_failure_from_fields, freeze_failure_value, freeze_is_monotonic,
-    freeze_provenance_from_fields, freeze_provenance_value, has_duplicate,
+    authorization_rejection_from_fields, authorization_rejection_value, cas_effect_from_fields,
+    cas_effect_value, correction_provenance_from_fields, correction_provenance_value,
+    decode_limited, domain_digest, encode_canonical, encode_limited, exact_array,
+    freeze_admission_authorization_value, freeze_admission_evidence_from_fields,
+    freeze_admission_evidence_value, freeze_authorization_evidence_from_fields,
+    freeze_authorization_evidence_value, freeze_failure_from_fields, freeze_failure_value,
+    freeze_is_monotonic, freeze_provenance_from_fields, freeze_provenance_value, has_duplicate,
     has_duplicate_acknowledgement_identity, invalid_owner_sets, inventories_are_within_closure,
     inventories_exceed_bound, inventories_have_duplicate_targets, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, obligation_from_fields, obligation_set_from_fields,
