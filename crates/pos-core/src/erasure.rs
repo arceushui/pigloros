@@ -1947,9 +1947,9 @@ type ErasurePositiveProvenanceIndexV1<'a> =
     BTreeMap<ErasureObligationOwnerV1, ErasureSelectedPositiveProvenanceV1<'a>>;
 
 mod evidence;
-use evidence::{
-    acknowledgement_provenance_ordering_key, normalize_retry_admission, option_is_unchanged,
-};
+#[cfg(test)]
+use evidence::option_is_unchanged;
+use evidence::{acknowledgement_provenance_ordering_key, normalize_retry_admission};
 /// Construction fields for [`ErasureSupportingRecordsV1`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ErasureSupportingRecordsInputV1 {

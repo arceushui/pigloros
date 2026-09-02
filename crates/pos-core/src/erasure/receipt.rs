@@ -6,14 +6,12 @@ use super::{
     inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
     receipt_value, reference_zero, sort_inventories, state_core_value, state_from_fields,
     state_value, verify_predecessor_chain, weakest_inventory_claim, BTreeMap, BTreeSet,
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureCoordinator,
-    ErasureCoordinatorPortV1, ErasureErrorV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequiredTargetV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    Ordering, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
-    ERASURE_MAX_OUTCOME_OWNERS, ERASURE_RECEIPT_MAX_BYTES, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
-    ERC1, ERS1,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureErrorV1, ErasureLifecycleV1,
+    ErasureObligationV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1, Ordering, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_RECEIPT_MAX_BYTES,
+    ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERC1, ERS1,
 };
 
 impl ErasureStateV1 {
