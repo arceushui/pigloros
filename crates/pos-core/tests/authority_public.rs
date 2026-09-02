@@ -181,13 +181,27 @@ fn decision_for(
     request: &AuthorizationRequestV1,
     chain: &[CapabilityGrantV1],
 ) -> AuthorizationDecisionV1 {
-    AuthorityEvaluatorV1::authorize(request, chain)
+    let decision = AuthorityEvaluatorV1::authorize(request, chain);
+    assert_eq!(
+        ok(AuthorizationDecisionV1::decode(&ok(decision.encode()))),
+        decision
+    );
+    decision
 }
 
 fn encode_value(value: &Value) -> CanonicalBytes {
     let mut bytes = Vec::new();
     ok(ciborium::into_writer(value, &mut bytes));
     CanonicalBytes::from_vec(bytes)
+}
+
+fn changed_array(encoded: &CanonicalBytes, change: impl FnOnce(&mut Vec<Value>)) -> CanonicalBytes {
+    let value: Value = ok(ciborium::from_reader(encoded.as_slice()));
+    let Value::Array(mut fields) = value else {
+        panic!("public authority encoding must be an array");
+    };
+    change(&mut fields);
+    encode_value(&Value::Array(fields))
 }
 
 #[test]
@@ -342,6 +356,11 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
         .outcome(),
         AuthorizationOutcomeV1::IndeterminateFailClosed
     );
+
+    assert_eq!(
+        decision_for(&request(principal(1), entity(10)), &[]).outcome(),
+        AuthorizationOutcomeV1::CapabilityMissing
+    );
 }
 
 #[test]
@@ -430,6 +449,143 @@ fn authority_records_reject_noncanonical_and_malformed_encodings() {
         AuthorizationDecisionV1::decode(&CanonicalBytes::from_vec(tampered)),
         Err(AuthorityErrorV1::DecisionDigestMismatch)
     );
+}
+
+#[test]
+fn authenticated_result_decoder_rejects_every_malformed_public_field() {
+    let encoded = ok(authenticated(principal(1)).encode());
+    for field in 2..8 {
+        let malformed = changed_array(&encoded, |fields| {
+            fields[field] = Value::Text("wrong-type".to_owned());
+        });
+        assert_eq!(
+            AuthenticatedPrincipalResultV1::decode(&malformed),
+            Err(AuthorityErrorV1::WrongFieldType),
+            "field {field} accepted the wrong CBOR type"
+        );
+    }
+
+    let wrong_principal_length = changed_array(&encoded, |fields| {
+        fields[2] = Value::Array(Vec::new());
+    });
+    assert_eq!(
+        AuthenticatedPrincipalResultV1::decode(&wrong_principal_length),
+        Err(AuthorityErrorV1::WrongArrayLength)
+    );
+}
+
+#[test]
+fn capability_decoder_rejects_every_malformed_public_field() {
+    let principal = principal(1);
+    let encoded = ok(root_grant(principal, vec![entity(10)]).encode());
+    for field in 2..17 {
+        let malformed = changed_array(&encoded, |fields| {
+            fields[field] = Value::Text("wrong-type".to_owned());
+        });
+        assert_eq!(
+            CapabilityGrantV1::decode(&malformed),
+            Err(AuthorityErrorV1::WrongFieldType),
+            "field {field} accepted the wrong CBOR type"
+        );
+    }
+
+    for scope_field in 0..10 {
+        let malformed = changed_array(&encoded, |fields| {
+            let Value::Array(scope_fields) = &mut fields[5] else {
+                panic!("capability scope encoding must be an array");
+            };
+            scope_fields[scope_field] = Value::Text("wrong-type".to_owned());
+        });
+        assert_eq!(
+            CapabilityGrantV1::decode(&malformed),
+            Err(AuthorityErrorV1::WrongFieldType),
+            "scope field {scope_field} accepted the wrong CBOR type"
+        );
+    }
+
+    let wrong_scope_length = changed_array(&encoded, |fields| {
+        fields[5] = Value::Array(Vec::new());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&wrong_scope_length),
+        Err(AuthorityErrorV1::WrongArrayLength)
+    );
+    let wrong_principal_grantee_tag = changed_array(&encoded, |fields| {
+        let Value::Array(grantee) = &mut fields[4] else {
+            panic!("capability grantee encoding must be an array");
+        };
+        grantee[0] = Value::Integer(1.into());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&wrong_principal_grantee_tag),
+        Err(AuthorityErrorV1::WrongFieldType)
+    );
+    let wrong_grantee_length = changed_array(&encoded, |fields| {
+        fields[4] = Value::Array(Vec::new());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&wrong_grantee_length),
+        Err(AuthorityErrorV1::WrongArrayLength)
+    );
+
+    let plugin_id = plugin(2);
+    let plugin_grant = ok(CapabilityGrantV1::try_from_draft(grant_draft(
+        4,
+        principal(1),
+        AuthorityGranteeV1::PluginInstallation {
+            controller: principal(1),
+            plugin_id,
+            installation_id: [3; 16],
+        },
+        scope(vec![entity(10)], vec!["read"], Some(plugin_id)),
+    )));
+    let plugin_encoded = ok(plugin_grant.encode());
+    let wrong_plugin_grantee_tag = changed_array(&plugin_encoded, |fields| {
+        let Value::Array(grantee) = &mut fields[4] else {
+            panic!("plugin grantee encoding must be an array");
+        };
+        grantee[0] = Value::Integer(0.into());
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&wrong_plugin_grantee_tag),
+        Err(AuthorityErrorV1::WrongFieldType)
+    );
+}
+
+#[test]
+fn decision_decoder_rejects_every_malformed_public_field() {
+    let request = request(principal(1), entity(10));
+    let grant = root_grant(principal(1), vec![entity(10)]);
+    let encoded = ok(decision_for(&request, &[grant]).encode());
+
+    for field in 2..11 {
+        let malformed = changed_array(&encoded, |fields| {
+            fields[field] = Value::Text("wrong-type".to_owned());
+        });
+        assert_eq!(
+            AuthorizationDecisionV1::decode(&malformed),
+            Err(AuthorityErrorV1::WrongFieldType),
+            "field {field} accepted the wrong CBOR type"
+        );
+    }
+
+    let invalid_outcome = changed_array(&encoded, |fields| {
+        fields[8] = Value::Integer(99.into());
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&invalid_outcome),
+        Err(AuthorityErrorV1::WrongFieldType)
+    );
+    for digest_field in [5, 9, 10] {
+        let zero_digest = changed_array(&encoded, |fields| {
+            fields[digest_field] = Value::Bytes(vec![0; 32]);
+        });
+        assert_eq!(
+            AuthorizationDecisionV1::decode(&zero_digest),
+            Err(AuthorityErrorV1::ZeroIdentity),
+            "digest field {digest_field} accepted the zero digest"
+        );
+    }
 }
 
 #[test]
@@ -834,7 +990,7 @@ fn delegation_rejects_broken_links_impersonation_cycles_and_amplification() {
     child.grantor = principal(4);
     variants.push(child);
     let mut child = delegation_child();
-    child.max_delegation_depth = 2;
+    child.max_delegation_depth = 3;
     variants.push(child);
     let mut child = delegation_child();
     child.valid_from_position = 5;
