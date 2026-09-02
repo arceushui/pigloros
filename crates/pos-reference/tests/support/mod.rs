@@ -18,6 +18,11 @@ pub struct Corpus {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {
+    RawProfileField(u8),
+    RawFixtureField(u8),
+    RawExecutionField(u8),
+    RawRegistryField(u8),
+    RawPackageField(u8),
     Magic,
     Version,
     ProfileId,
@@ -738,6 +743,9 @@ fn mutate_provider_package(
     mutation: ProfileMutation,
 ) -> TestResult<()> {
     match mutation {
+        ProfileMutation::RawPackageField(index) => {
+            fields[usize::from(index)] = Value::Null;
+        }
         ProfileMutation::PackageMagic => fields[0] = text("FPP0"),
         ProfileMutation::PackageVersion => fields[1] = uint(2),
         ProfileMutation::PackageProvider => fields[2] = provider_key(2),
@@ -754,6 +762,9 @@ fn mutate_provider_package(
 
 fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) {
     match mutation {
+        ProfileMutation::RawRegistryField(index) => {
+            fields[usize::from(index)] = Value::Null;
+        }
         ProfileMutation::RegistryMagic => fields[0] = text("FPR0"),
         ProfileMutation::RegistryVersion => fields[1] = uint(2),
         ProfileMutation::RegistryProviders => fields[2] = array(Vec::new()),
@@ -819,6 +830,9 @@ fn profile(
 fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<()> {
     let profile_fields = array_fields_mut(profile)?;
     match mutation {
+        ProfileMutation::RawProfileField(index) => {
+            profile_fields[usize::from(index)] = Value::Null;
+        }
         ProfileMutation::Magic => profile_fields[0] = text("CPF0"),
         ProfileMutation::Version => profile_fields[1] = uint(2),
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
@@ -910,7 +924,10 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         | ProfileMutation::PackageAdapter
         | ProfileMutation::PackageSchemas
         | ProfileMutation::PackageSupportRole
-        | ProfileMutation::PackageDigest => {}
+        | ProfileMutation::PackageDigest
+        | ProfileMutation::RawExecutionField(_)
+        | ProfileMutation::RawRegistryField(_)
+        | ProfileMutation::RawPackageField(_) => {}
         fixture_mutation => mutate_fixture(profile_fields, fixture_mutation)?,
     }
     Ok(())
@@ -923,6 +940,9 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         .ok_or_else(|| io::Error::other("test fixture is missing"))?;
     let fields = array_fields_mut(fixture)?;
     match mutation {
+        ProfileMutation::RawFixtureField(index) => {
+            fields[usize::from(index)] = Value::Null;
+        }
         ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
         ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
         ProfileMutation::FixtureModeOutOfRange => fields[7] = array(vec![uint(4)]),
@@ -1383,6 +1403,9 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
 
 fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
     match mutation {
+        ProfileMutation::RawExecutionField(index) => {
+            fields[usize::from(index)] = Value::Null;
+        }
         ProfileMutation::ExecutionMagic => fields[0] = text("EPF0"),
         ProfileMutation::ExecutionVersion => fields[1] = uint(2),
         ProfileMutation::ExecutionId => fields[2] = text("Invalid"),
