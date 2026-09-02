@@ -2261,8 +2261,13 @@ fn encode_decision(value: &AuthorizationDecisionV1) -> Value {
 }
 
 fn decode_decision(fields: &[Value]) -> Result<AuthorizationDecisionV1, AuthorityErrorV1> {
-    expect_header(fields, DECISION_MAGIC)?;
-    let decoded = AuthorizationDecisionV1 {
+    expect_header(fields, DECISION_MAGIC)
+        .and_then(|()| decode_decision_fields(fields))
+        .and_then(validate_decision)
+}
+
+fn decode_decision_fields(fields: &[Value]) -> Result<AuthorizationDecisionV1, AuthorityErrorV1> {
+    Ok(AuthorizationDecisionV1 {
         principal: decode_principal_value(&fields[2])?,
         principal_role: decode_role(&fields[3])?,
         actor_entity_id: decode_entity(&fields[4])?,
@@ -2280,30 +2285,32 @@ fn decode_decision(fields: &[Value]) -> Result<AuthorizationDecisionV1, Authorit
         outcome: AuthorizationOutcomeV1::from_code(decode_u8(&fields[16])?)?,
         request_digest: decode_hash(&fields[17])?,
         decision_digest: decode_hash(&fields[18])?,
-    };
-    validate_hash(decoded.policy_revision)?;
-    validate_hash(decoded.request_digest)?;
-    validate_hash(decoded.decision_digest)?;
-    validate_hash(decoded.authority_registry_digest)?;
-    validate_optional_hash(decoded.grant_id)?;
-    validate_timeline_id(decoded.authority_timeline)?;
-    validate_entity_id(decoded.actor_entity_id)?;
-    validate_optional_entity_id(decoded.subject_id)?;
-    validate_optional_entity_id(decoded.participant_id)?;
-    validate_optional_plugin_id(decoded.plugin_id)?;
-    validate_plugin_context(decoded.plugin_id, decoded.installation_id)?;
-    if decoded.acting_delegates.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1 {
-        return Err(AuthorityErrorV1::FieldOutOfBounds);
-    }
-    decoded
-        .acting_delegates
-        .iter()
-        .try_for_each(|principal| validate_text(principal.trust_domain()))?;
-    if decision_digest(&decoded) == decoded.decision_digest {
-        Ok(decoded)
-    } else {
-        Err(AuthorityErrorV1::DigestMismatch)
-    }
+    })
+}
+
+fn validate_decision(
+    decoded: AuthorizationDecisionV1,
+) -> Result<AuthorizationDecisionV1, AuthorityErrorV1> {
+    validate_hash(decoded.policy_revision)
+        .and_then(|()| validate_hash(decoded.request_digest))
+        .and_then(|()| validate_hash(decoded.decision_digest))
+        .and_then(|()| validate_hash(decoded.authority_registry_digest))
+        .and_then(|()| validate_optional_hash(decoded.grant_id))
+        .and_then(|()| validate_timeline_id(decoded.authority_timeline))
+        .and_then(|()| validate_entity_id(decoded.actor_entity_id))
+        .and_then(|()| validate_optional_entity_id(decoded.subject_id))
+        .and_then(|()| validate_optional_entity_id(decoded.participant_id))
+        .and_then(|()| validate_optional_plugin_id(decoded.plugin_id))
+        .and_then(|()| validate_plugin_context(decoded.plugin_id, decoded.installation_id))
+        .and_then(|()| {
+            if decoded.acting_delegates.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1 {
+                Err(AuthorityErrorV1::FieldOutOfBounds)
+            } else if decision_digest(&decoded) == decoded.decision_digest {
+                Ok(decoded)
+            } else {
+                Err(AuthorityErrorV1::DigestMismatch)
+            }
+        })
 }
 
 fn decode_text(value: &Value) -> Result<String, AuthorityErrorV1> {
