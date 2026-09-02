@@ -1079,3 +1079,100 @@ fn sqlite_state_resolution_rejects_a_foreign_request_binding(
     );
     Ok(())
 }
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_public_indexes_reject_unrepresentable_ordinals() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let store = SqliteStore::open(path)?;
+    for result in [
+        store.attempt_page_ref(reference(1), u64::MAX),
+        store.scope_node_ref(reference(1), u64::MAX),
+        store.administrative_resolution_ref(reference(1), u64::MAX),
+    ] {
+        assert_eq!(result, Err(ErasureErrorV1::PolicyConflict));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_public_reads_reject_malformed_reference_columns() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let store = SqliteStore::open(path)?;
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+    let request_digest = reference(1).digest();
+    let malformed = vec![1_u8];
+
+    connection.execute(
+        "INSERT INTO erasure_records(request_digest,manifest_digest,manifest_cbor) VALUES(?1,?2,?3)",
+        rusqlite::params![request_digest.as_slice(), &malformed, vec![0_u8]],
+    )?;
+    assert_eq!(
+        store.read_manifest(reference(1)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    for (table, read) in [
+        ("erasure_attempt_pages", SqliteReadOperation::AttemptRef),
+        ("erasure_scope_nodes", SqliteReadOperation::ScopeRef),
+        (
+            "erasure_administrative_resolutions",
+            SqliteReadOperation::ResolutionRef,
+        ),
+    ] {
+        connection.execute(
+            &format!(
+                "INSERT INTO {table}(request_digest,ordinal,reference_digest) VALUES(?1,0,?2)"
+            ),
+            rusqlite::params![request_digest.as_slice(), &malformed],
+        )?;
+        assert_eq!(read.invoke(&store), Err(ErasureErrorV1::ProvenanceMissing));
+    }
+
+    let manifest = reference(2).digest();
+    let subject = reference(3).digest();
+    connection.execute(
+        "INSERT INTO erasure_effects(manifest_digest,effect_digest,subject_digest,effect_cbor) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![
+            manifest.as_slice(),
+            &malformed,
+            subject.as_slice(),
+            pos_core::ErasureCasEffectV1::None.to_canonical_cbor()?
+        ],
+    )?;
+    assert_eq!(
+        store.read_effect(reference(2)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    connection.execute(
+        "UPDATE erasure_effects SET manifest_digest=?1 WHERE subject_digest=?2",
+        rusqlite::params![&malformed, subject.as_slice()],
+    )?;
+    assert_eq!(
+        store.effect_manifest(reference(3)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let state_digest = reference(4).digest();
+    connection.execute(
+        "INSERT INTO erasure_states(state_digest,request_digest,state_cbor) VALUES(?1,?2,?3)",
+        rusqlite::params![state_digest.as_slice(), &malformed, vec![0_u8]],
+    )?;
+    assert_eq!(
+        store.resolve_state(reference(4)),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
