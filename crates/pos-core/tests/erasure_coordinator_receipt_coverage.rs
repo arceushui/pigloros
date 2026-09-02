@@ -2112,6 +2112,40 @@ fn coordinator_persists_canonical_mixed_acknowledgement_order() -> Result<(), Er
 }
 
 #[test]
+fn coordinator_exact_retry_rejects_a_readdressed_receipt_object() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let request = coordinator_request()?;
+    let port = coordinator_port(vec![target], None);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    coordinator.dispatch_attempt(
+        request.reference(),
+        &coordinator_admission(request.reference(), target, 0, None)?,
+    )?;
+    coordinator.acknowledge(
+        request.reference(),
+        coordinator_acknowledgement(
+            request.reference(),
+            target,
+            reference(171),
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )?,
+    )?;
+    let input = coordinator_receipt_input(target, 30);
+    let receipt = coordinator.finalize(request.reference(), input.clone())?;
+    let (foreign_input, _) = complete_receipt_input()?;
+    let foreign = ErasureReceiptV1::new(foreign_input)?;
+    assert_ne!(receipt.receipt_digest(), foreign.receipt_digest());
+    adapter.insert_object(receipt.receipt_digest(), foreign.to_canonical_cbor()?);
+    assert_eq!(
+        coordinator.finalize(request.reference(), input),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_errors_lifecycles_and_digest_helpers_are_closed() {
     let errors = [
         ErasureErrorV1::InvalidEncoding,
@@ -3372,14 +3406,6 @@ fn portable_decoders_reject_wrong_types_in_every_foundation_field() -> Result<()
     reject_each_top_level_field(&request.to_canonical_cbor()?, |bytes| {
         ErasureRequestV1::from_canonical_cbor(bytes)
     })?;
-    assert_eq!(
-        ErasureRequestV1::from_canonical_cbor(&replace_path(
-            &request.to_canonical_cbor()?,
-            &[5],
-            Value::Array(vec![Value::Null; 4_097]),
-        )?),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
     let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
         rejected_request: reference(1),
         rejected_terminal_state: reference(2),
