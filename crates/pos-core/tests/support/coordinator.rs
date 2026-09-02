@@ -6,7 +6,9 @@ use std::rc::Rc;
 
 use ciborium::value::Value;
 use pos_core::erasure::{
-    target_closure_digest, ErasureAuthorizationDecisionV1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
+    target_closure_digest, ErasureAuthorizationDecisionV1,
+    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1,
 };
 use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
@@ -164,6 +166,47 @@ fn replace_attempt_page_field(
     Ok(())
 }
 
+fn replace_indexed_object(
+    storage: &mut RawStorage,
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    index: usize,
+    replacement: Value,
+    object_tag: &str,
+    manifest_field: usize,
+    select: impl Fn(&mut RawStorage) -> &mut BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    let previous = *select(storage)
+        .get(&(request, ordinal))
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let object = storage
+        .objects
+        .get(&previous)
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let changed = replace_array_field(&object, index, replacement)?;
+    let changed_reference = addressed(object_tag, &changed);
+    storage.objects.remove(&previous);
+    storage.objects.insert(changed_reference, changed);
+    select(storage).insert((request, ordinal), changed_reference);
+
+    let (_, manifest) = storage
+        .manifests
+        .get(&request)
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let changed_manifest = replace_array_field(
+        &manifest,
+        manifest_field,
+        Value::Bytes(changed_reference.digest().to_vec()),
+    )?;
+    storage.manifests.insert(
+        request,
+        (addressed("ERCRP1", &changed_manifest), changed_manifest),
+    );
+    Ok(changed_reference)
+}
+
 /// In-memory implementation of the raw persistence and host capability SPIs.
 ///
 /// The storage is shared by clones so tests can retain an adapter handle while
@@ -257,6 +300,27 @@ impl PublicCoordinatorPort {
         if let Some(manifest) = storage.effect_subjects.remove(&subject) {
             storage.effects.remove(&manifest);
         }
+    }
+
+    /// Replace one persisted effect while retaining its subject lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an encoding error when the replacement cannot be serialized.
+    pub fn replace_effect_for_subject(
+        &self,
+        subject: ErasureReferenceV1,
+        replacement: &pos_core::ErasureCasEffectV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let manifest = *storage
+            .effect_subjects
+            .get(&subject)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        storage
+            .effects
+            .insert(manifest, replacement.to_canonical_cbor()?);
+        Ok(())
     }
 
     /// Replace one raw manifest field while retaining a valid content address.
@@ -404,6 +468,100 @@ impl PublicCoordinatorPort {
             page_field,
             Value::Bytes(changed_reference.digest().to_vec()),
         )
+    }
+
+    /// Replace and re-address one scope node and its manifest/index links.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the selected graph component is absent or malformed.
+    pub fn replace_scope_node_field(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        index: usize,
+        replacement: Value,
+    ) -> Result<(), ErasureErrorV1> {
+        replace_indexed_object(
+            &mut self.storage.borrow_mut(),
+            request,
+            ordinal,
+            index,
+            replacement,
+            ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+            13,
+            |storage| &mut storage.scopes,
+        )?;
+        Ok(())
+    }
+
+    /// Replace one scope extension and repair its enclosing node links.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the extension or node is absent or malformed.
+    pub fn replace_scope_extension_field(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        index: usize,
+        replacement: Value,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let node = *storage
+            .scopes
+            .get(&(request, ordinal))
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let node_bytes = storage
+            .objects
+            .get(&node)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let previous = array_reference_field(node_bytes, 4)?;
+        let extension = storage
+            .objects
+            .get(&previous)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let changed = replace_array_field(&extension, index, replacement)?;
+        let changed_reference = addressed(ERASURE_SCOPE_EXTENSION_TAG_V1, &changed);
+        storage.objects.remove(&previous);
+        storage.objects.insert(changed_reference, changed);
+        replace_indexed_object(
+            &mut storage,
+            request,
+            ordinal,
+            4,
+            Value::Bytes(changed_reference.digest().to_vec()),
+            ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+            13,
+            |storage| &mut storage.scopes,
+        )?;
+        Ok(())
+    }
+
+    /// Replace and re-address one administrative resolution and its graph links.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the selected resolution is absent or malformed.
+    pub fn replace_resolution_field(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        index: usize,
+        replacement: Value,
+    ) -> Result<(), ErasureErrorV1> {
+        replace_indexed_object(
+            &mut self.storage.borrow_mut(),
+            request,
+            ordinal,
+            index,
+            replacement,
+            ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
+            18,
+            |storage| &mut storage.resolutions,
+        )?;
+        Ok(())
     }
 
     pub fn remove_object(&self, reference: ErasureReferenceV1) {

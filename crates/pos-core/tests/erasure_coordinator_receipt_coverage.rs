@@ -870,6 +870,47 @@ fn assert_active_graph_mutation_rejected(
     Ok(())
 }
 
+fn assert_scope_graph_mutation_rejected(
+    mutate: impl FnOnce(&CompletedGraph) -> Result<(), ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = complete_persisted_graph(Some(lineage_rule))?;
+    let scope = coordinator_scope(graph.request.reference(), target(10), lineage_rule)?;
+    let extension = coordinator_extension(graph.request.reference(), &scope, lineage_rule, None)?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .append_scope_extension(graph.request.reference(), extension)?;
+    mutate(&graph)?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+fn assert_resolution_graph_mutation_rejected(
+    mutate: impl FnOnce(&CompletedGraph) -> Result<(), ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    let lineage_rule = reference(170);
+    let graph = complete_persisted_graph(Some(lineage_rule))?;
+    let scope = coordinator_scope(graph.request.reference(), target(10), lineage_rule)?;
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: graph.request.reference(),
+            affected_digests: vec![graph.receipt.terminal_state()],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: scope.reference(),
+            policy: reference(5),
+            trust: reference(6),
+            principal: reference(173),
+            authorization_provenance: reference(174),
+            reason: reference(175),
+            issue_position: 31,
+            predecessor_resolution: None,
+        })?;
+    ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
+        .resolve_administratively(graph.request.reference(), &resolution)?;
+    mutate(&graph)?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
 fn assert_manifest_object_rejected(
     field: usize,
     reference: ErasureReferenceV1,
@@ -1368,6 +1409,97 @@ fn coordinator_recovery_rejects_active_and_completed_dispatch_mismatches(
         graph
             .adapter
             .replace_manifest_field(graph.request.reference(), 20, Value::Null)
+    })
+}
+
+#[test]
+fn coordinator_recovery_rejects_mismatched_persisted_effects() -> Result<(), ErasureErrorV1> {
+    assert_active_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_effect_for_subject(
+            graph.admission.reference(),
+            &ErasureCasEffectV1::AttemptAdmission {
+                reservation: ErasureAttemptQuotaReservationV1::new(
+                    graph.admission.reference(),
+                    reference(240),
+                ),
+                commands: Vec::new(),
+            },
+        )
+    })?;
+    assert_active_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_effect_for_subject(
+            graph.admission.reference(),
+            &ErasureCasEffectV1::ReceiptAdmission {
+                receipt: reference(240),
+            },
+        )
+    })?;
+    assert_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_effect_for_subject(
+            graph.acknowledgement,
+            &ErasureCasEffectV1::ReceiptAdmission {
+                receipt: reference(240),
+            },
+        )
+    })
+}
+
+#[test]
+fn coordinator_recovery_rejects_scope_chain_mismatches() -> Result<(), ErasureErrorV1> {
+    for (field, replacement) in [
+        (2, Value::Bytes(reference(240).digest().to_vec())),
+        (3, Value::Bytes(reference(240).digest().to_vec())),
+        (4, Value::Bytes(reference(240).digest().to_vec())),
+        (5, Value::Integer(1.into())),
+        (6, Value::Bytes(reference(240).digest().to_vec())),
+    ] {
+        assert_scope_graph_mutation_rejected(|graph| {
+            graph
+                .adapter
+                .replace_scope_node_field(graph.request.reference(), 0, field, replacement)
+        })?;
+    }
+    for (field, replacement) in [
+        (2, Value::Bytes(reference(240).digest().to_vec())),
+        (3, Value::Bytes(reference(240).digest().to_vec())),
+        (6, Value::Bytes(reference(240).digest().to_vec())),
+    ] {
+        assert_scope_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_scope_extension_field(
+                graph.request.reference(),
+                0,
+                field,
+                replacement,
+            )
+        })?;
+    }
+    assert_scope_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            13,
+            Value::Bytes(reference(240).digest().to_vec()),
+        )
+    })
+}
+
+#[test]
+fn coordinator_recovery_rejects_resolution_chain_mismatches() -> Result<(), ErasureErrorV1> {
+    for (field, replacement) in [
+        (2, Value::Bytes(reference(240).digest().to_vec())),
+        (12, Value::Bytes(reference(240).digest().to_vec())),
+    ] {
+        assert_resolution_graph_mutation_rejected(|graph| {
+            graph
+                .adapter
+                .replace_resolution_field(graph.request.reference(), 0, field, replacement)
+        })?;
+    }
+    assert_resolution_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            18,
+            Value::Bytes(reference(240).digest().to_vec()),
+        )
     })
 }
 
