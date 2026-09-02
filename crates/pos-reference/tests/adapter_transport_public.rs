@@ -14,7 +14,7 @@ use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-fn budget() -> DeterministicBudget {
+const fn budget() -> DeterministicBudget {
     DeterministicBudget {
         memory_bytes: 1,
         cpu_fuel: 2,
@@ -27,7 +27,7 @@ fn budget() -> DeterministicBudget {
     }
 }
 
-fn usage() -> ResourceUsage {
+const fn usage() -> ResourceUsage {
     ResourceUsage {
         memory_bytes: 8,
         cpu_fuel: 7,
