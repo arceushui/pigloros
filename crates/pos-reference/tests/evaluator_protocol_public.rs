@@ -146,6 +146,16 @@ fn reseal(report: &mut ConformanceReport) -> TestResult {
     Ok(())
 }
 
+fn assert_report_rejected(
+    template: &ConformanceReport,
+    update: impl FnOnce(&mut ConformanceReport),
+    expected: ProtocolError,
+) {
+    let mut report = template.clone();
+    update(&mut report);
+    assert_eq!(report.to_canonical_cbor(), Err(expected));
+}
+
 fn canonical(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)?;
@@ -244,6 +254,53 @@ fn request_rejects_every_public_identity_and_capability_boundary() -> TestResult
         request.to_canonical_cbor(),
         Err(ProtocolError::DigestMismatch)
     );
+    Ok(())
+}
+
+#[test]
+fn request_round_trips_every_adapter_and_optional_identity_shape() -> TestResult {
+    for adapter in [
+        SubjectAdapterKind::ExportedArtifact,
+        SubjectAdapterKind::PublicGatewayProtocol,
+        SubjectAdapterKind::PublicPluginProtocol,
+    ] {
+        let mut request = valid_request()?;
+        request.subject_adapter = adapter;
+        request.implementation.organization_id = Some("test-organization".to_owned());
+        request.output_capability.capability_digest =
+            request.expected_output_capability_digest()?;
+        request.request_digest = request.digest()?;
+        let encoded = request.to_canonical_cbor()?;
+        assert_eq!(
+            EvaluationRequest::from_canonical_cbor(&encoded),
+            Ok(request)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn request_rejects_each_identifier_boundary() -> TestResult {
+    for identifier in [
+        String::new(),
+        "a".repeat(129),
+        "café".to_owned(),
+        "Invalid".to_owned(),
+        "invalid@identifier".to_owned(),
+    ] {
+        let mut request = valid_request()?;
+        request.implementation.implementation_id = identifier.clone();
+        assert_eq!(
+            request.to_canonical_cbor(),
+            Err(ProtocolError::FieldOutOfBounds)
+        );
+        let mut request = valid_request()?;
+        request.implementation.organization_id = Some(identifier);
+        assert_eq!(
+            request.to_canonical_cbor(),
+            Err(ProtocolError::FieldOutOfBounds)
+        );
+    }
     Ok(())
 }
 
@@ -468,6 +525,97 @@ fn report_rejects_invalid_identity_order_aggregate_and_case_contracts() -> TestR
     assert_eq!(
         ConformanceReport::from_canonical_cbor(&canonical(&encoded)?),
         Err(ProtocolError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn report_rejects_every_top_level_and_independence_boundary() -> TestResult {
+    let valid = valid_report()?;
+    assert_report_rejected(
+        &valid,
+        |report| report.replay_claim = 5,
+        ProtocolError::FieldOutOfBounds,
+    );
+    assert_report_rejected(
+        &valid,
+        |report| report.redaction_state = 4,
+        ProtocolError::FieldOutOfBounds,
+    );
+    for index in 0..10 {
+        assert_report_rejected(
+            &valid,
+            |report| match index {
+                0 => report.subject_artifact_digest = [0; 32],
+                1 => report.profile_digest = [0; 32],
+                2 => report.normative_spec_digest = [0; 32],
+                3 => report.execution_profile_digest = [0; 32],
+                4 => report.fixture_bundle_digest = [0; 32],
+                5 => report.evaluator_source_digest = [0; 32],
+                6 => report.evaluator_binary_digest = [0; 32],
+                7 => report.evaluator_protocol_digest = [0; 32],
+                8 => report.limitations_digest = [0; 32],
+                _ => report.provenance_digest = [0; 32],
+            },
+            ProtocolError::FieldOutOfBounds,
+        );
+    }
+    for update in 0..4 {
+        assert_report_rejected(
+            &valid,
+            |report| match update {
+                0 => report.independence.declaration_digest = [0; 32],
+                1 => report.independence.shared_code_audit_digest = [0; 32],
+                2 => report.independence.reviewer_ids.clear(),
+                _ => {
+                    report.independence.reviewer_ids = (0..33)
+                        .map(|value| format!("reviewer-{value:02}"))
+                        .collect();
+                }
+            },
+            ProtocolError::FieldOutOfBounds,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn report_rejects_every_case_bound_and_evidence_boundary() -> TestResult {
+    let valid = valid_report()?;
+    for update in 0..10 {
+        assert_report_rejected(
+            &valid,
+            |report| match update {
+                0 => report.cases[0].fixture_digest = [0; 32],
+                1 => report.cases[0].execution_profile_digest = [0; 32],
+                2 => report.cases[0].provenance_digest = [0; 32],
+                3 => report.cases[0].mode = 4,
+                4 => report.cases[0].claim_layer = 7,
+                5 => report.cases[0].replay_claim = 5,
+                6 => report.cases[0].redaction_state = 4,
+                7 => report.cases[0].expected_error = Some(14),
+                8 => report.cases[0].actual_error = Some(14),
+                _ => report.cases[0].first_coordinate = Some(vec![1; 129]),
+            },
+            ProtocolError::FieldOutOfBounds,
+        );
+    }
+    assert_report_rejected(
+        &valid,
+        |report| {
+            report.cases[0].outcome = CaseStatus::Fail;
+            report.cases[0].expected_digest = None;
+            report.cases[0].actual_digest = None;
+        },
+        ProtocolError::InvalidEncoding,
+    );
+    assert_report_rejected(
+        &valid,
+        |report| {
+            report.cases[0].redaction_state = 1;
+            report.cases[0].replay_claim = 2;
+        },
+        ProtocolError::InvalidEncoding,
     );
     Ok(())
 }
