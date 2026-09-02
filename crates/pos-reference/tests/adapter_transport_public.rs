@@ -8,7 +8,7 @@ use pos_reference::adapter_transport::{
 use pos_reference::evaluator::{
     AdapterError, CaseAttempt, ResourceUsage, SubjectAdapter, SubjectObservation, SubjectResult,
 };
-use pos_reference::evaluator_protocol::SubjectAdapterKind;
+use pos_reference::evaluator_protocol::{ProtocolError, SubjectAdapterKind};
 use pos_reference::process_adapter::ProcessAdapter;
 use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
 
@@ -37,6 +37,25 @@ const fn usage() -> ResourceUsage {
         storage_bytes: 3,
         execution_steps: 2,
         simulation_time_ns: 1,
+    }
+}
+
+#[test]
+fn transport_errors_preserve_public_protocol_failure_classes() {
+    assert_eq!(
+        TransportError::from(ProtocolError::UnsupportedVersion),
+        TransportError::UnsupportedVersion
+    );
+    assert_eq!(
+        TransportError::from(ProtocolError::FieldOutOfBounds),
+        TransportError::FieldOutOfBounds
+    );
+    for error in [
+        ProtocolError::InvalidEncoding,
+        ProtocolError::NonCanonicalOrder,
+        ProtocolError::DigestMismatch,
+    ] {
+        assert_eq!(TransportError::from(error), TransportError::InvalidEncoding);
     }
 }
 

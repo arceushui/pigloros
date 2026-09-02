@@ -9,7 +9,7 @@ use crate::evaluator_protocol::{
     array, array_values, bool_value, contract_digest, decode_canonical, encode, fixed_bytes, text,
     uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
-use crate::signed_bundle::{BundleError, VerifiedBundle};
+use crate::signed_bundle::VerifiedBundle;
 
 const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
@@ -222,21 +222,6 @@ impl From<ProtocolError> for ProfileError {
             ProtocolError::NonCanonicalOrder => Self::NonCanonicalOrder,
             ProtocolError::DigestMismatch => Self::DigestMismatch,
             ProtocolError::InvalidEncoding => Self::InvalidEncoding,
-        }
-    }
-}
-
-impl From<BundleError> for ProfileError {
-    fn from(value: BundleError) -> Self {
-        match value {
-            BundleError::FieldOutOfBounds => Self::FieldOutOfBounds,
-            BundleError::NonCanonicalOrder => Self::NonCanonicalOrder,
-            BundleError::DigestMismatch => Self::DigestMismatch,
-            BundleError::ClosureIncomplete => Self::ClosureIncomplete,
-            BundleError::InvalidEncoding
-            | BundleError::SignatureInvalid
-            | BundleError::TrustPolicyMismatch
-            | BundleError::ProhibitedMaterial => Self::InvalidEncoding,
         }
     }
 }

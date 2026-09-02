@@ -4,15 +4,72 @@ use std::error::Error;
 
 use ciborium::value::Value;
 use pos_reference::evaluator::{
-    evaluate, AdapterError, CaseAttempt, EvaluatorIdentity, ResourceUsage, SubjectAdapter,
-    SubjectObservation, SubjectResult,
+    evaluate, AdapterError, CaseAttempt, EvaluatorError, EvaluatorIdentity, ResourceUsage,
+    SubjectAdapter, SubjectObservation, SubjectResult,
 };
 use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, ProtocolError,
     SubjectAdapterKind,
 };
+use pos_reference::profile::ProfileError;
+use pos_reference::signed_bundle::BundleError;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+#[test]
+fn public_error_boundaries_preserve_closed_failure_classes() {
+    assert_eq!(
+        BundleError::from(ProtocolError::FieldOutOfBounds),
+        BundleError::FieldOutOfBounds
+    );
+    assert_eq!(
+        BundleError::from(ProtocolError::NonCanonicalOrder),
+        BundleError::NonCanonicalOrder
+    );
+    assert_eq!(
+        BundleError::from(ProtocolError::DigestMismatch),
+        BundleError::DigestMismatch
+    );
+    assert_eq!(
+        BundleError::from(ProtocolError::UnsupportedVersion),
+        BundleError::InvalidEncoding
+    );
+    assert_eq!(
+        BundleError::from(ProtocolError::InvalidEncoding),
+        BundleError::InvalidEncoding
+    );
+
+    assert_eq!(
+        ProfileError::from(ProtocolError::UnsupportedVersion),
+        ProfileError::UnsupportedVersion
+    );
+    assert_eq!(
+        ProfileError::from(ProtocolError::FieldOutOfBounds),
+        ProfileError::FieldOutOfBounds
+    );
+    assert_eq!(
+        ProfileError::from(ProtocolError::NonCanonicalOrder),
+        ProfileError::NonCanonicalOrder
+    );
+    assert_eq!(
+        ProfileError::from(ProtocolError::DigestMismatch),
+        ProfileError::DigestMismatch
+    );
+    assert_eq!(
+        ProfileError::from(ProtocolError::InvalidEncoding),
+        ProfileError::InvalidEncoding
+    );
+
+    for error in [
+        ProtocolError::InvalidEncoding,
+        ProtocolError::UnsupportedVersion,
+        ProtocolError::FieldOutOfBounds,
+        ProtocolError::NonCanonicalOrder,
+        ProtocolError::DigestMismatch,
+    ] {
+        assert_eq!(EvaluatorError::from(error), EvaluatorError::Request);
+    }
+}
 
 struct PassingAdapter {
     subject_digest: [u8; 32],
