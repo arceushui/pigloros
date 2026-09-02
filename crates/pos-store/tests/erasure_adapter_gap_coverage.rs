@@ -1,0 +1,753 @@
+//! Public adapter coverage for the erasure persistence CAS boundaries.
+//!
+//! The tests keep the coordinator and the adapters on opposite sides of the
+//! public port. SQLite-only corruption is performed through a second public
+//! `rusqlite::Connection` so the adapter must still classify the resulting
+//! durable state through its normal public methods.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[path = "../../pos-core/tests/support/erasure.rs"]
+mod erasure_support;
+
+use erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
+use pos_core::erasure::{destruction_command_reference, target_closure_digest};
+use pos_core::{
+    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
+    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
+    ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
+    ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureAuthorizationDecisionV1,
+    ErasureCasOutcomeV1, ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
+    ErasureObligationV1, ErasurePersistencePortV1, ErasureReferenceV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, PreparedErasureCasV1,
+};
+use pos_store::memory::MemoryStore;
+
+#[cfg(feature = "sqlite")]
+use pos_store::sqlite::SqliteStore;
+
+const fn reference(value: u8) -> ErasureReferenceV1 {
+    ErasureReferenceV1::from_digest([value; 32])
+}
+
+const fn target() -> ErasureRequiredTargetV1 {
+    ErasureRequiredTargetV1 {
+        artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
+        artifact_digest: reference(10),
+        key_role: pos_core::ErasureKeyRoleV1::DataEncryption,
+        key_digest: reference(11),
+        replica_set: reference(12),
+        replica_id: reference(13),
+    }
+}
+
+fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
+    ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(1),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(3)],
+        requester: reference(4),
+        authorization: reference(5),
+        policy: reference(6),
+        request_position: 9,
+        horizon_position: 20,
+        provenance: reference(7),
+    })
+}
+
+const fn freeze_transition() -> ErasureStateTransitionV1 {
+    ErasureStateTransitionV1 {
+        lifecycle: pos_core::ErasureLifecycleV1::AccessFrozen,
+        freeze_position: Some(10),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        acknowledged_targets: Vec::new(),
+        replay_claim: pos_core::ErasureReplayClaimV1::Exact,
+        provenance: reference(14),
+    }
+}
+
+fn scope(
+    request: ErasureReferenceV1,
+    targets: &[ErasureRequiredTargetV1],
+    lineage_rule: ErasureReferenceV1,
+) -> Result<ErasureScopeCommitmentV1, ErasureErrorV1> {
+    ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(15)],
+        target_closure: target_closure_digest(targets),
+        lineage_rule: Some(lineage_rule),
+    })
+}
+
+fn extension(
+    request: ErasureReferenceV1,
+    scope: &ErasureScopeCommitmentV1,
+    lineage_rule: ErasureReferenceV1,
+) -> Result<ErasureScopeExtensionV1, ErasureErrorV1> {
+    ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request,
+        scope_commitment: scope.reference(),
+        fork: reference(16),
+        lineage_rule,
+        predecessor_extension: None,
+        admission_provenance: reference(17),
+    })
+}
+
+fn resolution(
+    request: ErasureReferenceV1,
+    state: &ErasureStateV1,
+    scope: &ErasureScopeCommitmentV1,
+) -> Result<ErasureAdministrativeResolutionV1, ErasureErrorV1> {
+    ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+        request,
+        affected_digests: vec![state.state_digest()],
+        action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+        scope_commitment: scope.reference(),
+        policy: reference(6),
+        trust: reference(8),
+        principal: reference(18),
+        authorization_provenance: reference(19),
+        reason: reference(20),
+        issue_position: 21,
+        predecessor_resolution: None,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum RetryExpectation {
+    Exact,
+    Propagate,
+}
+
+trait RetryHook<S: ErasurePersistencePortV1> {
+    fn before_retry(
+        &mut self,
+        store: &Rc<RefCell<S>>,
+        mutation: &PreparedErasureCasV1,
+    ) -> Result<RetryExpectation, ErasureErrorV1>;
+}
+
+#[derive(Default)]
+struct ExactRetryHook;
+
+impl<S: ErasurePersistencePortV1> RetryHook<S> for ExactRetryHook {
+    fn before_retry(
+        &mut self,
+        _store: &Rc<RefCell<S>>,
+        _mutation: &PreparedErasureCasV1,
+    ) -> Result<RetryExpectation, ErasureErrorV1> {
+        Ok(RetryExpectation::Exact)
+    }
+}
+
+struct AdapterHost<S, H> {
+    store: Rc<RefCell<S>>,
+    targets: Vec<ErasureRequiredTargetV1>,
+    lineage_rule: ErasureReferenceV1,
+    freeze_evidence: ErasureReferenceV1,
+    retry_hook: H,
+}
+
+impl<S, H> ErasureStateResolverV1 for AdapterHost<S, H>
+where
+    S: ErasurePersistencePortV1,
+    H: RetryHook<S>,
+{
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        self.store.borrow().resolve_state(digest)
+    }
+}
+
+impl<S, H> ErasurePersistencePortV1 for AdapterHost<S, H>
+where
+    S: ErasurePersistencePortV1,
+    H: RetryHook<S>,
+{
+    fn read_manifest(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
+        self.store.borrow().read_manifest(request)
+    }
+
+    fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+        self.store.borrow().read_object(reference)
+    }
+
+    fn read_effect(
+        &self,
+        manifest: ErasureReferenceV1,
+    ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+        self.store.borrow().read_effect(manifest)
+    }
+
+    fn effect_manifest(
+        &self,
+        subject: ErasureReferenceV1,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().effect_manifest(subject)
+    }
+
+    fn attempt_page_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().attempt_page_ref(request, ordinal)
+    }
+
+    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        self.store.borrow().attempt_index_count(request)
+    }
+
+    fn scope_node_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().scope_node_ref(request, ordinal)
+    }
+
+    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        self.store.borrow().scope_index_count(request)
+    }
+
+    fn administrative_resolution_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store
+            .borrow()
+            .administrative_resolution_ref(request, ordinal)
+    }
+
+    fn administrative_resolution_index_count(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<u64, ErasureErrorV1> {
+        self.store
+            .borrow()
+            .administrative_resolution_index_count(request)
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        mutation: PreparedErasureCasV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let retry = mutation.clone();
+        let outcome = self.store.borrow_mut().compare_and_swap(mutation)?;
+        let expectation = self.retry_hook.before_retry(&self.store, &retry)?;
+        let retry_outcome = self.store.borrow_mut().compare_and_swap(retry);
+        match expectation {
+            RetryExpectation::Exact => {
+                if retry_outcome != Ok(ErasureCasOutcomeV1::ExactRetry) {
+                    return Err(ErasureErrorV1::PolicyConflict);
+                }
+            }
+            RetryExpectation::Propagate => {
+                retry_outcome.map(|_| ())?;
+            }
+        }
+        Ok(outcome)
+    }
+}
+
+impl<S, H> ErasureFreezeAuthorizationVerifierV1 for AdapterHost<S, H>
+where
+    S: ErasurePersistencePortV1,
+    H: RetryHook<S>,
+{
+    fn validate_freeze_authorization(
+        &self,
+        admission: &ErasureFreezeAdmissionEvidenceV1,
+        authorization: &ErasureFreezeAuthorizationEvidenceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        authorization.verify_admission_body_binding(admission)
+    }
+}
+
+impl<S, H> ErasureCoordinatorPortV1 for AdapterHost<S, H>
+where
+    S: ErasurePersistencePortV1,
+    H: RetryHook<S>,
+{
+    fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_authorization(
+        &self,
+        _request: ErasureReferenceV1,
+        _provenance: ErasureReferenceV1,
+        _decision: ErasureAuthorizationDecisionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_corrected_submission(
+        &self,
+        _request: &ErasureRequestV1,
+        _correction: &pos_core::ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_atomic_freeze(
+        &self,
+        request: ErasureReferenceV1,
+        _requested: &ErasureStateTransitionV1,
+    ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+        let mut obligations = self
+            .targets
+            .iter()
+            .copied()
+            .map(|target| {
+                ErasureObligationV1::new(ErasureObligationInputV1 {
+                    category: ErasureInventoryCategoryV1::Artifact,
+                    target,
+                    owner: target.replica_id,
+                    command_identity: destruction_command_reference(request, target),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+        let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+            request,
+            obligations: obligations
+                .iter()
+                .map(ErasureObligationV1::reference)
+                .collect(),
+            policy: reference(6),
+            trust: reference(8),
+        })?;
+        let scope_input = ErasureScopeCommitmentInputV1 {
+            request,
+            scope_members: vec![reference(15)],
+            target_closure: target_closure_digest(&self.targets),
+            lineage_rule: Some(self.lineage_rule),
+        };
+        let scope_reference = ErasureScopeCommitmentV1::new(scope_input.clone())?.reference();
+        let evidence = self.freeze_evidence.digest();
+        let (freeze_admission_evidence, freeze_authorization_evidence) =
+            freeze_evidence_fixture(FreezeEvidenceFixtureInput {
+                request,
+                scope_commitment: scope_reference,
+                obligation_set: &obligation_set,
+                targets: &self.targets,
+                obligations: &obligations,
+                freeze_position: 10,
+                evidence: &evidence,
+            })?;
+        ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
+            targets: self.targets.clone(),
+            scope: scope_input,
+            obligations,
+            obligation_set,
+            freeze_position: 10,
+            freeze_admission_evidence,
+            freeze_authorization_evidence,
+        })
+        .map(Box::new)
+        .map(ErasureAtomicFreezeResultV1::Admitted)
+    }
+
+    fn admit_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_administrative_resolution(
+        &self,
+        _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn dispatch_destruction(
+        &self,
+        _request: ErasureReferenceV1,
+        _commands: &[ErasureDestructionCommandV1],
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_attempt(
+        &self,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+        Ok(ErasureAttemptQuotaReservationV1::new(
+            admission.reference(),
+            admission.reference(),
+        ))
+    }
+
+    fn admit_acknowledgement(
+        &self,
+        _acknowledgement: &ErasureAcknowledgementProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn admit_receipt(
+        &self,
+        _input: &pos_core::ErasureReceiptInputV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+}
+
+fn exercise_scope_and_resolution<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: ErasurePersistencePortV1,
+{
+    let shared = Rc::new(RefCell::new(store));
+    let request = request()?;
+    let target = target();
+    let lineage_rule = reference(40);
+    let mut coordinator = pos_core::ErasureCoordinatorStateMachineV1::new(
+        AdapterHost {
+            store: Rc::clone(&shared),
+            targets: vec![target],
+            lineage_rule,
+            freeze_evidence: reference(41),
+            retry_hook: ExactRetryHook,
+        },
+        reference(42),
+    );
+
+    assert_eq!(
+        coordinator
+            .submit(request.clone(), request.provenance())?
+            .lifecycle(),
+        pos_core::ErasureLifecycleV1::Submitted
+    );
+    assert_eq!(
+        coordinator
+            .authorize(request.reference(), reference(43))?
+            .lifecycle(),
+        pos_core::ErasureLifecycleV1::Authorized
+    );
+    let frozen = coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    assert_eq!(
+        frozen.lifecycle(),
+        pos_core::ErasureLifecycleV1::AccessFrozen
+    );
+
+    let scope = scope(request.reference(), &[target], lineage_rule)?;
+    let extension = extension(request.reference(), &scope, lineage_rule)?;
+    coordinator.append_scope_extension(request.reference(), extension)?;
+    {
+        let adapter = shared.borrow();
+        assert_eq!(adapter.scope_index_count(request.reference())?, 1);
+        assert!(adapter.scope_node_ref(request.reference(), 0)?.is_some());
+    }
+
+    let resolution = resolution(request.reference(), &frozen, &scope)?;
+    coordinator.resolve_administratively(request.reference(), &resolution)?;
+    let adapter = shared.borrow();
+    assert_eq!(
+        adapter.administrative_resolution_index_count(request.reference())?,
+        1
+    );
+    assert!(adapter
+        .administrative_resolution_ref(request.reference(), 0)?
+        .is_some());
+    Ok(())
+}
+
+#[test]
+fn memory_public_scope_and_resolution_indexes_are_idempotent(
+) -> Result<(), Box<dyn std::error::Error>> {
+    exercise_scope_and_resolution(MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_public_scope_and_resolution_indexes_are_idempotent(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?
+        .to_owned();
+    exercise_scope_and_resolution(SqliteStore::open(&path)?)
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Copy)]
+enum SqliteFaultKind {
+    MissingObject,
+    MismatchedState,
+    MissingIndex,
+    MismatchedEffect,
+    ApplyWithMismatchedState,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteFaultKind {
+    const fn fail_on(self) -> usize {
+        match self {
+            Self::MissingIndex => 4,
+            Self::MissingObject
+            | Self::MismatchedState
+            | Self::MismatchedEffect
+            | Self::ApplyWithMismatchedState => 1,
+        }
+    }
+
+    const fn expected_error(self) -> ErasureErrorV1 {
+        match self {
+            Self::ApplyWithMismatchedState => ErasureErrorV1::ProvenanceMissing,
+            Self::MissingObject
+            | Self::MismatchedState
+            | Self::MissingIndex
+            | Self::MismatchedEffect => ErasureErrorV1::PolicyConflict,
+        }
+    }
+
+    const fn uses_scope_operation(self) -> bool {
+        matches!(self, Self::MissingIndex)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+struct SqliteFaultHook {
+    path: std::path::PathBuf,
+    kind: SqliteFaultKind,
+    call: usize,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteFaultHook {
+    fn new(path: &str, kind: SqliteFaultKind) -> Self {
+        Self {
+            path: std::path::PathBuf::from(path),
+            kind,
+            call: 0,
+        }
+    }
+
+    fn corrupt(&self, mutation: &PreparedErasureCasV1) -> Result<(), ErasureErrorV1> {
+        let connection = rusqlite::Connection::open(&self.path)
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        match self.kind {
+            SqliteFaultKind::MissingObject => {
+                let object = mutation
+                    .new_objects()
+                    .first()
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                let digest = object.reference().digest();
+                connection
+                    .execute(
+                        "DELETE FROM erasure_evidence WHERE reference_digest=?1",
+                        rusqlite::params![digest.as_slice()],
+                    )
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            }
+            SqliteFaultKind::MismatchedState | SqliteFaultKind::ApplyWithMismatchedState => {
+                let state = mutation
+                    .new_states()
+                    .first()
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                let digest = state.reference().digest();
+                connection
+                    .execute(
+                        "UPDATE erasure_states SET state_cbor=?1 WHERE state_digest=?2",
+                        rusqlite::params![vec![0xff_u8], digest.as_slice()],
+                    )
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                if matches!(self.kind, SqliteFaultKind::ApplyWithMismatchedState) {
+                    if mutation.expected_manifest_digest().is_some() {
+                        return Err(ErasureErrorV1::PolicyConflict);
+                    }
+                    let request = mutation.request().digest();
+                    connection
+                        .execute(
+                            "DELETE FROM erasure_records WHERE request_digest=?1",
+                            rusqlite::params![request.as_slice()],
+                        )
+                        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                }
+            }
+            SqliteFaultKind::MissingIndex => {
+                let index = mutation
+                    .index_inserts()
+                    .first()
+                    .copied()
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                let request = mutation.request().digest();
+                match index {
+                    ErasureIndexInsertV1::AttemptPage { ordinal, .. } => {
+                        connection
+                            .execute(
+                                "DELETE FROM erasure_attempt_pages WHERE request_digest=?1 AND ordinal=?2",
+                                rusqlite::params![request.as_slice(), i64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?],
+                            )
+                            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                    }
+                    ErasureIndexInsertV1::ScopeNode { ordinal, .. } => {
+                        connection
+                            .execute(
+                                "DELETE FROM erasure_scope_nodes WHERE request_digest=?1 AND ordinal=?2",
+                                rusqlite::params![request.as_slice(), i64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?],
+                            )
+                            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                    }
+                    ErasureIndexInsertV1::AdministrativeResolution { ordinal, .. } => {
+                        connection
+                            .execute(
+                                "DELETE FROM erasure_administrative_resolutions WHERE request_digest=?1 AND ordinal=?2",
+                                rusqlite::params![request.as_slice(), i64::try_from(ordinal).map_err(|_| ErasureErrorV1::PolicyConflict)?],
+                            )
+                            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+                    }
+                }
+            }
+            SqliteFaultKind::MismatchedEffect => {
+                let manifest = mutation.next_manifest().digest().digest();
+                connection
+                    .execute(
+                        "UPDATE erasure_effects SET effect_cbor=?1 WHERE manifest_digest=?2",
+                        rusqlite::params![vec![0xff_u8], manifest.as_slice()],
+                    )
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl RetryHook<SqliteStore> for SqliteFaultHook {
+    fn before_retry(
+        &mut self,
+        _store: &Rc<RefCell<SqliteStore>>,
+        mutation: &PreparedErasureCasV1,
+    ) -> Result<RetryExpectation, ErasureErrorV1> {
+        self.call = self.call.saturating_add(1);
+        if self.call == self.kind.fail_on() {
+            self.corrupt(mutation)?;
+            Ok(RetryExpectation::Propagate)
+        } else {
+            Ok(RetryExpectation::Exact)
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn exercise_sqlite_fault(kind: SqliteFaultKind) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?
+        .to_owned();
+    let shared = Rc::new(RefCell::new(SqliteStore::open(&path)?));
+    let request = request()?;
+    let target = target();
+    let lineage_rule = reference(40);
+    let mut coordinator = pos_core::ErasureCoordinatorStateMachineV1::new(
+        AdapterHost {
+            store: Rc::clone(&shared),
+            targets: vec![target],
+            lineage_rule,
+            freeze_evidence: reference(41),
+            retry_hook: SqliteFaultHook::new(&path, kind),
+        },
+        reference(42),
+    );
+
+    let result = if kind.uses_scope_operation() {
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(43))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+        let scope = scope(request.reference(), &[target], lineage_rule)?;
+        let extension = extension(request.reference(), &scope, lineage_rule)?;
+        coordinator
+            .append_scope_extension(request.reference(), extension)
+            .map(|_| ())
+    } else {
+        coordinator
+            .submit(request.clone(), request.provenance())
+            .map(|_| ())
+    };
+    assert_eq!(result, Err(kind.expected_error()));
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_exact_retry_rechecks_each_public_durable_component(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for kind in [
+        SqliteFaultKind::MissingObject,
+        SqliteFaultKind::MismatchedState,
+        SqliteFaultKind::MissingIndex,
+        SqliteFaultKind::MismatchedEffect,
+    ] {
+        exercise_sqlite_fault(kind)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_apply_rejects_a_mismatched_state_row() -> Result<(), Box<dyn std::error::Error>> {
+    exercise_sqlite_fault(SqliteFaultKind::ApplyWithMismatchedState)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_state_resolution_rejects_a_foreign_request_binding(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?
+        .to_owned();
+    let shared = Rc::new(RefCell::new(SqliteStore::open(&path)?));
+    let request = request()?;
+    let state = {
+        let mut coordinator = pos_core::ErasureCoordinatorStateMachineV1::new(
+            AdapterHost {
+                store: Rc::clone(&shared),
+                targets: vec![target()],
+                lineage_rule: reference(40),
+                freeze_evidence: reference(41),
+                retry_hook: ExactRetryHook,
+            },
+            reference(42),
+        );
+        coordinator.submit(request.clone(), request.provenance())?
+    };
+    let connection = rusqlite::Connection::open(&path)?;
+    let foreign_request = reference(250).digest();
+    let state_digest = state.state_digest().digest();
+    connection.execute(
+        "UPDATE erasure_states SET request_digest=?1 WHERE state_digest=?2",
+        rusqlite::params![foreign_request.as_slice(), state_digest.as_slice()],
+    )?;
+    assert_eq!(
+        shared.borrow().resolve_state(state.state_digest()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
