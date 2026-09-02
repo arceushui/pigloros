@@ -585,6 +585,41 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
 }
 
 #[test]
+fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> TestResult {
+    let mutations = (0..16)
+        .map(ProfileMutation::RawProfileField)
+        .chain(
+            (0..23)
+                .filter(|index| ![13, 19, 20].contains(index))
+                .map(ProfileMutation::RawFixtureField),
+        )
+        .chain(
+            (0..15)
+                .map(ProfileMutation::RawExecutionField)
+                .chain((0..3).map(ProfileMutation::RawRegistryField))
+                .chain((0..11).map(ProfileMutation::RawPackageField)),
+        );
+    for mutation in mutations {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestResult {
     let corpus = support::corpus()?;
     for request in [
