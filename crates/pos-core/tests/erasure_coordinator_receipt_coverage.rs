@@ -4056,6 +4056,16 @@ fn freeze_and_obligation_codecs_reject_wrong_shapes() -> Result<(), ErasureError
         )?),
         Err(ErasureErrorV1::InvalidEncoding)
     );
+    for path in [&[5_usize, 0][..], &[5, 0, 1][..], &[5, 0, 3][..]] {
+        assert!(
+            ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace_path(
+                &admission_bytes,
+                path,
+                Value::Bool(true),
+            )?)
+            .is_err()
+        );
+    }
 
     let obligation = obligation(
         reference(1),
@@ -4169,6 +4179,60 @@ fn cas_effect_codec_rejects_wrong_shapes_and_trailing_data() -> Result<(), Erasu
     assert_eq!(
         ErasureCasEffectV1::from_canonical_cbor(&malformed),
         Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let admission = reference(20);
+    let obligation = obligation(
+        reference(1),
+        ErasureInventoryCategoryV1::Artifact,
+        target(21),
+    )?;
+    let attempt = ErasureCasEffectV1::AttemptAdmission {
+        reservation: ErasureAttemptQuotaReservationV1::new(admission, reference(22)),
+        commands: vec![ErasureDestructionCommandV1::from_obligation(
+            &obligation,
+            admission,
+        )],
+    };
+    let attempt_bytes = attempt.to_canonical_cbor()?;
+    for path in [
+        &[4_usize, 0][..],
+        &[4, 1][..],
+        &[4, 1, 0][..],
+        &[4, 1, 0, 0][..],
+        &[4, 1, 0, 2][..],
+        &[4, 1, 0, 3][..],
+        &[4, 1, 0, 4][..],
+        &[4, 1, 0, 5][..],
+    ] {
+        assert!(ErasureCasEffectV1::from_canonical_cbor(&replace_path(
+            &attempt_bytes,
+            path,
+            Value::Bool(true),
+        )?)
+        .is_err());
+    }
+    assert!(ErasureCasEffectV1::from_canonical_cbor(&replace_path(
+        &attempt_bytes,
+        &[4, 1, 0, 1],
+        Value::Integer(99.into()),
+    )?)
+    .is_err());
+    for field in 0..6 {
+        assert!(ErasureCasEffectV1::from_canonical_cbor(&replace_path(
+            &attempt_bytes,
+            &[4, 1, 0, 2, field],
+            Value::Bool(true),
+        )?)
+        .is_err());
+    }
+    assert_eq!(
+        ErasureCasEffectV1::from_canonical_cbor(&replace_path(
+            &attempt_bytes,
+            &[4, 1, 0, 5],
+            Value::Bytes(reference(23).digest().to_vec()),
+        )?),
+        Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(ERASURE_CAS_EFFECT_TAG_V1, "ERCE1");
     Ok(())
