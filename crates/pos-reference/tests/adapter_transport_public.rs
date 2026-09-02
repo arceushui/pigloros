@@ -340,19 +340,6 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() -> TestResu
         Err(TransportError::FieldOutOfBounds)
     );
 
-    let invalid_failure = SubjectObservation {
-        result: SubjectResult::Failure(NamespacedFailure {
-            owner_id: String::new(),
-            contract_version: "1.0.0".to_owned(),
-            code_id: "failure".to_owned(),
-        }),
-        usage: usage(),
-    };
-    assert_eq!(
-        encode_observation(&invalid_failure),
-        Err(TransportError::FieldOutOfBounds)
-    );
-
     let oversized_output = SubjectObservation {
         result: SubjectResult::Output(vec![0; 64 * 1024 * 1024 + 1]),
         usage: usage(),
@@ -386,23 +373,28 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() -> TestResu
         Err(TransportError::FieldOutOfBounds)
     );
 
-    for field in ["owner", "1.0.0", "failure"] {
+    Ok(())
+}
+
+#[test]
+fn observation_transport_rejects_each_failure_field_boundary() {
+    for mutation in 0..6 {
         let invalid_failure = SubjectObservation {
             result: SubjectResult::Failure(NamespacedFailure {
-                owner_id: if field == "owner" {
-                    "a".repeat(129)
-                } else {
-                    "owner".to_owned()
+                owner_id: match mutation {
+                    0 => String::new(),
+                    1 => "a".repeat(129),
+                    _ => "owner".to_owned(),
                 },
-                contract_version: if field == "1.0.0" {
-                    "a".repeat(129)
-                } else {
-                    "1.0.0".to_owned()
+                contract_version: match mutation {
+                    2 => String::new(),
+                    3 => "a".repeat(129),
+                    _ => "1.0.0".to_owned(),
                 },
-                code_id: if field == "failure" {
-                    "a".repeat(129)
-                } else {
-                    "failure".to_owned()
+                code_id: match mutation {
+                    4 => String::new(),
+                    5 => "a".repeat(129),
+                    _ => "failure".to_owned(),
                 },
             }),
             usage: usage(),
@@ -412,7 +404,6 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() -> TestResu
             Err(TransportError::FieldOutOfBounds)
         );
     }
-    Ok(())
 }
 
 #[test]
