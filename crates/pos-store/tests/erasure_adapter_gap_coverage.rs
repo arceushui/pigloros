@@ -16,16 +16,19 @@ use pos_core::erasure::{
     destruction_command_reference, target_closure_digest, ErasureAuthorizationDecisionV1,
 };
 use pos_core::{
-    ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
-    ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
     ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
-    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
-    ErasureObligationV1, ErasurePersistencePortV1, ErasureReferenceV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
     ErasureStateV1, PreparedErasureCasV1,
@@ -123,6 +126,88 @@ fn resolution(
         issue_position: 21,
         predecessor_resolution: None,
     })
+}
+
+fn retry_admission(
+    request: ErasureReferenceV1,
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: target.replica_id,
+        command_identity: destruction_command_reference(request, target),
+    })?;
+    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: vec![obligation.reference()],
+        command_identities: vec![obligation.command_identity()],
+        policy: reference(6),
+        trust: reference(8),
+        admitted_position: 11,
+        deadline_position: 20,
+        authorization_provenance: reference(44),
+    })
+}
+
+fn acknowledgement(
+    request: ErasureReferenceV1,
+    target: ErasureRequiredTargetV1,
+) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
+    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target,
+        owner: target.replica_id,
+        command_identity: destruction_command_reference(request, target),
+    })?;
+    Ok(ErasureAcknowledgementV1 {
+        obligation: obligation.reference(),
+        target,
+        owner: target.replica_id,
+        evidence: reference(45),
+        outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+    })
+}
+
+fn receipt_input(target: ErasureRequiredTargetV1) -> ErasureReceiptInputV1 {
+    ErasureReceiptInputV1 {
+        request: reference(0),
+        terminal_state: reference(0),
+        coordinator: reference(0),
+        lifecycle: ErasureLifecycleV1::Complete,
+        freeze_position: 0,
+        acknowledgements: Vec::new(),
+        frozen_targets: vec![target],
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: ErasureReceiptInventoriesV1 {
+            artifacts: vec![ErasureInventoryResultV1 {
+                category: ErasureInventoryCategoryV1::Artifact,
+                target,
+                transition: ErasureArtifactTransitionV1 {
+                    from: ErasureReplayClaimV1::Exact,
+                    to: ErasureReplayClaimV1::StructuralOnly,
+                    reason: reference(46),
+                    owner: target.replica_id,
+                    acknowledgements: reference(47),
+                    provenance: reference(48),
+                },
+                retained_disclosure: reference(49),
+            }],
+            keys: Vec::new(),
+            replicas: Vec::new(),
+            backups: Vec::new(),
+        },
+        replay_claim: ErasureReplayClaimV1::Exact,
+        policy: reference(0),
+        trust: reference(0),
+        provenance: reference(0),
+        issue_position: 21,
+        signature: reference(50),
+        receipt_digest: reference(0),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -469,6 +554,37 @@ where
     assert_eq!(
         frozen.lifecycle(),
         pos_core::ErasureLifecycleV1::AccessFrozen
+    );
+
+    let admission = retry_admission(request.reference(), target)?;
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.dispatch_attempt(request.reference(), &admission)?,
+        coordinator.dispatch_attempt(request.reference(), &admission)?
+    );
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    let acknowledged = coordinator.acknowledge(
+        request.reference(),
+        acknowledgement(request.reference(), target)?,
+    )?;
+    assert_eq!(
+        acknowledged.lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.acknowledge(
+            request.reference(),
+            acknowledgement(request.reference(), target)?,
+        )?,
+        acknowledged
+    );
+    let receipt = coordinator.finalize(request.reference(), receipt_input(target))?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.finalize(request.reference(), receipt_input(target))?,
+        receipt
     );
 
     let scope = scope(request.reference(), &[target], lineage_rule)?;
