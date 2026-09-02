@@ -211,10 +211,10 @@ fn sensitive_name(value: &str) -> bool {
 
 fn sensitive_key(value: &str) -> (bool, bool) {
     let normalized = value.to_ascii_lowercase().replace('-', "_");
-    match normalized.strip_suffix("_digest") {
-        Some(name) => (sensitive_name(name), true),
-        None => (sensitive_name(&normalized), false),
-    }
+    normalized.strip_suffix("_digest").map_or_else(
+        || (sensitive_name(&normalized), false),
+        |name| (sensitive_name(name), true),
+    )
 }
 
 fn json_secret(value: &serde_json::Value) -> bool {

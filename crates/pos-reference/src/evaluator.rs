@@ -33,7 +33,7 @@ pub struct ResourceUsage {
 }
 
 impl ResourceUsage {
-    fn exceeds(self, budget: DeterministicBudget) -> bool {
+    const fn exceeds(self, budget: DeterministicBudget) -> bool {
         self.memory_bytes > budget.memory_bytes
             || self.cpu_fuel > budget.cpu_fuel
             || self.host_calls > budget.host_calls

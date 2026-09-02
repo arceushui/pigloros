@@ -428,7 +428,7 @@ fn validate_case_evidence(value: &CaseOutcome) -> Result<(), ProtocolError> {
     }
 }
 
-fn empty_case_evidence(value: &CaseOutcome) -> bool {
+const fn empty_case_evidence(value: &CaseOutcome) -> bool {
     value.expected_digest.is_none()
         && value.actual_digest.is_none()
         && value.expected_error.is_none()
@@ -942,7 +942,7 @@ fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
     }
 }
 
-pub(crate) fn bool_value(value: &Value) -> Result<bool, ProtocolError> {
+pub(crate) const fn bool_value(value: &Value) -> Result<bool, ProtocolError> {
     match value {
         Value::Bool(value) => Ok(*value),
         _ => Err(ProtocolError::InvalidEncoding),

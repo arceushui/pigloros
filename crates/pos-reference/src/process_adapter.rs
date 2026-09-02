@@ -69,10 +69,10 @@ impl ProcessAdapter {
                 break status;
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = writer.join();
-                let _ = reader.join();
+                drop(child.kill());
+                drop(child.wait());
+                drop(writer.join());
+                drop(reader.join());
                 return Err(AdapterError::WatchdogExpired);
             }
             thread::sleep(POLL_INTERVAL);

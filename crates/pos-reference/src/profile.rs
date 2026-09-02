@@ -323,7 +323,7 @@ impl Profile {
     }
 
     /// Select exactly the fixtures admitted by the request's adapter and
-    /// ExecutionProfile in canonical CPF1 order.
+    /// `ExecutionProfile` in canonical CPF1 order.
     #[must_use]
     pub fn selected_fixtures(&self, request: &EvaluationRequest) -> Vec<&Fixture> {
         self.fixtures
@@ -768,7 +768,7 @@ fn validate_outcome_relationship(fixture: &Fixture) -> Result<(), ProfileError> 
     }
 }
 
-fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
+const fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
     let coherent = fixture.replay_claim == 4
         || match fixture.redaction_state {
             0 => true,
@@ -802,11 +802,17 @@ fn validate_downgrade_relationship(fixture: &Fixture) -> Result<(), ProfileError
             .release_admission_digest
             .is_some_and(|digest| digest != [0; 32])
         && fixture.transition.as_ref().is_some_and(|transition| {
-            transition.to == fixture.provider
-                && transition.from.provider_id == transition.to.provider_id
-                && transition.from.contract_version == transition.to.contract_version
-                && transition.from.abi_major == transition.to.abi_major
-                && transition.from.abi_minor > transition.to.abi_minor
+            let targets_selected_provider = transition.to == fixture.provider;
+            let preserves_provider = transition.from.provider_id == transition.to.provider_id;
+            let preserves_contract =
+                transition.from.contract_version == transition.to.contract_version;
+            let preserves_major = transition.from.abi_major == transition.to.abi_major;
+            let downgrades_minor = transition.from.abi_minor > transition.to.abi_minor;
+            targets_selected_provider
+                && preserves_provider
+                && preserves_contract
+                && preserves_major
+                && downgrades_minor
         });
     if valid {
         Ok(())
@@ -1389,9 +1395,10 @@ fn validate_provider_contracts(
         let provider = providers
             .iter()
             .find(|provider| {
-                provider.key == fixture.provider
-                    && provider.claim_layer == fixture.claim_layer
-                    && provider.adapter == fixture.subject_adapter
+                let identifies_provider = provider.key == fixture.provider;
+                let supports_layer = provider.claim_layer == fixture.claim_layer;
+                let supports_adapter = provider.adapter == fixture.subject_adapter;
+                identifies_provider && supports_layer && supports_adapter
             })
             .ok_or(ProfileError::ClosureIncomplete)?;
         if provider
@@ -1507,7 +1514,15 @@ fn decode_adapter(value: &Value) -> Result<SubjectAdapterKind, ProfileError> {
     }
 }
 
-fn fixture_key(value: &Fixture) -> ((&[u8], &[u8], u16, u16), u8, &[u8], [u8; 32], &[u8]) {
+type FixtureKey<'a> = (
+    (&'a [u8], &'a [u8], u16, u16),
+    u8,
+    &'a [u8],
+    [u8; 32],
+    &'a [u8],
+);
+
+fn fixture_key(value: &Fixture) -> FixtureKey<'_> {
     (
         (
             value.provider_id.as_bytes(),
@@ -1554,10 +1569,10 @@ fn string_list(value: &Value) -> Result<Vec<String>, ProfileError> {
 
 fn identifier(value: &Value) -> Result<String, ProfileError> {
     let value = text(value)?;
-    if !valid_identifier(value) {
-        Err(ProfileError::FieldOutOfBounds)
-    } else {
+    if valid_identifier(value) {
         Ok(value.to_owned())
+    } else {
+        Err(ProfileError::FieldOutOfBounds)
     }
 }
 
