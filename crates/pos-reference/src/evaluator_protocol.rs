@@ -383,6 +383,10 @@ fn validate_identity(value: &ImplementationIdentity) -> Result<(), ProtocolError
     {
         return Err(ProtocolError::FieldOutOfBounds);
     }
+    Ok(())
+}
+
+fn validate_case_evidence(value: &CaseOutcome) -> Result<(), ProtocolError> {
     let exact = value.expected_digest.is_some()
         && value.expected_digest == value.actual_digest
         && value.expected_error.is_none()
@@ -467,10 +471,9 @@ fn validate_case(value: &CaseOutcome) -> Result<(), ProtocolError> {
             coordinate.is_empty() || coordinate.len() > MAX_COORDINATE_BYTES
         })
     {
-        Err(ProtocolError::FieldOutOfBounds)
-    } else {
-        Ok(())
+        return Err(ProtocolError::FieldOutOfBounds);
     }
+    validate_case_evidence(value)
 }
 
 fn compare_cases(left: &CaseOutcome, right: &CaseOutcome) -> Ordering {
