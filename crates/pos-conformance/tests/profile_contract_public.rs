@@ -2530,6 +2530,8 @@ fn public_profile_rejects_invalid_failure_ownership_and_divergence_order() {
 fn public_profile_decoder_rejects_each_raw_cbor_boundary() -> Result<(), Box<dyn std::error::Error>>
 {
     let canonical = profile_for_digest().to_canonical_cbor()?;
+    let mut tagged = vec![0xc0];
+    tagged.extend_from_slice(&canonical);
     let marker = [0x64, b'C', b'P', b'F', b'1', 0x01];
     let version_index = canonical
         .windows(marker.len())
@@ -2543,6 +2545,7 @@ fn public_profile_decoder_rejects_each_raw_cbor_boundary() -> Result<(), Box<dyn
     over_nested.push(0);
     for malformed in [
         noncanonical,
+        tagged,
         vec![0x5f],
         vec![0x58],
         vec![0x41],
