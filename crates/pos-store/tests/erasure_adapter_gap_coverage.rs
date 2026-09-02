@@ -414,6 +414,26 @@ where
     }
 }
 
+fn exact_coordinator<S>(
+    store: &Rc<RefCell<S>>,
+    target: ErasureRequiredTargetV1,
+    lineage_rule: ErasureReferenceV1,
+) -> pos_core::ErasureCoordinatorStateMachineV1<AdapterHost<S, ExactRetryHook>>
+where
+    S: ErasurePersistencePortV1,
+{
+    pos_core::ErasureCoordinatorStateMachineV1::new(
+        AdapterHost {
+            store: Rc::clone(store),
+            targets: vec![target],
+            lineage_rule,
+            freeze_evidence: reference(41),
+            retry_hook: ExactRetryHook,
+        },
+        reference(42),
+    )
+}
+
 fn exercise_scope_and_resolution<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
 where
     S: ErasurePersistencePortV1,
@@ -422,28 +442,28 @@ where
     let request = request()?;
     let target = target();
     let lineage_rule = reference(40);
-    let mut coordinator = pos_core::ErasureCoordinatorStateMachineV1::new(
-        AdapterHost {
-            store: Rc::clone(&shared),
-            targets: vec![target],
-            lineage_rule,
-            freeze_evidence: reference(41),
-            retry_hook: ExactRetryHook,
-        },
-        reference(42),
-    );
-
+    let submitted = exact_coordinator(&shared, target, lineage_rule)
+        .submit(request.clone(), request.provenance())?;
     assert_eq!(
-        coordinator
-            .submit(request.clone(), request.provenance())?
-            .lifecycle(),
+        submitted.lifecycle(),
         pos_core::ErasureLifecycleV1::Submitted
     );
+
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
     assert_eq!(
-        coordinator
-            .authorize(request.reference(), reference(43))?
-            .lifecycle(),
+        coordinator.submit(request.clone(), request.provenance())?,
+        submitted
+    );
+    let authorized = coordinator.authorize(request.reference(), reference(43))?;
+    assert_eq!(
+        authorized.lifecycle(),
         pos_core::ErasureLifecycleV1::Authorized
+    );
+
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.authorize(request.reference(), reference(43))?,
+        authorized
     );
     let frozen = coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
     assert_eq!(
@@ -453,7 +473,12 @@ where
 
     let scope = scope(request.reference(), &[target], lineage_rule)?;
     let extension = extension(request.reference(), &scope, lineage_rule)?;
-    coordinator.append_scope_extension(request.reference(), extension)?;
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?,
+        frozen
+    );
+    let extended = coordinator.append_scope_extension(request.reference(), extension)?;
     {
         let adapter = shared.borrow();
         assert_eq!(adapter.scope_index_count(request.reference())?, 1);
@@ -461,7 +486,17 @@ where
     }
 
     let resolution = resolution(request.reference(), &frozen, &scope)?;
-    coordinator.resolve_administratively(request.reference(), &resolution)?;
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.append_scope_extension(request.reference(), extension)?,
+        extended
+    );
+    let resolved = coordinator.resolve_administratively(request.reference(), &resolution)?;
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.resolve_administratively(request.reference(), &resolution)?,
+        resolved
+    );
     let adapter = shared.borrow();
     assert_eq!(
         adapter.administrative_resolution_index_count(request.reference())?,
