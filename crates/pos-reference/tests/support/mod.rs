@@ -23,7 +23,7 @@ pub type TestResult<T> = Result<T, Box<dyn Error>>;
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false)
+    corpus_for_mode(0, None, false, false)
 }
 
 /// Build a signed corpus containing additional bytes for secret-scan tests.
@@ -31,7 +31,7 @@ pub fn corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
-    corpus_for_mode(0, Some(secret), false)
+    corpus_for_mode(0, Some(secret), false, false)
 }
 
 /// Build a complete Air-Gapped corpus with non-network capabilities.
@@ -39,7 +39,7 @@ pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn air_gapped_corpus() -> TestResult<Corpus> {
-    corpus_for_mode(1, None, false)
+    corpus_for_mode(1, None, false, false)
 }
 
 /// Build a signed corpus whose downgrade admission enables fallback.
@@ -47,13 +47,22 @@ pub fn air_gapped_corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, true)
+    corpus_for_mode(0, None, true, false)
+}
+
+/// Build a signed corpus containing output, typed-failure, and divergence oracles.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
+    corpus_for_mode(0, None, false, true)
 }
 
 fn corpus_for_mode(
     mode: u64,
     extra: Option<&[u8]>,
     invalid_release_admission: bool,
+    mixed_oracles: bool,
 ) -> TestResult<Corpus> {
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let trust_policy = trust_policy(&signing_key)?;
@@ -74,6 +83,7 @@ fn corpus_for_mode(
         trust_digest,
         &expected_output,
         invalid_release_admission,
+        mixed_oracles,
     )?;
     let profile = profile(
         &members,
@@ -81,6 +91,7 @@ fn corpus_for_mode(
         execution_digest,
         trust_digest,
         &hard_caps,
+        mixed_oracles,
     )?;
     let profile_digest = hash_contract("PiglorOS.ConformanceProfile.v1", &profile)?;
     let mut profile_fields = fields(profile)?;
@@ -184,6 +195,7 @@ fn fixtures(
     trust: [u8; 32],
     expected: &[u8],
     invalid_release_admission: bool,
+    mixed_oracles: bool,
 ) -> TestResult<Vec<Value>> {
     (0_u64..=6)
         .map(|family| -> TestResult<Value> {
@@ -225,6 +237,48 @@ fn fixtures(
             } else {
                 Value::Null
             };
+            let (auxiliary, oracle, expected_outcome, expected_error) =
+                match (mixed_oracles, family) {
+                    (true, 1) => (
+                        array(vec![
+                            descriptor(members, &evidence_path)?,
+                            descriptor(members, &output_path)?,
+                        ]),
+                        array(vec![
+                            uint(1),
+                            Value::Null,
+                            array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
+                            Value::Null,
+                        ]),
+                        uint(2),
+                        array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
+                    ),
+                    (true, 2) => (
+                        array(vec![
+                            descriptor(members, &evidence_path)?,
+                            descriptor(members, &output_path)?,
+                        ]),
+                        array(vec![
+                            uint(2),
+                            Value::Null,
+                            Value::Null,
+                            array(vec![uint(2), bytes(&[1, 2])]),
+                        ]),
+                        uint(1),
+                        Value::Null,
+                    ),
+                    _ => (
+                        array(vec![descriptor(members, &evidence_path)?]),
+                        array(vec![
+                            uint(0),
+                            descriptor(members, &output_path)?,
+                            Value::Null,
+                            Value::Null,
+                        ]),
+                        uint(0),
+                        Value::Null,
+                    ),
+                };
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
@@ -236,15 +290,10 @@ fn fixtures(
                 array(vec![uint(0), uint(1)]),
                 descriptor(members, &schema_path)?,
                 descriptor(members, &payload_path)?,
-                array(vec![descriptor(members, &evidence_path)?]),
-                array(vec![
-                    uint(0),
-                    descriptor(members, &output_path)?,
-                    Value::Null,
-                    Value::Null,
-                ]),
-                uint(0),
-                Value::Null,
+                auxiliary,
+                oracle,
+                expected_outcome,
+                expected_error,
                 uint(0),
                 uint(0),
                 array(vec![uint(100); 8]),
@@ -393,6 +442,7 @@ fn profile(
     execution: [u8; 32],
     trust: [u8; 32],
     hard_caps: &Value,
+    mixed_oracles: bool,
 ) -> TestResult<Value> {
     Ok(array(vec![
         text("CPF1"),
@@ -412,7 +462,11 @@ fn profile(
             array(vec![provider_key(1)]),
         ]),
         array(fixtures),
-        array(Vec::new()),
+        if mixed_oracles {
+            array(vec![array(vec![uint(2), bytes(&[1, 2])])])
+        } else {
+            array(Vec::new())
+        },
         array(vec![
             text("evaluator-v1"),
             bytes(&member_hash(members, "support/evaluator-protocol-v1.json")?),
