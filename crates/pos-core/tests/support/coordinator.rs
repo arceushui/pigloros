@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use ciborium::value::Value;
-use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
+use pos_core::erasure::{
+    target_closure_digest, ErasureAuthorizationDecisionV1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
+};
 use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
@@ -104,7 +106,7 @@ fn replace_attempt_page_field(
         .cloned()
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     let changed = replace_array_field(&page, index, replacement)?;
-    let changed_reference = addressed(pos_core::ERASURE_ATTEMPT_HISTORY_TAG_V1, &changed);
+    let changed_reference = addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, &changed);
     storage.objects.remove(&previous);
     storage.objects.insert(changed_reference, changed);
     storage

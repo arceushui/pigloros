@@ -10,7 +10,9 @@ pub mod coordinator_support;
 pub mod erasure_support;
 
 use ciborium::value::Value;
-use pos_core::erasure::{target_closure_digest, ERASURE_CAS_EFFECT_TAG_V1};
+use pos_core::erasure::{
+    target_closure_digest, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_CAS_EFFECT_TAG_V1,
+};
 use pos_core::{
     acknowledgement_inventory_reference, destruction_command_reference,
     erasure_evidence_set_reference, selected_obligations_reference,
@@ -36,8 +38,7 @@ use pos_core::{
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, StoredErasureManifestV1,
-    ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
-    ERASURE_RECEIPT_PROVENANCE_TAG_V1,
+    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1,
 };
 
 use coordinator_support::{PublicCoordinatorPort, PublicCoordinatorPortConfig};
