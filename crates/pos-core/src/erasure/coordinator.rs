@@ -77,7 +77,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
 
     fn commit(
         &mut self,
-        mut next: RecoveredErasureV1,
+        next: RecoveredErasureV1,
         expected: Option<ErasureReferenceV1>,
         include_request: bool,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
@@ -174,8 +174,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }
         match self.recover(request.reference())? {
             Some(record)
-                if record.request == request
-                    && record.correction.as_ref() == Some(&correction) =>
+                if record.request == request && record.correction.as_ref() == Some(&correction) =>
             {
                 let state = record.state.clone();
                 self.cache(record);

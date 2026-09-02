@@ -145,7 +145,7 @@ fn append_field(bytes: &[u8]) -> Vec<u8> {
 }
 
 macro_rules! roundtrip {
-    ($name:ident, $ty:ty, $value:expr) => {
+    ($name:ident, $ty:ty, $value:expr_2021) => {
         #[test]
         fn $name() -> Result<(), ErasureErrorV1> {
             let original: $ty = $value?;
@@ -327,7 +327,7 @@ roundtrip!(
 roundtrip!(receipt_codec_roundtrips, ErasureReceiptV1, receipt());
 
 macro_rules! codec_shape_guards {
-    ($bytes:expr, $decoder:expr) => {{
+    ($bytes:expr_2021, $decoder:expr_2021) => {{
         let bytes = $bytes;
         let wrong_tag = replace_field(&bytes, 0, Value::Text("wrong".to_owned()));
         let wrong_version = replace_field(&bytes, 1, Value::Text("wrong".to_owned()));
@@ -570,7 +570,9 @@ fn state_recovery_requires_the_complete_predecessor_chain() -> Result<(), Erasur
         .is_err());
     let mut states = BTreeMap::new();
     states.insert(root.state_digest(), root);
-    assert!(successor.verify_predecessor_chain(&Resolver(states)).is_ok());
+    assert!(successor
+        .verify_predecessor_chain(&Resolver(states))
+        .is_ok());
     Ok(())
 }
 

@@ -3403,7 +3403,7 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
 }
 
-fn verify_predecessor_chain<R: ErasureStateResolverV1>(
+fn verify_predecessor_chain<R: ErasureStateResolverV1 + ?Sized>(
     current: ErasureStateV1,
     resolver: &R,
 ) -> Result<(), ErasureErrorV1> {
@@ -3414,7 +3414,7 @@ fn verify_predecessor_chain<R: ErasureStateResolverV1>(
     )
 }
 
-fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1>(
+fn verify_predecessor_chain_bounded<R: ErasureStateResolverV1 + ?Sized>(
     mut current: ErasureStateV1,
     resolver: &R,
     maximum_depth: usize,

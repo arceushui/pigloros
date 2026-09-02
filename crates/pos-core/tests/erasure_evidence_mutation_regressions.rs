@@ -69,7 +69,7 @@ fn replace(bytes: &[u8], index: usize) -> Vec<u8> {
 }
 
 macro_rules! evidence_roundtrip {
-    ($name:ident, $ty:ty, $value:expr) => {
+    ($name:ident, $ty:ty, $value:expr_2021) => {
         #[test]
         fn $name() -> Result<(), ErasureErrorV1> {
             let value: $ty = $value?;
