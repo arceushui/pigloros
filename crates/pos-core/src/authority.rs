@@ -31,6 +31,10 @@ pub const MAX_AUTHORITY_TEXT_BYTES: usize = 128;
 pub const MAX_AUTHORITY_SCOPE_MEMBERS: usize = 32;
 /// Maximum resource selectors or actions in one capability scope.
 pub const MAX_AUTHORITY_SELECTORS: usize = 128;
+/// Maximum trusted bindings of one kind in an authority-registry snapshot.
+pub const MAX_AUTHORITY_REGISTRY_BINDINGS: usize = 128;
+/// Maximum consent grants that one capability grant may bind.
+pub const MAX_CAPABILITY_CONSENT_REFERENCES: usize = 32;
 /// Maximum accepted parent-to-child delegation depth.
 pub const MAX_AUTHORITY_DELEGATION_DEPTH: u8 = 16;
 
@@ -375,9 +379,9 @@ impl AuthorityRegistrySnapshotV1 {
         consent_bindings: Vec<Hash>,
     ) -> Result<Self, AuthorityErrorV1> {
         validate_hash(registry_digest)?;
-        validate_required_hash_set(&authentication_bindings)?;
-        validate_hash_set(&capability_bindings)?;
-        validate_hash_set(&consent_bindings)?;
+        validate_required_hash_set(&authentication_bindings, MAX_AUTHORITY_REGISTRY_BINDINGS)?;
+        validate_hash_set(&capability_bindings, MAX_AUTHORITY_REGISTRY_BINDINGS)?;
+        validate_hash_set(&consent_bindings, MAX_AUTHORITY_REGISTRY_BINDINGS)?;
         Ok(Self {
             registry_digest,
             authentication_bindings,
@@ -858,7 +862,9 @@ impl CapabilityGrantV1 {
                 validate_seq_interval(draft.valid_from_position, draft.valid_until_position)
             })
             .and_then(|()| validate_optional_hash(draft.parent_grant_id))
-            .and_then(|()| validate_hash_set(&draft.consent_references))
+            .and_then(|()| {
+                validate_hash_set(&draft.consent_references, MAX_CAPABILITY_CONSENT_REFERENCES)
+            })
             .and_then(|()| validate_delegation_depth(&draft))
             .and_then(|()| validate_ordered_set(&draft.permitted_delegate_classes, false))
             .and_then(|()| {
@@ -1625,7 +1631,7 @@ fn authorization_evaluation(
         );
     }
     if leaf.grantee.principal() != request.authenticated.principal() {
-        return AuthorizationEvaluationV1::denied_with_trusted_grant(
+        return AuthorizationEvaluationV1::denied(
             AuthorizationOutcomeV1::IndeterminateFailClosed,
             Some(AuthorityErrorV1::PrincipalUnresolved),
         );
@@ -1989,16 +1995,16 @@ fn validate_optional_hash(value: Option<Hash>) -> Result<(), AuthorityErrorV1> {
     value.map_or(Ok(()), validate_hash)
 }
 
-fn validate_hash_set(values: &[Hash]) -> Result<(), AuthorityErrorV1> {
-    validate_ordered_set_with_limit(values, false, MAX_AUTHORITY_SELECTORS)
+fn validate_hash_set(values: &[Hash], limit: usize) -> Result<(), AuthorityErrorV1> {
+    validate_ordered_set_with_limit(values, false, limit)
         .and_then(|()| values.iter().copied().try_for_each(validate_hash))
 }
 
-fn validate_required_hash_set(values: &[Hash]) -> Result<(), AuthorityErrorV1> {
+fn validate_required_hash_set(values: &[Hash], limit: usize) -> Result<(), AuthorityErrorV1> {
     if values.is_empty() {
         Err(AuthorityErrorV1::FieldOutOfBounds)
     } else {
-        validate_hash_set(values)
+        validate_hash_set(values, limit)
     }
 }
 
@@ -2018,7 +2024,7 @@ fn validate_hash_sequence(values: &[Hash], limit: usize) -> Result<(), Authority
 fn validate_consent_evidence(value: &ConsentEvidenceV1) -> Result<(), AuthorityErrorV1> {
     match value {
         ConsentEvidenceV1::Resolved { grants } => {
-            if grants.is_empty() || grants.len() > MAX_AUTHORITY_SCOPE_MEMBERS {
+            if grants.is_empty() || grants.len() > MAX_CAPABILITY_CONSENT_REFERENCES {
                 return Err(AuthorityErrorV1::FieldOutOfBounds);
             }
             if grants
@@ -2805,11 +2811,25 @@ fn validate_decision(
 }
 
 fn validate_decision_evidence(decision: &AuthorizationDecisionV1) -> Result<(), AuthorityErrorV1> {
+    let origin_reappears = decision
+        .originating_principal
+        .as_ref()
+        .is_some_and(|origin| {
+            decision
+                .acting_delegates
+                .iter()
+                .skip(1)
+                .any(|delegate| delegate == origin)
+        });
     if decision
         .acting_delegates
         .iter()
         .enumerate()
         .any(|(index, principal)| decision.acting_delegates[..index].contains(principal))
+        || decision.acting_delegates.contains(&decision.principal)
+        || (!decision.acting_delegates.is_empty()
+            && decision.originating_principal.as_ref() == Some(&decision.principal))
+        || origin_reappears
     {
         return Err(AuthorityErrorV1::DuplicateIdentity);
     }
@@ -2830,8 +2850,15 @@ fn validate_decision_evidence(decision: &AuthorizationDecisionV1) -> Result<(), 
                 && decision.grant_chain_bindings.is_empty()
         }
     };
-    let active_is_complete =
-        decision.outcome != AuthorizationOutcomeV1::Active || decision.grant_id.is_some();
+    let grant_evidence_matches_outcome = match decision.outcome {
+        AuthorizationOutcomeV1::Active
+        | AuthorizationOutcomeV1::ParentInvalid
+        | AuthorizationOutcomeV1::RevocationStateStale => decision.grant_id.is_some(),
+        AuthorizationOutcomeV1::ConsentMissing => decision.grant_id.is_none(),
+        AuthorizationOutcomeV1::RevokedAtFence
+        | AuthorizationOutcomeV1::Expired
+        | AuthorizationOutcomeV1::IndeterminateFailClosed => true,
+    };
     let outcome_matches_error = match decision.outcome {
         AuthorizationOutcomeV1::Active | AuthorizationOutcomeV1::Expired => {
             decision.error.is_none()
@@ -2862,7 +2889,7 @@ fn validate_decision_evidence(decision: &AuthorizationDecisionV1) -> Result<(), 
             )
         ),
     };
-    if complete_grant_evidence && active_is_complete && outcome_matches_error {
+    if complete_grant_evidence && grant_evidence_matches_outcome && outcome_matches_error {
         Ok(())
     } else {
         Err(AuthorityErrorV1::ProvenanceMissing)

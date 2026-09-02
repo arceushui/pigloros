@@ -7,8 +7,9 @@ use pos_core::{
     CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
     ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, EntityId, Hash,
     PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, DELEGATE_ACTION_V1,
-    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES,
-    MAX_CAPABILITY_RECORD_BYTES, MAX_DECISION_RECORD_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
+    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SELECTORS,
+    MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES, MAX_CAPABILITY_RECORD_BYTES,
+    MAX_DECISION_RECORD_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
 };
 use ulid::Ulid;
 
@@ -1136,9 +1137,9 @@ fn decision_decoder_rejects_every_malformed_public_field() {
 
 #[test]
 fn decision_decoder_rejects_inconsistent_evidence() {
-    let request = request(principal(1), entity(10));
+    let base_request = request(principal(1), entity(10));
     let grant = root_grant(principal(1), vec![entity(10)]);
-    let encoded = ok(decision_for(&request, &[grant]).encode());
+    let encoded = ok(decision_for(&base_request, &[grant]).encode());
 
     let invalid_outcome = changed_array(&encoded, |fields| {
         fields[20] = Value::Integer(99.into());
@@ -1222,6 +1223,7 @@ fn decision_decoder_rejects_inconsistent_evidence() {
         AuthorizationDecisionV1::decode(&duplicate_delegate),
         Err(AuthorityErrorV1::DuplicateIdentity)
     );
+
     for digest_field in [13, 14, 19, 22, 23] {
         let zero_digest = changed_array(&encoded, |fields| {
             fields[digest_field] = Value::Bytes(vec![0; 32]);
@@ -1231,6 +1233,101 @@ fn decision_decoder_rejects_inconsistent_evidence() {
             Err(AuthorityErrorV1::FieldOutOfBounds),
             "digest field {digest_field} accepted the zero digest"
         );
+    }
+}
+
+#[test]
+fn decision_decoder_rejects_cyclic_and_missing_chain_evidence() {
+    let parent = delegation_parent();
+    let child = ok(CapabilityGrantV1::try_from_draft(delegation_child()));
+    let delegated_request = request(principal(3), entity(10));
+    let delegated = decision_for(&delegated_request, &[parent, child]);
+    let delegated_encoded = ok(delegated.encode());
+    let terminal_repeats_delegate = changed_array(&delegated_encoded, |fields| {
+        let repeated = array_fields_mut(&mut fields[10])[0].clone();
+        fields[2] = repeated;
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&terminal_repeats_delegate),
+        Err(AuthorityErrorV1::DuplicateIdentity)
+    );
+    let terminal_returns_to_origin = changed_array(&delegated_encoded, |fields| {
+        let origin = fields[9].clone();
+        fields[2] = origin;
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&terminal_returns_to_origin),
+        Err(AuthorityErrorV1::DuplicateIdentity)
+    );
+    let origin_reappears_later = changed_array(&delegated_encoded, |fields| {
+        let origin = fields[9].clone();
+        array_fields_mut(&mut fields[10]).push(origin);
+        array_fields_mut(&mut fields[12]).push(Value::Bytes(hash(200).as_bytes().to_vec()));
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&origin_reappears_later),
+        Err(AuthorityErrorV1::DuplicateIdentity)
+    );
+
+    let consent_missing_with_grant_evidence = changed_array(&delegated_encoded, |fields| {
+        fields[20] = Value::Integer(AuthorizationOutcomeV1::ConsentMissing.code().into());
+        fields[21] = Value::Integer(AuthorityErrorV1::ConsentMissing.code().into());
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&consent_missing_with_grant_evidence),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+
+    let mut parent_invalid_draft = request_draft(authenticated(principal(1)), entity(10));
+    parent_invalid_draft.consent = ConsentEvidenceV1::Resolved {
+        grants: vec![consent_grant_with_id(7)],
+    };
+    let parent_invalid = decision_for(
+        &ok(AuthorizationRequestV1::try_from_draft(parent_invalid_draft)),
+        &[root_grant(principal(1), vec![entity(10)])],
+    );
+    let mut stale_draft = request_draft(authenticated(principal(1)), entity(10));
+    stale_draft.revocation_state_current = false;
+    let stale = decision_for(
+        &ok(AuthorizationRequestV1::try_from_draft(stale_draft)),
+        &[root_grant(principal(1), vec![entity(10)])],
+    );
+    for decision in [parent_invalid, stale] {
+        let missing_chain_evidence = changed_array(&ok(decision.encode()), |fields| {
+            fields[9] = Value::Null;
+            fields[10] = Value::Array(Vec::new());
+            fields[11] = Value::Null;
+            fields[12] = Value::Array(Vec::new());
+        });
+        assert_eq!(
+            AuthorizationDecisionV1::decode(&missing_chain_evidence),
+            Err(AuthorityErrorV1::ProvenanceMissing)
+        );
+    }
+}
+
+#[test]
+fn delegated_principal_mismatches_emit_round_trip_safe_decisions() {
+    let parent = delegation_parent();
+    let child = ok(CapabilityGrantV1::try_from_draft(delegation_child()));
+
+    for presenter in [principal(1), principal(2)] {
+        let decision = decision_for(
+            &request(presenter, entity(10)),
+            &[parent.clone(), child.clone()],
+        );
+        assert_eq!(
+            decision.outcome(),
+            AuthorizationOutcomeV1::IndeterminateFailClosed
+        );
+        assert_eq!(
+            decision.error(),
+            Some(AuthorityErrorV1::PrincipalUnresolved)
+        );
+        assert_eq!(decision.originating_principal(), None);
+        assert!(decision.acting_delegates().is_empty());
+        assert_eq!(decision.grant_id(), None);
+        assert!(decision.grant_chain_bindings().is_empty());
     }
 }
 
@@ -1291,18 +1388,63 @@ fn constructors_reject_unbounded_unordered_and_zero_identity_fields() {
 
     assert_eq!(MAX_AUTHORITY_DELEGATION_DEPTH, 16);
     assert_eq!(MAX_AUTHORITY_TEXT_BYTES, 128);
+    assert_eq!(MAX_CAPABILITY_CONSENT_REFERENCES, 32);
+    assert_eq!(MAX_AUTHORITY_REGISTRY_BINDINGS, 128);
     assert_eq!(MAX_PRINCIPAL_RECORD_BYTES, 1_024);
     assert_eq!(MAX_CAPABILITY_RECORD_BYTES, 65_536);
     assert_eq!(MAX_DECISION_RECORD_BYTES, 65_536);
+}
 
-    let registry_bindings: Vec<_> = (1_u8..=33).map(hash).collect();
+#[test]
+fn capability_and_registry_hash_sets_enforce_their_distinct_bounds() {
+    let mut bounded_grant = grant_draft(
+        2,
+        principal(1),
+        AuthorityGranteeV1::Principal(principal(1)),
+        scope(vec![entity(1)], vec!["read"], None),
+    );
+    bounded_grant.consent_references = (1_u8..=32).map(hash).collect();
+    let bounded_grant = ok(CapabilityGrantV1::try_from_draft(bounded_grant));
+    let oversized_grant = changed_array(&ok(bounded_grant.encode()), |fields| {
+        let references = array_fields_mut(&mut fields[13]);
+        references.push(Value::Bytes(hash(33).as_bytes().to_vec()));
+    });
+    assert_eq!(
+        CapabilityGrantV1::decode(&oversized_grant),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+
+    let mut oversized_grant = grant_draft(
+        2,
+        principal(1),
+        AuthorityGranteeV1::Principal(principal(1)),
+        scope(vec![entity(1)], vec!["read"], None),
+    );
+    oversized_grant.consent_references = (1_u8..=33).map(hash).collect();
+    assert_eq!(
+        CapabilityGrantV1::try_from_draft(oversized_grant),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
+
+    let registry_bindings: Vec<_> = (1_u8..=128).map(hash).collect();
     assert!(AuthorityRegistrySnapshotV1::try_new(
-        hash(100),
-        vec![hash(1)],
-        registry_bindings,
+        hash(200),
+        vec![hash(200)],
+        registry_bindings.clone(),
         Vec::new(),
     )
     .is_ok());
+    let mut oversized_registry = registry_bindings;
+    oversized_registry.push(hash(129));
+    assert_eq!(
+        AuthorityRegistrySnapshotV1::try_new(
+            hash(200),
+            vec![hash(200)],
+            oversized_registry,
+            Vec::new(),
+        ),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
 }
 
 #[test]
