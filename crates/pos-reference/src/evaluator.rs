@@ -273,7 +273,7 @@ fn case_attempt(
         .iter()
         .map(|descriptor| member_bytes(&descriptor.member_path))
         .collect::<Result<Vec<_>, _>>()?;
-    if mode == 1 && (fixture.network_allowed || !fixture.capability_ids.is_empty()) {
+    if mode == 1 && fixture.network_allowed {
         return Err(EvaluatorError::Profile);
     }
     Ok(CaseAttempt {

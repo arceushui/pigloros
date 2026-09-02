@@ -17,6 +17,12 @@ struct PublicAdapter {
     output: Vec<u8>,
 }
 
+struct RecordingAdapter {
+    subject_digest: [u8; 32],
+    output: Vec<u8>,
+    attempts: Vec<CaseAttempt>,
+}
+
 impl SubjectAdapter for PublicAdapter {
     fn kind(&self) -> SubjectAdapterKind {
         SubjectAdapterKind::ExportedArtifact
@@ -27,6 +33,24 @@ impl SubjectAdapter for PublicAdapter {
     }
 
     fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        Ok(SubjectObservation {
+            result: SubjectResult::Output(self.output.clone()),
+            usage: ResourceUsage::default(),
+        })
+    }
+}
+
+impl SubjectAdapter for RecordingAdapter {
+    fn kind(&self) -> SubjectAdapterKind {
+        SubjectAdapterKind::ExportedArtifact
+    }
+
+    fn subject_artifact_digest(&self) -> [u8; 32] {
+        self.subject_digest
+    }
+
+    fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        self.attempts.push(attempt.clone());
         Ok(SubjectObservation {
             result: SubjectResult::Output(self.output.clone()),
             usage: ResourceUsage::default(),
@@ -116,5 +140,51 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
             Err(EvaluatorError::Bundle)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn air_gapped_evaluation_preserves_declared_non_network_capabilities() -> TestResult {
+    let corpus = support::air_gapped_corpus()?;
+    let mut adapter = RecordingAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+        attempts: Vec::new(),
+    };
+    let result = evaluate(
+        &corpus.request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity(),
+        &mut adapter,
+    )?;
+    assert_eq!(result.report.cases.len(), 7);
+    assert_eq!(adapter.attempts.len(), 7);
+    assert!(adapter.attempts.iter().all(|attempt| {
+        attempt.mode == 1
+            && !attempt.network_allowed
+            && attempt.capability_ids.len() == 1
+            && attempt.capability_ids[0] == "read-public-bundle"
+    }));
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_semantically_invalid_signed_release_admission() -> TestResult {
+    let corpus = support::corpus_with_invalid_release_admission()?;
+    let mut adapter = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+    };
+    assert_eq!(
+        evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        ),
+        Err(EvaluatorError::Profile)
+    );
     Ok(())
 }

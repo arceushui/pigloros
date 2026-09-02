@@ -3,10 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ciborium::value::Value;
+use ed25519_dalek::Verifier;
 
 use crate::evaluator_protocol::{
-    array, array_values, bool_value, contract_digest, decode_canonical, fixed_bytes, text, uint,
-    EvaluationRequest, ProtocolError, SubjectAdapterKind,
+    array, array_values, bool_value, contract_digest, decode_canonical, encode, fixed_bytes, text,
+    uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
 use crate::signed_bundle::{BundleError, VerifiedBundle};
 
@@ -312,6 +313,7 @@ impl Profile {
         };
         profile.validate_request(request)?;
         profile.validate_bundle_closure(bundle, &registry)?;
+        validate_release_admissions(bundle, &profile.fixtures)?;
         validate_provider_contracts(
             bundle,
             &registry,
@@ -386,6 +388,83 @@ impl Profile {
         }
         validate_expected_results(bundle, &self.fixtures)
     }
+}
+
+fn validate_release_admissions(
+    bundle: &VerifiedBundle,
+    fixtures: &[Fixture],
+) -> Result<(), ProfileError> {
+    let selected = fixtures
+        .iter()
+        .filter(|fixture| fixture.family == 5 && fixture.modes.contains(&bundle.mode))
+        .collect::<Vec<_>>();
+    let expected = selected
+        .iter()
+        .filter_map(|fixture| fixture.release_admission_digest)
+        .collect::<BTreeSet<_>>();
+    let actual_members = bundle
+        .members
+        .values()
+        .filter(|member| member.role == 16)
+        .collect::<Vec<_>>();
+    let actual = actual_members
+        .iter()
+        .map(|member| member.digest)
+        .collect::<BTreeSet<_>>();
+    if expected.len() != selected.len()
+        || actual_members.len() != selected.len()
+        || actual != expected
+    {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    selected
+        .into_iter()
+        .try_for_each(|fixture| validate_release_admission(bundle, fixture))
+}
+
+fn validate_release_admission(
+    bundle: &VerifiedBundle,
+    fixture: &Fixture,
+) -> Result<(), ProfileError> {
+    let digest = fixture
+        .release_admission_digest
+        .ok_or(ProfileError::ClosureIncomplete)?;
+    let member = bundle
+        .members
+        .values()
+        .find(|member| member.role == 16 && member.digest == digest)
+        .ok_or(ProfileError::ClosureIncomplete)?;
+    let transition = fixture
+        .transition
+        .as_ref()
+        .ok_or(ProfileError::ClosureIncomplete)?;
+    let snapshot = fixture
+        .trust_policy_snapshot_digest
+        .ok_or(ProfileError::ClosureIncomplete)?;
+    let value = decode_canonical(&member.bytes)?;
+    let fields = array(&value, 11)?;
+    let from = decode_provider_key(&fields[6])?;
+    let to = decode_provider_key(&fields[7])?;
+    if text(&fields[0])? != "RAD1"
+        || uint(&fields[1])? != 1
+        || uint(&fields[2])? != 0
+        || text(&fields[3])? != fixture.case_id
+        || fixed_bytes::<32>(&fields[4])? != fixture.execution_profile_digest
+        || fixed_bytes::<32>(&fields[5])? != snapshot
+        || from != transition.from
+        || to != transition.to
+        || bool_value(&fields[8])?
+        || text(&fields[9])? != bundle.authority_key_id
+    {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    let signature: [u8; 64] = fixed_bytes(&fields[10])?;
+    let unsigned = encode(&Value::Array(fields[..10].to_vec()))?;
+    let verifier = ed25519_dalek::VerifyingKey::from_bytes(&bundle.authority_public_key)
+        .map_err(|_| ProfileError::InvalidEncoding)?;
+    verifier
+        .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
+        .map_err(|_| ProfileError::InvalidEncoding)
 }
 
 fn decode_fixtures(
