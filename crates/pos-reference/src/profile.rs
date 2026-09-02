@@ -1472,11 +1472,13 @@ fn validate_provider_package(
     let support = fields[6..11]
         .iter()
         .zip(support_roles)
-        .map(|(value, role)| {
-            let descriptor = decode_descriptor(value)?;
-            validate_descriptor_roles(bundle, &descriptor, &[role])?;
-            Ok(descriptor)
-        })
+        .map(
+            |(value, role)| -> Result<ArtifactDescriptor, ProfileError> {
+                let descriptor = decode_descriptor(value)?;
+                validate_descriptor_roles(bundle, &descriptor, &[role])?;
+                Ok(descriptor)
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?;
     let unique_paths = schemas
         .iter()
