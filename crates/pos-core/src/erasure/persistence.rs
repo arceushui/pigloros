@@ -1821,28 +1821,36 @@ mod tests {
         ErasureReferenceV1::from_digest([byte; 32])
     }
 
-    fn replace_field(bytes: &[u8], index: usize, replacement: Value) -> Vec<u8> {
-        let mut value: Value = ciborium::from_reader(bytes).expect("fixture must decode");
+    fn replace_field(
+        bytes: &[u8],
+        index: usize,
+        replacement: Value,
+    ) -> Result<Vec<u8>, ErasureErrorV1> {
+        let mut value: Value =
+            ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
         let Value::Array(fields) = &mut value else {
-            panic!("fixture must be an array");
+            return Err(ErasureErrorV1::InvalidEncoding);
         };
-        fields[index] = replacement;
+        *fields
+            .get_mut(index)
+            .ok_or(ErasureErrorV1::InvalidEncoding)? = replacement;
         let mut changed = Vec::new();
-        ciborium::into_writer(&value, &mut changed).expect("fixture must encode");
-        changed
+        ciborium::into_writer(&value, &mut changed).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        Ok(changed)
     }
 
     fn assert_each_field_rejected<T>(
         bytes: &[u8],
         field_count: usize,
         decode: impl Fn(&[u8]) -> Result<T, ErasureErrorV1>,
-    ) {
+    ) -> Result<(), ErasureErrorV1> {
         for index in 0..field_count {
             assert!(
-                decode(&replace_field(bytes, index, Value::Bool(true))).is_err(),
+                decode(&replace_field(bytes, index, Value::Bool(true))?).is_err(),
                 "field {index} accepted the wrong type"
             );
         }
+        Ok(())
     }
 
     fn manifest(active: Option<ActiveAttemptRefV1>) -> ManifestV1 {
@@ -1870,19 +1878,18 @@ mod tests {
     }
 
     #[test]
-    fn private_persistence_decoders_reject_every_wrong_field_type() {
+    fn private_persistence_decoders_reject_every_wrong_field_type() -> Result<(), ErasureErrorV1> {
         let manifest = manifest(None);
-        let bytes = manifest.canonical_cbor().expect("manifest must encode");
-        assert_each_field_rejected(&bytes, 21, ManifestV1::decode);
+        let bytes = manifest.canonical_cbor()?;
+        assert_each_field_rejected(&bytes, 21, ManifestV1::decode)?;
 
-        let closure = TargetClosureV1::new(reference(1), Vec::new()).expect("closure must build");
-        let bytes = closure.canonical_cbor().expect("closure must encode");
-        assert_each_field_rejected(&bytes, 4, TargetClosureV1::decode);
+        let closure = TargetClosureV1::new(reference(1), Vec::new())?;
+        let bytes = closure.canonical_cbor()?;
+        assert_each_field_rejected(&bytes, 4, TargetClosureV1::decode)?;
 
-        let inventory = InventoryV1::new(reference(1), 0, INVENTORY_ADMITTED, Vec::new())
-            .expect("inventory must build");
-        let bytes = inventory.canonical_cbor().expect("inventory must encode");
-        assert_each_field_rejected(&bytes, 6, InventoryV1::decode);
+        let inventory = InventoryV1::new(reference(1), 0, INVENTORY_ADMITTED, Vec::new())?;
+        let bytes = inventory.canonical_cbor()?;
+        assert_each_field_rejected(&bytes, 6, InventoryV1::decode)?;
 
         let page = AttemptPageV1 {
             request: reference(1),
@@ -1897,8 +1904,8 @@ mod tests {
             predecessor: None,
             reference: reference(9),
         };
-        let bytes = page.canonical_cbor().expect("page must encode");
-        assert_each_field_rejected(&bytes, 12, AttemptPageV1::decode);
+        let bytes = page.canonical_cbor()?;
+        assert_each_field_rejected(&bytes, 12, AttemptPageV1::decode)?;
 
         let node = ScopeNodeV1 {
             request: reference(1),
@@ -1908,48 +1915,47 @@ mod tests {
             predecessor: None,
             reference: reference(4),
         };
-        let bytes = node.canonical_cbor().expect("scope node must encode");
-        assert_each_field_rejected(&bytes, 7, ScopeNodeV1::decode);
+        let bytes = node.canonical_cbor()?;
+        assert_each_field_rejected(&bytes, 7, ScopeNodeV1::decode)?;
+        Ok(())
     }
 
     #[test]
-    fn private_persistence_shapes_fail_closed() {
+    fn private_persistence_shapes_fail_closed() -> Result<(), ErasureErrorV1> {
         let active = ActiveAttemptRefV1 {
             ordinal: 0,
             admission: reference(3),
             acknowledgements: Vec::new(),
         };
-        let active_bytes = manifest(Some(active))
-            .canonical_cbor()
-            .expect("active manifest must encode");
-        let mut active_value: Value =
-            ciborium::from_reader(active_bytes.as_slice()).expect("manifest must decode");
+        let active_bytes = manifest(Some(active)).canonical_cbor()?;
+        let mut active_value: Value = ciborium::from_reader(active_bytes.as_slice())
+            .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
         let Value::Array(fields) = &mut active_value else {
-            panic!("manifest must be an array");
+            return Err(ErasureErrorV1::InvalidEncoding);
         };
-        let active = fields[14].clone();
+        let active = fields
+            .get(14)
+            .cloned()
+            .ok_or(ErasureErrorV1::InvalidEncoding)?;
         let Value::Array(active_fields) = active else {
-            panic!("active attempt must be an array");
+            return Err(ErasureErrorV1::InvalidEncoding);
         };
         for index in 0..active_fields.len() {
             let mut changed = fields.clone();
             let mut nested = active_fields.clone();
-            nested[index] = Value::Bool(true);
-            changed[14] = Value::Array(nested);
+            *nested
+                .get_mut(index)
+                .ok_or(ErasureErrorV1::InvalidEncoding)? = Value::Bool(true);
+            *changed.get_mut(14).ok_or(ErasureErrorV1::InvalidEncoding)? = Value::Array(nested);
             let mut bytes = Vec::new();
             ciborium::into_writer(&Value::Array(changed), &mut bytes)
-                .expect("manifest must encode");
+                .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
             assert!(ManifestV1::decode(&bytes).is_err());
         }
 
         let mut missing_history = manifest(None);
         missing_history.completed_attempt_count = 1;
-        assert!(ManifestV1::decode(
-            &missing_history
-                .canonical_cbor()
-                .expect("manifest must encode")
-        )
-        .is_err());
+        assert!(ManifestV1::decode(&missing_history.canonical_cbor()?).is_err());
 
         assert_eq!(
             TargetClosureV1::new(reference(1), vec![target(2), target(2)]),
@@ -1959,6 +1965,7 @@ mod tests {
             InventoryV1::new(reference(1), 0, INVENTORY_EFFECTIVE + 1, Vec::new()),
             Err(ErasureErrorV1::ScopeInvalid)
         );
+        Ok(())
     }
 
     const fn target(byte: u8) -> ErasureRequiredTargetV1 {
