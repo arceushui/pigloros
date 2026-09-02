@@ -180,6 +180,7 @@ fn request_with(
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut request = EvaluationRequest::from_canonical_cbor(bytes)?;
     update(&mut request);
+    request.output_capability.capability_digest = request.expected_output_capability_digest()?;
     request.request_digest = request.digest()?;
     Ok(request.to_canonical_cbor()?)
 }
