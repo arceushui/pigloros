@@ -1574,7 +1574,10 @@ fn delegation_rejects_broken_links_impersonation_cycles_and_amplification() {
     for child in variants {
         assert_delegation_invalid(child);
     }
+}
 
+#[test]
+fn delegation_chain_rejects_duplicate_or_unbounded_identity_sequences() {
     let mut repeated = delegation_child();
     repeated.grant_id = hash(1);
     assert_eq!(
@@ -1634,7 +1637,7 @@ fn plugins_cannot_delegate_or_escape_their_installation_scope() {
     let mut child = grant_draft(
         2,
         controller,
-        AuthorityGranteeV1::Principal(recipient.clone()),
+        AuthorityGranteeV1::Principal(recipient),
         scope(vec![actor], vec!["read"], None),
     );
     child.parent_grant_id = Some(hash(1));
