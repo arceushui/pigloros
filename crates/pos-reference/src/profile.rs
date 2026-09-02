@@ -182,6 +182,39 @@ pub struct Fixture {
     transition: Option<ProviderTransition>,
 }
 
+struct FixtureHeader {
+    case_id: String,
+    mandatory: bool,
+    claim_layer: u8,
+    family: u8,
+    provider: ProviderKey,
+    subject_adapter: SubjectAdapterKind,
+    execution_profile_digest: [u8; 32],
+    modes: Vec<u8>,
+}
+
+struct FixtureEvidence {
+    schema: ArtifactDescriptor,
+    payload: ArtifactDescriptor,
+    auxiliary: Vec<ArtifactDescriptor>,
+    oracle: StrictOracle,
+    expected_verification_outcome: u8,
+    expected_verification_error: Option<NamespacedFailure>,
+    replay_claim: u8,
+    redaction_state: u8,
+}
+
+struct FixturePolicy {
+    deterministic_budget: DeterministicBudget,
+    watchdog_ms: u64,
+    network_allowed: bool,
+    capability_ids: Vec<String>,
+    trust_policy_snapshot_digest: Option<[u8; 32]>,
+    release_admission_digest: Option<[u8; 32]>,
+    provenance_digest: [u8; 32],
+    transition: Option<ProviderTransition>,
+}
+
 /// Validated current-only CPF1 information needed by the evaluator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Profile {
@@ -476,6 +509,45 @@ fn decode_fixtures(
 
 fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture, ProfileError> {
     let fields = array(value, 24)?;
+    let fixture_digest = validate_fixture_digest(fields)?;
+    let header = decode_fixture_header(fields)?;
+    let evidence = decode_fixture_evidence(fields)?;
+    let policy = decode_fixture_policy(fields, hard_caps)?;
+    let fixture = Fixture {
+        case_id: header.case_id,
+        mandatory: header.mandatory,
+        claim_layer: header.claim_layer,
+        family: header.family,
+        provider_id: header.provider.provider_id.clone(),
+        provider_contract_version: header.provider.contract_version.clone(),
+        provider_abi_major: header.provider.abi_major,
+        provider_abi_minor: header.provider.abi_minor,
+        subject_adapter: header.subject_adapter,
+        execution_profile_digest: header.execution_profile_digest,
+        modes: header.modes,
+        schema: evidence.schema,
+        payload: evidence.payload,
+        auxiliary: evidence.auxiliary,
+        oracle: evidence.oracle,
+        expected_verification_outcome: evidence.expected_verification_outcome,
+        expected_verification_error: evidence.expected_verification_error,
+        replay_claim: evidence.replay_claim,
+        redaction_state: evidence.redaction_state,
+        deterministic_budget: policy.deterministic_budget,
+        watchdog_ms: policy.watchdog_ms,
+        network_allowed: policy.network_allowed,
+        capability_ids: policy.capability_ids,
+        provenance_digest: policy.provenance_digest,
+        fixture_digest,
+        provider: header.provider,
+        trust_policy_snapshot_digest: policy.trust_policy_snapshot_digest,
+        release_admission_digest: policy.release_admission_digest,
+        transition: policy.transition,
+    };
+    validate_fixture(&fixture).map(|()| fixture)
+}
+
+fn validate_fixture_digest(fields: &[Value]) -> Result<[u8; 32], ProfileError> {
     let actual_digest = contract_digest(
         b"PiglorOS.Conformance.Fixture.v1",
         &Value::Array(fields[..23].to_vec()),
@@ -484,7 +556,24 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
     if actual_digest != fixture_digest {
         return Err(ProfileError::DigestMismatch);
     }
-    let modes = array_values(&fields[7])?
+    Ok(fixture_digest)
+}
+
+fn decode_fixture_header(fields: &[Value]) -> Result<FixtureHeader, ProfileError> {
+    Ok(FixtureHeader {
+        case_id: identifier(&fields[0])?,
+        mandatory: bool_value(&fields[1])?,
+        claim_layer: bounded_code(&fields[2], 6)?,
+        family: bounded_code(&fields[3], 6)?,
+        provider: decode_provider_key(&fields[4])?,
+        subject_adapter: decode_subject_adapter(&fields[5])?,
+        execution_profile_digest: fixed_bytes(&fields[6])?,
+        modes: decode_fixture_modes(&fields[7])?,
+    })
+}
+
+fn decode_fixture_modes(value: &Value) -> Result<Vec<u8>, ProfileError> {
+    let modes = array_values(value)?
         .iter()
         .map(|value| u8::try_from(uint(value)?).map_err(|_| ProfileError::InvalidEncoding))
         .collect::<Result<Vec<_>, _>>()?;
@@ -494,26 +583,19 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
     {
         return Err(ProfileError::NonCanonicalOrder);
     }
-    let subject_adapter = match uint(&fields[5])? {
+    Ok(modes)
+}
+
+fn decode_subject_adapter(value: &Value) -> Result<SubjectAdapterKind, ProfileError> {
+    Ok(match uint(value)? {
         0 => SubjectAdapterKind::ExportedArtifact,
         1 => SubjectAdapterKind::PublicGatewayProtocol,
         2 => SubjectAdapterKind::PublicPluginProtocol,
         _ => return Err(ProfileError::InvalidEncoding),
-    };
-    let safety = array(&fields[17], 1)?;
-    let capability = array(&fields[18], 2)?;
-    let capability_ids = string_list(&capability[1])?;
-    if capability_ids.len() > MAX_CAPABILITIES {
-        return Err(ProfileError::FieldOutOfBounds);
-    }
-    let provider = decode_provider_key(&fields[4])?;
-    let claim_layer = bounded_code(&fields[2], 6)?;
-    let family = bounded_code(&fields[3], 6)?;
-    let expected_verification_outcome = bounded_code(&fields[12], 5)?;
-    let replay_claim = bounded_code(&fields[14], 4)?;
-    let redaction_state = bounded_code(&fields[15], 3)?;
-    let deterministic_budget = DeterministicBudget::from_value(&fields[16])?;
-    hard_caps.admits(deterministic_budget)?;
+    })
+}
+
+fn decode_fixture_evidence(fields: &[Value]) -> Result<FixtureEvidence, ProfileError> {
     let schema = decode_descriptor(&fields[8])?;
     let payload = decode_descriptor(&fields[9])?;
     let auxiliary = array_values(&fields[10])?
@@ -522,45 +604,40 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
         .collect::<Result<Vec<_>, _>>()?;
     let oracle = decode_oracle(&fields[11])?;
     validate_artifact_paths(&schema, &payload, &auxiliary, &oracle)?;
-    let expected_verification_error = optional_failure(&fields[13])?;
-    let watchdog_ms = uint(&safety[0])?;
-    let network_allowed = bool_value(&capability[0])?;
-    let trust_policy_snapshot_digest = optional_digest(&fields[19])?;
-    let release_admission_digest = optional_digest(&fields[20])?;
-    let provenance_digest = decode_provenance(&fields[21])?;
-    let transition = optional_transition(&fields[22])?;
-    let fixture = Fixture {
-        case_id: identifier(&fields[0])?,
-        mandatory: bool_value(&fields[1])?,
-        claim_layer,
-        family,
-        provider_id: provider.provider_id.clone(),
-        provider_contract_version: provider.contract_version.clone(),
-        provider_abi_major: provider.abi_major,
-        provider_abi_minor: provider.abi_minor,
-        subject_adapter,
-        execution_profile_digest: fixed_bytes(&fields[6])?,
-        modes,
+    Ok(FixtureEvidence {
         schema,
         payload,
         auxiliary,
         oracle,
-        expected_verification_outcome,
-        expected_verification_error,
-        replay_claim,
-        redaction_state,
+        expected_verification_outcome: bounded_code(&fields[12], 5)?,
+        expected_verification_error: optional_failure(&fields[13])?,
+        replay_claim: bounded_code(&fields[14], 4)?,
+        redaction_state: bounded_code(&fields[15], 3)?,
+    })
+}
+
+fn decode_fixture_policy(
+    fields: &[Value],
+    hard_caps: EvaluatorHardCaps,
+) -> Result<FixturePolicy, ProfileError> {
+    let deterministic_budget = DeterministicBudget::from_value(&fields[16])?;
+    hard_caps.admits(deterministic_budget)?;
+    let safety = array(&fields[17], 1)?;
+    let capability = array(&fields[18], 2)?;
+    let capability_ids = string_list(&capability[1])?;
+    if capability_ids.len() > MAX_CAPABILITIES {
+        return Err(ProfileError::FieldOutOfBounds);
+    }
+    Ok(FixturePolicy {
         deterministic_budget,
-        watchdog_ms,
-        network_allowed,
+        watchdog_ms: uint(&safety[0])?,
+        network_allowed: bool_value(&capability[0])?,
         capability_ids,
-        provenance_digest,
-        fixture_digest,
-        provider,
-        trust_policy_snapshot_digest,
-        release_admission_digest,
-        transition,
-    };
-    validate_fixture(&fixture).map(|()| fixture)
+        trust_policy_snapshot_digest: optional_digest(&fields[19])?,
+        release_admission_digest: optional_digest(&fields[20])?,
+        provenance_digest: decode_provenance(&fields[21])?,
+        transition: optional_transition(&fields[22])?,
+    })
 }
 
 fn validate_profile_header(fields: &[Value]) -> Result<(), ProfileError> {
@@ -1073,6 +1150,21 @@ fn validate_execution_profile(
 ) -> Result<(), ProfileError> {
     let value = decode_canonical(bytes)?;
     let fields = array(&value, 17)?;
+    validate_execution_profile_identity(fields, path)?;
+    validate_execution_profile_contract(fields)?;
+    let expected = contract_digest(
+        b"PiglorOS.ExecutionProfile.v1",
+        &Value::Array(fields[..16].to_vec()),
+    )?;
+    if fixed_bytes::<32>(&fields[16])? != expected
+        || member_digest != *blake3::hash(bytes).as_bytes()
+    {
+        return Err(ProfileError::DigestMismatch);
+    }
+    Ok(())
+}
+
+fn validate_execution_profile_identity(fields: &[Value], path: &str) -> Result<(), ProfileError> {
     let profile_id = text(&fields[2])?;
     if text(&fields[0])? != "EPF1"
         || uint(&fields[1])? != 1
@@ -1088,7 +1180,15 @@ fn validate_execution_profile(
         || !valid_text_list(&fields[6], false)?
         || !valid_text_list(&fields[7], false)?
         || !valid_identifier(text(&fields[8])?)
-        || !valid_text_list(&fields[9], false)?
+    {
+        Err(ProfileError::ClosureIncomplete)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_execution_profile_contract(fields: &[Value]) -> Result<(), ProfileError> {
+    if !valid_text_list(&fields[9], false)?
         || !valid_text_list(&fields[10], false)?
         || !valid_text_list(&fields[13], true)?
         || fields[15] != Value::Null
@@ -1104,15 +1204,6 @@ fn validate_execution_profile(
     if !semantic_version(text(&versions[0])?, None) || !semantic_version(text(&versions[1])?, None)
     {
         return Err(ProfileError::FieldOutOfBounds);
-    }
-    let expected = contract_digest(
-        b"PiglorOS.ExecutionProfile.v1",
-        &Value::Array(fields[..16].to_vec()),
-    )?;
-    if fixed_bytes::<32>(&fields[16])? != expected
-        || member_digest != *blake3::hash(bytes).as_bytes()
-    {
-        return Err(ProfileError::DigestMismatch);
     }
     Ok(())
 }

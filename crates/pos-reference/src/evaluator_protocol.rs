@@ -390,23 +390,47 @@ fn validate_identity(value: &ImplementationIdentity) -> Result<(), ProtocolError
 }
 
 fn validate_case_evidence(value: &CaseOutcome) -> Result<(), ProtocolError> {
-    let exact = value.expected_digest.is_some()
+    if valid_redaction(value) && nonpass_has_difference(value) && evidence_matches_outcome(value) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidEncoding)
+    }
+}
+
+fn evidence_matches_outcome(value: &CaseOutcome) -> bool {
+    value.outcome != CaseStatus::Pass
+        || exact_evidence(value)
+        || typed_failure_evidence(value)
+        || allowed_divergence_evidence(value)
+}
+
+fn exact_evidence(value: &CaseOutcome) -> bool {
+    value.expected_digest.is_some()
         && value.expected_digest == value.actual_digest
         && value.expected_error.is_none()
         && value.actual_error.is_none()
-        && value.first_coordinate.is_none();
-    let typed_failure = value.expected_digest.is_none()
+        && value.first_coordinate.is_none()
+}
+
+fn typed_failure_evidence(value: &CaseOutcome) -> bool {
+    value.expected_digest.is_none()
         && value.actual_digest.is_none()
         && value.expected_error.is_some()
         && value.expected_error == value.actual_error
-        && value.first_coordinate.is_none();
-    let allowed_divergence = value.expected_digest.is_some()
+        && value.first_coordinate.is_none()
+}
+
+fn allowed_divergence_evidence(value: &CaseOutcome) -> bool {
+    value.expected_digest.is_some()
         && value.actual_digest.is_some()
         && value.expected_digest != value.actual_digest
         && value.expected_error.is_none()
         && value.actual_error.is_none()
-        && value.first_coordinate.is_some();
-    let redacted = match value.redaction_state {
+        && value.first_coordinate.is_some()
+}
+
+fn valid_redaction(value: &CaseOutcome) -> bool {
+    match value.redaction_state {
         0 => true,
         1 => value.replay_claim == 1 || value.replay_claim == 4,
         2 => (value.replay_claim == 2 || value.replay_claim == 4) && empty_case_evidence(value),
@@ -416,19 +440,14 @@ fn validate_case_evidence(value: &CaseOutcome) -> Result<(), ProtocolError> {
                 && empty_case_evidence(value)
         }
         _ => false,
-    };
-    let nonpass_has_difference = value.outcome == CaseStatus::Pass
+    }
+}
+
+fn nonpass_has_difference(value: &CaseOutcome) -> bool {
+    value.outcome == CaseStatus::Pass
         || value.redaction_state >= 2
         || value.expected_digest != value.actual_digest
-        || value.expected_error != value.actual_error;
-    if redacted
-        && nonpass_has_difference
-        && (value.outcome != CaseStatus::Pass || exact || typed_failure || allowed_divergence)
-    {
-        Ok(())
-    } else {
-        Err(ProtocolError::InvalidEncoding)
-    }
+        || value.expected_error != value.actual_error
 }
 
 const fn empty_case_evidence(value: &CaseOutcome) -> bool {
@@ -732,101 +751,120 @@ pub(crate) fn decode_canonical_with_limit(
     Ok(value)
 }
 
+fn read_cbor_length(bytes: &[u8], index: &mut usize, additional: u8) -> Result<u64, ProtocolError> {
+    let width = match additional {
+        value @ 0..=23 => return Ok(u64::from(value)),
+        24 => 1,
+        25 => 2,
+        26 => 4,
+        27 => 8,
+        _ => return Err(ProtocolError::InvalidEncoding),
+    };
+    let end = index
+        .checked_add(width)
+        .ok_or(ProtocolError::FieldOutOfBounds)?;
+    let encoded = bytes
+        .get(*index..end)
+        .ok_or(ProtocolError::InvalidEncoding)?;
+    *index = end;
+    let mut value = [0_u8; 8];
+    value[8 - width..].copy_from_slice(encoded);
+    Ok(u64::from_be_bytes(value))
+}
+
+fn preflight_cbor_item(
+    bytes: &[u8],
+    index: &mut usize,
+    depth: usize,
+    maximum_bytes: usize,
+    allow_maps_and_tags: bool,
+) -> Result<(), ProtocolError> {
+    if depth > MAX_NESTING {
+        return Err(ProtocolError::FieldOutOfBounds);
+    }
+    let initial = bytes
+        .get(*index)
+        .copied()
+        .ok_or(ProtocolError::InvalidEncoding)?;
+    *index = index
+        .checked_add(1)
+        .ok_or(ProtocolError::FieldOutOfBounds)?;
+    let major = initial >> 5;
+    let additional = initial & 0x1f;
+    let length = read_cbor_length(bytes, index, additional)?;
+    match major {
+        0 | 1 => Ok(()),
+        2 | 3 => preflight_bytes(bytes, index, length, maximum_bytes),
+        4 => preflight_items(
+            bytes,
+            index,
+            depth,
+            length,
+            maximum_bytes,
+            allow_maps_and_tags,
+        ),
+        5 if allow_maps_and_tags => preflight_items(
+            bytes,
+            index,
+            depth,
+            length
+                .checked_mul(2)
+                .ok_or(ProtocolError::FieldOutOfBounds)?,
+            maximum_bytes,
+            allow_maps_and_tags,
+        ),
+        6 if allow_maps_and_tags => {
+            preflight_cbor_item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
+        }
+        7 if matches!(additional, 20..=22) => Ok(()),
+        _ => Err(ProtocolError::InvalidEncoding),
+    }
+}
+
+fn preflight_bytes(
+    bytes: &[u8],
+    index: &mut usize,
+    length: u64,
+    maximum_bytes: usize,
+) -> Result<(), ProtocolError> {
+    let length = usize::try_from(length).map_err(|_| ProtocolError::FieldOutOfBounds)?;
+    if length > maximum_bytes {
+        return Err(ProtocolError::FieldOutOfBounds);
+    }
+    let end = index
+        .checked_add(length)
+        .ok_or(ProtocolError::FieldOutOfBounds)?;
+    bytes
+        .get(*index..end)
+        .ok_or(ProtocolError::InvalidEncoding)?;
+    *index = end;
+    Ok(())
+}
+
+fn preflight_items(
+    bytes: &[u8],
+    index: &mut usize,
+    depth: usize,
+    item_count: u64,
+    maximum_bytes: usize,
+    allow_maps_and_tags: bool,
+) -> Result<(), ProtocolError> {
+    let item_count = usize::try_from(item_count).map_err(|_| ProtocolError::FieldOutOfBounds)?;
+    if item_count > MAX_CASES {
+        return Err(ProtocolError::FieldOutOfBounds);
+    }
+    (0..item_count).try_for_each(|_| {
+        preflight_cbor_item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
+    })
+}
+
 pub(crate) fn preflight_cbor(
     bytes: &[u8],
     maximum_bytes: usize,
     allow_maps_and_tags: bool,
 ) -> Result<(), ProtocolError> {
-    fn read_length(bytes: &[u8], index: &mut usize, additional: u8) -> Result<u64, ProtocolError> {
-        let width = match additional {
-            value @ 0..=23 => return Ok(u64::from(value)),
-            24 => 1,
-            25 => 2,
-            26 => 4,
-            27 => 8,
-            _ => return Err(ProtocolError::InvalidEncoding),
-        };
-        let end = index
-            .checked_add(width)
-            .ok_or(ProtocolError::FieldOutOfBounds)?;
-        let encoded = bytes
-            .get(*index..end)
-            .ok_or(ProtocolError::InvalidEncoding)?;
-        *index = end;
-        let mut value = [0_u8; 8];
-        value[8 - width..].copy_from_slice(encoded);
-        Ok(u64::from_be_bytes(value))
-    }
-
-    fn item(
-        bytes: &[u8],
-        index: &mut usize,
-        depth: usize,
-        maximum_bytes: usize,
-        allow_maps_and_tags: bool,
-    ) -> Result<(), ProtocolError> {
-        if depth > MAX_NESTING {
-            return Err(ProtocolError::FieldOutOfBounds);
-        }
-        let initial = bytes
-            .get(*index)
-            .copied()
-            .ok_or(ProtocolError::InvalidEncoding)?;
-        *index = index
-            .checked_add(1)
-            .ok_or(ProtocolError::FieldOutOfBounds)?;
-        let major = initial >> 5;
-        let additional = initial & 0x1f;
-        let length = read_length(bytes, index, additional)?;
-        match major {
-            0 | 1 => Ok(()),
-            2 | 3 => {
-                let length =
-                    usize::try_from(length).map_err(|_| ProtocolError::FieldOutOfBounds)?;
-                if length > maximum_bytes {
-                    return Err(ProtocolError::FieldOutOfBounds);
-                }
-                let end = index
-                    .checked_add(length)
-                    .ok_or(ProtocolError::FieldOutOfBounds)?;
-                bytes
-                    .get(*index..end)
-                    .ok_or(ProtocolError::InvalidEncoding)?;
-                *index = end;
-                Ok(())
-            }
-            4 => {
-                let item_count =
-                    usize::try_from(length).map_err(|_| ProtocolError::FieldOutOfBounds)?;
-                if item_count > MAX_CASES {
-                    return Err(ProtocolError::FieldOutOfBounds);
-                }
-                (0..item_count).try_for_each(|_| {
-                    item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
-                })
-            }
-            5 if allow_maps_and_tags => {
-                let item_count = usize::try_from(length)
-                    .map_err(|_| ProtocolError::FieldOutOfBounds)?
-                    .checked_mul(2)
-                    .ok_or(ProtocolError::FieldOutOfBounds)?;
-                if item_count > MAX_CASES {
-                    return Err(ProtocolError::FieldOutOfBounds);
-                }
-                (0..item_count).try_for_each(|_| {
-                    item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
-                })
-            }
-            6 if allow_maps_and_tags => {
-                item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
-            }
-            7 if matches!(additional, 20..=22) => Ok(()),
-            _ => Err(ProtocolError::InvalidEncoding),
-        }
-    }
-
     let mut index = 0;
-    item(bytes, &mut index, 0, maximum_bytes, allow_maps_and_tags)?;
+    preflight_cbor_item(bytes, &mut index, 0, maximum_bytes, allow_maps_and_tags)?;
     if index == bytes.len() {
         Ok(())
     } else {

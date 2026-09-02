@@ -113,6 +113,7 @@ struct ExpectedResult {
     digest: [u8; 32],
 }
 
+#[derive(Clone)]
 struct TrustRoot {
     key_id: String,
     public_key: [u8; 32],
@@ -122,6 +123,17 @@ struct TrustPolicy {
     roots: Vec<TrustRoot>,
     revoked_key_ids: BTreeSet<String>,
     revoked_artifact_digests: BTreeSet<[u8; 32]>,
+}
+
+struct DecodedArchive {
+    mode: u8,
+    profile_digest: [u8; 32],
+    descriptors: Vec<Descriptor>,
+    expected: Vec<ExpectedResult>,
+    members: BTreeMap<String, VerifiedMember>,
+    signer_key: [u8; 32],
+    signature: [u8; 64],
+    manifest_bytes: Vec<u8>,
 }
 
 impl TrustPolicy {
@@ -147,6 +159,39 @@ pub fn verify_signed_bundle(
     trust_policy_bytes: &[u8],
     request: &EvaluationRequest,
 ) -> Result<VerifiedBundle, BundleError> {
+    let (trust_policy, archive_digest) =
+        validate_requested_artifacts(archive_bytes, trust_policy_bytes, request)?;
+    let decoded = decode_archive(archive_bytes, request)?;
+    validate_archive_closure(&decoded, &trust_policy)?;
+    let authority = verify_archive_signature(&decoded, &trust_policy)?;
+    if decoded
+        .members
+        .values()
+        .any(|member| prohibited_secret_material(&member.bytes))
+    {
+        return Err(BundleError::ProhibitedMaterial);
+    }
+    let expected_results = decoded
+        .expected
+        .into_iter()
+        .map(|result| (result.key, result.path))
+        .collect();
+    Ok(VerifiedBundle {
+        mode: decoded.mode,
+        profile_digest: decoded.profile_digest,
+        archive_digest,
+        members: decoded.members,
+        expected_results,
+        authority_key_id: authority.key_id,
+        authority_public_key: authority.public_key,
+    })
+}
+
+fn validate_requested_artifacts(
+    archive_bytes: &[u8],
+    trust_policy_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<(TrustPolicy, [u8; 32]), BundleError> {
     if archive_bytes.is_empty() || archive_bytes.len() > MAX_ARCHIVE_BYTES {
         return Err(BundleError::FieldOutOfBounds);
     }
@@ -162,7 +207,13 @@ pub fn verify_signed_bundle(
     if trust_policy.artifact_is_revoked(&archive_digest) {
         return Err(BundleError::TrustPolicyMismatch);
     }
+    Ok((trust_policy, archive_digest))
+}
 
+fn decode_archive(
+    archive_bytes: &[u8],
+    request: &EvaluationRequest,
+) -> Result<DecodedArchive, BundleError> {
     let root = decode_canonical_with_limit(archive_bytes, MAX_ARCHIVE_BYTES)?;
     let archive = array(&root, 4)?;
     let manifest = array(&archive[0], 6)?;
@@ -177,52 +228,50 @@ pub fn verify_signed_bundle(
     if profile_digest != request.profile_digest {
         return Err(BundleError::DigestMismatch);
     }
+    Ok(DecodedArchive {
+        mode,
+        profile_digest,
+        descriptors: decode_descriptors(&manifest[4])?,
+        expected: decode_expected_results(&manifest[5])?,
+        members: decode_members(&archive[1])?,
+        signer_key: fixed_bytes(&archive[2])?,
+        signature: fixed_bytes(&archive[3])?,
+        manifest_bytes: encode(&archive[0])?,
+    })
+}
 
-    let descriptors = decode_descriptors(&manifest[4])?;
-    let expected = decode_expected_results(&manifest[5])?;
-    let members = decode_members(&archive[1])?;
-    validate_closure(&descriptors, &members, &expected)?;
-    if trust_policy.artifact_is_revoked(&profile_digest)
-        || members
+fn validate_archive_closure(
+    archive: &DecodedArchive,
+    trust_policy: &TrustPolicy,
+) -> Result<(), BundleError> {
+    validate_closure(&archive.descriptors, &archive.members, &archive.expected)?;
+    if trust_policy.artifact_is_revoked(&archive.profile_digest)
+        || archive
+            .members
             .values()
             .any(|member| trust_policy.artifact_is_revoked(&member.digest))
     {
-        return Err(BundleError::TrustPolicyMismatch);
+        Err(BundleError::TrustPolicyMismatch)
+    } else {
+        Ok(())
     }
+}
 
-    let signer_key: [u8; 32] = fixed_bytes(&archive[2])?;
-    let signature: [u8; 64] = fixed_bytes(&archive[3])?;
+fn verify_archive_signature(
+    archive: &DecodedArchive,
+    trust_policy: &TrustPolicy,
+) -> Result<TrustRoot, BundleError> {
     let trusted_authority = trust_policy
-        .authority_for(signer_key)
+        .authority_for(archive.signer_key)
         .ok_or(BundleError::SignatureInvalid)?;
-    let manifest_bytes = encode(&archive[0])?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&signer_key)
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&archive.signer_key)
         .map_err(|_| BundleError::SignatureInvalid)?;
     key.verify(
-        &manifest_bytes,
-        &ed25519_dalek::Signature::from_bytes(&signature),
+        &archive.manifest_bytes,
+        &ed25519_dalek::Signature::from_bytes(&archive.signature),
     )
     .map_err(|_| BundleError::SignatureInvalid)?;
-    if members
-        .values()
-        .any(|member| prohibited_secret_material(&member.bytes))
-    {
-        return Err(BundleError::ProhibitedMaterial);
-    }
-
-    let expected_results = expected
-        .into_iter()
-        .map(|result| (result.key, result.path))
-        .collect();
-    Ok(VerifiedBundle {
-        mode,
-        profile_digest,
-        archive_digest,
-        members,
-        expected_results,
-        authority_key_id: trusted_authority.key_id.clone(),
-        authority_public_key: trusted_authority.public_key,
-    })
+    Ok(trusted_authority.clone())
 }
 
 fn sensitive_name(value: &str) -> bool {
