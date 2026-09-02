@@ -20,9 +20,32 @@ pub struct Corpus {
 pub enum ProfileMutation {
     RawProfileField(u8),
     RawFixtureField(u8),
+    RawProviderBindingField(u8),
+    RawRequiredProviderField(u8),
+    RawProtocolField(u8),
+    RawHardCapField(u8),
+    RawRequirementField(u8),
+    RawFixtureProviderField(u8),
+    RawFixtureSchemaField(u8),
+    RawFixturePayloadField(u8),
+    RawFixtureAuxiliaryField(u8),
+    RawFixtureOracleField(u8),
+    RawFixtureBudgetField(u8),
+    RawFixtureSafetyField(u8),
+    RawFixtureCapabilityField(u8),
+    RawFixtureProvenanceField(u8),
+    RawFixtureTransitionField(u8),
     RawExecutionField(u8),
+    RawExecutionNetworkField(u8),
+    RawExecutionBudgetField(u8),
+    RawExecutionVersionField(u8),
     RawRegistryField(u8),
+    RawRegistryRecordField(u8),
     RawPackageField(u8),
+    RawPackageProviderField(u8),
+    RawPackageSchemaBindingField(u8),
+    RawPackageSchemaDescriptorField(u8),
+    RawPackageSupportDescriptorField(u8),
     Magic,
     Version,
     ProfileId,
@@ -754,6 +777,21 @@ fn mutate_provider_package(
         ProfileMutation::RawPackageField(index) => {
             fields[usize::from(index)] = Value::Null;
         }
+        ProfileMutation::RawPackageProviderField(index) => {
+            array_fields_mut(&mut fields[2])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawPackageSchemaBindingField(index) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut schemas[0])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawPackageSchemaDescriptorField(index) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            let binding = array_fields_mut(&mut schemas[0])?;
+            array_fields_mut(&mut binding[1])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawPackageSupportDescriptorField(index) => {
+            array_fields_mut(&mut fields[6])?[usize::from(index)] = Value::Null;
+        }
         ProfileMutation::PackageMagic => fields[0] = text("FPP0"),
         ProfileMutation::PackageVersion => fields[1] = uint(2),
         ProfileMutation::PackageProvider => fields[2] = provider_key(2),
@@ -772,6 +810,15 @@ fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) {
     match mutation {
         ProfileMutation::RawRegistryField(index) => {
             fields[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawRegistryRecordField(index) => {
+            let Value::Array(providers) = &mut fields[2] else {
+                return;
+            };
+            let Value::Array(record) = &mut providers[0] else {
+                return;
+            };
+            record[usize::from(index)] = Value::Null;
         }
         ProfileMutation::RegistryMagic => fields[0] = text("FPR0"),
         ProfileMutation::RegistryVersion => fields[1] = uint(2),
@@ -839,6 +886,24 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
     let profile_fields = array_fields_mut(profile)?;
     match mutation {
         ProfileMutation::RawProfileField(index) => profile_fields[usize::from(index)] = Value::Null,
+        ProfileMutation::RawProviderBindingField(index) => {
+            array_fields_mut(&mut profile_fields[8])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawRequiredProviderField(index) => {
+            let binding = array_fields_mut(&mut profile_fields[8])?;
+            let providers = array_fields_mut(&mut binding[1])?;
+            array_fields_mut(&mut providers[0])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawProtocolField(index) => {
+            array_fields_mut(&mut profile_fields[11])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawHardCapField(index) => {
+            let protocol = array_fields_mut(&mut profile_fields[11])?;
+            array_fields_mut(&mut protocol[4])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawRequirementField(index) => {
+            array_fields_mut(&mut profile_fields[12])?[usize::from(index)] = Value::Null;
+        }
         ProfileMutation::Magic => profile_fields[0] = text("CPF0"),
         ProfileMutation::Version => profile_fields[1] = uint(2),
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
@@ -908,13 +973,49 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
 
 fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
     let fixtures = array_fields_mut(&mut profile_fields[9])?;
+    let fixture_index = if matches!(mutation, ProfileMutation::RawFixtureTransitionField(_)) {
+        5
+    } else {
+        0
+    };
     let fixture = fixtures
-        .first_mut()
+        .get_mut(fixture_index)
         .ok_or_else(|| io::Error::other("test fixture is missing"))?;
     let fields = array_fields_mut(fixture)?;
     match mutation {
         ProfileMutation::RawFixtureField(index) => {
             fields[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureProviderField(index) => {
+            array_fields_mut(&mut fields[4])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureSchemaField(index) => {
+            array_fields_mut(&mut fields[8])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixturePayloadField(index) => {
+            array_fields_mut(&mut fields[9])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureAuxiliaryField(index) => {
+            let auxiliary = array_fields_mut(&mut fields[10])?;
+            array_fields_mut(&mut auxiliary[0])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureOracleField(index) => {
+            array_fields_mut(&mut fields[11])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureBudgetField(index) => {
+            array_fields_mut(&mut fields[16])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureSafetyField(index) => {
+            array_fields_mut(&mut fields[17])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureCapabilityField(index) => {
+            array_fields_mut(&mut fields[18])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureProvenanceField(index) => {
+            array_fields_mut(&mut fields[21])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawFixtureTransitionField(index) => {
+            array_fields_mut(&mut fields[22])?[usize::from(index)] = Value::Null;
         }
         ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
         ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
@@ -1403,6 +1504,15 @@ fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> 
     match mutation {
         ProfileMutation::RawExecutionField(index) => {
             fields[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawExecutionNetworkField(index) => {
+            array_fields_mut(&mut fields[11])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawExecutionBudgetField(index) => {
+            array_fields_mut(&mut fields[12])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawExecutionVersionField(index) => {
+            array_fields_mut(&mut fields[14])?[usize::from(index)] = Value::Null;
         }
         ProfileMutation::ExecutionMagic => fields[0] = text("EPF0"),
         ProfileMutation::ExecutionVersion => fields[1] = uint(2),

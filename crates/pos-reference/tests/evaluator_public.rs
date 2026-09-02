@@ -596,9 +596,32 @@ fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> Te
         .chain(
             (0..15)
                 .map(ProfileMutation::RawExecutionField)
+                .chain((0..2).map(ProfileMutation::RawExecutionNetworkField))
+                .chain((0..8).map(ProfileMutation::RawExecutionBudgetField))
+                .chain((0..2).map(ProfileMutation::RawExecutionVersionField))
                 .chain((0..3).map(ProfileMutation::RawRegistryField))
+                .chain((0..7).map(ProfileMutation::RawRegistryRecordField))
                 .chain((0..11).map(ProfileMutation::RawPackageField)),
-        );
+        )
+        .chain((0..4).map(ProfileMutation::RawPackageProviderField))
+        .chain((0..2).map(ProfileMutation::RawPackageSchemaBindingField))
+        .chain((0..4).map(ProfileMutation::RawPackageSchemaDescriptorField))
+        .chain((0..4).map(ProfileMutation::RawPackageSupportDescriptorField))
+        .chain((0..2).map(ProfileMutation::RawProviderBindingField))
+        .chain((0..4).map(ProfileMutation::RawRequiredProviderField))
+        .chain((0..5).map(ProfileMutation::RawProtocolField))
+        .chain((0..18).map(ProfileMutation::RawHardCapField))
+        .chain((0..5).map(ProfileMutation::RawRequirementField))
+        .chain((0..4).map(ProfileMutation::RawFixtureProviderField))
+        .chain((0..4).map(ProfileMutation::RawFixtureSchemaField))
+        .chain((0..4).map(ProfileMutation::RawFixturePayloadField))
+        .chain((0..4).map(ProfileMutation::RawFixtureAuxiliaryField))
+        .chain((0..2).map(ProfileMutation::RawFixtureOracleField))
+        .chain((0..8).map(ProfileMutation::RawFixtureBudgetField))
+        .chain((0..1).map(ProfileMutation::RawFixtureSafetyField))
+        .chain((0..2).map(ProfileMutation::RawFixtureCapabilityField))
+        .chain((0..7).map(ProfileMutation::RawFixtureProvenanceField))
+        .chain((0..2).map(ProfileMutation::RawFixtureTransitionField));
     for mutation in mutations {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let mut adapter = PublicAdapter {
