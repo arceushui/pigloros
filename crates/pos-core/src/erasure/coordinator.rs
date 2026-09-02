@@ -630,8 +630,40 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         extension: ErasureScopeExtensionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let _ = (self.record(request)?, extension);
-        Err(ErasureErrorV1::PolicyConflict)
+        let mut record = self.record(request)?;
+        if record
+            .scope_head
+            .is_some_and(|head| head.extension == extension.reference())
+        {
+            return Ok(record.state);
+        }
+        let scope = record
+            .scope
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let lineage_rule = scope.lineage_rule().ok_or(ErasureErrorV1::PolicyConflict)?;
+        if (
+            extension.request(),
+            extension.scope_commitment(),
+            extension.lineage_rule(),
+            extension.predecessor_extension(),
+        ) != (
+            request,
+            scope.reference(),
+            lineage_rule,
+            record.scope_head.map(|head| head.extension),
+        ) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.port.admit_scope_extension(&extension)?;
+        let (extension_object, node_object, index) = record.append_scope_extension(extension)?;
+        self.commit_delta(
+            record.clone(),
+            Some(record.manifest_digest),
+            vec![extension_object, node_object],
+            vec![index],
+            ErasureCasEffectV1::None,
+        )
     }
     /// Append one authorized administrative recovery resolution.
     ///
@@ -643,8 +675,42 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         resolution: ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let _ = (self.record(request)?, resolution);
-        Err(ErasureErrorV1::PolicyConflict)
+        let mut record = self.record(request)?;
+        if record.administrative_resolution_head == Some(resolution.reference()) {
+            return Ok(record.state);
+        }
+        let scope = record
+            .scope
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let obligations = record
+            .obligation_set
+            .as_ref()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if (
+            resolution.request(),
+            resolution.scope_commitment(),
+            resolution.policy(),
+            resolution.trust(),
+            resolution.predecessor_resolution(),
+        ) != (
+            request,
+            scope.reference(),
+            record.request.policy(),
+            obligations.trust(),
+            record.administrative_resolution_head,
+        ) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        self.port.admit_administrative_resolution(&resolution)?;
+        let (object, index) = record.append_administrative_resolution(resolution)?;
+        self.commit_delta(
+            record.clone(),
+            Some(record.manifest_digest),
+            vec![object],
+            vec![index],
+            ErasureCasEffectV1::None,
+        )
     }
 }
 

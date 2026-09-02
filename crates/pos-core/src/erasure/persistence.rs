@@ -911,6 +911,73 @@ impl RecoveredErasureV1 {
         ))
     }
 
+    pub(crate) fn append_scope_extension(
+        &mut self,
+        extension: ErasureScopeExtensionV1,
+    ) -> Result<
+        (
+            ErasurePersistenceObjectV1,
+            ErasurePersistenceObjectV1,
+            ErasureIndexInsertV1,
+        ),
+        ErasureErrorV1,
+    > {
+        let ordinal = self.scope_head.map_or(0, |head| head.ordinal + 1);
+        let node = ScopeNodeV1 {
+            request: self.request.reference(),
+            scope: extension.scope_commitment(),
+            extension: extension.reference(),
+            ordinal,
+            predecessor: self.scope_head.map(|head| head.node),
+            reference: super::reference_zero(),
+        };
+        let node_bytes = node.canonical_cbor()?;
+        let node_reference = addressed(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, &node_bytes);
+        let extension_object = persistence_object(
+            ERASURE_SCOPE_EXTENSION_TAG_V1,
+            extension.reference(),
+            extension.to_canonical_cbor()?,
+        );
+        self.manifest.scope_extension_head = Some(node_reference);
+        self.scope_head = Some(RecoveredScopeHeadV1 {
+            node: node_reference,
+            extension: extension.reference(),
+            ordinal,
+        });
+        Ok((
+            extension_object,
+            persistence_object(
+                ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+                node_reference,
+                node_bytes,
+            ),
+            ErasureIndexInsertV1::ScopeNode {
+                ordinal,
+                reference: node_reference,
+            },
+        ))
+    }
+
+    pub(crate) fn append_administrative_resolution(
+        &mut self,
+        resolution: ErasureAdministrativeResolutionV1,
+    ) -> Result<(ErasurePersistenceObjectV1, ErasureIndexInsertV1), ErasureErrorV1> {
+        let ordinal = self.administrative_resolution_count;
+        let reference = resolution.reference();
+        let object = persistence_object(
+            ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
+            reference,
+            resolution.to_canonical_cbor()?,
+        );
+        self.manifest.administrative_resolution_head = Some(reference);
+        self.administrative_resolution_head = Some(reference);
+        self.administrative_resolution_count = ordinal + 1;
+        Ok((
+            object,
+            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
+        ))
+    }
+
     fn recover_attempts(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
