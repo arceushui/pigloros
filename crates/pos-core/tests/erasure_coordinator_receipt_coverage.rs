@@ -4195,6 +4195,29 @@ fn nested_codecs_reject_wrong_versions_shapes_and_closed_values() -> Result<(), 
         Err(ErasureErrorV1::InvalidEncoding)
     );
 
+    let mut oversized_request = decode_value(&request_bytes)?;
+    let Value::Array(fields) = &mut oversized_request else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[5] = Value::Array(vec![
+        Value::Bytes(reference(20).digest().to_vec());
+        ERASURE_MAX_REFERENCES + 1
+    ]);
+    assert_eq!(
+        ErasureRequestV1::from_canonical_cbor(&encode_value(&oversized_request)?),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    assert_eq!(
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: reference(1),
+            policy: reference(2),
+            trust: reference(3),
+            evidence: vec![0; ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES],
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
     let mut trailing = request_bytes;
     trailing.push(0);
     assert_eq!(
@@ -4249,30 +4272,6 @@ fn public_request_codec_rejects_every_bounded_cbor_shape_family() {
         ErasureRequestV1::from_canonical_cbor(&vec![0_u8; 2 * 1024 * 1024]),
         Err(ErasureErrorV1::ScopeInvalid)
     );
-
-    let mut oversized_request = decode_value(&request_bytes)?;
-    let Value::Array(fields) = &mut oversized_request else {
-        return Err(ErasureErrorV1::InvalidEncoding);
-    };
-    fields[5] = Value::Array(vec![
-        Value::Bytes(reference(20).digest().to_vec());
-        ERASURE_MAX_REFERENCES + 1
-    ]);
-    assert_eq!(
-        ErasureRequestV1::from_canonical_cbor(&encode_value(&oversized_request)?),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-
-    assert_eq!(
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: reference(1),
-            policy: reference(2),
-            trust: reference(3),
-            evidence: vec![0; ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES],
-        },),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-    Ok(())
 }
 
 #[test]
