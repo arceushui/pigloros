@@ -523,6 +523,50 @@ where
     )
 }
 
+fn exercise_complete_attempt<S>(
+    shared: &Rc<RefCell<S>>,
+    request: &ErasureRequestV1,
+    target: ErasureRequiredTargetV1,
+    lineage_rule: ErasureReferenceV1,
+) -> Result<(), ErasureErrorV1>
+where
+    S: ErasurePersistencePortV1,
+{
+    let admission = retry_admission(request.reference(), target, 0, None)?;
+    let mut coordinator = exact_coordinator(shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.dispatch_attempt(request.reference(), &admission)?,
+        coordinator.dispatch_attempt(request.reference(), &admission)?
+    );
+    let acknowledgement = || {
+        acknowledgement(
+            request.reference(),
+            target,
+            reference(45),
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )
+    };
+    let mut coordinator = exact_coordinator(shared, target, lineage_rule);
+    let acknowledged = coordinator.acknowledge(request.reference(), acknowledgement()?)?;
+    assert_eq!(
+        acknowledged.lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+    let mut coordinator = exact_coordinator(shared, target, lineage_rule);
+    assert_eq!(
+        coordinator.acknowledge(request.reference(), acknowledgement()?)?,
+        acknowledged
+    );
+    let receipt = coordinator.finalize(request.reference(), receipt_input(target, 21))?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(
+        exact_coordinator(shared, target, lineage_rule)
+            .finalize(request.reference(), receipt_input(target, 21))?,
+        receipt
+    );
+    Ok(())
+}
+
 fn exercise_scope_and_resolution<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
 where
     S: ErasurePersistencePortV1,
@@ -560,46 +604,7 @@ where
         pos_core::ErasureLifecycleV1::AccessFrozen
     );
 
-    let admission = retry_admission(request.reference(), target, 0, None)?;
-    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
-    assert_eq!(
-        coordinator.dispatch_attempt(request.reference(), &admission)?,
-        coordinator.dispatch_attempt(request.reference(), &admission)?
-    );
-    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
-    let acknowledged = coordinator.acknowledge(
-        request.reference(),
-        acknowledgement(
-            request.reference(),
-            target,
-            reference(45),
-            ErasureAcknowledgementOutcomeV1::Acknowledged,
-        )?,
-    )?;
-    assert_eq!(
-        acknowledged.lifecycle(),
-        ErasureLifecycleV1::AwaitingAcknowledgements
-    );
-    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
-    assert_eq!(
-        coordinator.acknowledge(
-            request.reference(),
-            acknowledgement(
-                request.reference(),
-                target,
-                reference(45),
-                ErasureAcknowledgementOutcomeV1::Acknowledged,
-            )?,
-        )?,
-        acknowledged
-    );
-    let receipt = coordinator.finalize(request.reference(), receipt_input(target, 21))?;
-    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
-    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
-    assert_eq!(
-        coordinator.finalize(request.reference(), receipt_input(target, 21))?,
-        receipt
-    );
+    exercise_complete_attempt(&shared, &request, target, lineage_rule)?;
 
     let scope = scope(request.reference(), &[target], lineage_rule)?;
     let extension = extension(request.reference(), &scope, lineage_rule)?;
