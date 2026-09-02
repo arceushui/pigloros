@@ -11,8 +11,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod adapter_transport;
 pub mod evaluator;
 pub mod evaluator_protocol;
+pub mod process_adapter;
 pub mod profile;
 pub mod signed_bundle;
 

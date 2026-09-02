@@ -311,7 +311,7 @@ fn case_outcome(
         actual_error: None,
         replay_claim: fixture.replay_claim,
         redaction_state: fixture.redaction_state,
-        provenance_digest: fixture.fixture_digest,
+        provenance_digest: fixture.provenance_digest,
     };
     match &fixture.oracle {
         StrictOracle::Output(expected) => outcome.expected_digest = Some(expected.digest),
