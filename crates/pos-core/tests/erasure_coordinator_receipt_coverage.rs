@@ -1921,6 +1921,60 @@ fn coordinator_recovery_rejects_readdressed_attempt_page_conflicts() -> Result<(
 }
 
 #[test]
+fn coordinator_recovery_rejects_malformed_private_graph_envelopes() -> Result<(), ErasureErrorV1> {
+    for field in 0..4 {
+        assert_manifest_object_field_rejected(
+            4,
+            ERASURE_TARGET_CLOSURE_TAG_V1,
+            field,
+            Value::Bool(true),
+        )?;
+    }
+    assert_manifest_object_field_rejected(
+        4,
+        ERASURE_TARGET_CLOSURE_TAG_V1,
+        3,
+        Value::Array(vec![Value::Bool(true)]),
+    )?;
+
+    for field in 0..12 {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_page_field(
+                graph.request.reference(),
+                0,
+                field,
+                Value::Bool(true),
+            )
+        })?;
+    }
+    for page_field in [5, 6] {
+        for object_field in 0..6 {
+            assert_graph_mutation_rejected(|graph| {
+                graph.adapter.replace_attempt_component_field(
+                    graph.request.reference(),
+                    0,
+                    page_field,
+                    ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+                    object_field,
+                    Value::Bool(true),
+                )
+            })?;
+        }
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                page_field,
+                ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+                5,
+                Value::Array(vec![Value::Bool(true)]),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
 fn coordinator_recovery_rejects_readdressed_inventory_conflicts() -> Result<(), ErasureErrorV1> {
     for (page_field, object_field, replacement) in [
         (5, 2, Value::Bytes(reference(240).digest().to_vec())),
@@ -3680,6 +3734,12 @@ fn portable_decoders_reject_wrong_types_in_every_foundation_field() -> Result<()
     reject_each_top_level_field(&obligation.to_canonical_cbor()?, |bytes| {
         ErasureObligationV1::from_canonical_cbor(bytes)
     })?;
+    assert!(ErasureObligationV1::from_canonical_cbor(&replace_path(
+        &obligation.to_canonical_cbor()?,
+        &[2],
+        Value::Integer(99.into()),
+    )?)
+    .is_err());
     let set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
         request: reference(1),
         obligations: vec![obligation.reference()],
@@ -3723,6 +3783,12 @@ fn portable_decoders_reject_wrong_types_in_every_evidence_field() -> Result<(), 
     reject_each_top_level_field(&failure.to_canonical_cbor()?, |bytes| {
         ErasureFreezeFailureV1::from_canonical_cbor(bytes)
     })?;
+    assert!(ErasureFreezeFailureV1::from_canonical_cbor(&replace_path(
+        &failure.to_canonical_cbor()?,
+        &[3],
+        Value::Integer(99.into()),
+    )?)
+    .is_err());
     let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
         request: reference(1),
         authorization_provenance: reference(2),
@@ -3756,6 +3822,14 @@ fn portable_decoders_reject_wrong_types_in_attempt_and_terminal_fields(
     reject_each_top_level_field(&acknowledgement.to_canonical_cbor()?, |bytes| {
         ErasureAcknowledgementProvenanceV1::from_canonical_cbor(bytes)
     })?;
+    assert!(
+        ErasureAcknowledgementProvenanceV1::from_canonical_cbor(&replace_path(
+            &acknowledgement.to_canonical_cbor()?,
+            &[8],
+            Value::Integer(99.into()),
+        )?)
+        .is_err()
+    );
     let outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
         request: reference(1),
         attempt: retry.reference(),
@@ -3770,6 +3844,12 @@ fn portable_decoders_reject_wrong_types_in_attempt_and_terminal_fields(
     reject_each_top_level_field(&outcome.to_canonical_cbor()?, |bytes| {
         ErasureAttemptOutcomeV1::from_canonical_cbor(bytes)
     })?;
+    assert!(ErasureAttemptOutcomeV1::from_canonical_cbor(&replace_path(
+        &outcome.to_canonical_cbor()?,
+        &[5],
+        Value::Integer(99.into()),
+    )?)
+    .is_err());
     let provenance = ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
         request: reference(1),
         attempt: retry.reference(),
@@ -3805,11 +3885,27 @@ fn terminal_and_effect_decoders_reject_wrong_types_in_every_field() -> Result<()
     reject_each_top_level_field(&resolution.to_canonical_cbor()?, |bytes| {
         ErasureAdministrativeResolutionV1::from_canonical_cbor(bytes)
     })?;
+    assert!(
+        ErasureAdministrativeResolutionV1::from_canonical_cbor(&replace_path(
+            &resolution.to_canonical_cbor()?,
+            &[4],
+            Value::Integer(99.into()),
+        )?)
+        .is_err()
+    );
     let (input, _) = complete_receipt_input()?;
     let receipt = ErasureReceiptV1::new(input)?;
     reject_each_top_level_field(&receipt.to_canonical_cbor()?, |bytes| {
         ErasureReceiptV1::from_canonical_cbor(bytes)
     })?;
+    for field in [4, 11] {
+        assert!(ErasureReceiptV1::from_canonical_cbor(&replace_path(
+            &receipt.to_canonical_cbor()?,
+            &[field],
+            Value::Integer(99.into()),
+        )?)
+        .is_err());
+    }
     let obligation = obligation(
         reference(1),
         ErasureInventoryCategoryV1::Artifact,
