@@ -12,6 +12,8 @@ pub mod erasure_support;
 use ciborium::value::Value;
 use pos_core::erasure::{
     target_closure_digest, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_CAS_EFFECT_TAG_V1,
+    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
+    ERASURE_TARGET_CLOSURE_TAG_V1,
 };
 use pos_core::{
     acknowledgement_inventory_reference, destruction_command_reference,
@@ -42,8 +44,8 @@ use pos_core::{
 };
 
 use coordinator_support::{
-    PublicCoordinatorPort, PublicCoordinatorPortConfig, PublicPersistenceFault,
-    PublicPersistenceOperation,
+    PublicCoordinatorFault, PublicCoordinatorOperation, PublicCoordinatorPort,
+    PublicCoordinatorPortConfig,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -422,7 +424,7 @@ fn coordinator_port(
         freeze_evidence: reference(8),
         lineage_rule,
         freeze_rejection: None,
-        persistence_fault: None,
+        operation_fault: None,
     })
 }
 
@@ -824,33 +826,110 @@ fn assert_manifest_object_rejected(
     })
 }
 
+fn assert_manifest_object_field_rejected(
+    manifest_field: usize,
+    object_tag: &str,
+    object_field: usize,
+    replacement: Value,
+) -> Result<(), ErasureErrorV1> {
+    assert_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_object_field(
+            graph.request.reference(),
+            manifest_field,
+            object_tag,
+            object_field,
+            replacement,
+        )
+    })
+}
+
 fn assert_fault_occurrences_rejected(
-    operation: PublicPersistenceOperation,
+    operation: PublicCoordinatorOperation,
 ) -> Result<(), ErasureErrorV1> {
     let probe = complete_persisted_graph(None)?;
-    let adapter = probe
-        .adapter
-        .with_persistence_fault(PublicPersistenceFault {
-            operation,
-            occurrence: u64::MAX,
-        });
+    let adapter = probe.adapter.with_operation_fault(PublicCoordinatorFault {
+        operation,
+        occurrence: u64::MAX,
+    });
     let observer = adapter.clone();
     ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR)
         .submit(probe.request.clone(), probe.request.provenance())?;
-    let occurrences = observer.persistence_fault_hits();
+    let occurrences = observer.operation_fault_hits();
     assert!(occurrences > 0, "operation {operation:?} was not exercised");
 
     for occurrence in 0..occurrences {
         let graph = complete_persisted_graph(None)?;
-        let adapter = graph
-            .adapter
-            .with_persistence_fault(PublicPersistenceFault {
-                operation,
-                occurrence,
-            });
+        let adapter = graph.adapter.with_operation_fault(PublicCoordinatorFault {
+            operation,
+            occurrence,
+        });
         assert_eq!(
             ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR)
                 .submit(graph.request.clone(), graph.request.provenance()),
+            Err(ErasureErrorV1::TrustSnapshotInvalid),
+            "operation {operation:?} occurrence {occurrence} did not propagate"
+        );
+    }
+    Ok(())
+}
+
+fn exercise_coordinator_dependencies(port: PublicCoordinatorPort) -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let request = coordinator_request()?;
+    let lineage_rule = reference(170);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    let api: &mut dyn ErasureCoordinator = &mut coordinator;
+    submit_authorize_and_freeze(api, &request)?;
+    api.dispatch_destruction(
+        request.reference(),
+        coordinator_admission(request.reference(), target, 0, None)?,
+    )?;
+    api.acknowledge(
+        request.reference(),
+        coordinator_acknowledgement(
+            request.reference(),
+            target,
+            reference(33),
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )?,
+    )?;
+    let receipt = api.finalize(request.reference(), coordinator_receipt_input(target, 30))?;
+    let scope = coordinator_scope(request.reference(), target, lineage_rule)?;
+    api.append_scope_extension(
+        request.reference(),
+        coordinator_extension(request.reference(), &scope, lineage_rule, None)?,
+    )?;
+    verify_administrative_resolution(
+        api,
+        request.reference(),
+        receipt.terminal_state(),
+        scope.reference(),
+    )
+}
+
+fn assert_dependency_fault_occurrences_rejected(
+    operation: PublicCoordinatorOperation,
+) -> Result<(), ErasureErrorV1> {
+    let probe = coordinator_port(vec![target(10)], Some(reference(170))).with_operation_fault(
+        PublicCoordinatorFault {
+            operation,
+            occurrence: u64::MAX,
+        },
+    );
+    let observer = probe.clone();
+    exercise_coordinator_dependencies(probe)?;
+    let occurrences = observer.operation_fault_hits();
+    assert!(occurrences > 0, "operation {operation:?} was not exercised");
+
+    for occurrence in 0..occurrences {
+        let port = coordinator_port(vec![target(10)], Some(reference(170))).with_operation_fault(
+            PublicCoordinatorFault {
+                operation,
+                occurrence,
+            },
+        );
+        assert_eq!(
+            exercise_coordinator_dependencies(port),
             Err(ErasureErrorV1::TrustSnapshotInvalid),
             "operation {operation:?} occurrence {occurrence} did not propagate"
         );
@@ -952,6 +1031,12 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
         Err(ErasureErrorV1::PolicyConflict)
     );
 
+    let mut incomplete_inventory = coordinator_receipt_input(target, 30);
+    incomplete_inventory.inventories.artifacts.clear();
+    assert_eq!(
+        api.finalize(request.reference(), incomplete_inventory),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     let terminal_input = coordinator_receipt_input(target, 30);
     let receipt = api.finalize(request.reference(), terminal_input.clone())?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
@@ -964,6 +1049,7 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
 fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<(), ErasureErrorV1> {
     let original = coordinator_request()?;
     let port = coordinator_port(Vec::new(), None);
+    let adapter = port.clone();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     coordinator.submit(original.clone(), original.provenance())?;
     let rejected = coordinator.reject(original.reference(), reference(21))?;
@@ -985,11 +1071,68 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         horizon_position: 20,
         provenance: correction.reference(),
     })?;
-    let corrected_state = coordinator.submit_corrected(corrected.clone(), correction.clone())?;
+    let mut faulted = ErasureCoordinatorStateMachineV1::new(
+        adapter.with_operation_fault(PublicCoordinatorFault {
+            operation: PublicCoordinatorOperation::AdmitCorrectedSubmission,
+            occurrence: 0,
+        }),
+        COORDINATOR,
+    );
+    assert_eq!(
+        faulted.submit_corrected(corrected.clone(), correction.clone()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    let wrong_terminal = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: original.reference(),
+        rejected_terminal_state: reference(99),
+        correction_reason: reference(22),
+        authorization_provenance: reference(23),
+    })?;
+    let wrong_terminal_request = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(50),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
+        request_position: 11,
+        horizon_position: 20,
+        provenance: wrong_terminal.reference(),
+    })?;
+    let api: &mut dyn ErasureCoordinator = &mut coordinator;
+    assert_eq!(
+        api.submit_corrected(wrong_terminal_request, wrong_terminal),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let corrected_state = api.submit_corrected(corrected.clone(), correction.clone())?;
     assert_eq!(corrected_state.lifecycle(), ErasureLifecycleV1::Submitted);
     assert_eq!(
-        coordinator.submit_corrected(corrected, correction.clone())?,
+        api.submit_corrected(corrected.clone(), correction.clone())?,
         corrected_state
+    );
+    let conflicting_correction =
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: original.reference(),
+            rejected_terminal_state: rejected.state_digest(),
+            correction_reason: reference(98),
+            authorization_provenance: reference(23),
+        })?;
+    let conflicting_request = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(50),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
+        request_position: 11,
+        horizon_position: 20,
+        provenance: conflicting_correction.reference(),
+    })?;
+    assert_eq!(
+        api.submit_corrected(conflicting_request, conflicting_correction),
+        Err(ErasureErrorV1::PolicyConflict)
     );
     let wrong_request = ErasureRequestV1::new(ErasureRequestInputV1 {
         request: reference(51),
@@ -1004,7 +1147,7 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         provenance: reference(52),
     })?;
     assert_eq!(
-        coordinator.submit_corrected(wrong_request, correction),
+        api.submit_corrected(wrong_request, correction),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
@@ -1027,7 +1170,7 @@ fn coordinator_persists_typed_freeze_rejection_and_rejects_wrong_provenance(
             freeze_evidence: reference(8),
             lineage_rule: None,
             freeze_rejection: Some((ErasureErrorV1::ScopeInvalid, authorization)),
-            persistence_fault: None,
+            operation_fault: None,
         });
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
         coordinator.submit(request.clone(), request.provenance())?;
@@ -1045,6 +1188,30 @@ fn coordinator_persists_typed_freeze_rejection_and_rejects_wrong_provenance(
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn coordinator_rejects_freeze_admission_for_another_policy() -> Result<(), ErasureErrorV1> {
+    let request = coordinator_request()?;
+    let port = PublicCoordinatorPort::new(PublicCoordinatorPortConfig {
+        targets: vec![target(10)],
+        fail_commits: false,
+        policy: reference(99),
+        trust: reference(6),
+        scope_member: reference(7),
+        freeze_evidence: reference(8),
+        lineage_rule: None,
+        freeze_rejection: None,
+        operation_fault: None,
+    });
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(21))?;
+    assert_eq!(
+        coordinator.freeze_inventory(request.reference(), &coordinator_freeze_transition()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     Ok(())
 }
 
@@ -1200,6 +1367,38 @@ fn coordinator_recovery_rejects_readdressed_fixed_evidence_conflicts() -> Result
 }
 
 #[test]
+fn coordinator_recovery_rejects_cross_object_freeze_bindings() -> Result<(), ErasureErrorV1> {
+    let wrong_reference = Value::Bytes(reference(250).digest().to_vec());
+    for (manifest_field, object_tag, object_field) in [
+        (4, ERASURE_TARGET_CLOSURE_TAG_V1, 2),
+        (7, ERASURE_SCOPE_COMMITMENT_TAG_V1, 4),
+        (10, ERASURE_FREEZE_PROVENANCE_TAG_V1, 3),
+    ] {
+        assert_manifest_object_field_rejected(
+            manifest_field,
+            object_tag,
+            object_field,
+            wrong_reference.clone(),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_each_incomplete_freeze_graph() -> Result<(), ErasureErrorV1> {
+    for manifest_field in [7, 9] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_manifest_field(
+                graph.request.reference(),
+                manifest_field,
+                Value::Null,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
 fn coordinator_recovery_rejects_readdressed_outcome_conflicts() -> Result<(), ErasureErrorV1> {
     assert_graph_mutation_rejected(|graph| {
         graph.adapter.replace_attempt_component_field(
@@ -1217,18 +1416,52 @@ fn coordinator_recovery_rejects_readdressed_outcome_conflicts() -> Result<(), Er
 fn coordinator_recovery_propagates_every_observed_persistence_fault() -> Result<(), ErasureErrorV1>
 {
     for operation in [
-        PublicPersistenceOperation::LoadManifest,
-        PublicPersistenceOperation::ReadObject,
-        PublicPersistenceOperation::ResolveState,
-        PublicPersistenceOperation::EffectManifest,
-        PublicPersistenceOperation::ReadEffect,
-        PublicPersistenceOperation::AttemptIndexCount,
-        PublicPersistenceOperation::AttemptPageRef,
-        PublicPersistenceOperation::ScopeIndexCount,
-        PublicPersistenceOperation::ResolutionIndexCount,
+        PublicCoordinatorOperation::LoadManifest,
+        PublicCoordinatorOperation::ReadObject,
+        PublicCoordinatorOperation::ResolveState,
+        PublicCoordinatorOperation::EffectManifest,
+        PublicCoordinatorOperation::ReadEffect,
+        PublicCoordinatorOperation::AttemptIndexCount,
+        PublicCoordinatorOperation::AttemptPageRef,
+        PublicCoordinatorOperation::ScopeIndexCount,
+        PublicCoordinatorOperation::ResolutionIndexCount,
     ] {
         assert_fault_occurrences_rejected(operation)?;
     }
+    Ok(())
+}
+
+#[test]
+fn coordinator_propagates_every_host_dependency_fault() -> Result<(), ErasureErrorV1> {
+    for operation in [
+        PublicCoordinatorOperation::CompareAndSwap,
+        PublicCoordinatorOperation::ValidateFreezeAuthorization,
+        PublicCoordinatorOperation::AdmitAuthorization,
+        PublicCoordinatorOperation::AdmitAtomicFreeze,
+        PublicCoordinatorOperation::AdmitAttempt,
+        PublicCoordinatorOperation::AdmitAcknowledgement,
+        PublicCoordinatorOperation::AdmitReceipt,
+        PublicCoordinatorOperation::AdmitScopeExtension,
+        PublicCoordinatorOperation::AdmitAdministrativeResolution,
+    ] {
+        assert_dependency_fault_occurrences_rejected(operation)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_propagates_rejection_admission_failure() -> Result<(), ErasureErrorV1> {
+    let request = coordinator_request()?;
+    let port = coordinator_port(Vec::new(), None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::AdmitAuthorization,
+        occurrence: 0,
+    });
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    assert_eq!(
+        coordinator.reject(request.reference(), reference(21)),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
     Ok(())
 }
 

@@ -733,3 +733,119 @@ fn private_persistence_shapes_fail_closed() -> Result<(), ErasureErrorV1> {
     );
     Ok(())
 }
+
+fn retry_admission(
+    request: ErasureReferenceV1,
+    ordinal: u64,
+) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request,
+        attempt_ordinal: ordinal,
+        source_receipt: None,
+        unresolved_obligations: Vec::new(),
+        command_identities: Vec::new(),
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 10,
+        deadline_position: 20,
+        authorization_provenance: reference(7),
+    })
+}
+
+#[test]
+fn recovered_attempt_mutators_reject_conflicting_private_state() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let state = ErasureStateV1::submitted(request.reference(), reference(2), reference(3))?;
+    let mut recovered = RecoveredErasureV1::initial(request, state);
+    assert_eq!(
+        recovered.begin_attempt(retry_admission(reference(99), 0)?),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let admission = retry_admission(reference(1), 0)?;
+    recovered.begin_attempt(admission.clone())?;
+    assert_eq!(
+        recovered.begin_attempt(admission.clone()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    let wrong = ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+        request: reference(99),
+        command: reference(14),
+        attempt: admission.reference(),
+        obligation: reference(15),
+        owner: reference(13),
+        scope: reference(8),
+        outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        evidence: reference(16),
+        policy: reference(5),
+        trust: reference(6),
+    })?;
+    assert_eq!(
+        recovered.retain_acknowledgement(&wrong),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    let acknowledgement =
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request: reference(1),
+            command: reference(14),
+            attempt: admission.reference(),
+            obligation: reference(15),
+            owner: reference(13),
+            scope: reference(8),
+            outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+            evidence: reference(16),
+            policy: reference(5),
+            trust: reference(6),
+        })?;
+    recovered.retain_acknowledgement(&acknowledgement)?;
+    assert_eq!(
+        recovered.retain_acknowledgement(&acknowledgement),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn recovered_history_mutators_enforce_v1_cardinality_bounds() -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let state = ErasureStateV1::submitted(request.reference(), reference(2), reference(3))?;
+    let mut recovered = RecoveredErasureV1::initial(request, state);
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: reference(2),
+        fork: reference(3),
+        lineage_rule: reference(4),
+        predecessor_extension: None,
+        admission_provenance: reference(5),
+    })?;
+    for _ in 0..ERASURE_MAX_SCOPE_EXTENSIONS {
+        recovered.append_scope_extension(extension)?;
+    }
+    assert_eq!(
+        recovered.append_scope_extension(extension),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: reference(1),
+            affected_digests: vec![reference(2)],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: reference(3),
+            policy: reference(4),
+            trust: reference(5),
+            principal: reference(6),
+            authorization_provenance: reference(7),
+            reason: reference(8),
+            issue_position: 20,
+            predecessor_resolution: None,
+        })?;
+    for _ in 0..ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS {
+        recovered.append_administrative_resolution(&resolution)?;
+    }
+    assert_eq!(
+        recovered.append_administrative_resolution(&resolution),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
