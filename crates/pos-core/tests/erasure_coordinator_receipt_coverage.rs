@@ -4205,7 +4205,7 @@ fn nested_codecs_reject_wrong_versions_shapes_and_closed_values() -> Result<(), 
     ]);
     assert_eq!(
         ErasureRequestV1::from_canonical_cbor(&encode_value(&oversized_request)?),
-        Err(ErasureErrorV1::ScopeInvalid)
+        Err(ErasureErrorV1::InvalidEncoding)
     );
 
     assert_eq!(
