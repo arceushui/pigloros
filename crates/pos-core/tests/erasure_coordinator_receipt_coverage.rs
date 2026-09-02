@@ -862,7 +862,7 @@ fn public_errors_lifecycles_and_digest_helpers_are_closed() {
     let mut targets = vec![target(21), target(11)];
     let unsorted_closure = target_closure_digest(&targets);
     targets.sort_unstable();
-    assert_ne!(unsorted_closure, target_closure_digest(&targets));
+    assert_eq!(unsorted_closure, target_closure_digest(&targets));
 }
 
 #[test]
