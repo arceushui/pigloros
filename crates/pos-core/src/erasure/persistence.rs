@@ -117,13 +117,13 @@ impl ManifestV1 {
     }
 
     fn validate_shape(&self) -> Result<(), ErasureErrorV1> {
-        if self.completed_attempt_count > ERASURE_MAX_ATTEMPT_OUTCOMES as u64
-            || (self.completed_attempt_count == 0) != self.attempt_history_head.is_none()
-            || self
-                .active
+        if has_invariant_violation(&[
+            self.completed_attempt_count > ERASURE_MAX_ATTEMPT_OUTCOMES as u64,
+            (self.completed_attempt_count == 0) != self.attempt_history_head.is_none(),
+            self.active
                 .as_ref()
-                .is_some_and(|active| active.ordinal != self.completed_attempt_count)
-        {
+                .is_some_and(|active| active.ordinal != self.completed_attempt_count),
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         Ok(())
@@ -407,6 +407,10 @@ fn exact_bounded_array(value: &Value, maximum: usize) -> Result<&[Value], Erasur
     }
 }
 
+fn has_invariant_violation(conditions: &[bool]) -> bool {
+    conditions.contains(&true)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RecoveredScopeHeadV1 {
     pub(super) node: ErasureReferenceV1,
@@ -517,7 +521,10 @@ fn recover_foundation(
     let state = port
         .resolve_state(manifest.state)?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    if request.reference() != requested || state.request() != requested {
+    if has_invariant_violation(&[
+        request.reference() != requested,
+        state.request() != requested,
+    ]) {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     verify_predecessor_chain(state.clone(), port)?;
@@ -932,11 +939,12 @@ impl RecoveredErasureV1 {
         &mut self,
         admission: ErasureRetryAdmissionV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
-        if self.active.is_some()
-            || admission.request() != self.request.reference()
-            || admission.attempt_ordinal() != self.completed_attempt_count
-            || admission.source_receipt() != self.latest_receipt
-        {
+        if has_invariant_violation(&[
+            self.active.is_some(),
+            admission.request() != self.request.reference(),
+            admission.attempt_ordinal() != self.completed_attempt_count,
+            admission.source_receipt() != self.latest_receipt,
+        ]) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let bytes = admission.to_canonical_cbor()?;
@@ -973,9 +981,10 @@ impl RecoveredErasureV1 {
             .active
             .as_mut()
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if acknowledgement.request() != self.request.reference()
-            || acknowledgement.attempt() != active.admission.reference()
-        {
+        if has_invariant_violation(&[
+            acknowledgement.request() != self.request.reference(),
+            acknowledgement.attempt() != active.admission.reference(),
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let identity = (acknowledgement.obligation(), acknowledgement.owner());
@@ -1184,7 +1193,10 @@ impl RecoveredErasureV1 {
             predecessor_receipt = Some(self.replay_page(port, &page, predecessor_receipt)?);
             predecessor = Some(reference);
         }
-        if predecessor != self.attempt_history_head || predecessor_receipt != self.latest_receipt {
+        if has_invariant_violation(&[
+            predecessor != self.attempt_history_head,
+            predecessor_receipt != self.latest_receipt,
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if let Some(active) = self.manifest.active.clone() {
@@ -1194,10 +1206,11 @@ impl RecoveredErasureV1 {
                 ErasureRetryAdmissionV1::from_canonical_cbor,
                 ErasureRetryAdmissionV1::reference,
             )?;
-            if admission.request() != self.request.reference()
-                || admission.attempt_ordinal() != active.ordinal
-                || admission.source_receipt() != self.latest_receipt
-            {
+            if has_invariant_violation(&[
+                admission.request() != self.request.reference(),
+                admission.attempt_ordinal() != active.ordinal,
+                admission.source_receipt() != self.latest_receipt,
+            ]) {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
             if active.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
@@ -1243,14 +1256,15 @@ impl RecoveredErasureV1 {
             InventoryV1::decode,
             |value| value.reference,
         )?;
-        if admission.request() != self.request.reference()
-            || admission.attempt_ordinal() != page.ordinal
-            || admission.source_receipt() != predecessor_receipt
-            || (admitted.request, admitted.ordinal, admitted.kind)
-                != (self.request.reference(), page.ordinal, INVENTORY_ADMITTED)
-            || (effective.request, effective.ordinal, effective.kind)
-                != (self.request.reference(), page.ordinal, INVENTORY_EFFECTIVE)
-        {
+        if has_invariant_violation(&[
+            admission.request() != self.request.reference(),
+            admission.attempt_ordinal() != page.ordinal,
+            admission.source_receipt() != predecessor_receipt,
+            (admitted.request, admitted.ordinal, admitted.kind)
+                != (self.request.reference(), page.ordinal, INVENTORY_ADMITTED),
+            (effective.request, effective.ordinal, effective.kind)
+                != (self.request.reference(), page.ordinal, INVENTORY_EFFECTIVE),
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if page.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
@@ -1299,36 +1313,37 @@ impl RecoveredErasureV1 {
         let terminal = port
             .resolve_state(page.terminal_state)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if terminal.request() != self.request.reference()
-            || outcome.request() != self.request.reference()
-            || outcome.attempt() != admission.reference()
-            || outcome.source_receipt() != predecessor_receipt
-            || outcome.selected_obligations()
-                != selected_obligations_reference(admission.unresolved_obligations())
-            || outcome.acknowledgement_inventory()
-                != acknowledgement_inventory_reference(&effective.references)
-            || outcome.lifecycle() != terminal.lifecycle()
-            || outcome.terminal_position() != provenance.issue_position()
-            || outcome.policy() != admission.policy()
-            || outcome.trust() != admission.trust()
-            || provenance.request() != self.request.reference()
-            || provenance.attempt() != admission.reference()
-            || provenance.attempt_ordinal() != page.ordinal
-            || provenance.predecessor_receipt() != predecessor_receipt
-            || provenance.terminal_state() != page.terminal_state
-            || provenance.evidence_set() != erasure_evidence_set_reference(&effective.references)
-            || provenance.policy() != admission.policy()
-            || provenance.trust() != admission.trust()
-            || receipt.request() != self.request.reference()
-            || receipt.receipt_digest() != page.receipt
-            || receipt.terminal_state() != page.terminal_state
-            || receipt.provenance() != page.receipt_provenance
-            || receipt.lifecycle() != terminal.lifecycle()
-            || receipt.coordinator() != terminal.coordinator()
-            || receipt.policy() != admission.policy()
-            || receipt.trust() != admission.trust()
-            || receipt.issue_position() != provenance.issue_position()
-        {
+        if has_invariant_violation(&[
+            terminal.request() != self.request.reference(),
+            outcome.request() != self.request.reference(),
+            outcome.attempt() != admission.reference(),
+            outcome.source_receipt() != predecessor_receipt,
+            outcome.selected_obligations()
+                != selected_obligations_reference(admission.unresolved_obligations()),
+            outcome.acknowledgement_inventory()
+                != acknowledgement_inventory_reference(&effective.references),
+            outcome.lifecycle() != terminal.lifecycle(),
+            outcome.terminal_position() != provenance.issue_position(),
+            outcome.policy() != admission.policy(),
+            outcome.trust() != admission.trust(),
+            provenance.request() != self.request.reference(),
+            provenance.attempt() != admission.reference(),
+            provenance.attempt_ordinal() != page.ordinal,
+            provenance.predecessor_receipt() != predecessor_receipt,
+            provenance.terminal_state() != page.terminal_state,
+            provenance.evidence_set() != erasure_evidence_set_reference(&effective.references),
+            provenance.policy() != admission.policy(),
+            provenance.trust() != admission.trust(),
+            receipt.request() != self.request.reference(),
+            receipt.receipt_digest() != page.receipt,
+            receipt.terminal_state() != page.terminal_state,
+            receipt.provenance() != page.receipt_provenance,
+            receipt.lifecycle() != terminal.lifecycle(),
+            receipt.coordinator() != terminal.coordinator(),
+            receipt.policy() != admission.policy(),
+            receipt.trust() != admission.trust(),
+            receipt.issue_position() != provenance.issue_position(),
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         Self::validate_effect_subject(
@@ -1407,11 +1422,12 @@ impl RecoveredErasureV1 {
         let obligations_match =
             admission.unresolved_obligations() == expected_obligations.as_slice();
         let identities_match = admission.command_identities() == expected_identities.as_slice();
-        let admission_matches = admission.policy() == obligation_set.policy()
-            && admission.trust() == obligation_set.trust()
-            && obligations_match
-            && identities_match;
-        if !admission_matches {
+        if has_invariant_violation(&[
+            admission.policy() != obligation_set.policy(),
+            admission.trust() != obligation_set.trust(),
+            !obligations_match,
+            !identities_match,
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let expected_commands = unresolved
@@ -1428,11 +1444,13 @@ impl RecoveredErasureV1 {
                 reservation,
                 commands,
             } => {
-                let reservation_matches = reservation.admission() == admission.reference();
-                if reservation_matches && commands == expected_commands {
-                    Ok(())
-                } else {
+                if has_invariant_violation(&[
+                    reservation.admission() != admission.reference(),
+                    commands != expected_commands,
+                ]) {
                     Err(ErasureErrorV1::ProvenanceMissing)
+                } else {
+                    Ok(())
                 }
             }
             _ => Err(ErasureErrorV1::ProvenanceMissing),
@@ -1473,14 +1491,16 @@ impl RecoveredErasureV1 {
             .unresolved_obligations()
             .binary_search(&acknowledgement.obligation())
             .is_ok_and(|index| admission.command_identities()[index] == acknowledgement.command());
-        acknowledgement.request() == self.request.reference()
-            && acknowledgement.attempt() == admission.reference()
-            && acknowledgement.scope() == scope.reference()
-            && acknowledgement.policy() == admission.policy()
-            && acknowledgement.trust() == admission.trust()
-            && acknowledgement.owner() == obligation.owner()
-            && acknowledgement.command() == obligation.command_identity()
-            && selected
+        !has_invariant_violation(&[
+            acknowledgement.request() != self.request.reference(),
+            acknowledgement.attempt() != admission.reference(),
+            acknowledgement.scope() != scope.reference(),
+            acknowledgement.policy() != admission.policy(),
+            acknowledgement.trust() != admission.trust(),
+            acknowledgement.owner() != obligation.owner(),
+            acknowledgement.command() != obligation.command_identity(),
+            !selected,
+        ])
     }
 
     fn apply_acknowledgements(
@@ -1501,9 +1521,10 @@ impl RecoveredErasureV1 {
 
     fn recover_scope(&mut self, port: &dyn ErasurePersistencePortV1) -> Result<(), ErasureErrorV1> {
         let count = port.scope_index_count(self.request.reference())?;
-        if count > ERASURE_MAX_SCOPE_EXTENSIONS as u64
-            || (count == 0) != self.manifest.scope_extension_head.is_none()
-        {
+        if has_invariant_violation(&[
+            count > ERASURE_MAX_SCOPE_EXTENSIONS as u64,
+            (count == 0) != self.manifest.scope_extension_head.is_none(),
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let mut predecessor_node = None;
@@ -1522,15 +1543,16 @@ impl RecoveredErasureV1 {
                 ErasureScopeExtensionV1::from_canonical_cbor,
                 ErasureScopeExtensionV1::reference,
             )?;
-            if node.request != self.request.reference()
-                || Some(node.scope) != self.manifest.scope
-                || node.ordinal != ordinal
-                || node.predecessor != predecessor_node
-                || extension.request() != self.request.reference()
-                || extension.scope_commitment() != node.scope
-                || extension.predecessor_extension() != predecessor_extension
-                || !forks.insert(extension.fork())
-            {
+            if has_invariant_violation(&[
+                node.request != self.request.reference(),
+                Some(node.scope) != self.manifest.scope,
+                node.ordinal != ordinal,
+                node.predecessor != predecessor_node,
+                extension.request() != self.request.reference(),
+                extension.scope_commitment() != node.scope,
+                extension.predecessor_extension() != predecessor_extension,
+                !forks.insert(extension.fork()),
+            ]) {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
             predecessor_node = Some(reference);
@@ -1552,9 +1574,10 @@ impl RecoveredErasureV1 {
         port: &dyn ErasurePersistencePortV1,
     ) -> Result<(), ErasureErrorV1> {
         let count = port.administrative_resolution_index_count(self.request.reference())?;
-        if count > ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64
-            || (count == 0) != self.administrative_resolution_head.is_none()
-        {
+        if has_invariant_violation(&[
+            count > ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64,
+            (count == 0) != self.administrative_resolution_head.is_none(),
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         let mut predecessor = None;
@@ -1568,9 +1591,10 @@ impl RecoveredErasureV1 {
                 ErasureAdministrativeResolutionV1::from_canonical_cbor,
                 ErasureAdministrativeResolutionV1::reference,
             )?;
-            if resolution.request() != self.request.reference()
-                || resolution.predecessor_resolution() != predecessor
-            {
+            if has_invariant_violation(&[
+                resolution.request() != self.request.reference(),
+                resolution.predecessor_resolution() != predecessor,
+            ]) {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
             predecessor = Some(reference);
@@ -1631,30 +1655,31 @@ struct FixedGraphV1<'a> {
 }
 
 fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> {
-    if graph.erq.reference() != graph.requested
-        || graph.state.request() != graph.requested
-        || graph
+    if has_invariant_violation(&[
+        graph.erq.reference() != graph.requested,
+        graph.state.request() != graph.requested,
+        graph
             .correction
-            .is_some_and(|value| graph.erq.provenance() != value.reference())
-        || graph
+            .is_some_and(|value| graph.erq.provenance() != value.reference()),
+        graph
             .rejection
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_some_and(|value| value.request() != graph.requested),
+        graph
             .failure
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_some_and(|value| value.request() != graph.requested),
+        graph
             .scope
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_some_and(|value| value.request() != graph.requested),
+        graph
             .admission
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_some_and(|value| value.request() != graph.requested),
+        graph
             .obligation_set
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_some_and(|value| value.request() != graph.requested),
+        graph
             .freeze
-            .is_some_and(|value| value.request() != graph.requested)
-    {
+            .is_some_and(|value| value.request() != graph.requested),
+    ]) {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     match (graph.admission, graph.authorization) {
@@ -1690,37 +1715,39 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> 
                     .cloned()
                     .ok_or(ErasureErrorV1::ProvenanceMissing)?,
             })?;
-        if reconstructed.targets() != graph.targets
-            || scope.target_closure() != target_closure_digest(graph.targets)
-            || freeze.scope_commitment() != scope.reference()
-            || freeze.obligation_set() != set.reference()
-            || freeze.host_evidence() != admission.reference()
-            || freeze.freeze_position() != admission.freeze_position()
-            || graph.state.freeze_position() != Some(admission.freeze_position())
-            || set.policy() != graph.erq.policy()
-            || graph.authorize_provenance.is_none()
-            || graph.rejection.is_some()
-            || graph.failure.is_some()
-            || !matches!(
+        if has_invariant_violation(&[
+            reconstructed.targets() != graph.targets,
+            scope.target_closure() != target_closure_digest(graph.targets),
+            freeze.scope_commitment() != scope.reference(),
+            freeze.obligation_set() != set.reference(),
+            freeze.host_evidence() != admission.reference(),
+            freeze.freeze_position() != admission.freeze_position(),
+            graph.state.freeze_position() != Some(admission.freeze_position()),
+            set.policy() != graph.erq.policy(),
+            graph.authorize_provenance.is_none(),
+            graph.rejection.is_some(),
+            graph.failure.is_some(),
+            !matches!(
                 graph.state.lifecycle(),
                 ErasureLifecycleV1::AccessFrozen
                     | ErasureLifecycleV1::DestructionDispatched
                     | ErasureLifecycleV1::AwaitingAcknowledgements
                     | ErasureLifecycleV1::PartialFailure
                     | ErasureLifecycleV1::Complete
-            )
-            || (graph.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
-                && graph.state.provenance() != freeze.reference())
-        {
+            ),
+            graph.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
+                && graph.state.provenance() != freeze.reference(),
+        ]) {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-    } else if graph.scope.is_some()
-        || graph.admission.is_some()
-        || graph.freeze.is_some()
-        || graph.obligation_set.is_some()
-        || !graph.targets.is_empty()
-        || !graph.obligations.is_empty()
-    {
+    } else if has_invariant_violation(&[
+        graph.scope.is_some(),
+        graph.admission.is_some(),
+        graph.freeze.is_some(),
+        graph.obligation_set.is_some(),
+        !graph.targets.is_empty(),
+        !graph.obligations.is_empty(),
+    ]) {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     validate_unfrozen_graph(graph)?;
@@ -1767,20 +1794,22 @@ fn validate_correction(
     let Some(correction) = correction else {
         return Ok(());
     };
-    if request.provenance() != correction.reference()
-        || request.reference() == correction.rejected_request()
-    {
+    if has_invariant_violation(&[
+        request.provenance() != correction.reference(),
+        request.reference() == correction.rejected_request(),
+    ]) {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     let rejected = port
         .resolve_state(correction.rejected_terminal_state())?
         .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    if rejected.request() == correction.rejected_request()
-        && rejected.lifecycle() == ErasureLifecycleV1::Rejected
-    {
-        Ok(())
-    } else {
+    if has_invariant_violation(&[
+        rejected.request() != correction.rejected_request(),
+        rejected.lifecycle() != ErasureLifecycleV1::Rejected,
+    ]) {
         Err(ErasureErrorV1::ProvenanceMissing)
+    } else {
+        Ok(())
     }
 }
 
@@ -1799,12 +1828,13 @@ fn validate_state_provenance(
             _ => {}
         }
         let Some(previous) = current.previous_state() else {
-            if authorization == manifest.authorize_provenance
-                && dispatch == manifest.dispatch_provenance
-            {
-                return Ok(());
+            if has_invariant_violation(&[
+                authorization != manifest.authorize_provenance,
+                dispatch != manifest.dispatch_provenance,
+            ]) {
+                return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            return Err(ErasureErrorV1::ProvenanceMissing);
+            return Ok(());
         };
         current = port
             .resolve_state(previous)?
