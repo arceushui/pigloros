@@ -44,7 +44,7 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
-fn target(seed: u8) -> ErasureRequiredTargetV1 {
+const fn target(seed: u8) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: match seed % 7 {
             0 => ErasureArtifactClassV1::TimelineReplay,
@@ -190,7 +190,7 @@ fn obligation(
     })
 }
 
-fn inventory(
+const fn inventory(
     category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
     to: ErasureReplayClaimV1,
@@ -248,13 +248,13 @@ fn complete_receipt_input(
     let mut acknowledgements = entries
         .iter()
         .zip(&obligations)
-        .enumerate()
+        .zip(100_u8..)
         .map(
-            |(index, (entry, obligation))| pos_core::ErasureAcknowledgementV1 {
+            |((entry, obligation), evidence_seed)| pos_core::ErasureAcknowledgementV1 {
                 obligation: obligation.reference(),
                 target: entry.target,
                 owner: entry.transition.owner,
-                evidence: reference(100 + index as u8),
+                evidence: reference(evidence_seed),
                 outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
             },
         )
@@ -310,7 +310,7 @@ fn coordinator_port(
     })
 }
 
-fn coordinator_freeze_transition() -> ErasureStateTransitionV1 {
+const fn coordinator_freeze_transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle: ErasureLifecycleV1::AccessFrozen,
         freeze_position: Some(10),
@@ -427,7 +427,7 @@ fn coordinator_extension(
 enum ResolverReply {
     Missing,
     Error(ErasureErrorV1),
-    State(ErasureStateV1),
+    State(Box<ErasureStateV1>),
 }
 
 impl ErasureStateResolverV1 for ResolverReply {
@@ -438,19 +438,120 @@ impl ErasureStateResolverV1 for ResolverReply {
         match self {
             Self::Missing => Ok(None),
             Self::Error(error) => Err(*error),
-            Self::State(state) => Ok(Some(state.clone())),
+            Self::State(state) => Ok(Some(state.as_ref().clone())),
         }
     }
 }
 
-#[test]
-fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), ErasureErrorV1> {
-    let target = target(10);
-    let request = coordinator_request()?;
-    let port = coordinator_port(vec![target], None);
+fn reject_invalid_acknowledgements(
+    api: &mut dyn ErasureCoordinator,
+    request: ErasureReferenceV1,
+    target: ErasureRequiredTargetV1,
+) -> Result<(), ErasureErrorV1> {
+    let foreign_target = crate::target(11);
+    assert_eq!(
+        api.acknowledge(
+            request,
+            coordinator_acknowledgement(
+                request,
+                foreign_target,
+                reference(30),
+                ErasureAcknowledgementOutcomeV1::Acknowledged,
+            )?,
+        ),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    let mut unknown_obligation = coordinator_acknowledgement(
+        request,
+        target,
+        reference(31),
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+    )?;
+    unknown_obligation.obligation = reference(202);
+    assert_eq!(
+        api.acknowledge(request, unknown_obligation),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    let mut wrong_owner = coordinator_acknowledgement(
+        request,
+        target,
+        reference(32),
+        ErasureAcknowledgementOutcomeV1::Acknowledged,
+    )?;
+    wrong_owner.owner = reference(203);
+    assert_eq!(
+        api.acknowledge(request, wrong_owner),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
+}
+
+fn verify_rejection_path(request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
+    let port = coordinator_port(Vec::new(), None);
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     let api: &mut dyn ErasureCoordinator = &mut coordinator;
+    api.submit(request.clone())?;
+    let rejected = api.reject(request.reference(), reference(35))?;
+    assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
+    assert_eq!(api.reject(request.reference(), reference(35))?, rejected);
+    assert_eq!(
+        api.reject(request.reference(), reference(36)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        api.authorize(request.reference(), reference(37)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
 
+fn verify_administrative_resolution(
+    api: &mut dyn ErasureCoordinator,
+    request: ErasureReferenceV1,
+    terminal_state: ErasureReferenceV1,
+    scope: ErasureReferenceV1,
+) -> Result<(), ErasureErrorV1> {
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request,
+            affected_digests: vec![terminal_state],
+            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
+            scope_commitment: scope,
+            policy: reference(5),
+            trust: reference(6),
+            principal: reference(173),
+            authorization_provenance: reference(174),
+            reason: reference(175),
+            issue_position: 31,
+            predecessor_resolution: None,
+        })?;
+    let state = api.resolve_administratively(request, resolution.clone())?;
+    assert_eq!(api.resolve_administratively(request, resolution)?, state);
+    let wrong_resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request,
+            affected_digests: vec![terminal_state],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: scope,
+            policy: reference(176),
+            trust: reference(6),
+            principal: reference(173),
+            authorization_provenance: reference(174),
+            reason: reference(177),
+            issue_position: 32,
+            predecessor_resolution: None,
+        })?;
+    assert_eq!(
+        api.resolve_administratively(request, wrong_resolution),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+fn submit_authorize_and_freeze(
+    api: &mut dyn ErasureCoordinator,
+    request: &ErasureRequestV1,
+) -> Result<(), ErasureErrorV1> {
     let submitted = api.submit(request.clone())?;
     assert_eq!(submitted.lifecycle(), ErasureLifecycleV1::Submitted);
     assert_eq!(api.submit(request.clone())?, submitted);
@@ -504,6 +605,18 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
         ),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
+
+#[test]
+fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let request = coordinator_request()?;
+    let port = coordinator_port(vec![target], None);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    let api: &mut dyn ErasureCoordinator = &mut coordinator;
+
+    submit_authorize_and_freeze(api, &request)?;
 
     let admission = coordinator_admission(request.reference(), target, 0, None)?;
     let invalid_admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
@@ -528,45 +641,11 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
         ErasureLifecycleV1::AwaitingAcknowledgements
     );
     assert_eq!(
-        api.dispatch_destruction(request.reference(), admission.clone())?,
+        api.dispatch_destruction(request.reference(), admission)?,
         awaiting
     );
 
-    let foreign_target = crate::target(11);
-    assert_eq!(
-        api.acknowledge(
-            request.reference(),
-            coordinator_acknowledgement(
-                request.reference(),
-                foreign_target,
-                reference(30),
-                ErasureAcknowledgementOutcomeV1::Acknowledged,
-            )?,
-        ),
-        Err(ErasureErrorV1::Unauthorized)
-    );
-    let mut unknown_obligation = coordinator_acknowledgement(
-        request.reference(),
-        target,
-        reference(31),
-        ErasureAcknowledgementOutcomeV1::Acknowledged,
-    )?;
-    unknown_obligation.obligation = reference(202);
-    assert_eq!(
-        api.acknowledge(request.reference(), unknown_obligation),
-        Err(ErasureErrorV1::Unauthorized)
-    );
-    let mut wrong_owner = coordinator_acknowledgement(
-        request.reference(),
-        target,
-        reference(32),
-        ErasureAcknowledgementOutcomeV1::Acknowledged,
-    )?;
-    wrong_owner.owner = reference(203);
-    assert_eq!(
-        api.acknowledge(request.reference(), wrong_owner),
-        Err(ErasureErrorV1::Unauthorized)
-    );
+    reject_invalid_acknowledgements(api, request.reference(), target)?;
 
     let acknowledgement = coordinator_acknowledgement(
         request.reference(),
@@ -598,26 +677,7 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     assert_eq!(api.finalize(request.reference(), terminal_input)?, receipt);
 
-    let rejection_port = coordinator_port(Vec::new(), None);
-    let mut rejection_coordinator =
-        ErasureCoordinatorStateMachineV1::new(rejection_port, COORDINATOR);
-    let rejection_api: &mut dyn ErasureCoordinator = &mut rejection_coordinator;
-    rejection_api.submit(request.clone())?;
-    let rejected = rejection_api.reject(request.reference(), reference(35))?;
-    assert_eq!(rejected.lifecycle(), ErasureLifecycleV1::Rejected);
-    assert_eq!(
-        rejection_api.reject(request.reference(), reference(35))?,
-        rejected
-    );
-    assert_eq!(
-        rejection_api.reject(request.reference(), reference(36)),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    assert_eq!(
-        rejection_api.authorize(request.reference(), reference(37)),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    Ok(())
+    verify_rejection_path(&request)
 }
 
 #[test]
@@ -672,9 +732,9 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
 
     let scope = coordinator_scope(request.reference(), target, lineage_rule)?;
     let extension = coordinator_extension(request.reference(), &scope, lineage_rule, None)?;
-    let extension_state = api.append_scope_extension(request.reference(), extension.clone())?;
+    let extension_state = api.append_scope_extension(request.reference(), extension)?;
     assert_eq!(
-        api.append_scope_extension(request.reference(), extension.clone())?,
+        api.append_scope_extension(request.reference(), extension)?,
         extension_state
     );
     let wrong_extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
@@ -690,44 +750,12 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let resolution =
-        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
-            request: request.reference(),
-            affected_digests: vec![complete.terminal_state()],
-            action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
-            scope_commitment: scope.reference(),
-            policy: reference(5),
-            trust: reference(6),
-            principal: reference(173),
-            authorization_provenance: reference(174),
-            reason: reference(175),
-            issue_position: 31,
-            predecessor_resolution: None,
-        })?;
-    let resolution_state = api.resolve_administratively(request.reference(), resolution.clone())?;
-    assert_eq!(
-        api.resolve_administratively(request.reference(), resolution.clone())?,
-        resolution_state
-    );
-    let wrong_resolution =
-        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
-            request: request.reference(),
-            affected_digests: vec![complete.terminal_state()],
-            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
-            scope_commitment: scope.reference(),
-            policy: reference(176),
-            trust: reference(6),
-            principal: reference(173),
-            authorization_provenance: reference(174),
-            reason: reference(177),
-            issue_position: 32,
-            predecessor_resolution: None,
-        })?;
-    assert_eq!(
-        api.resolve_administratively(request.reference(), wrong_resolution),
-        Err(ErasureErrorV1::PolicyConflict)
-    );
-    Ok(())
+    verify_administrative_resolution(
+        api,
+        request.reference(),
+        complete.terminal_state(),
+        scope.reference(),
+    )
 }
 
 #[test]
@@ -788,7 +816,7 @@ fn public_errors_lifecycles_and_digest_helpers_are_closed() {
     ];
     for lifecycle in lifecycles {
         for next in lifecycles {
-            let _ = lifecycle.permits(next);
+            std::hint::black_box(lifecycle.permits(next));
         }
         assert_eq!(
             lifecycle.is_terminal(),
@@ -911,7 +939,11 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
         }),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    Ok(())
+}
 
+#[test]
+fn freeze_evidence_records_cover_bindings_and_round_trips() -> Result<(), ErasureErrorV1> {
     let (admission, authorization) = freeze_evidence_pair()?;
     assert_eq!(admission.applicability_matrix().len(), 8);
     assert_eq!(
@@ -968,7 +1000,11 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
         ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor(&authorization_bytes)?,
         authorization
     );
+    Ok(())
+}
 
+#[test]
+fn freeze_failure_and_rejection_records_cover_closed_errors() -> Result<(), ErasureErrorV1> {
     let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
         request: reference(1),
         scope_commitment: reference(2),
@@ -1017,7 +1053,11 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
         ErasureAuthorizationRejectionV1::from_canonical_cbor(&rejection.to_canonical_cbor()?)?,
         rejection
     );
+    Ok(())
+}
 
+#[test]
+fn retry_and_acknowledgement_records_cover_public_forms() -> Result<(), ErasureErrorV1> {
     let retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
         request: reference(1),
         attempt_ordinal: 2,
@@ -1084,7 +1124,11 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
             provenance
         );
     }
+    Ok(())
+}
 
+#[test]
+fn attempt_and_receipt_provenance_cover_retry_lineage() -> Result<(), ErasureErrorV1> {
     let attempt_outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
         request: reference(1),
         attempt: reference(2),
@@ -1146,7 +1190,11 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
         }),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
 
+#[test]
+fn administrative_resolution_normalizes_and_rejects_duplicates() -> Result<(), ErasureErrorV1> {
     let resolution =
         ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
             request: reference(1),
@@ -1294,7 +1342,7 @@ fn atomic_freeze_admission_exposes_its_complete_public_commitments() -> Result<(
 #[test]
 fn receipt_covers_complete_partial_and_negative_public_closures() -> Result<(), ErasureErrorV1> {
     let (input, obligations) = complete_receipt_input()?;
-    let receipt = ErasureReceiptV1::new(input.clone())?;
+    let receipt = ErasureReceiptV1::new(input)?;
     assert_eq!(receipt.request(), reference(1));
     assert_eq!(receipt.terminal_state(), reference(101));
     assert_eq!(receipt.coordinator(), reference(102));
@@ -1317,7 +1365,11 @@ fn receipt_covers_complete_partial_and_negative_public_closures() -> Result<(), 
     assert_eq!(receipt.validate_frozen_obligations(&obligations), Ok(()));
     let bytes = receipt.to_canonical_cbor()?;
     assert_eq!(ErasureReceiptV1::from_canonical_cbor(&bytes)?, receipt);
+    Ok(())
+}
 
+#[test]
+fn partial_receipt_closes_pending_owner_contract() -> Result<(), ErasureErrorV1> {
     let partial_target = target(80);
     let partial_obligation = obligation(
         reference(1),
@@ -1360,7 +1412,11 @@ fn receipt_covers_complete_partial_and_negative_public_closures() -> Result<(), 
         partial.validate_frozen_obligations(&[partial_obligation]),
         Ok(())
     );
+    Ok(())
+}
 
+#[test]
+fn negative_receipt_closes_failed_owner_contract() -> Result<(), ErasureErrorV1> {
     let negative_target = target(90);
     let negative_obligation = obligation(
         reference(1),
@@ -1503,13 +1559,18 @@ fn receipt_rejects_inconsistent_closures_and_history_sources() -> Result<(), Era
         ErasureReceiptV1::new(resolved_partial),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
 
+#[test]
+fn receipt_rejects_wrong_obligations_and_history_sources() -> Result<(), ErasureErrorV1> {
+    let (input, obligations) = complete_receipt_input()?;
     let receipt = ErasureReceiptV1::new(input)?;
     assert_eq!(
         receipt.validate_frozen_obligations(&obligations[..3]),
         Err(ErasureErrorV1::ScopeInvalid)
     );
-    let mut wrong_owner = obligations.clone();
+    let mut wrong_owner = obligations;
     wrong_owner[0] = ErasureObligationV1::new(ErasureObligationInputV1 {
         category: wrong_owner[0].category(),
         target: wrong_owner[0].target(),
@@ -1539,7 +1600,7 @@ fn receipt_rejects_inconsistent_closures_and_history_sources() -> Result<(), Era
         Err(ErasureErrorV1::TrustSnapshotInvalid)
     );
     assert_eq!(
-        receipt.verify_history(&ResolverReply::State(root)),
+        receipt.verify_history(&ResolverReply::State(Box::new(root))),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -1607,13 +1668,13 @@ fn state_manifest_and_cas_effect_public_boundaries_are_exercised() -> Result<(),
         match effect {
             ErasureCasEffectV1::None => assert_eq!(effect.subject(), None),
             ErasureCasEffectV1::AttemptAdmission { .. } => {
-                assert_eq!(effect.subject(), Some(admission))
+                assert_eq!(effect.subject(), Some(admission));
             }
             ErasureCasEffectV1::AcknowledgementAdmission { acknowledgement } => {
-                assert_eq!(effect.subject(), Some(acknowledgement))
+                assert_eq!(effect.subject(), Some(acknowledgement));
             }
             ErasureCasEffectV1::ReceiptAdmission { receipt } => {
-                assert_eq!(effect.subject(), Some(receipt))
+                assert_eq!(effect.subject(), Some(receipt));
             }
         }
     }
@@ -1628,7 +1689,11 @@ fn state_manifest_and_cas_effect_public_boundaries_are_exercised() -> Result<(),
         ErasureCasOutcomeV1::Applied,
         ErasureCasOutcomeV1::ExactRetry
     );
+    Ok(())
+}
 
+#[test]
+fn erasure_index_variants_expose_ordinals() {
     let indexes = [
         ErasureIndexInsertV1::AttemptPage {
             ordinal: 0,
@@ -1652,7 +1717,6 @@ fn state_manifest_and_cas_effect_public_boundaries_are_exercised() -> Result<(),
             }
         }
     }
-    Ok(())
 }
 
 #[test]
@@ -1700,7 +1764,7 @@ fn nested_codecs_reject_wrong_versions_shapes_and_closed_values() -> Result<(), 
         Err(ErasureErrorV1::InvalidEncoding)
     );
 
-    let mut trailing = request_bytes.clone();
+    let mut trailing = request_bytes;
     trailing.push(0);
     assert_eq!(
         ErasureRequestV1::from_canonical_cbor(&trailing),
@@ -1714,7 +1778,11 @@ fn nested_codecs_reject_wrong_versions_shapes_and_closed_values() -> Result<(), 
         ErasureRequestV1::from_canonical_cbor(&[0xff]),
         Err(ErasureErrorV1::InvalidEncoding)
     );
+    Ok(())
+}
 
+#[test]
+fn state_and_freeze_codecs_reject_wrong_shapes() -> Result<(), ErasureErrorV1> {
     let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     let state_bytes = state.to_canonical_cbor()?;
     assert_eq!(
@@ -1760,7 +1828,11 @@ fn nested_codecs_reject_wrong_versions_shapes_and_closed_values() -> Result<(), 
         )?),
         Err(ErasureErrorV1::InvalidEncoding)
     );
+    Ok(())
+}
 
+#[test]
+fn receipt_codec_rejects_wrong_shapes_and_digest() -> Result<(), ErasureErrorV1> {
     let (receipt_input, _) = complete_receipt_input()?;
     let receipt = ErasureReceiptV1::new(receipt_input)?;
     let receipt_bytes = receipt.to_canonical_cbor()?;
@@ -1804,7 +1876,11 @@ fn nested_codecs_reject_wrong_versions_shapes_and_closed_values() -> Result<(), 
         )?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
 
+#[test]
+fn cas_effect_codec_rejects_wrong_shapes_and_trailing_data() -> Result<(), ErasureErrorV1> {
     let effect = ErasureCasEffectV1::AcknowledgementAdmission {
         acknowledgement: reference(15),
     };
@@ -1864,7 +1940,7 @@ fn destruction_commands_and_inventory_ordering_use_public_contracts() -> Result<
     let mut targets = vec![second_target, first_target];
     targets.sort_unstable();
     assert!(targets[0] < targets[1]);
-    let mut inventories = vec![
+    let mut inventories = [
         inventory(
             ErasureInventoryCategoryV1::Artifact,
             second_target,
