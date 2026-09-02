@@ -4594,15 +4594,15 @@ fn sqlite_mutation_is_exact(
         }
     }
     for state in mutation.new_states() {
-        if validate_sqlite_state_row(
+        match validate_sqlite_state_row(
             conn,
             mutation.request(),
             state.reference(),
             state.canonical_cbor(),
-        )
-        .is_err()
-        {
-            return Ok(false);
+        ) {
+            Ok(()) => {}
+            Err(ErasureErrorV1::ProvenanceMissing) => return Ok(false),
+            Err(error) => return Err(error),
         }
     }
     for index in mutation.index_inserts() {

@@ -3188,7 +3188,11 @@ impl ErasureCasEffectV1 {
                 hasher.update(&[1]);
                 hasher.update(&reservation.admission().digest());
                 hasher.update(&reservation.reference().digest());
-                hasher.update(&(commands.len() as u64).to_be_bytes());
+                hasher.update(
+                    &u64::try_from(commands.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
                 for command in commands {
                     hasher.update(&command.obligation.digest());
                     hasher.update(&command.category.code().to_be_bytes());
