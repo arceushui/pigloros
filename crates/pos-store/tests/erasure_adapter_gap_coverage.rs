@@ -609,10 +609,9 @@ where
     let scope = scope(request.reference(), &[target], lineage_rule)?;
     let extension = extension(request.reference(), &scope, lineage_rule)?;
     let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
-    assert_eq!(
-        coordinator.freeze_inventory(request.reference(), &freeze_transition())?,
-        frozen
-    );
+    let recovered_terminal =
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    assert_eq!(recovered_terminal.lifecycle(), ErasureLifecycleV1::Complete);
     let extended = coordinator.append_scope_extension(request.reference(), extension)?;
     {
         let adapter = shared.borrow();
@@ -620,7 +619,7 @@ where
         assert!(adapter.scope_node_ref(request.reference(), 0)?.is_some());
     }
 
-    let resolution = resolution(request.reference(), &frozen, &scope)?;
+    let resolution = resolution(request.reference(), &recovered_terminal, &scope)?;
     let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
     assert_eq!(
         coordinator.append_scope_extension(request.reference(), extension)?,
