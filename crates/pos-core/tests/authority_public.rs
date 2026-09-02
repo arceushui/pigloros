@@ -27,7 +27,7 @@ fn timeline(value: u128) -> TimelineId {
     TimelineId::from_ulid(Ulid::from(value))
 }
 
-fn hash(value: u8) -> Hash {
+const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
@@ -715,7 +715,7 @@ fn malformed_grants_are_rejected_before_evaluation() {
         1,
         principal.clone(),
         AuthorityGranteeV1::Principal(principal.clone()),
-        scope.clone(),
+        scope,
     );
 
     let mut invalid = base.clone();
@@ -768,7 +768,7 @@ fn malformed_grants_are_rejected_before_evaluation() {
     );
     let mut invalid = base;
     invalid.grantee = AuthorityGranteeV1::PluginInstallation {
-        controller: principal.clone(),
+        controller: principal,
         plugin_id: plugin(1),
         installation_id: [0; 16],
     };
