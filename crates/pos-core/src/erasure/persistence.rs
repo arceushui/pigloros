@@ -7,9 +7,9 @@ use super::codec::{
 use super::{
     decode_limited, domain_digest, encode_limited, exact_array, verify_predecessor_chain, BTreeMap,
     BTreeSet, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
-    ErasureAdministrativeResolutionV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionV1,
-    ErasureCasEffectV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionV1, ErasureAttemptOutcomeV1,
+    ErasureAuthorizationRejectionV1, ErasureCasEffectV1, ErasureCorrectionProvenanceV1,
+    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceV1,
     ErasureIndexInsertV1, ErasureObligationSetV1, ErasureObligationV1, ErasurePersistedStateV1,
     ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReceiptProvenanceV1,
@@ -25,8 +25,8 @@ use super::{
     ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
     ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
     ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1,
-    ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, ERQ1, VERSION,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, ERQ1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -755,6 +755,93 @@ impl RecoveredErasureV1 {
         ))
     }
 
+    pub(crate) fn retain_atomic_freeze(
+        &mut self,
+        admission: &ErasureAtomicFreezeAdmissionV1,
+        scope: ErasureScopeCommitmentV1,
+        freeze: ErasureFreezeProvenanceV1,
+    ) -> Result<Vec<ErasurePersistenceObjectV1>, ErasureErrorV1> {
+        let closure = TargetClosureV1::new(self.request.reference(), admission.targets().to_vec())?;
+        let objects = vec![
+            persistence_object(
+                ERASURE_TARGET_CLOSURE_TAG_V1,
+                closure.reference,
+                closure.canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_SCOPE_COMMITMENT_TAG_V1,
+                scope.reference(),
+                scope.to_canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
+                admission.freeze_admission_evidence().reference(),
+                admission.freeze_admission_evidence().to_canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
+                admission.freeze_authorization_evidence().reference(),
+                admission
+                    .freeze_authorization_evidence()
+                    .to_canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_FREEZE_PROVENANCE_TAG_V1,
+                freeze.reference(),
+                freeze.to_canonical_cbor()?,
+            ),
+            persistence_object(
+                ERASURE_OBLIGATION_SET_TAG_V1,
+                admission.obligation_set().reference(),
+                admission.obligation_set().to_canonical_cbor()?,
+            ),
+        ];
+        let objects =
+            admission
+                .obligations()
+                .iter()
+                .try_fold(objects, |mut objects, obligation| {
+                    objects.push(persistence_object(
+                        ERASURE_OBLIGATION_TAG_V1,
+                        obligation.reference(),
+                        obligation.to_canonical_cbor()?,
+                    ));
+                    Ok::<_, ErasureErrorV1>(objects)
+                })?;
+        self.manifest.target_closure = Some(closure.reference);
+        self.manifest.scope = Some(scope.reference());
+        self.manifest.freeze_admission = Some(admission.freeze_admission_evidence().reference());
+        self.manifest.freeze_authorization =
+            Some(admission.freeze_authorization_evidence().reference());
+        self.manifest.freeze_provenance = Some(freeze.reference());
+        self.manifest.obligation_set = Some(admission.obligation_set().reference());
+        self.targets = closure.targets;
+        self.scope = Some(scope);
+        self.freeze_admission = Some(admission.freeze_admission_evidence().clone());
+        self.freeze_authorization = Some(admission.freeze_authorization_evidence().clone());
+        self.freeze_provenance = Some(freeze);
+        self.obligation_set = Some(admission.obligation_set().clone());
+        self.obligations = admission.obligations().to_vec();
+        Ok(objects)
+    }
+
+    pub(crate) fn set_freeze_failure(
+        &mut self,
+        failure: ErasureFreezeFailureV1,
+    ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+        let bytes = failure.to_canonical_cbor()?;
+        self.manifest.freeze_failure = Some(failure.reference());
+        self.freeze_failure = Some(failure);
+        Ok(persistence_object(
+            ERASURE_FREEZE_FAILURE_TAG_V1,
+            self.freeze_failure
+                .as_ref()
+                .map(ErasureFreezeFailureV1::reference)
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+            bytes,
+        ))
+    }
+
     fn recover_attempts(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
@@ -1024,6 +1111,14 @@ impl RecoveredErasureV1 {
         self.administrative_resolution_count = count;
         Ok(())
     }
+}
+
+fn persistence_object(
+    tag: &'static str,
+    reference: ErasureReferenceV1,
+    canonical_cbor: Vec<u8>,
+) -> ErasurePersistenceObjectV1 {
+    ErasurePersistenceObjectV1::new(tag, reference, canonical_cbor)
 }
 
 fn canonical_acknowledgement_references(
