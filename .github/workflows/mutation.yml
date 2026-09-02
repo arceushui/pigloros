@@ -4,14 +4,6 @@ name: mutation
 
 on:
   pull_request:
-    paths:
-      - >-
-        **/*.rs
-      - >-
-        **/Cargo.toml
-      - Cargo.lock
-      - fixtures/conformance/**
-      - .github/workflows/mutation.yml
   workflow_dispatch:
 
 permissions:
@@ -22,8 +14,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  mutation-changes:
+    name: detect mutation-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.changes.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - id: changes
+        name: Classify changed paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FORCE_MUTATION: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          relevant=false
+          if [[ "$FORCE_MUTATION" = true ]]; then
+            relevant=true
+          else
+            while IFS= read -r path; do
+              case "$path" in
+                *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|fixtures/conformance/*|.github/workflows/mutation.yml)
+                  relevant=true
+                  break
+                  ;;
+              esac
+            done < <(git diff --name-only --diff-filter=ACMRT "$BASE_SHA...$HEAD_SHA")
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+
   mutation-baseline:
     name: mutation baseline
+    needs: mutation-changes
+    if: needs.mutation-changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -43,7 +69,10 @@ jobs:
 
   mutation:
     name: diff mutation testing (shard ${{ matrix.shard }})
-    needs: mutation-baseline
+    needs: [mutation-changes, mutation-baseline]
+    if: >-
+      needs.mutation-changes.outputs.relevant == 'true' &&
+      needs.mutation-baseline.result == 'success'
     runs-on: ubuntu-latest
     # The shell watchdog below exits with diagnostics before this outer limit.
     timeout-minutes: 70
@@ -129,10 +158,16 @@ jobs:
     # and the baseline must never be configured as independent merge approvals.
     name: diff mutation testing
     if: always()
-    needs: [mutation-baseline, mutation]
+    needs: [mutation-changes, mutation-baseline, mutation]
     runs-on: ubuntu-latest
     steps:
       - name: Require baseline and every mutation shard to pass
         run: |
-          test "${{ needs.mutation-baseline.result }}" = success
-          test "${{ needs.mutation.result }}" = success
+          test "${{ needs.mutation-changes.result }}" = success
+          if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
+            test "${{ needs.mutation-baseline.result }}" = success
+            test "${{ needs.mutation.result }}" = success
+          else
+            test "${{ needs.mutation-baseline.result }}" = skipped
+            test "${{ needs.mutation.result }}" = skipped
+          fi

@@ -18,6 +18,7 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
 | Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions |
+| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
 ## Coverage attribution policy
@@ -27,6 +28,31 @@ mapped to a source line or segment after a fresh non-root run. It is a
 reporting-tolerance only: all tests still run with `--include-ignored`, and
 `coverage(off)` remains test-only. Do not use the allowance to exempt
 production code or avoid writing a reachable behavior test.
+
+## Change-risk policy
+
+The hosted coverage job publishes its completed LCOV report to a separate,
+required `cargo-crap` check running pinned v0.2.2. The verdict uses zero
+tool tolerance and treats one IEEE-754 representation step (one ULP) as
+numerical equality; every larger score increase fails, including increases on
+moved functions. Every new function must score at most 30. Standard Cargo
+integration-test, benchmark, and example directories are excluded from
+complexity scoring; their execution still contributes coverage to production
+code. Repository `.cargo-crap.toml` files are prohibited so a change cannot
+suppress or truncate the report.
+
+Each successful `main` workflow publishes a 90-day baseline artifact named for
+its exact commit. A pull request downloads the artifact for its base SHA, so
+newly merged functions become existing baseline entries on the next change.
+If that trusted artifact has expired or the base never completed green CI, the
+pull request must rebase onto a green `main` commit.
+
+PR #58 has one explicit initialization exception for pre-gate base
+`45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,
+or cargo-crap configuration input changed may the hosted job generate the
+baseline directly from the same LCOV artifact. No other base SHA can use this
+path. The gate treats missing coverage pessimistically and bounds source
+analysis to two threads.
 
 ## Hardware-dependent startup
 
