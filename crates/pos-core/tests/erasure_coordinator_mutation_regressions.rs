@@ -68,6 +68,7 @@ const fn config(
         freeze_evidence: reference(10),
         lineage_rule: None,
         freeze_rejection: None,
+        persistence_fault: None,
     }
 }
 

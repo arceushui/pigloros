@@ -1,6 +1,6 @@
 //! Shared raw persistence and host-port fixture for ADR-060 public tests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -35,6 +35,30 @@ pub struct PublicCoordinatorPortConfig {
     pub freeze_evidence: ErasureReferenceV1,
     pub lineage_rule: Option<ErasureReferenceV1>,
     pub freeze_rejection: Option<(ErasureErrorV1, ErasureReferenceV1)>,
+    pub persistence_fault: Option<PublicPersistenceFault>,
+}
+
+/// One raw persistence operation selected for deterministic fault injection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicPersistenceOperation {
+    LoadManifest,
+    ReadObject,
+    ResolveState,
+    EffectManifest,
+    ReadEffect,
+    AttemptIndexCount,
+    AttemptPageRef,
+    ScopeIndexCount,
+    ScopeNodeRef,
+    ResolutionIndexCount,
+    ResolutionRef,
+}
+
+/// Fail one zero-based occurrence of a selected persistence operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicPersistenceFault {
+    pub operation: PublicPersistenceOperation,
+    pub occurrence: u64,
 }
 
 #[derive(Default)]
@@ -140,6 +164,7 @@ pub struct PublicCoordinatorPort {
     storage: Rc<RefCell<RawStorage>>,
     last_mutation: Rc<RefCell<Option<pos_core::PreparedErasureCasV1>>>,
     attempt_admissions: Rc<RefCell<u64>>,
+    persistence_fault_hits: Rc<Cell<u64>>,
     config: PublicCoordinatorPortConfig,
 }
 
@@ -150,7 +175,40 @@ impl PublicCoordinatorPort {
             storage: Rc::new(RefCell::new(RawStorage::default())),
             last_mutation: Rc::new(RefCell::new(None)),
             attempt_admissions: Rc::new(RefCell::new(0)),
+            persistence_fault_hits: Rc::new(Cell::new(0)),
             config,
+        }
+    }
+
+    #[must_use]
+    pub fn with_persistence_fault(mut self, fault: PublicPersistenceFault) -> Self {
+        self.config.persistence_fault = Some(fault);
+        self.persistence_fault_hits.set(0);
+        self
+    }
+
+    #[must_use]
+    pub fn persistence_fault_hits(&self) -> u64 {
+        self.persistence_fault_hits.get()
+    }
+
+    fn maybe_fail_persistence(
+        &self,
+        operation: PublicPersistenceOperation,
+    ) -> Result<(), ErasureErrorV1> {
+        let Some(fault) = self.config.persistence_fault else {
+            return Ok(());
+        };
+        if fault.operation != operation {
+            return Ok(());
+        }
+        let occurrence = self.persistence_fault_hits.get();
+        self.persistence_fault_hits
+            .set(occurrence.saturating_add(1));
+        if occurrence == fault.occurrence {
+            Err(ErasureErrorV1::TrustSnapshotInvalid)
+        } else {
+            Ok(())
         }
     }
 
@@ -416,6 +474,7 @@ impl ErasureStateResolverV1 for PublicCoordinatorPort {
         &self,
         digest: ErasureReferenceV1,
     ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::ResolveState)?;
         self.storage
             .borrow()
             .states
@@ -436,10 +495,12 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Option<pos_core::StoredErasureManifestV1>, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::LoadManifest)?;
         Ok(self.current_manifest(request))
     }
 
     fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::ReadObject)?;
         self.storage
             .borrow()
             .objects
@@ -452,6 +513,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         &self,
         manifest: ErasureReferenceV1,
     ) -> Result<pos_core::ErasureCasEffectV1, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::ReadEffect)?;
         self.storage
             .borrow()
             .effects
@@ -464,6 +526,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         &self,
         subject: ErasureReferenceV1,
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::EffectManifest)?;
         Ok(self.storage.borrow().effect_subjects.get(&subject).copied())
     }
 
@@ -472,6 +535,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         request: ErasureReferenceV1,
         ordinal: u64,
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::AttemptPageRef)?;
         Ok(self
             .storage
             .borrow()
@@ -481,6 +545,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
     }
 
     fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::AttemptIndexCount)?;
         Ok(index_count(&self.storage.borrow().attempts, request))
     }
 
@@ -489,6 +554,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         request: ErasureReferenceV1,
         ordinal: u64,
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::ScopeNodeRef)?;
         Ok(self
             .storage
             .borrow()
@@ -498,6 +564,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
     }
 
     fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::ScopeIndexCount)?;
         Ok(index_count(&self.storage.borrow().scopes, request))
     }
 
@@ -506,6 +573,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         request: ErasureReferenceV1,
         ordinal: u64,
     ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::ResolutionRef)?;
         Ok(self
             .storage
             .borrow()
@@ -518,6 +586,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<u64, ErasureErrorV1> {
+        self.maybe_fail_persistence(PublicPersistenceOperation::ResolutionIndexCount)?;
         Ok(index_count(&self.storage.borrow().resolutions, request))
     }
 
