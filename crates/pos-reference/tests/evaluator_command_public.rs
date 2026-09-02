@@ -14,6 +14,10 @@ fn evaluator() -> Command {
 }
 
 fn complete_command(directory: &Path) -> TestResult<Command> {
+    complete_command_with_adapter(directory, "/bin/cat")
+}
+
+fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<Command> {
     let corpus = support::corpus()?;
     let request = directory.join("request.cbor");
     let bundle = directory.join("bundle.cfb1");
@@ -41,7 +45,7 @@ fn complete_command(directory: &Path) -> TestResult<Command> {
         "--authorship-independent",
         "--organizational-independent",
         "--adapter",
-        "/bin/cat",
+        adapter,
     ]);
     Ok(command)
 }
@@ -69,6 +73,110 @@ fn command_rejects_incomplete_duplicate_and_noncanonical_identity_arguments() ->
 
     let unknown = evaluator().arg("--legacy-protocol").output()?;
     assert!(!unknown.status.success());
+
+    let wrong_length = evaluator().args(["--source-digest", "01"]).output()?;
+    assert!(!wrong_length.status.success());
+
+    let invalid_low_nibble = "0g".repeat(32);
+    let invalid_digest = evaluator()
+        .args(["--source-digest", invalid_low_nibble.as_str()])
+        .output()?;
+    assert!(!invalid_digest.status.success());
+
+    for option in [
+        "--request",
+        "--bundle",
+        "--trust-policy",
+        "--source-digest",
+        "--declaration-digest",
+        "--shared-code-audit-digest",
+        "--reviewer",
+        "--adapter",
+        "--adapter-arg",
+    ] {
+        assert!(!evaluator().arg(option).output()?.status.success());
+    }
+
+    for flag in ["--authorship-independent", "--organizational-independent"] {
+        assert!(!evaluator().args([flag, flag]).output()?.status.success());
+    }
+    Ok(())
+}
+
+#[test]
+fn command_rejects_each_missing_required_option() -> TestResult {
+    let digest = "01".repeat(32);
+    let prefixes = [
+        vec!["--reviewer", "reviewer-one"],
+        vec!["--request", "request", "--reviewer", "reviewer-one"],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--reviewer",
+            "reviewer-one",
+        ],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--reviewer",
+            "reviewer-one",
+        ],
+    ];
+    for arguments in prefixes {
+        assert!(!evaluator().args(arguments).output()?.status.success());
+    }
+    for arguments in [
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--source-digest",
+            digest.as_str(),
+            "--reviewer",
+            "reviewer-one",
+        ],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--source-digest",
+            digest.as_str(),
+            "--declaration-digest",
+            digest.as_str(),
+            "--reviewer",
+            "reviewer-one",
+        ],
+        vec![
+            "--request",
+            "request",
+            "--bundle",
+            "bundle",
+            "--trust-policy",
+            "policy",
+            "--source-digest",
+            digest.as_str(),
+            "--declaration-digest",
+            digest.as_str(),
+            "--shared-code-audit-digest",
+            digest.as_str(),
+            "--reviewer",
+            "reviewer-one",
+        ],
+    ] {
+        assert!(!evaluator().args(arguments).output()?.status.success());
+    }
     Ok(())
 }
 
@@ -149,6 +257,37 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
     assert!(report.independence.authorship_independent);
     assert!(report.independence.organizational_independent);
     assert!(!output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let mut missing_input = complete_command(directory.path())?;
+    fs::remove_file(directory.path().join("request.cbor"))?;
+    assert!(!missing_input.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    assert!(
+        !complete_command_with_adapter(directory.path(), "relative-adapter")?
+            .output()?
+            .status
+            .success()
+    );
+
+    let directory = tempfile::tempdir()?;
+    assert!(
+        !complete_command_with_adapter(directory.path(), "/bin/false")?
+            .output()?
+            .status
+            .success()
+    );
+
+    let directory = tempfile::tempdir()?;
+    let mut malformed_bundle = complete_command(directory.path())?;
+    fs::write(directory.path().join("bundle.cfb1"), [0xff])?;
+    assert!(!malformed_bundle.output()?.status.success());
     Ok(())
 }
 

@@ -161,6 +161,54 @@ fn attempt_transport_rejects_each_bounded_identity_failure() {
 }
 
 #[test]
+fn attempt_transport_rejects_each_scalar_and_collection_boundary() {
+    for mutation in 0..7 {
+        let mut value = attempt();
+        match mutation {
+            0 => value.case_id = "a".repeat(129),
+            1 => value.claim_layer = 7,
+            2 => value.family = 7,
+            3 => value.mode = 4,
+            4 => value.auxiliary = vec![Vec::new(); 65_537],
+            5 => value.capability_ids = vec!["capability".to_owned(); 65_537],
+            _ => value.capability_ids = vec!["same".to_owned(), "same".to_owned()],
+        }
+        assert_eq!(
+            encode_attempt(&value),
+            Err(TransportError::FieldOutOfBounds)
+        );
+    }
+}
+
+#[test]
+fn attempt_transport_rejects_wrong_types_at_each_required_field() -> TestResult {
+    let valid = attempt_value();
+    for index in 0..14 {
+        let mut changed = valid.clone();
+        replace_field(&mut changed, index, Value::Null)?;
+        assert!(decode_attempt(&canonical(&changed)?).is_err());
+    }
+    let Value::Array(fields) = &valid else {
+        return Err("attempt is not an array".into());
+    };
+    for (field_index, nested_count) in [(9, 2), (10, 8), (13, 2)] {
+        for nested_index in 0..nested_count {
+            let mut changed = valid.clone();
+            let Value::Array(changed_fields) = &mut changed else {
+                return Err("attempt is not an array".into());
+            };
+            let Value::Array(nested) = &mut changed_fields[field_index] else {
+                return Err("attempt nested field is not an array".into());
+            };
+            nested[nested_index] = Value::Null;
+            assert!(decode_attempt(&canonical(&changed)?).is_err());
+        }
+    }
+    assert_eq!(fields.len(), 14);
+    Ok(())
+}
+
+#[test]
 fn attempt_transport_rejects_wrong_versions_shapes_types_and_codes() -> TestResult {
     let mut value = attempt_value();
     replace_field(&mut value, 0, Value::Text("EAI0".to_owned()))?;
@@ -325,6 +373,45 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() -> TestResu
         encode_observation(&invalid_divergence),
         Err(TransportError::FieldOutOfBounds)
     );
+
+    let oversized_coordinate = SubjectObservation {
+        result: SubjectResult::Divergence {
+            classification: 1,
+            first_coordinate: vec![1; 129],
+        },
+        usage: usage(),
+    };
+    assert_eq!(
+        encode_observation(&oversized_coordinate),
+        Err(TransportError::FieldOutOfBounds)
+    );
+
+    for field in ["owner", "1.0.0", "failure"] {
+        let invalid_failure = SubjectObservation {
+            result: SubjectResult::Failure(NamespacedFailure {
+                owner_id: if field == "owner" {
+                    "a".repeat(129)
+                } else {
+                    "owner".to_owned()
+                },
+                contract_version: if field == "1.0.0" {
+                    "a".repeat(129)
+                } else {
+                    "1.0.0".to_owned()
+                },
+                code_id: if field == "failure" {
+                    "a".repeat(129)
+                } else {
+                    "failure".to_owned()
+                },
+            }),
+            usage: usage(),
+        };
+        assert_eq!(
+            encode_observation(&invalid_failure),
+            Err(TransportError::FieldOutOfBounds)
+        );
+    }
     Ok(())
 }
 
@@ -406,6 +493,35 @@ fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestRe
     )?;
     assert_eq!(
         malformed.execute(&operational_attempt),
+        Err(AdapterError::ProtocolFailure)
+    );
+
+    let mut missing = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/definitely/not/a/subject-adapter",
+        Vec::new(),
+    )?;
+    assert_eq!(
+        missing.execute(&operational_attempt),
+        Err(AdapterError::Unavailable)
+    );
+
+    let mut invalid_attempt = attempt();
+    invalid_attempt.case_id.clear();
+    assert_eq!(
+        malformed.execute(&invalid_attempt),
+        Err(AdapterError::ProtocolFailure)
+    );
+
+    let mut oversized = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/usr/bin/head",
+        ["-c", "70000", "/dev/zero"].map(OsString::from).to_vec(),
+    )?;
+    assert_eq!(
+        oversized.execute(&operational_attempt),
         Err(AdapterError::ProtocolFailure)
     );
     Ok(())
