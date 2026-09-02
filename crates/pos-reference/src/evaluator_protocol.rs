@@ -820,7 +820,19 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
 }
 
 fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
-    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+    if value.is_empty()
+        || value.len() > MAX_IDENTIFIER_BYTES
+        || !value.is_ascii()
+        || value
+            .bytes()
+            .next()
+            .is_none_or(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit())
+        || value.bytes().any(|byte| {
+            !byte.is_ascii_lowercase()
+                && !byte.is_ascii_digit()
+                && !matches!(byte, b'.' | b'_' | b'/' | b'-')
+        })
+    {
         Err(ProtocolError::FieldOutOfBounds)
     } else {
         Ok(())

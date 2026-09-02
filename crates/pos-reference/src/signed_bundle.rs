@@ -186,6 +186,10 @@ fn decode_trusted_key(bytes: &[u8]) -> Result<[u8; 32], BundleError> {
     if text(&fields[0])? != "TPS1" || uint(&fields[1])? != 1 {
         return Err(BundleError::TrustPolicyMismatch);
     }
+    if !valid_identifier(text(&fields[2])?) || uint(&fields[3])? == 0 {
+        return Err(BundleError::TrustPolicyMismatch);
+    }
+    uint(&fields[4])?;
     let roots = array_values(&fields[5])?;
     if roots.len() != 1
         || !array_values(&fields[6])?.is_empty()
@@ -194,7 +198,13 @@ fn decode_trusted_key(bytes: &[u8]) -> Result<[u8; 32], BundleError> {
         return Err(BundleError::TrustPolicyMismatch);
     }
     let root = array(&roots[0], 4)?;
-    if text(&root[0])?.is_empty() || uint(&root[1])? == 0 || text(&root[2])? != "Ed25519" {
+    if !valid_identifier(text(&root[0])?)
+        || uint(&root[1])? == 0
+        || text(&root[2])? != "Ed25519"
+        || !valid_minimum_versions(&fields[8])?
+        || !valid_expiry(text(&fields[9])?)
+        || fields[10] != Value::Null
+    {
         return Err(BundleError::TrustPolicyMismatch);
     }
     let key: [u8; 32] = fixed_bytes(&root[3])?;
@@ -206,6 +216,93 @@ fn decode_trusted_key(bytes: &[u8]) -> Result<[u8; 32], BundleError> {
         .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
         .map_err(|_| BundleError::TrustPolicyMismatch)?;
     Ok(key)
+}
+
+fn valid_minimum_versions(value: &Value) -> Result<bool, BundleError> {
+    let values = array_values(value)?;
+    if values.is_empty() || values.len() > 64 {
+        return Ok(false);
+    }
+    let mut previous: Option<&str> = None;
+    for value in values {
+        let fields = array(value, 2)?;
+        let kind = text(&fields[0])?;
+        let version = text(&fields[1])?;
+        if !valid_identifier(kind)
+            || !valid_semantic_version(version)
+            || previous.is_some_and(|old| old.as_bytes() >= kind.as_bytes())
+        {
+            return Ok(false);
+        }
+        previous = Some(kind);
+    }
+    Ok(true)
+}
+
+fn valid_expiry(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'.' | b'Z'))
+}
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.is_ascii()
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'/' | b'-')
+        })
+}
+
+fn valid_semantic_version(value: &str) -> bool {
+    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
+        return false;
+    }
+    let (core_pre, build) = match value.split_once('+') {
+        Some((left, right)) if !right.is_empty() && !right.contains('+') => (left, right),
+        Some(_) => return false,
+        None => (value, ""),
+    };
+    let (core, pre) = match core_pre.split_once('-') {
+        Some((left, right)) if !right.is_empty() => (left, right),
+        Some(_) => return false,
+        None => (core_pre, ""),
+    };
+    let mut parts = core.split('.');
+    parts.next().is_some_and(valid_numeric_version)
+        && parts.next().is_some_and(valid_numeric_version)
+        && parts.next().is_some_and(valid_numeric_version)
+        && parts.next().is_none()
+        && valid_version_identifiers(pre, true)
+        && valid_version_identifiers(build, false)
+}
+
+fn valid_numeric_version(value: &str) -> bool {
+    !value.is_empty()
+        && (value == "0" || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_version_identifiers(value: &str, no_leading_zero: bool) -> bool {
+    value.is_empty()
+        || value.split('.').all(|item| {
+            !item.is_empty()
+                && item
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && (!no_leading_zero
+                    || !item.bytes().all(|byte| byte.is_ascii_digit())
+                    || valid_numeric_version(item))
+        })
 }
 
 fn decode_descriptors(value: &Value) -> Result<Vec<Descriptor>, BundleError> {
