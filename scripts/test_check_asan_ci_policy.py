@@ -147,6 +147,33 @@ class AsanCiPolicyTests(unittest.TestCase):
             lambda workflow: self.asan_step(workflow)["env"].pop("CARGO_BUILD_JOBS")
         )
 
+    def test_requires_bounded_test_concurrency(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.asan_step(workflow)["env"].pop("RUST_TEST_THREADS")
+        )
+
+    def test_requires_both_asan_shards(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"]["strategy"]["matrix"][
+                "shard"
+            ].pop()
+        )
+
+    def test_requires_aggregate_asan_gate(self) -> None:
+        self.assert_rejected(lambda workflow: workflow["jobs"].pop("asan-gate"))
+
+    def test_aggregate_gate_must_run_after_shard_failure(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-gate"].pop("if")
+        )
+
+    def test_aggregate_gate_must_require_shard_success(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-gate"]["steps"][0].update(
+                {"run": "true"}
+            )
+        )
+
     def test_rejects_commented_serialization(self) -> None:
         source = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         source = source.replace(
@@ -195,8 +222,8 @@ class AsanCiPolicyTests(unittest.TestCase):
         def insert_newline(workflow: dict) -> None:
             step = self.asan_step(workflow)
             step["run"] = step["run"].replace(
-                'RUSTFLAGS="-Z sanitizer=address" \\\n  cargo +nightly',
-                'RUSTFLAGS="-Z sanitizer=address"\ncargo +nightly',
+                'RUSTFLAGS="-Z sanitizer=address" \\\n    cargo "${cargo_args[@]}"',
+                'RUSTFLAGS="-Z sanitizer=address"\n    cargo "${cargo_args[@]}"',
             )
 
         self.assert_rejected(insert_newline)

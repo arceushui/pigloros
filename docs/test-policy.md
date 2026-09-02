@@ -18,6 +18,7 @@ Shared reference for humans and agents. `.cursor/rules/test-policy.mdc` mirrors 
 | Runtime | `cargo test -- --include-ignored` | Ignored tests still execute |
 | Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches `test result:` line only (no log prose FP) |
 | Coverage | `cargo llvm-cov` with `--include-ignored` | At least 99% lines + 99% regions |
+| Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
 ## Coverage attribution policy
@@ -27,6 +28,31 @@ mapped to a source line or segment after a fresh non-root run. It is a
 reporting-tolerance only: all tests still run with `--include-ignored`, and
 `coverage(off)` remains test-only. Do not use the allowance to exempt
 production code or avoid writing a reachable behavior test.
+
+## Change-risk policy
+
+The hosted coverage job publishes its completed LCOV report to a separate,
+required `cargo-crap` check running pinned v0.2.2. The verdict uses zero
+tool tolerance and treats one IEEE-754 representation step (one ULP) as
+numerical equality; every larger score increase fails, including increases on
+moved functions. Every new function must score at most 30. Standard Cargo
+integration-test, benchmark, and example directories are excluded from
+complexity scoring; their execution still contributes coverage to production
+code. Repository `.cargo-crap.toml` files are prohibited so a change cannot
+suppress or truncate the report.
+
+Each successful `main` workflow publishes a 90-day baseline artifact named for
+its exact commit. A pull request downloads the artifact for its base SHA, so
+newly merged functions become existing baseline entries on the next change.
+If that trusted artifact has expired or the base never completed green CI, the
+pull request must rebase onto a green `main` commit.
+
+PR #58 has one explicit initialization exception for pre-gate base
+`45bdac85b29d273573583f846ba7acd2b3a12573`: only when no Rust, Cargo, toolchain,
+or cargo-crap configuration input changed may the hosted job generate the
+baseline directly from the same LCOV artifact. No other base SHA can use this
+path. The gate treats missing coverage pessimistically and bounds source
+analysis to two threads.
 
 ## Hardware-dependent startup
 
@@ -46,12 +72,19 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 
 ## Resource-intensive sanitizer jobs
 
-The complete workspace ASan gate retains `--all-features`, `--workspace`, and
-`--tests`, but serializes Cargo build/link jobs on hosted runners. ASan plus
+The complete workspace ASan gate retains all features and test targets, but
+partitions their execution across two hosted shards because Cargo runs separate
+test executables serially. The `bundle-contracts` shard runs the two
+`pos-conformance` bundle integration targets. The `remainder` shard runs
+`--workspace --exclude pos-conformance --tests`, then the `pos-conformance`
+library, binaries, and remaining three integration targets. Each shard
+serializes Cargo build/link jobs and bounds test threads at two. The required
+`asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
+every shard succeeds. Partitioning changes throughput only: it does not remove
+a package, feature, test target, sanitizer, or coverage requirement. ASan plus
 `build-std` produces unusually large test-binary links; concurrent lld workers
 can exhaust the runner's available resources and crash with `SIGBUS` before any
-test executes. Serialization changes throughput only: it does not remove a
-package, feature, test target, sanitizer, or coverage requirement.
+test executes.
 
 The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
 nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled
@@ -70,14 +103,15 @@ backtraces without full type and variable metadata. This changes artifact size
 only; sanitizer instrumentation, debug assertions, packages, features, test
 targets, and execution scope remain.
 
-`scripts/check-asan-ci-policy.sh` enforces both the serialization setting and
-the unchanged ASan workspace test command by parsing the workflow's executable
-YAML semantics. Adversarial fixtures prove that disabled/non-failing steps,
-environment-based test runners, detached sanitizer flags, `--no-run`, shell
-success overrides, skipped prerequisites, injected setup steps, and test-skip
-arguments are rejected. The ASan job graph and pinned setup-step sequence must
-match exactly, and the final test step may contain only `name`, `env`, and
-`run` so it cannot select a nested Cargo configuration.
+`scripts/check-asan-ci-policy.sh` enforces the exact shard matrix, target
+partition, per-shard resource settings, fail-closed aggregate, and complete
+ASan scope by parsing the workflow's executable YAML semantics. Adversarial
+fixtures prove that disabled/non-failing steps, environment-based test runners,
+detached sanitizer flags, `--no-run`, shell success overrides, skipped
+prerequisites, injected setup steps, and test-skip arguments are rejected. The
+ASan job graph and pinned setup-step sequence must match exactly, and each test
+step may contain only `name`, `env`, and `run` so it cannot select a nested
+Cargo configuration.
 
 ### Controlled Bevy reflection metadata roots
 
@@ -92,10 +126,11 @@ different process tables are aggregated only for diagnostics. Root and byte
 counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
-The complete workspace/all-features/all-test-target ASan command and
-`detect_leaks=1` remain unchanged. A separate 1,234-byte intentional leak runs
-under the same sanitizer, symbolizer, suppression file, and options; it must
-exit nonzero, report exactly one allocation, and match neither approved rule.
+The complete workspace/all-features/all-test-target ASan scope and
+`detect_leaks=1` remain unchanged across the two shards. A separate 1,234-byte
+intentional leak runs under the same sanitizer, symbolizer, suppression file,
+and options; it must exit nonzero, report exactly one allocation, and match
+neither approved rule.
 Any unexpected or malformed suppression row/table, duplicate template within
 one process table, zero measurement, unrelated leak, or negative-control
 success fails CI. Bevy, Rust nightly, LLVM, sanitizer, or runner-image upgrades
