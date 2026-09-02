@@ -47,6 +47,87 @@ struct RawStorage {
     effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
 }
 
+fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
+    let mut input = tag.as_bytes().to_vec();
+    input.push(0);
+    input.extend_from_slice(bytes);
+    ErasureReferenceV1::from_digest(*blake3::hash(&input).as_bytes())
+}
+
+fn replace_array_field(
+    bytes: &[u8],
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, ErasureErrorV1> {
+    let mut value: Value =
+        ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let Value::Array(fields) = &mut value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    *fields
+        .get_mut(index)
+        .ok_or(ErasureErrorV1::InvalidEncoding)? = replacement;
+    let mut changed = Vec::new();
+    ciborium::into_writer(&value, &mut changed).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    Ok(changed)
+}
+
+fn array_reference_field(bytes: &[u8], index: usize) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+    let value: Value = ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    let Value::Array(fields) = value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Bytes(bytes) = fields.get(index).ok_or(ErasureErrorV1::InvalidEncoding)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let digest: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+    Ok(ErasureReferenceV1::from_digest(digest))
+}
+
+fn replace_attempt_page_field(
+    storage: &mut RawStorage,
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    index: usize,
+    replacement: Value,
+) -> Result<(), ErasureErrorV1> {
+    let previous = *storage
+        .attempts
+        .get(&(request, ordinal))
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let page = storage
+        .objects
+        .get(&previous)
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let changed = replace_array_field(&page, index, replacement)?;
+    let changed_reference = addressed(pos_core::ERASURE_ATTEMPT_HISTORY_TAG_V1, &changed);
+    storage.objects.remove(&previous);
+    storage.objects.insert(changed_reference, changed);
+    storage
+        .attempts
+        .insert((request, ordinal), changed_reference);
+
+    let (_, manifest) = storage
+        .manifests
+        .get(&request)
+        .cloned()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let changed_manifest = replace_array_field(
+        &manifest,
+        15,
+        Value::Bytes(changed_reference.digest().to_vec()),
+    )?;
+    storage.manifests.insert(
+        request,
+        (addressed("ERCRP1", &changed_manifest), changed_manifest),
+    );
+    Ok(())
+}
+
 /// In-memory implementation of the raw persistence and host capability SPIs.
 ///
 /// The storage is shared by clones so tests can retain an adapter handle while
@@ -130,21 +211,83 @@ impl PublicCoordinatorPort {
             .get(&request)
             .cloned()
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        let mut value: Value =
-            ciborium::from_reader(bytes.as_slice()).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-        let Value::Array(fields) = &mut value else {
-            return Err(ErasureErrorV1::InvalidEncoding);
-        };
-        *fields
-            .get_mut(index)
-            .ok_or(ErasureErrorV1::InvalidEncoding)? = replacement;
-        let mut changed = Vec::new();
-        ciborium::into_writer(&value, &mut changed).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-        let mut addressed = b"ERCRP1\0".to_vec();
-        addressed.extend_from_slice(&changed);
-        let digest = ErasureReferenceV1::from_digest(*blake3::hash(&addressed).as_bytes());
+        let changed = replace_array_field(&bytes, index, replacement)?;
+        let digest = addressed("ERCRP1", &changed);
         storage.manifests.insert(request, (digest, changed));
         Ok(())
+    }
+
+    /// Insert one deliberately selected immutable object for recovery tests.
+    pub fn insert_object(&self, reference: ErasureReferenceV1, canonical_cbor: Vec<u8>) {
+        self.storage
+            .borrow_mut()
+            .objects
+            .insert(reference, canonical_cbor);
+    }
+
+    /// Replace one field in the single completed attempt page and re-address
+    /// the page, its index entry, and the manifest history head.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the page or manifest is absent or malformed.
+    pub fn replace_attempt_page_field(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        index: usize,
+        replacement: Value,
+    ) -> Result<(), ErasureErrorV1> {
+        replace_attempt_page_field(
+            &mut self.storage.borrow_mut(),
+            request,
+            ordinal,
+            index,
+            replacement,
+        )
+    }
+
+    /// Replace and re-address one attempt component, then repair the page link.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the component, page, or manifest is absent
+    /// or malformed.
+    pub fn replace_attempt_component_field(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        page_field: usize,
+        object_tag: &str,
+        object_field: usize,
+        replacement: Value,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let page = *storage
+            .attempts
+            .get(&(request, ordinal))
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let page_bytes = storage
+            .objects
+            .get(&page)
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let component = array_reference_field(page_bytes, page_field)?;
+        let component_bytes = storage
+            .objects
+            .get(&component)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let changed = replace_array_field(&component_bytes, object_field, replacement)?;
+        let changed_reference = addressed(object_tag, &changed);
+        storage.objects.remove(&component);
+        storage.objects.insert(changed_reference, changed);
+        replace_attempt_page_field(
+            &mut storage,
+            request,
+            ordinal,
+            page_field,
+            Value::Bytes(changed_reference.digest().to_vec()),
+        )
     }
 
     pub fn remove_object(&self, reference: ErasureReferenceV1) {

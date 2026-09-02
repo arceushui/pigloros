@@ -36,6 +36,8 @@ use pos_core::{
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, StoredErasureManifestV1,
+    ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1,
 };
 
 use coordinator_support::{PublicCoordinatorPort, PublicCoordinatorPortConfig};
@@ -503,6 +505,28 @@ fn coordinator_receipt_input(
     }
 }
 
+fn receipt_input_from(receipt: &ErasureReceiptV1) -> ErasureReceiptInputV1 {
+    ErasureReceiptInputV1 {
+        request: receipt.request(),
+        terminal_state: receipt.terminal_state(),
+        coordinator: receipt.coordinator(),
+        lifecycle: receipt.lifecycle(),
+        freeze_position: receipt.freeze_position(),
+        acknowledgements: receipt.acknowledgements().to_vec(),
+        frozen_targets: receipt.frozen_targets().to_vec(),
+        pending_owners: Vec::new(),
+        failed_owners: Vec::new(),
+        inventories: receipt.inventories().clone(),
+        replay_claim: receipt.replay_claim(),
+        policy: receipt.policy(),
+        trust: receipt.trust(),
+        provenance: receipt.provenance(),
+        issue_position: receipt.issue_position(),
+        signature: receipt.signature(),
+        receipt_digest: reference(0),
+    }
+}
+
 fn coordinator_scope(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
@@ -793,6 +817,30 @@ fn assert_public_recovery_fails(adapter: PublicCoordinatorPort, request: &Erasur
         .is_err());
 }
 
+fn assert_graph_mutation_rejected(
+    mutate: impl FnOnce(&CompletedGraph) -> Result<(), ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    let graph = complete_persisted_graph(None)?;
+    mutate(&graph)?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+fn assert_manifest_object_rejected(
+    field: usize,
+    reference: ErasureReferenceV1,
+    canonical_cbor: Vec<u8>,
+) -> Result<(), ErasureErrorV1> {
+    assert_graph_mutation_rejected(|graph| {
+        graph.adapter.insert_object(reference, canonical_cbor);
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            field,
+            Value::Bytes(reference.digest().to_vec()),
+        )
+    })
+}
+
 #[test]
 fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), ErasureErrorV1> {
     let target = target(10);
@@ -1074,6 +1122,205 @@ fn coordinator_recovery_rejects_missing_attempt_graph_components() -> Result<(),
     let graph = complete_persisted_graph(None)?;
     graph.adapter.remove_object(graph.receipt.receipt_digest());
     assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_attempt_page_conflicts() -> Result<(), ErasureErrorV1> {
+    for (index, replacement) in [
+        (2, Value::Bytes(reference(240).digest().to_vec())),
+        (3, Value::Integer(1.into())),
+        (11, Value::Bytes(reference(241).digest().to_vec())),
+    ] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_page_field(
+                graph.request.reference(),
+                0,
+                index,
+                replacement,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_inventory_conflicts() -> Result<(), ErasureErrorV1> {
+    for (page_field, object_field, replacement) in [
+        (5, 2, Value::Bytes(reference(240).digest().to_vec())),
+        (5, 3, Value::Integer(1.into())),
+        (5, 4, Value::Integer(1.into())),
+        (5, 5, Value::Array(Vec::new())),
+        (6, 2, Value::Bytes(reference(240).digest().to_vec())),
+        (6, 3, Value::Integer(1.into())),
+        (6, 4, Value::Integer(0.into())),
+        (6, 5, Value::Array(Vec::new())),
+    ] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                page_field,
+                ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+                object_field,
+                replacement,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_fixed_evidence_conflicts() -> Result<(), ErasureErrorV1>
+{
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: reference(210),
+        rejected_terminal_state: reference(211),
+        correction_reason: reference(212),
+        authorization_provenance: reference(213),
+    })?;
+    assert_manifest_object_rejected(5, correction.reference(), correction.to_canonical_cbor()?)?;
+
+    let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request: reference(214),
+        authorization_provenance: reference(215),
+    })?;
+    assert_manifest_object_rejected(6, rejection.reference(), rejection.to_canonical_cbor()?)?;
+
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: reference(216),
+        scope_members: vec![reference(217)],
+        target_closure: reference(218),
+        lineage_rule: None,
+    })?;
+    assert_manifest_object_rejected(7, scope.reference(), scope.to_canonical_cbor()?)?;
+
+    let admission = ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+        request: reference(219),
+        scope_commitment: reference(220),
+        obligation_set: reference(221),
+        applicability_matrix: applicability_matrix(1, None)?,
+        freeze_position: 10,
+        policy: reference(5),
+        trust: reference(6),
+        authorization_provenance: reference(222),
+    })?;
+    assert_manifest_object_rejected(8, admission.reference(), admission.to_canonical_cbor()?)?;
+
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request: reference(223),
+        scope_commitment: reference(224),
+        obligation_set: reference(225),
+        freeze_position: 10,
+        host_evidence: reference(226),
+    })?;
+    assert_manifest_object_rejected(10, freeze.reference(), freeze.to_canonical_cbor()?)?;
+
+    let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request: reference(227),
+        error: ErasureErrorV1::AccessFreezeFailed,
+        authorization_provenance: reference(228),
+        evidence: reference(229),
+    })?;
+    assert_manifest_object_rejected(11, failure.reference(), failure.to_canonical_cbor()?)?;
+
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request: reference(230),
+        obligations: vec![reference(231)],
+        policy: reference(5),
+        trust: reference(6),
+    })?;
+    assert_manifest_object_rejected(
+        12,
+        obligation_set.reference(),
+        obligation_set.to_canonical_cbor()?,
+    )
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_outcome_conflicts() -> Result<(), ErasureErrorV1> {
+    for (object_field, replacement) in [
+        (2, Value::Bytes(reference(210).digest().to_vec())),
+        (3, Value::Bytes(reference(211).digest().to_vec())),
+        (4, Value::Bytes(reference(212).digest().to_vec())),
+        (5, Value::Integer(6.into())),
+        (6, Value::Bytes(reference(213).digest().to_vec())),
+        (7, Value::Bytes(reference(214).digest().to_vec())),
+        (8, Value::Integer(31.into())),
+        (9, Value::Bytes(reference(215).digest().to_vec())),
+        (10, Value::Bytes(reference(216).digest().to_vec())),
+    ] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                7,
+                ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+                object_field,
+                replacement,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_receipt_provenance_conflicts(
+) -> Result<(), ErasureErrorV1> {
+    for (object_field, replacement) in [
+        (2, Value::Bytes(reference(217).digest().to_vec())),
+        (3, Value::Bytes(reference(218).digest().to_vec())),
+        (6, Value::Bytes(reference(219).digest().to_vec())),
+        (7, Value::Bytes(reference(220).digest().to_vec())),
+        (8, Value::Bytes(reference(221).digest().to_vec())),
+        (9, Value::Bytes(reference(222).digest().to_vec())),
+        (10, Value::Integer(31.into())),
+    ] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                9,
+                ERASURE_RECEIPT_PROVENANCE_TAG_V1,
+                object_field,
+                replacement,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_receipt_conflicts() -> Result<(), ErasureErrorV1> {
+    let graph = complete_persisted_graph(None)?;
+    let base = receipt_input_from(&graph.receipt);
+    let mut variants = Vec::new();
+    for change in 0..7 {
+        let mut input = base.clone();
+        match change {
+            0 => input.request = reference(223),
+            1 => input.terminal_state = reference(224),
+            2 => input.coordinator = reference(225),
+            3 => input.policy = reference(226),
+            4 => input.trust = reference(227),
+            5 => input.provenance = reference(228),
+            _ => input.issue_position = input.issue_position.saturating_add(1),
+        }
+        variants.push(ErasureReceiptV1::new(input)?);
+    }
+    for receipt in variants {
+        assert_graph_mutation_rejected(|graph| {
+            graph
+                .adapter
+                .insert_object(receipt.receipt_digest(), receipt.to_canonical_cbor()?);
+            graph.adapter.replace_attempt_page_field(
+                graph.request.reference(),
+                0,
+                8,
+                Value::Bytes(receipt.receipt_digest().digest().to_vec()),
+            )
+        })?;
+    }
     Ok(())
 }
 
