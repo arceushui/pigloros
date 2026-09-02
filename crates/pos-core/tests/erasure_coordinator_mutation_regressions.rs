@@ -1,7 +1,7 @@
 //! Public mutation regressions for the raw ERCRP1 persistence contract.
 
 #[path = "support/coordinator.rs"]
-mod coordinator_support;
+pub mod coordinator_support;
 #[path = "support/erasure.rs"]
 pub mod erasure_support;
 
@@ -55,7 +55,7 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     request_with(reference(1), reference(7))
 }
 
-fn config(
+const fn config(
     targets: Vec<ErasureRequiredTargetV1>,
     fail_commits: bool,
 ) -> PublicCoordinatorPortConfig {
@@ -70,7 +70,7 @@ fn config(
     }
 }
 
-fn freeze_transition() -> ErasureStateTransitionV1 {
+const fn freeze_transition() -> ErasureStateTransitionV1 {
     ErasureStateTransitionV1 {
         lifecycle: ErasureLifecycleV1::AccessFrozen,
         freeze_position: Some(10),
@@ -154,7 +154,7 @@ fn restart_recovers_the_state_from_the_raw_manifest() -> Result<(), ErasureError
         coordinator.submit(request.clone(), request.provenance())?;
         coordinator.authorize(request.reference(), reference(21))?;
     }
-    let mut restarted = ErasureCoordinatorStateMachineV1::new(port.clone(), COORDINATOR);
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     let recovered = restarted.submit(request.clone(), request.provenance())?;
     assert_eq!(recovered.lifecycle(), ErasureLifecycleV1::Authorized);
     assert_eq!(restarted.existing(request.reference()), Some(&recovered));

@@ -75,9 +75,8 @@ impl PublicCoordinatorPort {
             .borrow()
             .manifests
             .get(&request)
-            .map(|(digest, bytes)| {
-                pos_core::StoredErasureManifestV1::new(*digest, bytes.clone())
-                    .expect("fixture stores authenticated manifests")
+            .and_then(|(digest, bytes)| {
+                pos_core::StoredErasureManifestV1::new(*digest, bytes.clone()).ok()
             })
     }
 

@@ -1,7 +1,7 @@
 //! Public lifecycle coverage over the raw ERCRP1 persistence seam.
 
 #[path = "support/coordinator.rs"]
-mod coordinator_support;
+pub mod coordinator_support;
 #[path = "support/erasure.rs"]
 pub mod erasure_support;
 
