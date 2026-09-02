@@ -314,8 +314,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let record = self.record(request)?;
-        self.freeze_record(record, request, transition)
+        self.record(request)
+            .and_then(|record| self.freeze_record(record, request, transition))
     }
 
     fn freeze_record(

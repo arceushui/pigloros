@@ -11,6 +11,66 @@ const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
+#[test]
+fn lifecycle_permits_exactly_the_adr_edges() {
+    let lifecycles = [
+        ErasureLifecycleV1::Submitted,
+        ErasureLifecycleV1::Authorized,
+        ErasureLifecycleV1::AccessFrozen,
+        ErasureLifecycleV1::DestructionDispatched,
+        ErasureLifecycleV1::AwaitingAcknowledgements,
+        ErasureLifecycleV1::Complete,
+        ErasureLifecycleV1::PartialFailure,
+        ErasureLifecycleV1::Rejected,
+    ];
+    let permitted = [
+        (
+            ErasureLifecycleV1::Submitted,
+            ErasureLifecycleV1::Authorized,
+        ),
+        (ErasureLifecycleV1::Submitted, ErasureLifecycleV1::Rejected),
+        (
+            ErasureLifecycleV1::Authorized,
+            ErasureLifecycleV1::AccessFrozen,
+        ),
+        (ErasureLifecycleV1::Authorized, ErasureLifecycleV1::Rejected),
+        (
+            ErasureLifecycleV1::AccessFrozen,
+            ErasureLifecycleV1::DestructionDispatched,
+        ),
+        (
+            ErasureLifecycleV1::DestructionDispatched,
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+        ),
+        (
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+            ErasureLifecycleV1::Complete,
+        ),
+        (
+            ErasureLifecycleV1::AwaitingAcknowledgements,
+            ErasureLifecycleV1::PartialFailure,
+        ),
+        (
+            ErasureLifecycleV1::PartialFailure,
+            ErasureLifecycleV1::PartialFailure,
+        ),
+        (
+            ErasureLifecycleV1::PartialFailure,
+            ErasureLifecycleV1::Complete,
+        ),
+    ];
+
+    for current in lifecycles {
+        for next in lifecycles {
+            assert_eq!(
+                current.permits(next),
+                permitted.contains(&(current, next)),
+                "unexpected {current:?} -> {next:?} lifecycle decision"
+            );
+        }
+    }
+}
+
 const fn target() -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,

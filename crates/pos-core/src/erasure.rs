@@ -314,18 +314,17 @@ impl ErasureLifecycleV1 {
     /// Report whether `next` is the single permitted forward edge.
     #[must_use]
     pub const fn permits(self, next: Self) -> bool {
-        match self {
-            Self::Submitted => matches!(next, Self::Authorized | Self::Rejected),
-            Self::Authorized => matches!(next, Self::AccessFrozen | Self::Rejected),
-            Self::AccessFrozen => matches!(next, Self::DestructionDispatched),
-            Self::DestructionDispatched => matches!(next, Self::AwaitingAcknowledgements),
-            Self::AwaitingAcknowledgements => matches!(next, Self::Complete | Self::PartialFailure),
-            Self::PartialFailure => Self::permits_after_partial_failure(next),
-            Self::Complete | Self::Rejected => false,
-        }
-    }
-    const fn permits_after_partial_failure(next: Self) -> bool {
-        matches!(next, Self::PartialFailure | Self::Complete)
+        const PERMITTED_SUCCESSORS: [u8; 8] = [
+            0b1000_0010,
+            0b1000_0100,
+            0b0000_1000,
+            0b0001_0000,
+            0b0110_0000,
+            0,
+            0b0110_0000,
+            0,
+        ];
+        PERMITTED_SUCCESSORS[self.code() as usize] & (1_u8 << next.code()) != 0
     }
     /// Report whether the request itself has reached a terminal outcome.
     #[must_use]
