@@ -45,6 +45,7 @@ pub struct PublicCoordinatorPortConfig {
 /// One coordinator dependency operation selected for deterministic failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PublicCoordinatorOperation {
+    Authenticate,
     LoadManifest,
     ReadObject,
     ResolveState,
@@ -986,7 +987,7 @@ impl ErasureFreezeAuthorizationVerifierV1 for PublicCoordinatorPort {
 
 impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
     fn authenticate(&self, _request: &ErasureRequestV1) -> Result<(), ErasureErrorV1> {
-        Ok(())
+        self.maybe_fail(PublicCoordinatorOperation::Authenticate)
     }
 
     fn admit_authorization(

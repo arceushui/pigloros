@@ -773,18 +773,20 @@ impl RecoveredErasureV1 {
         effect: ErasureCasEffectV1,
     ) -> Result<PreparedErasureCasV1, ErasureErrorV1> {
         self.manifest.validate_shape()?;
-        let bytes = self.manifest.canonical_cbor()?;
-        let digest = addressed(ERCRP1, &bytes);
-        let next_manifest = StoredErasureManifestV1::new(digest, bytes)?;
-        Ok(PreparedErasureCasV1::new(
-            self.request.reference(),
-            expected_manifest_digest,
-            next_manifest,
-            new_objects,
-            new_states,
-            index_inserts,
-            effect,
-        ))
+        self.manifest.canonical_cbor().and_then(|bytes| {
+            let digest = addressed(ERCRP1, &bytes);
+            StoredErasureManifestV1::new(digest, bytes).map(|next_manifest| {
+                PreparedErasureCasV1::new(
+                    self.request.reference(),
+                    expected_manifest_digest,
+                    next_manifest,
+                    new_objects,
+                    new_states,
+                    index_inserts,
+                    effect,
+                )
+            })
+        })
     }
 
     pub(super) fn request_object(&self) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
@@ -813,32 +815,24 @@ impl RecoveredErasureV1 {
         &mut self,
         rejection: ErasureAuthorizationRejectionV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
-        let bytes = rejection.to_canonical_cbor()?;
-        self.manifest.rejection = Some(rejection.reference());
-        self.rejection = Some(rejection);
-        Ok(ErasurePersistenceObjectV1::new(
-            self.rejection
-                .as_ref()
-                .map(ErasureAuthorizationRejectionV1::reference)
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
-            bytes,
-        ))
+        let reference = rejection.reference();
+        rejection.to_canonical_cbor().map(|bytes| {
+            self.manifest.rejection = Some(reference);
+            self.rejection = Some(rejection);
+            ErasurePersistenceObjectV1::new(reference, bytes)
+        })
     }
 
     pub(super) fn set_correction(
         &mut self,
         correction: ErasureCorrectionProvenanceV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
-        let bytes = correction.to_canonical_cbor()?;
-        self.manifest.correction = Some(correction.reference());
-        self.correction = Some(correction);
-        Ok(ErasurePersistenceObjectV1::new(
-            self.correction
-                .as_ref()
-                .map(ErasureCorrectionProvenanceV1::reference)
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
-            bytes,
-        ))
+        let reference = correction.reference();
+        correction.to_canonical_cbor().map(|bytes| {
+            self.manifest.correction = Some(reference);
+            self.correction = Some(correction);
+            ErasurePersistenceObjectV1::new(reference, bytes)
+        })
     }
 
     pub(super) fn retain_atomic_freeze(
@@ -848,52 +842,55 @@ impl RecoveredErasureV1 {
         freeze: ErasureFreezeProvenanceV1,
     ) -> Result<Vec<ErasurePersistenceObjectV1>, ErasureErrorV1> {
         let closure = TargetClosureV1::new(self.request.reference(), admission.targets().to_vec())?;
-        let objects = vec![
-            persistence_object(
+        let mut objects = [
+            encoded_persistence_object(
                 ERASURE_TARGET_CLOSURE_TAG_V1,
                 closure.reference,
-                closure.canonical_cbor()?,
+                closure.canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_SCOPE_COMMITMENT_TAG_V1,
                 scope.reference(),
-                scope.to_canonical_cbor()?,
+                scope.to_canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
                 admission.freeze_admission_evidence().reference(),
-                admission.freeze_admission_evidence().to_canonical_cbor()?,
+                admission.freeze_admission_evidence().to_canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
                 admission.freeze_authorization_evidence().reference(),
                 admission
                     .freeze_authorization_evidence()
-                    .to_canonical_cbor()?,
+                    .to_canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_FREEZE_PROVENANCE_TAG_V1,
                 freeze.reference(),
-                freeze.to_canonical_cbor()?,
+                freeze.to_canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_OBLIGATION_SET_TAG_V1,
                 admission.obligation_set().reference(),
-                admission.obligation_set().to_canonical_cbor()?,
+                admission.obligation_set().to_canonical_cbor(),
             ),
-        ];
-        let objects =
+        ]
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+        objects.extend(
             admission
                 .obligations()
                 .iter()
-                .try_fold(objects, |mut objects, obligation| {
-                    objects.push(persistence_object(
+                .map(|obligation| {
+                    encoded_persistence_object(
                         ERASURE_OBLIGATION_TAG_V1,
                         obligation.reference(),
-                        obligation.to_canonical_cbor()?,
-                    ));
-                    Ok::<_, ErasureErrorV1>(objects)
-                })?;
+                        obligation.to_canonical_cbor(),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         self.manifest.target_closure = Some(closure.reference);
         self.manifest.scope = Some(scope.reference());
         self.manifest.freeze_admission = Some(admission.freeze_admission_evidence().reference());
@@ -915,17 +912,12 @@ impl RecoveredErasureV1 {
         &mut self,
         failure: ErasureFreezeFailureV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
-        let bytes = failure.to_canonical_cbor()?;
-        self.manifest.freeze_failure = Some(failure.reference());
-        self.freeze_failure = Some(failure);
-        Ok(persistence_object(
-            ERASURE_FREEZE_FAILURE_TAG_V1,
-            self.freeze_failure
-                .as_ref()
-                .map(ErasureFreezeFailureV1::reference)
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
-            bytes,
-        ))
+        let reference = failure.reference();
+        failure.to_canonical_cbor().map(|bytes| {
+            self.manifest.freeze_failure = Some(reference);
+            self.freeze_failure = Some(failure);
+            persistence_object(ERASURE_FREEZE_FAILURE_TAG_V1, reference, bytes)
+        })
     }
 
     pub(super) fn begin_attempt(
@@ -939,39 +931,38 @@ impl RecoveredErasureV1 {
         {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let bytes = admission.to_canonical_cbor()?;
         let reference = admission.reference();
         let ordinal = admission.attempt_ordinal();
-        self.effective
-            .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
-        self.manifest.active = Some(ActiveAttemptRefV1 {
-            ordinal,
-            admission: reference,
-            acknowledgements: Vec::new(),
-        });
-        if ordinal == 0 {
-            self.manifest.dispatch_provenance = Some(reference);
-            self.dispatch_provenance = Some(reference);
-        }
-        self.active = Some(RecoveredAttemptV1 {
-            ordinal,
-            admission,
-            admitted: BTreeMap::new(),
-        });
-        Ok(persistence_object(
-            ERASURE_RETRY_ADMISSION_TAG_V1,
-            reference,
-            bytes,
-        ))
+        admission.to_canonical_cbor().map(|bytes| {
+            self.effective.retain(|_, value| {
+                value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged
+            });
+            self.manifest.active = Some(ActiveAttemptRefV1 {
+                ordinal,
+                admission: reference,
+                acknowledgements: Vec::new(),
+            });
+            if ordinal == 0 {
+                self.manifest.dispatch_provenance = Some(reference);
+                self.dispatch_provenance = Some(reference);
+            }
+            self.active = Some(RecoveredAttemptV1 {
+                ordinal,
+                admission,
+                admitted: BTreeMap::new(),
+            });
+            persistence_object(ERASURE_RETRY_ADMISSION_TAG_V1, reference, bytes)
+        })
     }
 
     pub(super) fn retain_acknowledgement(
         &mut self,
         acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
-        let active = self
+        let (active, manifest_active) = self
             .active
             .as_mut()
+            .zip(self.manifest.active.as_mut())
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
         if acknowledgement.request() != self.request.reference()
             || acknowledgement.attempt() != active.admission.reference()
@@ -982,21 +973,17 @@ impl RecoveredErasureV1 {
         if active.admitted.contains_key(&identity) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        let bytes = acknowledgement.to_canonical_cbor()?;
         let reference = acknowledgement.reference();
-        active.admitted.insert(identity, *acknowledgement);
-        self.effective.insert(identity, *acknowledgement);
-        self.manifest
-            .active
-            .as_mut()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?
-            .acknowledgements
-            .push(reference);
-        Ok(persistence_object(
-            super::ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
-            reference,
-            bytes,
-        ))
+        acknowledgement.to_canonical_cbor().map(|bytes| {
+            active.admitted.insert(identity, *acknowledgement);
+            self.effective.insert(identity, *acknowledgement);
+            manifest_active.acknowledgements.push(reference);
+            persistence_object(
+                super::ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+                reference,
+                bytes,
+            )
+        })
     }
 
     pub(super) fn append_scope_extension(
@@ -1026,31 +1013,34 @@ impl RecoveredErasureV1 {
             predecessor: self.scope_head.map(|head| head.node),
             reference: super::reference_zero(),
         };
-        let node_bytes = node.canonical_cbor()?;
-        let node_reference = addressed(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, &node_bytes);
-        let extension_object = persistence_object(
-            ERASURE_SCOPE_EXTENSION_TAG_V1,
-            extension.reference(),
-            extension.to_canonical_cbor()?,
-        );
-        self.manifest.scope_extension_head = Some(node_reference);
-        self.scope_head = Some(RecoveredScopeHeadV1 {
-            node: node_reference,
-            extension: extension.reference(),
-            ordinal,
-        });
-        Ok((
-            extension_object,
-            persistence_object(
-                ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-                node_reference,
-                node_bytes,
-            ),
-            ErasureIndexInsertV1::ScopeNode {
-                ordinal,
-                reference: node_reference,
-            },
-        ))
+        let extension_reference = extension.reference();
+        node.canonical_cbor().and_then(|node_bytes| {
+            extension.to_canonical_cbor().map(|extension_bytes| {
+                let node_reference = addressed(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, &node_bytes);
+                self.manifest.scope_extension_head = Some(node_reference);
+                self.scope_head = Some(RecoveredScopeHeadV1 {
+                    node: node_reference,
+                    extension: extension_reference,
+                    ordinal,
+                });
+                (
+                    persistence_object(
+                        ERASURE_SCOPE_EXTENSION_TAG_V1,
+                        extension_reference,
+                        extension_bytes,
+                    ),
+                    persistence_object(
+                        ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+                        node_reference,
+                        node_bytes,
+                    ),
+                    ErasureIndexInsertV1::ScopeNode {
+                        ordinal,
+                        reference: node_reference,
+                    },
+                )
+            })
+        })
     }
 
     pub(super) fn append_administrative_resolution(
@@ -1062,20 +1052,20 @@ impl RecoveredErasureV1 {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let reference = resolution.reference();
-        let object = persistence_object(
-            ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
-            reference,
-            resolution.to_canonical_cbor()?,
-        );
-        self.manifest.administrative_resolution_head = Some(reference);
-        self.administrative_resolution_head = Some(reference);
-        self.administrative_resolution_count = ordinal
+        let next_count = ordinal
             .checked_add(1)
             .ok_or(ErasureErrorV1::PolicyConflict)?;
-        Ok((
-            object,
-            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
-        ))
+        resolution.to_canonical_cbor().map(|bytes| {
+            let object =
+                persistence_object(ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, reference, bytes);
+            self.manifest.administrative_resolution_head = Some(reference);
+            self.administrative_resolution_head = Some(reference);
+            self.administrative_resolution_count = next_count;
+            (
+                object,
+                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
+            )
+        })
     }
 
     pub(super) fn finish_attempt(
@@ -1116,34 +1106,40 @@ impl RecoveredErasureV1 {
         };
         let page_bytes = page.canonical_cbor()?;
         let page_reference = addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, &page_bytes);
-        let objects = vec![
-            persistence_object(
+        let mut objects = [
+            encoded_persistence_object(
                 ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
                 admitted.reference,
-                admitted.canonical_cbor()?,
+                admitted.canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
                 effective.reference,
-                effective.canonical_cbor()?,
+                effective.canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_ATTEMPT_OUTCOME_TAG_V1,
                 outcome.reference(),
-                outcome.to_canonical_cbor()?,
+                outcome.to_canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_RECEIPT_PROVENANCE_TAG_V1,
                 receipt_provenance.reference(),
-                receipt_provenance.to_canonical_cbor()?,
+                receipt_provenance.to_canonical_cbor(),
             ),
-            persistence_object(
+            encoded_persistence_object(
                 ERASURE_RECEIPT_TAG_V1,
                 receipt.receipt_digest(),
-                receipt.to_canonical_cbor()?,
+                receipt.to_canonical_cbor(),
             ),
-            persistence_object(ERASURE_ATTEMPT_HISTORY_TAG_V1, page_reference, page_bytes),
-        ];
+        ]
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+        objects.push(persistence_object(
+            ERASURE_ATTEMPT_HISTORY_TAG_V1,
+            page_reference,
+            page_bytes,
+        ));
         self.manifest.active = None;
         self.manifest.attempt_history_head = Some(page_reference);
         let completed = ordinal
@@ -1605,6 +1601,14 @@ const fn persistence_object(
     canonical_cbor: Vec<u8>,
 ) -> ErasurePersistenceObjectV1 {
     ErasurePersistenceObjectV1::new(reference, canonical_cbor)
+}
+
+fn encoded_persistence_object(
+    tag: &'static str,
+    reference: ErasureReferenceV1,
+    canonical_cbor: Result<Vec<u8>, ErasureErrorV1>,
+) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+    canonical_cbor.map(|bytes| persistence_object(tag, reference, bytes))
 }
 
 fn canonical_acknowledgement_references(
