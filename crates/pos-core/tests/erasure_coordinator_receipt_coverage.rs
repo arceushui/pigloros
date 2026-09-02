@@ -116,6 +116,23 @@ fn replace_path(
     encode_value(&value)
 }
 
+fn reject_each_top_level_field<T>(
+    bytes: &[u8],
+    decode: impl Fn(&[u8]) -> Result<T, ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    let Value::Array(fields) = decode_value(bytes)? else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    for index in 0..fields.len() {
+        let malformed = replace_path(bytes, &[index], Value::Bool(true))?;
+        assert!(
+            decode(&malformed).is_err(),
+            "field {index} accepted a boolean"
+        );
+    }
+    Ok(())
+}
+
 fn applicability_matrix(
     target_count: usize,
     applicable: Option<(ErasureInventoryCategoryV1, usize, ErasureReferenceV1)>,
@@ -1850,6 +1867,208 @@ fn erasure_index_variants_expose_ordinals() {
             }
         }
     }
+}
+
+#[test]
+fn portable_decoders_reject_wrong_types_in_every_foundation_field() -> Result<(), ErasureErrorV1> {
+    let request = request(ErasureScopeV1::PrivateSubjectData, vec![reference(20)])?;
+    reject_each_top_level_field(&request.to_canonical_cbor()?, |bytes| {
+        ErasureRequestV1::from_canonical_cbor(bytes)
+    })?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: reference(1),
+        rejected_terminal_state: reference(2),
+        correction_reason: reference(3),
+        authorization_provenance: reference(4),
+    })?;
+    reject_each_top_level_field(&correction.to_canonical_cbor()?, |bytes| {
+        ErasureCorrectionProvenanceV1::from_canonical_cbor(bytes)
+    })?;
+    let scope = ErasureScopeCommitmentV1::new(ErasureScopeCommitmentInputV1 {
+        request: reference(1),
+        scope_members: vec![reference(2)],
+        target_closure: reference(3),
+        lineage_rule: Some(reference(4)),
+    })?;
+    reject_each_top_level_field(&scope.to_canonical_cbor()?, |bytes| {
+        ErasureScopeCommitmentV1::from_canonical_cbor(bytes)
+    })?;
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: reference(1),
+        scope_commitment: scope.reference(),
+        fork: reference(5),
+        lineage_rule: reference(4),
+        predecessor_extension: Some(reference(6)),
+        admission_provenance: reference(7),
+    })?;
+    reject_each_top_level_field(&extension.to_canonical_cbor()?, |bytes| {
+        ErasureScopeExtensionV1::from_canonical_cbor(bytes)
+    })?;
+    let obligation = obligation(
+        reference(1),
+        ErasureInventoryCategoryV1::Artifact,
+        target(10),
+    )?;
+    reject_each_top_level_field(&obligation.to_canonical_cbor()?, |bytes| {
+        ErasureObligationV1::from_canonical_cbor(bytes)
+    })?;
+    let set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request: reference(1),
+        obligations: vec![obligation.reference()],
+        policy: reference(8),
+        trust: reference(9),
+    })?;
+    reject_each_top_level_field(&set.to_canonical_cbor()?, |bytes| {
+        ErasureObligationSetV1::from_canonical_cbor(bytes)
+    })?;
+    let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
+    reject_each_top_level_field(&state.to_canonical_cbor()?, |bytes| {
+        ErasureStateV1::from_canonical_cbor(bytes)
+    })
+}
+
+#[test]
+fn portable_decoders_reject_wrong_types_in_every_evidence_field() -> Result<(), ErasureErrorV1> {
+    let (admission, authorization) = freeze_evidence_pair()?;
+    reject_each_top_level_field(&admission.to_canonical_cbor()?, |bytes| {
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(bytes)
+    })?;
+    reject_each_top_level_field(&authorization.to_canonical_cbor()?, |bytes| {
+        ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor(bytes)
+    })?;
+    let freeze = ErasureFreezeProvenanceV1::new(ErasureFreezeProvenanceInputV1 {
+        request: reference(1),
+        scope_commitment: reference(2),
+        obligation_set: reference(3),
+        freeze_position: 4,
+        host_evidence: reference(5),
+    })?;
+    reject_each_top_level_field(&freeze.to_canonical_cbor()?, |bytes| {
+        ErasureFreezeProvenanceV1::from_canonical_cbor(bytes)
+    })?;
+    let failure = ErasureFreezeFailureV1::new(ErasureFreezeFailureInputV1 {
+        request: reference(1),
+        error: ErasureErrorV1::ScopeInvalid,
+        authorization_provenance: reference(2),
+        evidence: reference(3),
+    })?;
+    reject_each_top_level_field(&failure.to_canonical_cbor()?, |bytes| {
+        ErasureFreezeFailureV1::from_canonical_cbor(bytes)
+    })?;
+    let rejection = ErasureAuthorizationRejectionV1::new(ErasureAuthorizationRejectionInputV1 {
+        request: reference(1),
+        authorization_provenance: reference(2),
+    })?;
+    reject_each_top_level_field(&rejection.to_canonical_cbor()?, |bytes| {
+        ErasureAuthorizationRejectionV1::from_canonical_cbor(bytes)
+    })?;
+    Ok(())
+}
+
+#[test]
+fn portable_decoders_reject_wrong_types_in_attempt_and_terminal_fields(
+) -> Result<(), ErasureErrorV1> {
+    let retry = coordinator_admission(reference(1), target(10), 1, Some(reference(2)))?;
+    reject_each_top_level_field(&retry.to_canonical_cbor()?, |bytes| {
+        ErasureRetryAdmissionV1::from_canonical_cbor(bytes)
+    })?;
+    let acknowledgement =
+        ErasureAcknowledgementProvenanceV1::new(ErasureAcknowledgementProvenanceInputV1 {
+            request: reference(1),
+            command: reference(2),
+            attempt: retry.reference(),
+            obligation: reference(3),
+            owner: reference(4),
+            scope: reference(5),
+            outcome: ErasureAcknowledgementOutcomeV1::Stale,
+            evidence: reference(6),
+            policy: reference(7),
+            trust: reference(8),
+        })?;
+    reject_each_top_level_field(&acknowledgement.to_canonical_cbor()?, |bytes| {
+        ErasureAcknowledgementProvenanceV1::from_canonical_cbor(bytes)
+    })?;
+    let outcome = ErasureAttemptOutcomeV1::new(ErasureAttemptOutcomeInputV1 {
+        request: reference(1),
+        attempt: retry.reference(),
+        source_receipt: Some(reference(2)),
+        lifecycle: ErasureLifecycleV1::PartialFailure,
+        selected_obligations: reference(3),
+        acknowledgement_inventory: reference(4),
+        terminal_position: 20,
+        policy: reference(5),
+        trust: reference(6),
+    })?;
+    reject_each_top_level_field(&outcome.to_canonical_cbor()?, |bytes| {
+        ErasureAttemptOutcomeV1::from_canonical_cbor(bytes)
+    })?;
+    let provenance = ErasureReceiptProvenanceV1::new(ErasureReceiptProvenanceInputV1 {
+        request: reference(1),
+        attempt: retry.reference(),
+        attempt_ordinal: 1,
+        predecessor_receipt: Some(reference(2)),
+        terminal_state: reference(3),
+        evidence_set: reference(4),
+        policy: reference(5),
+        trust: reference(6),
+        issue_position: 20,
+    })?;
+    reject_each_top_level_field(&provenance.to_canonical_cbor()?, |bytes| {
+        ErasureReceiptProvenanceV1::from_canonical_cbor(bytes)
+    })
+}
+
+#[test]
+fn terminal_and_effect_decoders_reject_wrong_types_in_every_field() -> Result<(), ErasureErrorV1> {
+    let resolution =
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: reference(1),
+            affected_digests: vec![reference(2)],
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: reference(3),
+            policy: reference(4),
+            trust: reference(5),
+            principal: reference(6),
+            authorization_provenance: reference(7),
+            reason: reference(8),
+            issue_position: 20,
+            predecessor_resolution: Some(reference(9)),
+        })?;
+    reject_each_top_level_field(&resolution.to_canonical_cbor()?, |bytes| {
+        ErasureAdministrativeResolutionV1::from_canonical_cbor(bytes)
+    })?;
+    let (input, _) = complete_receipt_input()?;
+    let receipt = ErasureReceiptV1::new(input)?;
+    reject_each_top_level_field(&receipt.to_canonical_cbor()?, |bytes| {
+        ErasureReceiptV1::from_canonical_cbor(bytes)
+    })?;
+    let obligation = obligation(
+        reference(1),
+        ErasureInventoryCategoryV1::Artifact,
+        target(10),
+    )?;
+    let effects = [
+        ErasureCasEffectV1::None,
+        ErasureCasEffectV1::AttemptAdmission {
+            reservation: ErasureAttemptQuotaReservationV1::new(reference(10), reference(11)),
+            commands: vec![ErasureDestructionCommandV1::from_obligation(
+                &obligation,
+                reference(12),
+            )],
+        },
+        ErasureCasEffectV1::AcknowledgementAdmission {
+            acknowledgement: reference(13),
+        },
+        ErasureCasEffectV1::ReceiptAdmission {
+            receipt: reference(14),
+        },
+    ];
+    for effect in effects {
+        reject_each_top_level_field(&effect.to_canonical_cbor()?, |bytes| {
+            ErasureCasEffectV1::from_canonical_cbor(bytes)
+        })?;
+    }
+    Ok(())
 }
 
 #[test]
