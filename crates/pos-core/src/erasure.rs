@@ -325,7 +325,7 @@ impl ErasureLifecycleV1 {
             0b0110_0000,
             0,
         ];
-        PERMITTED_SUCCESSORS[usize::from(self as u8)] & (1_u8 << (next as u8)) != 0
+        PERMITTED_SUCCESSORS[self as usize] & (1_u8 << (next as u8)) != 0
     }
     /// Report whether the request itself has reached a terminal outcome.
     #[must_use]
