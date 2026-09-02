@@ -243,7 +243,10 @@ impl PublicCoordinatorPort {
     }
 
     #[must_use]
-    pub fn with_attempt_reservation_admission(mut self, admission: ErasureReferenceV1) -> Self {
+    pub const fn with_attempt_reservation_admission(
+        mut self,
+        admission: ErasureReferenceV1,
+    ) -> Self {
         self.config.attempt_reservation_admission = Some(admission);
         self
     }
@@ -1110,7 +1113,7 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
         Ok(ErasureAttemptQuotaReservationV1::new(
             self.config
                 .attempt_reservation_admission
-                .unwrap_or(admission.reference()),
+                .unwrap_or_else(|| admission.reference()),
             admission.reference(),
         ))
     }

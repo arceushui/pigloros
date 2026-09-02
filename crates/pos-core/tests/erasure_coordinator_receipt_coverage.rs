@@ -919,6 +919,45 @@ fn retry_persisted_graph() -> Result<ActiveGraph, ErasureErrorV1> {
     })
 }
 
+fn acknowledging_persisted_graph(
+) -> Result<(ActiveGraph, ErasureAcknowledgementProvenanceV1), ErasureErrorV1> {
+    let target = target(10);
+    let request = coordinator_request()?;
+    let port = coordinator_port(vec![target], None);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    let admission = coordinator_admission(request.reference(), target, 0, None)?;
+    coordinator.dispatch_attempt(request.reference(), &admission)?;
+    coordinator.acknowledge(
+        request.reference(),
+        coordinator_acknowledgement(
+            request.reference(),
+            target,
+            reference(171),
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )?,
+    )?;
+    let reference = match adapter
+        .last_mutation()
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .effect()
+    {
+        ErasureCasEffectV1::AcknowledgementAdmission { acknowledgement } => *acknowledgement,
+        _ => return Err(ErasureErrorV1::ProvenanceMissing),
+    };
+    let acknowledgement =
+        ErasureAcknowledgementProvenanceV1::from_canonical_cbor(&adapter.read_object(reference)?)?;
+    Ok((
+        ActiveGraph {
+            adapter,
+            request,
+            admission,
+        },
+        acknowledgement,
+    ))
+}
+
 fn complete_persisted_graph(
     lineage_rule: Option<ErasureReferenceV1>,
 ) -> Result<CompletedGraph, ErasureErrorV1> {
@@ -987,6 +1026,46 @@ fn assert_retry_graph_mutation_rejected(
 ) -> Result<(), ErasureErrorV1> {
     let graph = retry_persisted_graph()?;
     mutate(&graph)?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+fn acknowledgement_input(
+    acknowledgement: ErasureAcknowledgementProvenanceV1,
+) -> ErasureAcknowledgementProvenanceInputV1 {
+    ErasureAcknowledgementProvenanceInputV1 {
+        request: acknowledgement.request(),
+        command: acknowledgement.command(),
+        attempt: acknowledgement.attempt(),
+        obligation: acknowledgement.obligation(),
+        owner: acknowledgement.owner(),
+        scope: acknowledgement.scope(),
+        outcome: acknowledgement.outcome(),
+        evidence: acknowledgement.evidence(),
+        policy: acknowledgement.policy(),
+        trust: acknowledgement.trust(),
+    }
+}
+
+fn assert_acknowledgement_mutation_rejected(
+    mutate: fn(&mut ErasureAcknowledgementProvenanceInputV1),
+) -> Result<(), ErasureErrorV1> {
+    let (graph, original) = acknowledging_persisted_graph()?;
+    let mut input = acknowledgement_input(original);
+    mutate(&mut input);
+    let changed = ErasureAcknowledgementProvenanceV1::new(input)?;
+    graph
+        .adapter
+        .insert_object(changed.reference(), changed.to_canonical_cbor()?);
+    graph.adapter.replace_manifest_field(
+        graph.request.reference(),
+        14,
+        Value::Array(vec![
+            Value::Integer(0.into()),
+            Value::Bytes(graph.admission.reference().digest().to_vec()),
+            Value::Array(vec![Value::Bytes(changed.reference().digest().to_vec())]),
+        ]),
+    )?;
     assert_public_recovery_fails(graph.adapter, &graph.request);
     Ok(())
 }
@@ -1616,6 +1695,45 @@ fn coordinator_recovery_rejects_retry_admission_commitment_mismatches() -> Resul
             Value::Array(Vec::new()),
         )
     })
+}
+
+#[test]
+fn coordinator_recovery_rejects_acknowledgement_binding_mismatches() -> Result<(), ErasureErrorV1> {
+    let mutations: [fn(&mut ErasureAcknowledgementProvenanceInputV1); 8] = [
+        |input| input.request = reference(240),
+        |input| input.command = reference(240),
+        |input| input.attempt = reference(240),
+        |input| input.obligation = reference(240),
+        |input| input.owner = reference(240),
+        |input| input.scope = reference(240),
+        |input| input.policy = reference(240),
+        |input| input.trust = reference(240),
+    ];
+    for mutate in mutations {
+        assert_acknowledgement_mutation_rejected(mutate)?;
+    }
+
+    let (graph, original) = acknowledging_persisted_graph()?;
+    let mut input = acknowledgement_input(original);
+    input.evidence = reference(240);
+    let changed = ErasureAcknowledgementProvenanceV1::new(input)?;
+    graph
+        .adapter
+        .insert_object(changed.reference(), changed.to_canonical_cbor()?);
+    graph.adapter.replace_manifest_field(
+        graph.request.reference(),
+        14,
+        Value::Array(vec![
+            Value::Integer(0.into()),
+            Value::Bytes(graph.admission.reference().digest().to_vec()),
+            Value::Array(vec![
+                Value::Bytes(original.reference().digest().to_vec()),
+                Value::Bytes(changed.reference().digest().to_vec()),
+            ]),
+        ]),
+    )?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
 }
 
 #[test]
