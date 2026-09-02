@@ -1027,7 +1027,11 @@ fn freeze_failure_and_rejection_records_cover_closed_errors() -> Result<(), Eras
             authorization_provenance: reference(2),
             evidence: reference(3),
         })?;
+        assert_eq!(failure.request(), reference(1));
         assert_eq!(failure.error(), error);
+        assert_eq!(failure.authorization_provenance(), reference(2));
+        assert_eq!(failure.evidence(), reference(3));
+        assert_ne!(failure.reference(), reference(0));
         assert_eq!(
             ErasureFreezeFailureV1::from_canonical_cbor(&failure.to_canonical_cbor()?)?,
             failure
@@ -1070,6 +1074,8 @@ fn retry_and_acknowledgement_records_cover_public_forms() -> Result<(), ErasureE
         deadline_position: 49,
         authorization_provenance: reference(6),
     })?;
+    assert_eq!(retry.request(), reference(1));
+    assert_eq!(retry.attempt_ordinal(), 2);
     assert_eq!(retry.source_receipt(), Some(reference(50)));
     assert_eq!(
         retry.unresolved_obligations(),
@@ -1078,6 +1084,10 @@ fn retry_and_acknowledgement_records_cover_public_forms() -> Result<(), ErasureE
     assert_eq!(retry.command_identities(), &[reference(21), reference(31)]);
     assert_eq!(retry.admitted_position(), 41);
     assert_eq!(retry.deadline_position(), 49);
+    assert_eq!(retry.policy(), reference(4));
+    assert_eq!(retry.trust(), reference(5));
+    assert_eq!(retry.authorization_provenance(), reference(6));
+    assert_eq!(retry.digest(), retry.reference());
     assert_eq!(
         ErasureRetryAdmissionV1::from_canonical_cbor(&retry.to_canonical_cbor()?)?,
         retry
@@ -1116,7 +1126,17 @@ fn retry_and_acknowledgement_records_cover_public_forms() -> Result<(), ErasureE
                 policy: reference(8),
                 trust: reference(9),
             })?;
+        assert_eq!(provenance.request(), reference(1));
+        assert_eq!(provenance.command(), reference(2));
+        assert_eq!(provenance.attempt(), reference(3));
+        assert_eq!(provenance.obligation(), reference(4));
+        assert_eq!(provenance.owner(), reference(5));
+        assert_eq!(provenance.scope(), reference(6));
         assert_eq!(provenance.outcome(), outcome);
+        assert_eq!(provenance.evidence(), reference(7));
+        assert_eq!(provenance.policy(), reference(8));
+        assert_eq!(provenance.trust(), reference(9));
+        assert_eq!(provenance.digest(), provenance.reference());
         assert_eq!(
             ErasureAcknowledgementProvenanceV1::from_canonical_cbor(
                 &provenance.to_canonical_cbor()?
@@ -1140,7 +1160,16 @@ fn attempt_and_receipt_provenance_cover_retry_lineage() -> Result<(), ErasureErr
         policy: reference(6),
         trust: reference(7),
     })?;
+    assert_eq!(attempt_outcome.request(), reference(1));
+    assert_eq!(attempt_outcome.attempt(), reference(2));
     assert_eq!(attempt_outcome.source_receipt(), Some(reference(3)));
+    assert_eq!(attempt_outcome.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(attempt_outcome.selected_obligations(), reference(4));
+    assert_eq!(attempt_outcome.acknowledgement_inventory(), reference(5));
+    assert_eq!(attempt_outcome.terminal_position(), 50);
+    assert_eq!(attempt_outcome.policy(), reference(6));
+    assert_eq!(attempt_outcome.trust(), reference(7));
+    assert_eq!(attempt_outcome.digest(), attempt_outcome.reference());
     assert_eq!(
         ErasureAttemptOutcomeV1::from_canonical_cbor(&attempt_outcome.to_canonical_cbor()?)?,
         attempt_outcome
@@ -1171,7 +1200,16 @@ fn attempt_and_receipt_provenance_cover_retry_lineage() -> Result<(), ErasureErr
         trust: reference(7),
         issue_position: 50,
     })?;
+    assert_eq!(receipt_provenance.request(), reference(1));
+    assert_eq!(receipt_provenance.attempt(), reference(2));
+    assert_eq!(receipt_provenance.attempt_ordinal(), 1);
     assert_eq!(receipt_provenance.predecessor_receipt(), Some(reference(3)));
+    assert_eq!(receipt_provenance.terminal_state(), reference(4));
+    assert_eq!(receipt_provenance.evidence_set(), reference(5));
+    assert_eq!(receipt_provenance.policy(), reference(6));
+    assert_eq!(receipt_provenance.trust(), reference(7));
+    assert_eq!(receipt_provenance.issue_position(), 50);
+    assert_eq!(receipt_provenance.digest(), receipt_provenance.reference());
     assert_eq!(
         ErasureReceiptProvenanceV1::from_canonical_cbor(&receipt_provenance.to_canonical_cbor()?)?,
         receipt_provenance
@@ -1209,10 +1247,24 @@ fn administrative_resolution_normalizes_and_rejects_duplicates() -> Result<(), E
             issue_position: 50,
             predecessor_resolution: Some(reference(10)),
         })?;
+    assert_eq!(resolution.request(), reference(1));
     assert_eq!(
         resolution.affected_digests(),
         &[reference(20), reference(30)]
     );
+    assert_eq!(
+        resolution.action(),
+        ErasureAdministrativeResolutionActionV1::RecoverExactEvidence
+    );
+    assert_eq!(resolution.scope_commitment(), reference(4));
+    assert_eq!(resolution.policy(), reference(5));
+    assert_eq!(resolution.trust(), reference(6));
+    assert_eq!(resolution.principal(), reference(7));
+    assert_eq!(resolution.authorization_provenance(), reference(8));
+    assert_eq!(resolution.reason(), reference(9));
+    assert_eq!(resolution.issue_position(), 50);
+    assert_eq!(resolution.predecessor_resolution(), Some(reference(10)));
+    assert_eq!(resolution.digest(), resolution.reference());
     assert_eq!(
         ErasureAdministrativeResolutionV1::from_canonical_cbor(&resolution.to_canonical_cbor()?)?,
         resolution
@@ -1237,6 +1289,87 @@ fn administrative_resolution_normalizes_and_rejects_duplicates() -> Result<(), E
         Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
+}
+
+#[test]
+fn public_constructors_reject_each_bounded_collection_violation() {
+    assert_eq!(
+        request(
+            ErasureScopeV1::PrivateSubjectData,
+            vec![reference(20); 10_000]
+        ),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
+            request: reference(1),
+            affected_digests: Vec::new(),
+            action: ErasureAdministrativeResolutionActionV1::CloseContainment,
+            scope_commitment: reference(2),
+            policy: reference(3),
+            trust: reference(4),
+            principal: reference(5),
+            authorization_provenance: reference(6),
+            reason: reference(7),
+            issue_position: 8,
+            predecessor_resolution: None,
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    for (obligations, commands, admitted, deadline, expected) in [
+        (
+            vec![reference(10)],
+            Vec::new(),
+            1,
+            2,
+            ErasureErrorV1::ScopeInvalid,
+        ),
+        (
+            vec![reference(10), reference(10)],
+            vec![reference(11), reference(12)],
+            1,
+            2,
+            ErasureErrorV1::ScopeInvalid,
+        ),
+        (
+            vec![reference(10)],
+            vec![reference(11)],
+            2,
+            1,
+            ErasureErrorV1::PolicyConflict,
+        ),
+    ] {
+        assert_eq!(
+            ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+                request: reference(1),
+                attempt_ordinal: 0,
+                source_receipt: None,
+                unresolved_obligations: obligations,
+                command_identities: commands,
+                policy: reference(2),
+                trust: reference(3),
+                admitted_position: admitted,
+                deadline_position: deadline,
+                authorization_provenance: reference(4),
+            }),
+            Err(expected)
+        );
+    }
+    for obligations in [
+        vec![reference(2), reference(1)],
+        vec![reference(1), reference(1)],
+        vec![reference(1); 10_000],
+    ] {
+        assert_eq!(
+            ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+                request: reference(1),
+                obligations,
+                policy: reference(2),
+                trust: reference(3),
+            }),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
 }
 
 #[test]
@@ -1779,6 +1912,45 @@ fn nested_codecs_reject_wrong_versions_shapes_and_closed_values() -> Result<(), 
         Err(ErasureErrorV1::InvalidEncoding)
     );
     Ok(())
+}
+
+#[test]
+fn public_request_codec_rejects_every_bounded_cbor_shape_family() {
+    let invalid_encodings: &[&[u8]] = &[
+        &[0x00],
+        &[0x20],
+        &[0x40],
+        &[0x60],
+        &[0x80],
+        &[0xa0],
+        &[0xc0, 0x00],
+        &[0xf6],
+        &[0x58, 0x20],
+        &[0x78, 0x20],
+        &[0x98, 0xff],
+        &[0x9f, 0xff],
+        &[0x18],
+        &[0x19, 0x01],
+        &[0x1a, 0x00, 0x01, 0x00],
+        &[0x1b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00],
+        &[0x18, 0x00],
+        &[0x19, 0x00, 0xff],
+        &[0x1a, 0x00, 0x00, 0xff, 0xff],
+        &[0x1b, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff],
+        &[0x19, 0x01, 0x00],
+        &[0x1a, 0x00, 0x01, 0x00, 0x00],
+        &[0x1b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+    ];
+    for bytes in invalid_encodings {
+        assert_eq!(
+            ErasureRequestV1::from_canonical_cbor(bytes),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+    assert_eq!(
+        ErasureRequestV1::from_canonical_cbor(&vec![0_u8; 2 * 1024 * 1024]),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
 }
 
 #[test]
