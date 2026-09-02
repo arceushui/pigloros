@@ -1943,6 +1943,9 @@ type ErasurePositiveProvenanceIndexV1<'a> =
     BTreeMap<ErasureObligationOwnerV1, ErasureSelectedPositiveProvenanceV1<'a>>;
 
 mod evidence;
+use evidence::{acknowledgement_provenance_ordering_key, normalize_retry_admission};
+/// Construction fields for [`ErasureSupportingRecordsV1`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ErasureSupportingRecordsInputV1 {
     /// Provenance linking a corrected ERQ1 to a rejected predecessor.
     pub correction_provenance: Option<ErasureCorrectionProvenanceV1>,
@@ -2880,7 +2883,7 @@ pub struct ErasureStateV1 {
 mod receipt;
 use receipt::{
     acknowledgements_close_frozen_obligations, derived_outcome_owners_for_obligations,
-    inventories_match_frozen_obligations,
+    inventories_match_frozen_obligations, target_closure_digest,
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureAcknowledgementV1 {
@@ -3733,6 +3736,7 @@ pub struct ErasurePersistenceEvidenceV1 {
 }
 
 mod persistence;
+pub use persistence::ErasurePersistenceBundleV1;
 /// Core-owned, idempotent ERQ1/ERS1/ERC1 state machine; adapters cannot bypass it.
 pub struct ErasureCoordinatorStateMachineV1<P> {
     port: P,

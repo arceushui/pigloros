@@ -141,9 +141,6 @@ impl<'a> ErasureEvidenceIndex<'a> {
     }
 }
 
-/// Construction fields for [`ErasureSupportingRecordsV1`].
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-
 impl ErasureSupportingRecordsV1 {
     /// Encode the canonical portable evidence ledger.
     ///
@@ -867,7 +864,7 @@ impl ErasureSupportingRecordsV1 {
         .all(std::convert::identity)
     }
 }
-const fn acknowledgement_provenance_ordering_key(
+pub(super) const fn acknowledgement_provenance_ordering_key(
     acknowledgement: &ErasureAcknowledgementProvenanceV1,
 ) -> (
     ErasureReferenceV1,
@@ -1017,7 +1014,7 @@ impl ErasureAdministrativeResolutionV1 {
     }
 }
 
-fn normalize_retry_admission(
+pub(super) fn normalize_retry_admission(
     input: &mut ErasureRetryAdmissionInputV1,
 ) -> Result<(), ErasureErrorV1> {
     if !(0..ERASURE_MAX_ATTEMPT_OUTCOMES as u64).contains(&input.attempt_ordinal) {
