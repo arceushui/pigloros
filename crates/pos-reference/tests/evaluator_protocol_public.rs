@@ -166,6 +166,22 @@ fn replace_field(value: &mut Value, index: usize, replacement: Value) -> TestRes
     Ok(())
 }
 
+fn replace_path(value: &mut Value, path: &[usize], replacement: Value) -> TestResult {
+    let (&index, remainder) = path.split_first().ok_or("test path is empty")?;
+    let Value::Array(fields) = value else {
+        return Err("test path does not select an array".into());
+    };
+    let field = fields
+        .get_mut(index)
+        .ok_or("test path index is out of bounds")?;
+    if remainder.is_empty() {
+        *field = replacement;
+        Ok(())
+    } else {
+        replace_path(field, remainder, replacement)
+    }
+}
+
 #[test]
 fn request_rejects_every_public_identity_and_capability_boundary() -> TestResult {
     let valid = valid_request()?;
@@ -279,6 +295,35 @@ fn request_decoder_rejects_protocol_shapes_codes_and_noncanonical_bytes() -> Tes
         EvaluationRequest::from_canonical_cbor(&[0x81, 0x00, 0x00]),
         Err(ProtocolError::InvalidEncoding)
     );
+    Ok(())
+}
+
+#[test]
+fn request_and_report_decoders_reject_wrong_types_at_every_required_field() -> TestResult {
+    let request_bytes = valid_request()?.to_canonical_cbor()?;
+    let request = decoded_value(&request_bytes)?;
+    for path in (0..14)
+        .map(|index| vec![index])
+        .chain((0..5).map(|index| vec![7, index]))
+        .chain((0..3).map(|index| vec![10, index]))
+    {
+        let mut changed = request.clone();
+        replace_path(&mut changed, &path, Value::Null)?;
+        assert!(EvaluationRequest::from_canonical_cbor(&canonical(&changed)?).is_err());
+    }
+
+    let report_bytes = valid_report()?.to_canonical_cbor()?;
+    let report = decoded_value(&report_bytes)?;
+    for (path, replacement) in (0..24)
+        .map(|index| (vec![index], Value::Null))
+        .chain((0..6).map(|index| (vec![11, index], Value::Bool(false))))
+        .chain((0..6).map(|index| (vec![12, index], Value::Null)))
+        .chain((0..14).map(|index| (vec![13, 0, index], Value::Bool(false))))
+    {
+        let mut changed = report.clone();
+        replace_path(&mut changed, &path, replacement)?;
+        assert!(ConformanceReport::from_canonical_cbor(&canonical(&changed)?).is_err());
+    }
     Ok(())
 }
 
