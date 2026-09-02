@@ -21,31 +21,59 @@ pub enum ProfileMutation {
     Magic,
     Version,
     ProfileId,
+    ProfileSemver,
     Lifecycle,
     NormativeDigest,
+    MatrixDigest,
+    FixturePolicyDigest,
+    LimitationsDigest,
+    PublicationDigest,
+    PreviousDigest,
     ExecutionProfilesEmpty,
+    ExecutionProfilesUnsorted,
     ProvidersEmpty,
+    ProvidersUnsorted,
     FixturesEmpty,
+    FixturesUnsorted,
     AllowedDivergenceUndeclared,
+    AllowedDivergenceUnsorted,
+    AllowedDivergenceCoordinate,
     ProtocolId,
     ProtocolDigest,
+    ProtocolRequestDigest,
+    ProtocolReportDigest,
     HardCapZero,
+    HardCapAboveMaximum,
     RequirementDigest,
+    RequirementDeclaration,
     FixtureModesEmpty,
     FixtureModesUnsorted,
+    FixtureModeOutOfRange,
     FixtureAdapter,
     FixtureProvider,
+    FixtureCaseId,
+    FixtureExecutionDigest,
     FixtureClaimLayer,
     FixtureFamily,
     FixtureOutcome,
     FixtureReplay,
     FixtureRedaction,
     FixtureBudget,
+    FixtureBudgetAboveCap,
     FixtureWatchdog,
     FixtureNetworkPlugin,
+    FixtureNetworkAirGapped,
     FixtureCapabilities,
+    FixtureCapabilitiesUnsorted,
+    FixtureAuxiliaryTooMany,
+    FixtureDuplicatePath,
     FixtureDescriptor,
+    FixturePayloadDescriptor,
     FixtureOracle,
+    FixtureOracleOutputMissing,
+    FixtureOracleDivergenceCoordinate,
+    FixtureUnexpectedVerificationError,
+    FixtureClaimMismatch,
     FixtureProvenance,
     FixtureDowngradeBinding,
     FixtureDigest,
@@ -794,15 +822,40 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::Magic => profile_fields[0] = text("CPF0"),
         ProfileMutation::Version => profile_fields[1] = uint(2),
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
+        ProfileMutation::ProfileSemver => profile_fields[3] = text("01.0.0"),
         ProfileMutation::Lifecycle => profile_fields[4] = uint(1),
         ProfileMutation::NormativeDigest => profile_fields[5] = bytes(&[0; 32]),
+        ProfileMutation::MatrixDigest => profile_fields[6] = bytes(&[0; 32]),
+        ProfileMutation::FixturePolicyDigest => profile_fields[13] = bytes(&[0; 32]),
+        ProfileMutation::LimitationsDigest => profile_fields[14] = bytes(&[0; 32]),
+        ProfileMutation::PublicationDigest => profile_fields[15] = bytes(&[0; 32]),
+        ProfileMutation::PreviousDigest => profile_fields[16] = bytes(&[0; 32]),
         ProfileMutation::ExecutionProfilesEmpty => profile_fields[7] = array(Vec::new()),
+        ProfileMutation::ExecutionProfilesUnsorted => {
+            profile_fields[7] = array(vec![bytes(&[2; 32]), bytes(&[1; 32])]);
+        }
         ProfileMutation::ProvidersEmpty => {
             array_fields_mut(&mut profile_fields[8])?[1] = array(Vec::new());
         }
+        ProfileMutation::ProvidersUnsorted => {
+            let binding = array_fields_mut(&mut profile_fields[8])?;
+            binding[1] = array(vec![provider_key(1), provider_key(1)]);
+        }
         ProfileMutation::FixturesEmpty => profile_fields[9] = array(Vec::new()),
+        ProfileMutation::FixturesUnsorted => {
+            array_fields_mut(&mut profile_fields[9])?.swap(0, 1);
+        }
         ProfileMutation::AllowedDivergenceUndeclared => {
             profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[1, 2])])]);
+        }
+        ProfileMutation::AllowedDivergenceUnsorted => {
+            profile_fields[10] = array(vec![
+                array(vec![uint(2), bytes(&[2])]),
+                array(vec![uint(1), bytes(&[1])]),
+            ]);
+        }
+        ProfileMutation::AllowedDivergenceCoordinate => {
+            profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[])])]);
         }
         ProfileMutation::ProtocolId => {
             array_fields_mut(&mut profile_fields[11])?[0] = text("Invalid");
@@ -810,12 +863,25 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::ProtocolDigest => {
             array_fields_mut(&mut profile_fields[11])?[1] = bytes(&[0; 32]);
         }
+        ProfileMutation::ProtocolRequestDigest => {
+            array_fields_mut(&mut profile_fields[11])?[2] = bytes(&[0; 32]);
+        }
+        ProfileMutation::ProtocolReportDigest => {
+            array_fields_mut(&mut profile_fields[11])?[3] = bytes(&[0; 32]);
+        }
         ProfileMutation::HardCapZero => {
             let protocol = array_fields_mut(&mut profile_fields[11])?;
             array_fields_mut(&mut protocol[4])?[0] = uint(0);
         }
+        ProfileMutation::HardCapAboveMaximum => {
+            let protocol = array_fields_mut(&mut profile_fields[11])?;
+            array_fields_mut(&mut protocol[4])?[0] = uint(16 * 1024 * 1024 + 1);
+        }
         ProfileMutation::RequirementDigest => {
             array_fields_mut(&mut profile_fields[12])?[3] = bytes(&[0; 32]);
+        }
+        ProfileMutation::RequirementDeclaration => {
+            array_fields_mut(&mut profile_fields[12])?[4] = bytes(&[0; 32]);
         }
         ProfileMutation::ExecutionMagic
         | ProfileMutation::ExecutionVersion
@@ -859,10 +925,13 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
     match mutation {
         ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
         ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
+        ProfileMutation::FixtureModeOutOfRange => fields[7] = array(vec![uint(4)]),
         ProfileMutation::FixtureAdapter => fields[5] = uint(9),
         ProfileMutation::FixtureProvider => {
             array_fields_mut(&mut fields[4])?[0] = text("Invalid");
         }
+        ProfileMutation::FixtureCaseId => fields[0] = text("Invalid"),
+        ProfileMutation::FixtureExecutionDigest => fields[6] = bytes(&[0; 32]),
         ProfileMutation::FixtureClaimLayer => fields[2] = uint(7),
         ProfileMutation::FixtureFamily => fields[3] = uint(7),
         ProfileMutation::FixtureOutcome => fields[12] = uint(6),
@@ -871,28 +940,52 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         ProfileMutation::FixtureBudget => {
             array_fields_mut(&mut fields[16])?[0] = uint(0);
         }
+        ProfileMutation::FixtureBudgetAboveCap => {
+            array_fields_mut(&mut fields[16])?[0] = uint(101);
+        }
         ProfileMutation::FixtureWatchdog => fields[17] = array(vec![uint(0)]),
         ProfileMutation::FixtureNetworkPlugin => {
             fields[5] = uint(2);
             array_fields_mut(&mut fields[18])?[0] = Value::Bool(true);
         }
+        ProfileMutation::FixtureNetworkAirGapped => {
+            array_fields_mut(&mut fields[18])?[0] = Value::Bool(true);
+        }
         ProfileMutation::FixtureCapabilities => {
-            array_fields_mut(&mut fields[18])?[1] = array(
-                (0..257)
-                    .map(|index| text(&format!("capability-{index:03}")))
-                    .collect(),
-            );
+            array_fields_mut(&mut fields[18])?[1] = excessive_capabilities();
+        }
+        ProfileMutation::FixtureCapabilitiesUnsorted => {
+            array_fields_mut(&mut fields[18])?[1] = array(vec![text("z"), text("a")]);
+        }
+        ProfileMutation::FixtureAuxiliaryTooMany => {
+            let auxiliary = array_fields_mut(&mut fields[10])?;
+            *auxiliary = vec![auxiliary[0].clone(); 65];
+        }
+        ProfileMutation::FixtureDuplicatePath => {
+            let schema = fields[8].clone();
+            array_fields_mut(&mut fields[10])?[0] = schema;
         }
         ProfileMutation::FixtureDescriptor => {
-            fields[8] = array(vec![
-                text("../schema"),
-                text("application/json"),
-                uint(1),
-                bytes(&[1; 32]),
-            ]);
+            fields[8] = invalid_descriptor("../schema", "application/json");
+        }
+        ProfileMutation::FixturePayloadDescriptor => {
+            fields[9] = invalid_descriptor("fixtures//payload", "application/octet-stream");
         }
         ProfileMutation::FixtureOracle => {
             fields[11] = array(vec![uint(9), Value::Null, Value::Null, Value::Null]);
+        }
+        ProfileMutation::FixtureOracleOutputMissing => {
+            fields[11] = array(vec![uint(0), Value::Null, Value::Null, Value::Null]);
+        }
+        ProfileMutation::FixtureOracleDivergenceCoordinate => {
+            fields[11] = divergence_oracle(&[]);
+        }
+        ProfileMutation::FixtureUnexpectedVerificationError => {
+            fields[13] = array(vec![text("pigloros.core"), text("1.0.0"), text("failure")]);
+        }
+        ProfileMutation::FixtureClaimMismatch => {
+            fields[14] = uint(0);
+            fields[15] = uint(1);
         }
         ProfileMutation::FixtureProvenance => {
             fields[21] = array(vec![
@@ -917,6 +1010,27 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         fields[23] = bytes(&digest);
     }
     Ok(())
+}
+
+fn excessive_capabilities() -> Value {
+    array(
+        (0..257)
+            .map(|index| text(&format!("capability-{index:03}")))
+            .collect(),
+    )
+}
+
+fn invalid_descriptor(path: &str, media_type: &str) -> Value {
+    array(vec![text(path), text(media_type), uint(1), bytes(&[1; 32])])
+}
+
+fn divergence_oracle(coordinate: &[u8]) -> Value {
+    array(vec![
+        uint(2),
+        Value::Null,
+        Value::Null,
+        array(vec![uint(1), bytes(coordinate)]),
+    ])
 }
 
 fn array_fields_mut(value: &mut Value) -> TestResult<&mut Vec<Value>> {

@@ -174,6 +174,16 @@ fn request_with_limits(
     Ok(request.to_canonical_cbor()?)
 }
 
+fn request_with(
+    bytes: &[u8],
+    update: impl FnOnce(&mut EvaluationRequest),
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut request = EvaluationRequest::from_canonical_cbor(bytes)?;
+    update(&mut request);
+    request.request_digest = request.digest()?;
+    Ok(request.to_canonical_cbor()?)
+}
+
 #[test]
 fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResult {
     let corpus = support::corpus()?;
@@ -407,31 +417,59 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
         ProfileMutation::Magic,
         ProfileMutation::Version,
         ProfileMutation::ProfileId,
+        ProfileMutation::ProfileSemver,
         ProfileMutation::Lifecycle,
         ProfileMutation::NormativeDigest,
+        ProfileMutation::MatrixDigest,
+        ProfileMutation::FixturePolicyDigest,
+        ProfileMutation::LimitationsDigest,
+        ProfileMutation::PublicationDigest,
+        ProfileMutation::PreviousDigest,
         ProfileMutation::ExecutionProfilesEmpty,
+        ProfileMutation::ExecutionProfilesUnsorted,
         ProfileMutation::ProvidersEmpty,
+        ProfileMutation::ProvidersUnsorted,
         ProfileMutation::FixturesEmpty,
+        ProfileMutation::FixturesUnsorted,
         ProfileMutation::AllowedDivergenceUndeclared,
+        ProfileMutation::AllowedDivergenceUnsorted,
+        ProfileMutation::AllowedDivergenceCoordinate,
         ProfileMutation::ProtocolId,
         ProfileMutation::ProtocolDigest,
+        ProfileMutation::ProtocolRequestDigest,
+        ProfileMutation::ProtocolReportDigest,
         ProfileMutation::HardCapZero,
+        ProfileMutation::HardCapAboveMaximum,
         ProfileMutation::RequirementDigest,
+        ProfileMutation::RequirementDeclaration,
         ProfileMutation::FixtureModesEmpty,
         ProfileMutation::FixtureModesUnsorted,
+        ProfileMutation::FixtureModeOutOfRange,
         ProfileMutation::FixtureAdapter,
         ProfileMutation::FixtureProvider,
+        ProfileMutation::FixtureCaseId,
+        ProfileMutation::FixtureExecutionDigest,
         ProfileMutation::FixtureClaimLayer,
         ProfileMutation::FixtureFamily,
         ProfileMutation::FixtureOutcome,
         ProfileMutation::FixtureReplay,
         ProfileMutation::FixtureRedaction,
         ProfileMutation::FixtureBudget,
+        ProfileMutation::FixtureBudgetAboveCap,
         ProfileMutation::FixtureWatchdog,
         ProfileMutation::FixtureNetworkPlugin,
+        ProfileMutation::FixtureNetworkAirGapped,
         ProfileMutation::FixtureCapabilities,
+        ProfileMutation::FixtureCapabilitiesUnsorted,
+        ProfileMutation::FixtureAuxiliaryTooMany,
+        ProfileMutation::FixtureDuplicatePath,
         ProfileMutation::FixtureDescriptor,
+        ProfileMutation::FixturePayloadDescriptor,
         ProfileMutation::FixtureOracle,
+        ProfileMutation::FixtureOracleOutputMissing,
+        ProfileMutation::FixtureOracleDivergenceCoordinate,
+        ProfileMutation::FixtureUnexpectedVerificationError,
+        ProfileMutation::FixtureClaimMismatch,
         ProfileMutation::FixtureProvenance,
         ProfileMutation::FixtureDowngradeBinding,
         ProfileMutation::FixtureDigest,
@@ -473,6 +511,38 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
         assert_eq!(
             evaluate(
                 &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestResult {
+    let corpus = support::valid_corpus()?;
+    for request in [
+        request_with(&corpus.request, |request| {
+            request.execution_profile_digest = [90; 32];
+        })?,
+        request_with(&corpus.request, |request| {
+            request.evaluator_protocol_digest = [91; 32];
+        })?,
+        request_with(&corpus.request, |request| {
+            request.evaluator_hard_caps_digest = [92; 32];
+        })?,
+    ] {
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output.clone(),
+        };
+        assert_eq!(
+            evaluate(
+                &request,
                 &corpus.archive,
                 &corpus.trust_policy,
                 &evaluator_identity(),

@@ -220,7 +220,7 @@ pub fn verify_signed_bundle(
         archive_digest,
         members,
         expected_results,
-        authority_key_id: trusted_authority.key_id,
+        authority_key_id: trusted_authority.key_id.clone(),
         authority_public_key: trusted_authority.public_key,
     })
 }
@@ -356,10 +356,8 @@ fn decode_trust_policy(bytes: &[u8]) -> Result<TrustPolicy, BundleError> {
     let roots = decode_trust_roots(&fields[5])?;
     let revoked_key_ids = decode_revoked_key_ids(&fields[6])?;
     let revoked_artifact_digests = decode_revoked_artifact_digests(&fields[7])?;
-    if !valid_minimum_versions(&fields[8])?
-        || !valid_expiry(text(&fields[9])?)
-        || !nullable_digest(&fields[10])?
-    {
+    validate_nullable_digest(&fields[10])?;
+    if !valid_minimum_versions(&fields[8])? || !valid_expiry(text(&fields[9])?) {
         return Err(BundleError::TrustPolicyMismatch);
     }
     let signature: [u8; 64] = fixed_bytes(&fields[11])?;
@@ -447,10 +445,10 @@ fn decode_revoked_artifact_digests(value: &Value) -> Result<BTreeSet<[u8; 32]>, 
     Ok(digests)
 }
 
-fn nullable_digest(value: &Value) -> Result<bool, BundleError> {
+fn validate_nullable_digest(value: &Value) -> Result<(), BundleError> {
     match value {
-        Value::Null => Ok(true),
-        _ => fixed_bytes::<32>(value).map(|_| true),
+        Value::Null => Ok(()),
+        _ => fixed_bytes::<32>(value).map(|_| ()).map_err(Into::into),
     }
 }
 
