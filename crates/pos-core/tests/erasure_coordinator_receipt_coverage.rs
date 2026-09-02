@@ -1469,7 +1469,7 @@ fn negative_receipt_closes_failed_owner_contract() -> Result<(), ErasureErrorV1>
 
 #[test]
 fn receipt_rejects_inconsistent_closures_and_history_sources() -> Result<(), ErasureErrorV1> {
-    let (input, obligations) = complete_receipt_input()?;
+    let (input, _) = complete_receipt_input()?;
     assert_eq!(
         ErasureReceiptV1::new(ErasureReceiptInputV1 {
             lifecycle: ErasureLifecycleV1::Authorized,
@@ -1553,7 +1553,7 @@ fn receipt_rejects_inconsistent_closures_and_history_sources() -> Result<(), Era
         Err(ErasureErrorV1::PolicyConflict)
     );
 
-    let mut resolved_partial = input.clone();
+    let mut resolved_partial = input;
     resolved_partial.lifecycle = ErasureLifecycleV1::PartialFailure;
     assert_eq!(
         ErasureReceiptV1::new(resolved_partial),
