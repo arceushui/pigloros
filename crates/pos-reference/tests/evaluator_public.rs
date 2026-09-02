@@ -671,6 +671,36 @@ fn evaluator_rejects_each_profile_textual_contract_boundary() -> TestResult {
 }
 
 #[test]
+fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestResult {
+    let mutations = (0..2)
+        .map(ProfileMutation::ProviderKeyNumericBoundary)
+        .chain(std::iter::once(ProfileMutation::DivergenceCoordinateLong))
+        .chain((0..7).map(ProfileMutation::SelectedCapBoundary))
+        .chain((0..10).map(ProfileMutation::ExecutionContractBoundary))
+        .chain((0..9).map(ProfileMutation::FixtureSemanticBoundary))
+        .chain((0..8).map(ProfileMutation::ProvenanceBoundary))
+        .chain((0..3).map(ProfileMutation::DescriptorValueBoundary));
+    for mutation in mutations {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestResult {
     let corpus = support::corpus()?;
     for request in [
