@@ -271,6 +271,33 @@ fn assert_atomic_freeze_rejected(
     assert_eq!(ErasureAtomicFreezeAdmissionV1::new(input), Err(expected));
 }
 
+fn atomic_freeze_fixture() -> Result<
+    (
+        ErasureRequiredTargetV1,
+        ErasureObligationV1,
+        Vec<ErasureFreezeApplicabilityRowV1>,
+    ),
+    ErasureErrorV1,
+> {
+    let frozen_target = target(11);
+    Ok((
+        frozen_target,
+        obligation(
+            reference(1),
+            ErasureInventoryCategoryV1::Artifact,
+            frozen_target,
+        )?,
+        applicability_matrix(
+            1,
+            Some((
+                ErasureInventoryCategoryV1::Artifact,
+                0,
+                frozen_target.replica_id,
+            )),
+        )?,
+    ))
+}
+
 const fn inventory(
     category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
@@ -1846,17 +1873,7 @@ fn atomic_freeze_admission_exposes_its_complete_public_commitments() -> Result<(
 #[test]
 fn atomic_freeze_admission_rejects_inconsistent_public_commitments() -> Result<(), ErasureErrorV1> {
     let request = reference(1);
-    let frozen_target = target(11);
-    let valid_obligation =
-        obligation(request, ErasureInventoryCategoryV1::Artifact, frozen_target)?;
-    let applicable = applicability_matrix(
-        1,
-        Some((
-            ErasureInventoryCategoryV1::Artifact,
-            0,
-            frozen_target.replica_id,
-        )),
-    )?;
+    let (frozen_target, valid_obligation, applicable) = atomic_freeze_fixture()?;
 
     let mut mismatched_evidence = atomic_freeze_input(
         vec![frozen_target],
@@ -1922,11 +1939,18 @@ fn atomic_freeze_admission_rejects_inconsistent_public_commitments() -> Result<(
         atomic_freeze_input(
             vec![frozen_target],
             vec![valid_obligation, duplicate_target],
-            applicable.clone(),
+            applicable,
         )?,
         ErasureErrorV1::ScopeInvalid,
     );
+    Ok(())
+}
 
+#[test]
+fn atomic_freeze_admission_rejects_duplicate_and_missing_applicability(
+) -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let (frozen_target, valid_obligation, _) = atomic_freeze_fixture()?;
     let duplicate_command_owner = ErasureObligationV1::new(ErasureObligationInputV1 {
         category: ErasureInventoryCategoryV1::Key,
         target: frozen_target,
@@ -2177,40 +2201,6 @@ fn receipt_rejects_inconsistent_closures_and_history_sources() -> Result<(), Era
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
-    let mut acknowledgement_without_inventory = input.clone();
-    acknowledgement_without_inventory
-        .inventories
-        .artifacts
-        .clear();
-    assert_eq!(
-        ErasureReceiptV1::new(acknowledgement_without_inventory),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-
-    let mut wrong_derived_owners = input.clone();
-    wrong_derived_owners.pending_owners = vec![input.inventories.artifacts[0].transition.owner];
-    assert_eq!(
-        ErasureReceiptV1::new(wrong_derived_owners),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-
-    let mut inventory_outside_closure = input.clone();
-    let old_target = inventory_outside_closure.inventories.artifacts[0].target;
-    let outside_target = target(250);
-    inventory_outside_closure.inventories.artifacts[0].target = outside_target;
-    inventory_outside_closure.inventories.artifacts[0]
-        .transition
-        .owner = outside_target.replica_id;
-    inventory_outside_closure
-        .acknowledgements
-        .retain(|acknowledgement| acknowledgement.target != old_target);
-    inventory_outside_closure.lifecycle = ErasureLifecycleV1::PartialFailure;
-    inventory_outside_closure.pending_owners = vec![outside_target.replica_id];
-    assert_eq!(
-        ErasureReceiptV1::new(inventory_outside_closure),
-        Err(ErasureErrorV1::ScopeInvalid)
-    );
-
     let mut incomplete_complete = input.clone();
     incomplete_complete.acknowledgements.clear();
     incomplete_complete.pending_owners = input
@@ -2232,6 +2222,45 @@ fn receipt_rejects_inconsistent_closures_and_history_sources() -> Result<(), Era
     assert_eq!(
         ErasureReceiptV1::new(resolved_partial),
         Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn receipt_rejects_inventory_and_derived_owner_gaps() -> Result<(), ErasureErrorV1> {
+    let (input, _) = complete_receipt_input()?;
+    let mut acknowledgement_without_inventory = input.clone();
+    acknowledgement_without_inventory
+        .inventories
+        .artifacts
+        .clear();
+    assert_eq!(
+        ErasureReceiptV1::new(acknowledgement_without_inventory),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let mut wrong_derived_owners = input.clone();
+    wrong_derived_owners.pending_owners = vec![input.inventories.artifacts[0].transition.owner];
+    assert_eq!(
+        ErasureReceiptV1::new(wrong_derived_owners),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let mut inventory_outside_closure = input;
+    let old_target = inventory_outside_closure.inventories.artifacts[0].target;
+    let outside_target = target(250);
+    inventory_outside_closure.inventories.artifacts[0].target = outside_target;
+    inventory_outside_closure.inventories.artifacts[0]
+        .transition
+        .owner = outside_target.replica_id;
+    inventory_outside_closure
+        .acknowledgements
+        .retain(|acknowledgement| acknowledgement.target != old_target);
+    inventory_outside_closure.lifecycle = ErasureLifecycleV1::PartialFailure;
+    inventory_outside_closure.pending_owners = vec![outside_target.replica_id];
+    assert_eq!(
+        ErasureReceiptV1::new(inventory_outside_closure),
+        Err(ErasureErrorV1::ScopeInvalid)
     );
     Ok(())
 }
