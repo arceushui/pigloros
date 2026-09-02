@@ -42,10 +42,9 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, ErasureCoordinatorRecordV1, ErasureErrorV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasurePersistencePortV1, ErasureReferenceV1,
-    ErasureStateResolverV1, KeyRegistryStateV1, VerifiedErasureCoordinatorRecordV1,
-    GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, ErasureCasEffectV1, ErasureCasOutcomeV1, ErasureErrorV1,
+    ErasureIndexInsertV1, ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1,
+    KeyRegistryStateV1, PreparedErasureCasV1, StoredErasureManifestV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -158,12 +157,16 @@ pub struct MemoryStore {
     consent_authority_permit: Option<ConsentAppendPermit>,
     /// Durable-equivalent owner-scoped key registry for adapter tests.
     key_registry: Option<KeyRegistryStateV1>,
-    /// Canonical durable ERQ1/ERS1/ERC1 coordinator records.
-    erasure_records: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    /// Current raw ERCRP1 envelope per request.
+    erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
     erasure_evidence: BTreeMap<ErasureReferenceV1, Vec<u8>>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
     erasure_states: BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    erasure_attempt_pages: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    erasure_scope_nodes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    erasure_administrative_resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    erasure_effects: BTreeMap<ErasureReferenceV1, ErasureCasEffectV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -460,6 +463,10 @@ impl MemoryStore {
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
+            erasure_attempt_pages: BTreeMap::new(),
+            erasure_scope_nodes: BTreeMap::new(),
+            erasure_administrative_resolutions: BTreeMap::new(),
+            erasure_effects: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1164,201 +1171,164 @@ impl ErasureStateResolverV1 for MemoryStore {
 }
 
 impl ErasurePersistencePortV1 for MemoryStore {
-    fn load_record(
+    fn read_manifest(
         &self,
         request: ErasureReferenceV1,
-        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
-    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
-        load_memory_erasure_record(&self.erasure_records, &self.erasure_evidence, request).and_then(
-            |record| {
-                record
-                    .map(|record| {
-                        if record.request().reference() == request {
-                            validate_memory_loaded_record(self, &record)
-                                .and_then(|()| {
-                                    record.verify_recovered_freeze_authorization(verifier)
-                                })
-                                .map(|()| record)
-                        } else {
-                            Err(ErasureErrorV1::ProvenanceMissing)
-                        }
-                    })
-                    .transpose()
-            },
-        )
+    ) -> Result<Option<StoredErasureManifestV1>, ErasureErrorV1> {
+        self.erasure_records
+            .get(&request)
+            .map(|(digest, bytes)| StoredErasureManifestV1::new(*digest, bytes.clone()))
+            .transpose()
     }
-
-    fn commit_records(
-        &mut self,
-        records: &[VerifiedErasureCoordinatorRecordV1],
-    ) -> Result<(), ErasureErrorV1> {
-        if records.is_empty() {
-            return Ok(());
-        }
-        let mut staged_records = self.erasure_records.clone();
-        let mut staged_evidence = self.erasure_evidence.clone();
-        let mut staged_states = self.erasure_states.clone();
-        records
-            .iter()
-            .try_for_each(|record| {
-                stage_erasure_record(
-                    &mut staged_records,
-                    &mut staged_evidence,
-                    &mut staged_states,
-                    record.record(),
-                )
-            })
-            .map(|()| {
-                self.erasure_records = staged_records;
-                self.erasure_evidence = staged_evidence;
-                self.erasure_states = staged_states;
-            })
+    fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+        self.erasure_evidence
+            .get(&reference)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
-
-    fn compare_and_swap_scope_extension(
-        &mut self,
+    fn attempt_page_ref(
+        &self,
         request: ErasureReferenceV1,
-        expected_ledger: ErasureReferenceV1,
-        record: VerifiedErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1> {
-        let current =
-            load_memory_erasure_record(&self.erasure_records, &self.erasure_evidence, request)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        validate_memory_loaded_record(self, &current)?;
-        if current == *record.record() {
-            return Ok(());
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self.erasure_attempt_pages.get(&(request, ordinal)).copied())
+    }
+    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        memory_index_count(&self.erasure_attempt_pages, request)
+    }
+    fn scope_node_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self.erasure_scope_nodes.get(&(request, ordinal)).copied())
+    }
+    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1> {
+        memory_index_count(&self.erasure_scope_nodes, request)
+    }
+    fn administrative_resolution_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self
+            .erasure_administrative_resolutions
+            .get(&(request, ordinal))
+            .copied())
+    }
+    fn administrative_resolution_index_count(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<u64, ErasureErrorV1> {
+        memory_index_count(&self.erasure_administrative_resolutions, request)
+    }
+    fn compare_and_swap(
+        &mut self,
+        mutation: PreparedErasureCasV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1> {
+        let request = mutation.request();
+        let next = mutation.next_manifest();
+        if self
+            .erasure_records
+            .get(&request)
+            .is_some_and(|(digest, bytes)| {
+                *digest == next.digest() && bytes.as_slice() == next.canonical_cbor()
+            })
+        {
+            return Ok(ErasureCasOutcomeV1::ExactRetry);
         }
-        if current.scope_extension_ledger() != Some(expected_ledger) {
+        if self.erasure_records.get(&request).map(|value| value.0)
+            != mutation.expected_manifest_digest()
+        {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        self.commit_record(record)
-    }
-
-    fn compare_and_swap_administrative_resolution(
-        &mut self,
-        request: ErasureReferenceV1,
-        expected_head: Option<ErasureReferenceV1>,
-        record: VerifiedErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1> {
-        let current =
-            load_memory_erasure_record(&self.erasure_records, &self.erasure_evidence, request)?
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        validate_memory_loaded_record(self, &current)?;
-        if current == *record.record() {
-            return Ok(());
+        let mut evidence = self.erasure_evidence.clone();
+        let mut states = self.erasure_states.clone();
+        let mut attempts = self.erasure_attempt_pages.clone();
+        let mut scopes = self.erasure_scope_nodes.clone();
+        let mut resolutions = self.erasure_administrative_resolutions.clone();
+        for object in mutation.new_objects() {
+            insert_exact(&mut evidence, object.reference(), object.canonical_cbor())?;
         }
-        if current.administrative_resolution_head() != expected_head {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        self.commit_record(record)
-    }
-}
-
-fn validate_memory_loaded_record(
-    store: &MemoryStore,
-    record: &ErasureCoordinatorRecordV1,
-) -> Result<(), ErasureErrorV1> {
-    store
-        .resolve_state(record.state().state_digest())
-        .and_then(|state| state.ok_or(ErasureErrorV1::ProvenanceMissing))
-        .and_then(|_| record.state().verify_predecessor_chain(store))
-        .and_then(|()| {
-            validate_memory_correction(record, &store.erasure_records, &store.erasure_evidence)
-        })
-}
-
-fn load_memory_erasure_record(
-    records: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
-    evidence: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
-    request: ErasureReferenceV1,
-) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1> {
-    records
-        .get(&request)
-        .map(|bytes| {
-            ErasureCoordinatorRecordV1::from_persistence_manifest(bytes, &mut |reference| {
-                evidence
-                    .get(&reference)
-                    .cloned()
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
-        })
-        .transpose()
-}
-
-fn stage_erasure_record(
-    records: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
-    evidence: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
-    states: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
-    record: &ErasureCoordinatorRecordV1,
-) -> Result<(), ErasureErrorV1> {
-    let request = record.request().reference();
-    validate_memory_correction(record, records, evidence)?;
-    let bundle = record.to_persistence_bundle()?;
-    let record_bytes = bundle.manifest_cbor().to_vec();
-    let existing_state_digest = if let Some(existing_bytes) = records.get(&request) {
-        let existing = ErasureCoordinatorRecordV1::from_persistence_manifest(
-            existing_bytes,
-            &mut |reference| {
-                evidence
-                    .get(&reference)
-                    .cloned()
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            },
-        )?;
-        if existing_bytes.as_slice() != record_bytes.as_slice() {
-            existing.validate_replacement(record)?;
-        }
-        Some(existing.state().state_digest())
-    } else if record.state().previous_state().is_some() {
-        return Err(ErasureErrorV1::ProvenanceMissing);
-    } else {
-        None
-    };
-
-    for object in bundle.evidence() {
-        if let Some(existing) = evidence.get(&object.reference()) {
-            if existing.as_slice() != object.canonical_cbor() {
-                return Err(ErasureErrorV1::ProvenanceMissing);
+        for state in mutation.new_states() {
+            if let Some(previous) = state.state().previous_state() {
+                let bytes = states
+                    .get(&previous)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                state
+                    .state()
+                    .validate_predecessor(&pos_core::ErasureStateV1::from_canonical_cbor(bytes)?)?;
             }
-        } else {
-            evidence.insert(object.reference(), object.canonical_cbor().to_vec());
+            insert_exact(&mut states, state.reference(), state.canonical_cbor())?;
         }
+        for index in mutation.index_inserts() {
+            let (map, ordinal, reference) = match *index {
+                ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+                    (&mut attempts, ordinal, reference)
+                }
+                ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+                    (&mut scopes, ordinal, reference)
+                }
+                ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => {
+                    (&mut resolutions, ordinal, reference)
+                }
+            };
+            insert_index(map, request, ordinal, reference)?;
+        }
+        self.erasure_records
+            .insert(request, (next.digest(), next.canonical_cbor().to_vec()));
+        self.erasure_evidence = evidence;
+        self.erasure_states = states;
+        self.erasure_attempt_pages = attempts;
+        self.erasure_scope_nodes = scopes;
+        self.erasure_administrative_resolutions = resolutions;
+        self.erasure_effects
+            .insert(next.digest(), mutation.effect().clone());
+        Ok(ErasureCasOutcomeV1::Applied)
     }
-
-    let state_digest = record.state().state_digest();
-    let state_bytes = record.state().to_canonical_cbor()?;
-    if let Some(existing_bytes) = states.get(&state_digest) {
-        if existing_bytes.as_slice() != state_bytes.as_slice() {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-    } else {
-        if existing_state_digest == Some(state_digest) {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        if let Some(previous) = record.state().previous_state() {
-            let previous_bytes = states
-                .get(&previous)
-                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-            let previous_state = pos_core::ErasureStateV1::from_canonical_cbor(previous_bytes)?;
-            record.state().validate_predecessor(&previous_state)?;
-        }
-        states.insert(state_digest, state_bytes);
-    }
-    records.insert(request, record_bytes);
-    Ok(())
 }
 
-fn validate_memory_correction(
-    record: &ErasureCoordinatorRecordV1,
-    records: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
-    evidence: &BTreeMap<ErasureReferenceV1, Vec<u8>>,
+fn insert_exact(
+    map: &mut BTreeMap<ErasureReferenceV1, Vec<u8>>,
+    reference: ErasureReferenceV1,
+    bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
-    let Some(correction) = record.supporting_records().correction_provenance() else {
-        return Ok(());
-    };
-    load_memory_erasure_record(records, evidence, correction.rejected_request())?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)
-        .and_then(|predecessor| record.validate_correction_predecessor(&predecessor))
+    match map.get(&reference) {
+        Some(existing) if existing.as_slice() != bytes => Err(ErasureErrorV1::ProvenanceMissing),
+        Some(_) => Ok(()),
+        None => {
+            map.insert(reference, bytes.to_vec());
+            Ok(())
+        }
+    }
+}
+
+fn insert_index(
+    map: &mut BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    reference: ErasureReferenceV1,
+) -> Result<(), ErasureErrorV1> {
+    match map.get(&(request, ordinal)) {
+        Some(existing) if *existing != reference => Err(ErasureErrorV1::PolicyConflict),
+        Some(_) => Ok(()),
+        None => {
+            map.insert((request, ordinal), reference);
+            Ok(())
+        }
+    }
+}
+
+fn memory_index_count(
+    map: &BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
+    request: ErasureReferenceV1,
+) -> Result<u64, ErasureErrorV1> {
+    u64::try_from(
+        map.keys()
+            .filter(|(candidate, _)| *candidate == request)
+            .count(),
+    )
+    .map_err(|_| ErasureErrorV1::PolicyConflict)
 }
 
 impl OwnTracksEnrollmentStore for MemoryStore {
