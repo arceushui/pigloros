@@ -16,6 +16,83 @@ pub struct Corpus {
     pub expected_output: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ProfileMutation {
+    Magic,
+    Version,
+    ProfileId,
+    Lifecycle,
+    NormativeDigest,
+    ExecutionProfilesEmpty,
+    ProvidersEmpty,
+    FixturesEmpty,
+    AllowedDivergenceUndeclared,
+    ProtocolId,
+    ProtocolDigest,
+    HardCapZero,
+    RequirementDigest,
+    FixtureModesEmpty,
+    FixtureModesUnsorted,
+    FixtureAdapter,
+    FixtureProvider,
+    FixtureClaimLayer,
+    FixtureFamily,
+    FixtureOutcome,
+    FixtureReplay,
+    FixtureRedaction,
+    FixtureBudget,
+    FixtureWatchdog,
+    FixtureNetworkPlugin,
+    FixtureCapabilities,
+    FixtureDescriptor,
+    FixtureOracle,
+    FixtureProvenance,
+    FixtureDowngradeBinding,
+    FixtureDigest,
+}
+
+#[derive(Clone, Copy)]
+pub enum BundleMutation {
+    Magic,
+    Version,
+    Mode,
+    ProfileDigest,
+    DescriptorOrder,
+    DescriptorDuplicate,
+    DescriptorSize,
+    DescriptorDigest,
+    DescriptorRole,
+    MemberOrder,
+    MemberDuplicate,
+    MemberBytes,
+    ExpectedOrder,
+    ExpectedDuplicate,
+    Signer,
+    Signature,
+    ArchiveShape,
+}
+
+#[derive(Clone, Copy)]
+pub enum TrustMutation {
+    Magic,
+    Version,
+    PolicyId,
+    Epoch,
+    RootsEmpty,
+    RootsMultiple,
+    Revocations,
+    Replacements,
+    KeyId,
+    KeyEpoch,
+    Algorithm,
+    PublicKey,
+    VersionsEmpty,
+    VersionsOrder,
+    Expiry,
+    Previous,
+    Signature,
+}
+
 pub type TestResult<T> = Result<T, Box<dyn Error>>;
 
 struct FixtureExpectation {
@@ -30,7 +107,7 @@ struct FixtureExpectation {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false, false)
+    corpus_for_mode(0, None, false, false, None, None, None)
 }
 
 /// Build a signed corpus containing additional bytes for secret-scan tests.
@@ -38,7 +115,7 @@ pub fn corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
-    corpus_for_mode(0, Some(secret), false, false)
+    corpus_for_mode(0, Some(secret), false, false, None, None, None)
 }
 
 /// Build a complete Air-Gapped corpus with non-network capabilities.
@@ -46,7 +123,7 @@ pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn air_gapped_corpus() -> TestResult<Corpus> {
-    corpus_for_mode(1, None, false, false)
+    corpus_for_mode(1, None, false, false, None, None, None)
 }
 
 /// Build a signed corpus whose downgrade admission enables fallback.
@@ -54,7 +131,7 @@ pub fn air_gapped_corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, true, false)
+    corpus_for_mode(0, None, true, false, None, None, None)
 }
 
 /// Build a signed corpus containing output, typed-failure, and divergence oracles.
@@ -62,7 +139,31 @@ pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false, true)
+    corpus_for_mode(0, None, false, true, None, None, None)
+}
+
+/// Build a cryptographically bound corpus with one invalid CPF1 contract field.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Corpus> {
+    corpus_for_mode(0, None, false, false, Some(mutation), None, None)
+}
+
+/// Build a request-bound corpus containing one signed CFB1 attack shape.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_bundle_mutation(mutation: BundleMutation) -> TestResult<Corpus> {
+    corpus_for_mode(0, None, false, false, None, Some(mutation), None)
+}
+
+/// Build a request-bound corpus containing one invalid TPS1 authority contract.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_trust_mutation(mutation: TrustMutation) -> TestResult<Corpus> {
+    corpus_for_mode(0, None, false, false, None, None, Some(mutation))
 }
 
 fn corpus_for_mode(
@@ -70,9 +171,12 @@ fn corpus_for_mode(
     extra: Option<&[u8]>,
     invalid_release_admission: bool,
     mixed_oracles: bool,
+    profile_mutation: Option<ProfileMutation>,
+    bundle_mutation: Option<BundleMutation>,
+    trust_mutation: Option<TrustMutation>,
 ) -> TestResult<Corpus> {
     let signing_key = SigningKey::from_bytes(&[9; 32]);
-    let trust_policy = trust_policy(&signing_key)?;
+    let trust_policy = trust_policy(&signing_key, trust_mutation)?;
     let trust_digest = hash(&trust_policy);
     let execution_profile = execution_profile()?;
     let execution_digest = hash(&execution_profile);
@@ -92,7 +196,7 @@ fn corpus_for_mode(
         invalid_release_admission,
         mixed_oracles,
     )?;
-    let profile = profile(
+    let mut profile = profile(
         &members,
         fixtures,
         execution_digest,
@@ -100,6 +204,9 @@ fn corpus_for_mode(
         &hard_caps,
         mixed_oracles,
     )?;
+    if let Some(mutation) = profile_mutation {
+        mutate_profile(&mut profile, mutation)?;
+    }
     let profile_digest = hash_contract("PiglorOS.ConformanceProfile.v1", &profile)?;
     let mut profile_fields = fields(profile)?;
     profile_fields.push(bytes(&profile_digest));
@@ -113,6 +220,7 @@ fn corpus_for_mode(
         profile_digest,
         execution_digest,
         mode,
+        bundle_mutation,
     )?;
     let archive_digest = hash(&archive);
     let subject_digest = [41; 32];
@@ -508,14 +616,125 @@ fn profile(
     ]))
 }
 
+fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<()> {
+    let profile_fields = array_fields_mut(profile)?;
+    match mutation {
+        ProfileMutation::Magic => profile_fields[0] = text("CPF0"),
+        ProfileMutation::Version => profile_fields[1] = uint(2),
+        ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
+        ProfileMutation::Lifecycle => profile_fields[4] = uint(1),
+        ProfileMutation::NormativeDigest => profile_fields[5] = bytes(&[0; 32]),
+        ProfileMutation::ExecutionProfilesEmpty => profile_fields[7] = array(Vec::new()),
+        ProfileMutation::ProvidersEmpty => {
+            array_fields_mut(&mut profile_fields[8])?[1] = array(Vec::new());
+        }
+        ProfileMutation::FixturesEmpty => profile_fields[9] = array(Vec::new()),
+        ProfileMutation::AllowedDivergenceUndeclared => {
+            profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[1, 2])])]);
+        }
+        ProfileMutation::ProtocolId => {
+            array_fields_mut(&mut profile_fields[11])?[0] = text("Invalid");
+        }
+        ProfileMutation::ProtocolDigest => {
+            array_fields_mut(&mut profile_fields[11])?[1] = bytes(&[0; 32]);
+        }
+        ProfileMutation::HardCapZero => {
+            let protocol = array_fields_mut(&mut profile_fields[11])?;
+            array_fields_mut(&mut protocol[4])?[0] = uint(0);
+        }
+        ProfileMutation::RequirementDigest => {
+            array_fields_mut(&mut profile_fields[12])?[3] = bytes(&[0; 32]);
+        }
+        fixture_mutation => mutate_fixture(profile_fields, fixture_mutation)?,
+    }
+    Ok(())
+}
+
+fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
+    let fixtures = array_fields_mut(&mut profile_fields[9])?;
+    let fixture = fixtures
+        .first_mut()
+        .ok_or_else(|| io::Error::other("test fixture is missing"))?;
+    let fields = array_fields_mut(fixture)?;
+    match mutation {
+        ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
+        ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
+        ProfileMutation::FixtureAdapter => fields[5] = uint(9),
+        ProfileMutation::FixtureProvider => {
+            array_fields_mut(&mut fields[4])?[0] = text("Invalid");
+        }
+        ProfileMutation::FixtureClaimLayer => fields[2] = uint(7),
+        ProfileMutation::FixtureFamily => fields[3] = uint(7),
+        ProfileMutation::FixtureOutcome => fields[12] = uint(6),
+        ProfileMutation::FixtureReplay => fields[14] = uint(5),
+        ProfileMutation::FixtureRedaction => fields[15] = uint(4),
+        ProfileMutation::FixtureBudget => {
+            array_fields_mut(&mut fields[16])?[0] = uint(0);
+        }
+        ProfileMutation::FixtureWatchdog => fields[17] = array(vec![uint(0)]),
+        ProfileMutation::FixtureNetworkPlugin => {
+            fields[5] = uint(2);
+            array_fields_mut(&mut fields[18])?[0] = Value::Bool(true);
+        }
+        ProfileMutation::FixtureCapabilities => {
+            array_fields_mut(&mut fields[18])?[1] = array(
+                (0..65)
+                    .map(|index| text(&format!("capability-{index:02}")))
+                    .collect(),
+            );
+        }
+        ProfileMutation::FixtureDescriptor => {
+            fields[8] = array(vec![
+                text("../schema"),
+                text("application/json"),
+                uint(1),
+                bytes(&[1; 32]),
+            ]);
+        }
+        ProfileMutation::FixtureOracle => {
+            fields[11] = array(vec![uint(9), Value::Null, Value::Null, Value::Null]);
+        }
+        ProfileMutation::FixtureProvenance => {
+            fields[21] = array(vec![
+                text("Apache-2.0"),
+                bytes(&[0; 32]),
+                bytes(&[1; 32]),
+                bytes(&[1; 32]),
+                bytes(&[1; 32]),
+                bytes(&[1; 32]),
+                bytes(&[1; 32]),
+            ]);
+        }
+        ProfileMutation::FixtureDowngradeBinding => fields[19] = bytes(&[1; 32]),
+        ProfileMutation::FixtureDigest => fields[23] = bytes(&[99; 32]),
+        _ => return Err(io::Error::other("mutation does not target a fixture").into()),
+    }
+    if mutation != ProfileMutation::FixtureDigest {
+        let digest = hash_contract(
+            "PiglorOS.Conformance.Fixture.v1",
+            &array(fields[..23].to_vec()),
+        )?;
+        fields[23] = bytes(&digest);
+    }
+    Ok(())
+}
+
+fn array_fields_mut(value: &mut Value) -> TestResult<&mut Vec<Value>> {
+    let Value::Array(fields) = value else {
+        return Err(io::Error::other("test value is not an array").into());
+    };
+    Ok(fields)
+}
+
 fn archive(
     signing_key: &SigningKey,
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     profile: [u8; 32],
     execution: [u8; 32],
     mode: u64,
+    mutation: Option<BundleMutation>,
 ) -> TestResult<Vec<u8>> {
-    let descriptors = members
+    let descriptors: Vec<Value> = members
         .iter()
         .map(|(path, (member, role))| -> TestResult<Value> {
             Ok(array(vec![
@@ -526,7 +745,7 @@ fn archive(
             ]))
         })
         .collect::<TestResult<Vec<_>>>()?;
-    let archive_members = members
+    let archive_members: Vec<Value> = members
         .iter()
         .map(|(path, (member, role))| {
             array(vec![
@@ -553,8 +772,8 @@ fn archive(
         .collect::<TestResult<Vec<_>>>()?;
     let mut expected = expected;
     expected.sort_by(|left, right| left.0.cmp(&right.0));
-    let expected = expected.into_iter().map(|(_, value)| value).collect();
-    let manifest = array(vec![
+    let expected: Vec<Value> = expected.into_iter().map(|(_, value)| value).collect();
+    let mut manifest = array(vec![
         text("CFB1"),
         uint(0),
         uint(mode),
@@ -562,16 +781,84 @@ fn archive(
         array(descriptors),
         array(expected),
     ]);
+    if let Some(mutation) = mutation {
+        mutate_manifest(&mut manifest, mutation)?;
+    }
     let signature = signing_key.sign(&canonical(&manifest)?).to_bytes();
-    canonical(&array(vec![
+    let mut root = array(vec![
         manifest,
         array(archive_members),
         bytes(&signing_key.verifying_key().to_bytes()),
         bytes(&signature),
-    ]))
+    ]);
+    if let Some(mutation) = mutation {
+        mutate_archive_root(&mut root, mutation)?;
+    }
+    canonical(&root)
 }
 
-fn trust_policy(signing_key: &SigningKey) -> TestResult<Vec<u8>> {
+fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult<()> {
+    let fields = array_fields_mut(manifest)?;
+    match mutation {
+        BundleMutation::Magic => fields[0] = text("CFB0"),
+        BundleMutation::Version => fields[1] = uint(1),
+        BundleMutation::Mode => fields[2] = uint(2),
+        BundleMutation::ProfileDigest => fields[3] = bytes(&[0; 32]),
+        BundleMutation::DescriptorOrder => array_fields_mut(&mut fields[4])?.swap(0, 1),
+        BundleMutation::DescriptorDuplicate => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            descriptors.push(descriptors[0].clone());
+        }
+        BundleMutation::DescriptorSize => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[1] = uint(u64::MAX);
+        }
+        BundleMutation::DescriptorDigest => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[2] = bytes(&[99; 32]);
+        }
+        BundleMutation::DescriptorRole => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[3] = uint(19);
+        }
+        BundleMutation::ExpectedOrder => array_fields_mut(&mut fields[5])?.swap(0, 1),
+        BundleMutation::ExpectedDuplicate => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            expected.push(expected[0].clone());
+        }
+        BundleMutation::MemberOrder
+        | BundleMutation::MemberDuplicate
+        | BundleMutation::MemberBytes
+        | BundleMutation::Signer
+        | BundleMutation::Signature
+        | BundleMutation::ArchiveShape => {}
+    }
+    Ok(())
+}
+
+fn mutate_archive_root(root: &mut Value, mutation: BundleMutation) -> TestResult<()> {
+    let fields = array_fields_mut(root)?;
+    match mutation {
+        BundleMutation::MemberOrder => array_fields_mut(&mut fields[1])?.swap(0, 1),
+        BundleMutation::MemberDuplicate => {
+            let members = array_fields_mut(&mut fields[1])?;
+            members.push(members[0].clone());
+        }
+        BundleMutation::MemberBytes => {
+            let members = array_fields_mut(&mut fields[1])?;
+            array_fields_mut(&mut members[0])?[1] = Value::Bytes(vec![99]);
+        }
+        BundleMutation::Signer => fields[2] = bytes(&[8; 32]),
+        BundleMutation::Signature => fields[3] = bytes(&[0; 64]),
+        BundleMutation::ArchiveShape => {
+            fields.pop();
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn trust_policy(signing_key: &SigningKey, mutation: Option<TrustMutation>) -> TestResult<Vec<u8>> {
     let mut fields = vec![
         text("TPS1"),
         uint(1),
@@ -590,11 +877,61 @@ fn trust_policy(signing_key: &SigningKey) -> TestResult<Vec<u8>> {
         text("2099-01-01T00:00:00Z"),
         Value::Null,
     ];
+    if let Some(mutation) = mutation {
+        mutate_trust_policy(&mut fields, mutation)?;
+    }
     let signature = signing_key
         .sign(&canonical(&array(fields.clone()))?)
         .to_bytes();
-    fields.push(bytes(&signature));
+    fields.push(if matches!(mutation, Some(TrustMutation::Signature)) {
+        bytes(&[0; 64])
+    } else {
+        bytes(&signature)
+    });
     canonical(&array(fields))
+}
+
+fn mutate_trust_policy(fields: &mut [Value], mutation: TrustMutation) -> TestResult<()> {
+    match mutation {
+        TrustMutation::Magic => fields[0] = text("TPS0"),
+        TrustMutation::Version => fields[1] = uint(2),
+        TrustMutation::PolicyId => fields[2] = text("Invalid"),
+        TrustMutation::Epoch => fields[3] = uint(0),
+        TrustMutation::RootsEmpty => fields[5] = array(Vec::new()),
+        TrustMutation::RootsMultiple => {
+            let roots = array_fields_mut(&mut fields[5])?;
+            roots.push(roots[0].clone());
+        }
+        TrustMutation::Revocations => fields[6] = array(vec![text("revoked")]),
+        TrustMutation::Replacements => fields[7] = array(vec![text("replacement")]),
+        TrustMutation::KeyId => {
+            let roots = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut roots[0])?[0] = text("Invalid");
+        }
+        TrustMutation::KeyEpoch => {
+            let roots = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut roots[0])?[1] = uint(0);
+        }
+        TrustMutation::Algorithm => {
+            let roots = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut roots[0])?[2] = text("unknown");
+        }
+        TrustMutation::PublicKey => {
+            let roots = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut roots[0])?[3] = bytes(&[8; 32]);
+        }
+        TrustMutation::VersionsEmpty => fields[8] = array(Vec::new()),
+        TrustMutation::VersionsOrder => {
+            fields[8] = array(vec![
+                array(vec![text("z-contract"), text("1.0.0")]),
+                array(vec![text("a-contract"), text("1.0.0")]),
+            ]);
+        }
+        TrustMutation::Expiry => fields[9] = text("invalid expiry!"),
+        TrustMutation::Previous => fields[10] = bytes(&[1; 32]),
+        TrustMutation::Signature => {}
+    }
+    Ok(())
 }
 
 fn provenance() -> Value {

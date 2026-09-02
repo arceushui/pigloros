@@ -185,7 +185,7 @@ fn command_rejects_duplicate_and_unsorted_public_identity_options() -> TestResul
     assert!(!output.status.success());
 
     let output = complete_command(directory.path())?
-        .args(["--reviewer", "reviewer-zero"])
+        .args(["--reviewer", "reviewer-alpha"])
         .output()?;
     assert!(!output.status.success());
     Ok(())

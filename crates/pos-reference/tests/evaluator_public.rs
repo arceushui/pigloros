@@ -10,6 +10,7 @@ use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
 };
 use pos_reference::profile::NamespacedFailure;
+use support::{BundleMutation, ProfileMutation, TrustMutation};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -397,5 +398,142 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
     )?
     .diagnostic_bytes
     .is_none());
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() -> TestResult {
+    let mutations = [
+        ProfileMutation::Magic,
+        ProfileMutation::Version,
+        ProfileMutation::ProfileId,
+        ProfileMutation::Lifecycle,
+        ProfileMutation::NormativeDigest,
+        ProfileMutation::ExecutionProfilesEmpty,
+        ProfileMutation::ProvidersEmpty,
+        ProfileMutation::FixturesEmpty,
+        ProfileMutation::AllowedDivergenceUndeclared,
+        ProfileMutation::ProtocolId,
+        ProfileMutation::ProtocolDigest,
+        ProfileMutation::HardCapZero,
+        ProfileMutation::RequirementDigest,
+        ProfileMutation::FixtureModesEmpty,
+        ProfileMutation::FixtureModesUnsorted,
+        ProfileMutation::FixtureAdapter,
+        ProfileMutation::FixtureProvider,
+        ProfileMutation::FixtureClaimLayer,
+        ProfileMutation::FixtureFamily,
+        ProfileMutation::FixtureOutcome,
+        ProfileMutation::FixtureReplay,
+        ProfileMutation::FixtureRedaction,
+        ProfileMutation::FixtureBudget,
+        ProfileMutation::FixtureWatchdog,
+        ProfileMutation::FixtureNetworkPlugin,
+        ProfileMutation::FixtureCapabilities,
+        ProfileMutation::FixtureDescriptor,
+        ProfileMutation::FixtureOracle,
+        ProfileMutation::FixtureProvenance,
+        ProfileMutation::FixtureDowngradeBinding,
+        ProfileMutation::FixtureDigest,
+    ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
+    let mutations = [
+        BundleMutation::Magic,
+        BundleMutation::Version,
+        BundleMutation::Mode,
+        BundleMutation::ProfileDigest,
+        BundleMutation::DescriptorOrder,
+        BundleMutation::DescriptorDuplicate,
+        BundleMutation::DescriptorSize,
+        BundleMutation::DescriptorDigest,
+        BundleMutation::DescriptorRole,
+        BundleMutation::MemberOrder,
+        BundleMutation::MemberDuplicate,
+        BundleMutation::MemberBytes,
+        BundleMutation::ExpectedOrder,
+        BundleMutation::ExpectedDuplicate,
+        BundleMutation::Signer,
+        BundleMutation::Signature,
+        BundleMutation::ArchiveShape,
+    ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
+    let mutations = [
+        TrustMutation::Magic,
+        TrustMutation::Version,
+        TrustMutation::PolicyId,
+        TrustMutation::Epoch,
+        TrustMutation::RootsEmpty,
+        TrustMutation::RootsMultiple,
+        TrustMutation::Revocations,
+        TrustMutation::Replacements,
+        TrustMutation::KeyId,
+        TrustMutation::KeyEpoch,
+        TrustMutation::Algorithm,
+        TrustMutation::PublicKey,
+        TrustMutation::VersionsEmpty,
+        TrustMutation::VersionsOrder,
+        TrustMutation::Expiry,
+        TrustMutation::Previous,
+        TrustMutation::Signature,
+    ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_trust_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
+    }
     Ok(())
 }
