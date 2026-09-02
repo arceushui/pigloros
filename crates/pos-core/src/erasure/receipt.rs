@@ -1,4 +1,19 @@
-use super::*;
+use super::{
+    acknowledgements_are_closure_subset, decode_limited, domain_digest, encode_canonical,
+    encode_limited, exact_array, freeze_is_monotonic, has_duplicate,
+    has_duplicate_acknowledgement_identity, invalid_owner_sets, inventories_are_within_closure,
+    inventories_exceed_bound, inventories_have_duplicate_targets, inventory_categories_match,
+    inventory_transitions_preserve_or_weaken, receipt_core_value, receipt_from_fields,
+    receipt_value, reference_zero, sort_inventories, state_core_value, state_from_fields,
+    state_value, verify_predecessor_chain, weakest_inventory_claim, BTreeMap, BTreeSet,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureCoordinator,
+    ErasureCoordinatorPortV1, ErasureErrorV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequiredTargetV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    Ordering, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES, ERASURE_RECEIPT_MAX_BYTES,
+    ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERC1, ERS1,
+};
 
 impl ErasureStateV1 {
     /// Create the initial submitted ERS1 state.
@@ -235,8 +250,6 @@ impl ErasureStateV1 {
     }
 }
 
-/// One owner acknowledgement, containing only structural digests.
-
 impl Ord for ErasureAcknowledgementV1 {
     fn cmp(&self, other: &Self) -> Ordering {
         (
@@ -260,8 +273,6 @@ impl PartialOrd for ErasureAcknowledgementV1 {
         Some(self.cmp(other))
     }
 }
-
-/// Closed acknowledgement outcomes.
 
 impl ErasureAcknowledgementOutcomeV1 {
     pub(super) const fn code(self) -> u64 {

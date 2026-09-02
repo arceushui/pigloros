@@ -1,4 +1,26 @@
-use super::*;
+use super::{
+    acknowledgement_inventory_reference, administrative_resolution_from_fields,
+    administrative_resolution_value, category_obligation_count_is_bounded, decode_limited,
+    destruction_command_reference, domain_digest, encode_limited, erasure_evidence_set_reference,
+    exact_array, has_duplicate, obligation_count_is_bounded, reference_zero,
+    scope_extension_count_is_bounded, selected_obligations_reference,
+    supporting_records_from_value, supporting_records_value, BTreeMap, BTreeSet,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureAdministrativeResolutionV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionV1,
+    ErasureCoordinator, ErasureCoordinatorPortV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1,
+    ErasurePositiveProvenanceIndexV1, ErasureReceiptProvenanceV1, ErasureReceiptV1,
+    ErasureReferenceV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1,
+    ErasureStateResolverV1, ErasureSupportingRecordsInputV1, ErasureSupportingRecordsV1,
+    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+    ERASURE_INVENTORY_CATEGORY_COUNT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
+    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_REFERENCES,
+    ERASURE_PORTABLE_RECORD_MAX_BYTES,
+};
 
 struct ErasureEvidenceIndex<'a> {
     obligations: BTreeMap<ErasureReferenceV1, &'a ErasureObligationV1>,
@@ -880,7 +902,7 @@ pub(super) const fn acknowledgement_provenance_ordering_key(
     )
 }
 
-fn option_is_unchanged<T: PartialEq>(current: Option<&T>, next: Option<&T>) -> bool {
+pub(super) fn option_is_unchanged<T: PartialEq>(current: Option<&T>, next: Option<&T>) -> bool {
     current.is_none_or(|value| next == Some(value))
 }
 
