@@ -36,11 +36,12 @@ pub mod world_transform;
 // Re-export commonly used types at the crate root.
 pub use authority::{
     AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
-    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorizationDecisionV1,
-    AuthorizationOutcomeV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    ConsentEvidenceV1, PrincipalRefV1, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH,
-    MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_TEXT_BYTES,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationOutcomeV1, AuthorizationRequestDraftV1,
+    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
+    DelegateClassV1, PrincipalRefV1, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH,
+    MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES,
 };
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
