@@ -5,8 +5,10 @@ use super::codec::{
     target_value, text, uint, unordered_references_from_value, unsigned,
 };
 use super::{
-    decode_limited, domain_digest, encode_limited, exact_array, verify_predecessor_chain, BTreeMap,
-    BTreeSet, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
+    acknowledgement_inventory_reference, decode_limited, domain_digest, encode_limited,
+    erasure_evidence_set_reference, exact_array, selected_obligations_reference,
+    verify_predecessor_chain, BTreeMap, BTreeSet, ErasureAcknowledgementOutcomeV1,
+    ErasureAcknowledgementProvenanceV1,
     ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionV1, ErasureAttemptOutcomeV1,
     ErasureAuthorizationRejectionV1, ErasureCasEffectV1, ErasureCorrectionProvenanceV1,
     ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
@@ -923,7 +925,14 @@ impl RecoveredErasureV1 {
         ),
         ErasureErrorV1,
     > {
-        let ordinal = self.scope_head.map_or(0, |head| head.ordinal + 1);
+        let ordinal = self.scope_head.map_or(Ok(0), |head| {
+            head.ordinal
+                .checked_add(1)
+                .ok_or(ErasureErrorV1::PolicyConflict)
+        })?;
+        if ordinal >= ERASURE_MAX_SCOPE_EXTENSIONS as u64 {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         let node = ScopeNodeV1 {
             request: self.request.reference(),
             scope: extension.scope_commitment(),
@@ -964,6 +973,9 @@ impl RecoveredErasureV1 {
         resolution: ErasureAdministrativeResolutionV1,
     ) -> Result<(ErasurePersistenceObjectV1, ErasureIndexInsertV1), ErasureErrorV1> {
         let ordinal = self.administrative_resolution_count;
+        if ordinal >= ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64 {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         let reference = resolution.reference();
         let object = persistence_object(
             ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
@@ -972,7 +984,9 @@ impl RecoveredErasureV1 {
         );
         self.manifest.administrative_resolution_head = Some(reference);
         self.administrative_resolution_head = Some(reference);
-        self.administrative_resolution_count = ordinal + 1;
+        self.administrative_resolution_count = ordinal
+            .checked_add(1)
+            .ok_or(ErasureErrorV1::PolicyConflict)?;
         Ok((
             object,
             ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference },
@@ -1043,11 +1057,14 @@ impl RecoveredErasureV1 {
         ];
         self.manifest.active = None;
         self.manifest.attempt_history_head = Some(page_reference);
-        self.manifest.completed_attempt_count = ordinal + 1;
+        let completed = ordinal
+            .checked_add(1)
+            .ok_or(ErasureErrorV1::PolicyConflict)?;
+        self.manifest.completed_attempt_count = completed;
         self.manifest.latest_receipt = Some(receipt.receipt_digest());
         self.active = None;
         self.attempt_history_head = Some(page_reference);
-        self.completed_attempt_count = ordinal + 1;
+        self.completed_attempt_count = completed;
         self.latest_receipt = Some(receipt.receipt_digest());
         Ok((
             objects,
@@ -1182,18 +1199,31 @@ impl RecoveredErasureV1 {
             || outcome.request() != self.request.reference()
             || outcome.attempt() != admission.reference()
             || outcome.source_receipt() != predecessor_receipt
-            || outcome.acknowledgement_inventory() != effective.reference
+            || outcome.selected_obligations()
+                != selected_obligations_reference(admission.unresolved_obligations())
+            || outcome.acknowledgement_inventory()
+                != acknowledgement_inventory_reference(&effective.references)
             || outcome.lifecycle() != terminal.lifecycle()
+            || outcome.terminal_position() != provenance.issue_position()
+            || outcome.policy() != admission.policy()
+            || outcome.trust() != admission.trust()
             || provenance.request() != self.request.reference()
             || provenance.attempt() != admission.reference()
             || provenance.attempt_ordinal() != page.ordinal
             || provenance.predecessor_receipt() != predecessor_receipt
             || provenance.terminal_state() != page.terminal_state
+            || provenance.evidence_set() != erasure_evidence_set_reference(&effective.references)
+            || provenance.policy() != admission.policy()
+            || provenance.trust() != admission.trust()
             || receipt.request() != self.request.reference()
             || receipt.receipt_digest() != page.receipt
             || receipt.terminal_state() != page.terminal_state
             || receipt.provenance() != page.receipt_provenance
             || receipt.lifecycle() != terminal.lifecycle()
+            || receipt.coordinator() != terminal.coordinator()
+            || receipt.policy() != admission.policy()
+            || receipt.trust() != admission.trust()
+            || receipt.issue_position() != provenance.issue_position()
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
