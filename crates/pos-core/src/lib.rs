@@ -10,6 +10,7 @@
 //! those protected domain concepts.
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+pub mod authority;
 pub mod clock;
 pub mod consent;
 pub mod crypto;
@@ -33,6 +34,17 @@ pub mod timeline;
 pub mod world_transform;
 
 // Re-export commonly used types at the crate root.
+pub use authority::{
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationOutcomeV1, AuthorizationRequestDraftV1,
+    AuthorizationRequestV1, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
+    ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
+    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_REGISTRY_BINDINGS, MAX_AUTHORITY_SCOPE_MEMBERS,
+    MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_CONSENT_REFERENCES,
+    MAX_CAPABILITY_RECORD_BYTES, MAX_DECISION_RECORD_BYTES, MAX_PRINCIPAL_RECORD_BYTES,
+};
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
 };

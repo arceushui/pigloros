@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A 32-byte cryptographic hash (e.g. BLAKE3-256). Algorithms live in pos-crypto.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Hash(#[serde(with = "bytes_32")] [u8; 32]);
 
 impl Hash {
