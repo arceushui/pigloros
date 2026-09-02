@@ -489,6 +489,36 @@ fn coordinator_admission(
     })
 }
 
+fn coordinator_admission_for_targets(
+    request: ErasureReferenceV1,
+    targets: &[ErasureRequiredTargetV1],
+) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+    let mut obligations = targets
+        .iter()
+        .copied()
+        .map(|target| obligation(request, ErasureInventoryCategoryV1::Artifact, target))
+        .collect::<Result<Vec<_>, _>>()?;
+    obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+        request,
+        attempt_ordinal: 0,
+        source_receipt: None,
+        unresolved_obligations: obligations
+            .iter()
+            .map(ErasureObligationV1::reference)
+            .collect(),
+        command_identities: obligations
+            .iter()
+            .map(ErasureObligationV1::command_identity)
+            .collect(),
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 11,
+        deadline_position: 20,
+        authorization_provenance: reference(10),
+    })
+}
+
 fn coordinator_acknowledgement(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
@@ -538,6 +568,27 @@ fn coordinator_receipt_input(
         signature: reference(151),
         receipt_digest: reference(0),
     }
+}
+
+fn coordinator_receipt_input_for_targets(
+    targets: &[ErasureRequiredTargetV1],
+) -> ErasureReceiptInputV1 {
+    let mut input = coordinator_receipt_input(targets[0], 30);
+    input.frozen_targets = targets.to_vec();
+    input.inventories.artifacts = targets
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, target)| {
+            inventory(
+                ErasureInventoryCategoryV1::Artifact,
+                target,
+                ErasureReplayClaimV1::StructuralOnly,
+                u8::try_from(160 + index).unwrap_or(u8::MAX),
+            )
+        })
+        .collect();
+    input
 }
 
 fn coordinator_scope(
@@ -1777,6 +1828,49 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
 }
 
 #[test]
+fn coordinator_persists_canonical_mixed_acknowledgement_order() -> Result<(), ErasureErrorV1> {
+    let request = coordinator_request()?;
+    let mut targets = vec![target(30), target(10), target(20)];
+    targets.sort_unstable();
+    let port = coordinator_port(targets.clone(), None);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    coordinator.dispatch_attempt(
+        request.reference(),
+        &coordinator_admission_for_targets(request.reference(), &targets)?,
+    )?;
+    for (target, outcome, evidence) in [
+        (
+            targets[2],
+            ErasureAcknowledgementOutcomeV1::Stale,
+            reference(173),
+        ),
+        (
+            targets[0],
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+            reference(171),
+        ),
+        (
+            targets[1],
+            ErasureAcknowledgementOutcomeV1::Negative,
+            reference(172),
+        ),
+    ] {
+        coordinator.acknowledge(
+            request.reference(),
+            coordinator_acknowledgement(request.reference(), target, evidence, outcome)?,
+        )?;
+    }
+    let receipt = coordinator.finalize(
+        request.reference(),
+        coordinator_receipt_input_for_targets(&targets),
+    )?;
+    assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    assert_eq!(receipt.acknowledgements().len(), targets.len());
+    Ok(())
+}
+
+#[test]
 fn public_errors_lifecycles_and_digest_helpers_are_closed() {
     let errors = [
         ErasureErrorV1::InvalidEncoding,
@@ -1957,6 +2051,18 @@ fn request_and_portable_records_cover_optional_and_normalized_forms() -> Result<
         }),
         Err(ErasureErrorV1::ScopeInvalid)
     );
+    let positioned = request(ErasureScopeV1::PrivateSubjectData, vec![reference(20)])?;
+    assert_eq!(positioned.request_position(), 10);
+    assert_eq!(positioned.horizon_position(), 20);
+    let extension = ErasureScopeExtensionV1::new(ErasureScopeExtensionInputV1 {
+        request: positioned.reference(),
+        scope_commitment: scope.reference(),
+        fork: reference(10),
+        lineage_rule: reference(11),
+        predecessor_extension: None,
+        admission_provenance: reference(12),
+    })?;
+    assert_eq!(extension.admission_provenance(), reference(12));
     Ok(())
 }
 
@@ -3317,6 +3423,55 @@ fn public_request_codec_rejects_every_bounded_cbor_shape_family() {
 fn state_and_freeze_codecs_reject_wrong_shapes() -> Result<(), ErasureErrorV1> {
     let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     let state_bytes = state.to_canonical_cbor()?;
+    let changed_state = |changes: &[(usize, Value)]| {
+        changes
+            .iter()
+            .try_fold(state_bytes.clone(), |bytes, (field, replacement)| {
+                replace_path(&bytes, &[*field], replacement.clone())
+            })
+    };
+    for (changes, expected) in [
+        (
+            vec![(
+                6,
+                Value::Array(vec![Value::Bytes(reference(4).digest().to_vec())]),
+            )],
+            ErasureErrorV1::PolicyConflict,
+        ),
+        (
+            vec![(4, Value::Integer(10.into()))],
+            ErasureErrorV1::PolicyConflict,
+        ),
+        (
+            vec![(3, Value::Integer(1.into()))],
+            ErasureErrorV1::ProvenanceMissing,
+        ),
+        (
+            vec![
+                (3, Value::Integer(5.into())),
+                (4, Value::Integer(10.into())),
+                (
+                    6,
+                    Value::Array(vec![Value::Bytes(reference(4).digest().to_vec())]),
+                ),
+                (9, Value::Bytes(reference(5).digest().to_vec())),
+            ],
+            ErasureErrorV1::PolicyConflict,
+        ),
+        (
+            vec![
+                (3, Value::Integer(6.into())),
+                (4, Value::Integer(10.into())),
+                (9, Value::Bytes(reference(5).digest().to_vec())),
+            ],
+            ErasureErrorV1::PolicyConflict,
+        ),
+    ] {
+        assert_eq!(
+            ErasureStateV1::from_canonical_cbor(&changed_state(&changes)?),
+            Err(expected)
+        );
+    }
     assert_eq!(
         ErasureStateV1::from_canonical_cbor(&replace_path(
             &state_bytes,
@@ -3330,6 +3485,14 @@ fn state_and_freeze_codecs_reject_wrong_shapes() -> Result<(), ErasureErrorV1> {
             &state_bytes,
             &[6],
             Value::Text("owners".to_owned()),
+        )?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+    assert_eq!(
+        ErasureStateV1::from_canonical_cbor(&replace_path(
+            &state_bytes,
+            &[8],
+            Value::Integer(99.into()),
         )?),
         Err(ErasureErrorV1::InvalidEncoding)
     );
@@ -3360,6 +3523,35 @@ fn state_and_freeze_codecs_reject_wrong_shapes() -> Result<(), ErasureErrorV1> {
         )?),
         Err(ErasureErrorV1::InvalidEncoding)
     );
+    assert_eq!(
+        ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace_path(
+            &admission_bytes,
+            &[5, 0, 2],
+            Value::Integer(99.into()),
+        )?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let obligation = obligation(
+        reference(1),
+        ErasureInventoryCategoryV1::Artifact,
+        target(1),
+    )?;
+    let obligation_bytes = obligation.to_canonical_cbor()?;
+    assert_eq!(
+        ErasureObligationV1::from_canonical_cbor(&obligation_bytes)?,
+        obligation
+    );
+    for path in [[3_usize, 0], [3, 2]] {
+        assert_eq!(
+            ErasureObligationV1::from_canonical_cbor(&replace_path(
+                &obligation_bytes,
+                &path,
+                Value::Integer(99.into()),
+            )?),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
     Ok(())
 }
 
