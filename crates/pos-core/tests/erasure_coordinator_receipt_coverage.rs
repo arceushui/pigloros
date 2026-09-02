@@ -688,7 +688,7 @@ fn submit_authorize_and_freeze(
     assert_eq!(
         api.dispatch_destruction(
             request.reference(),
-            &coordinator_admission(request.reference(), target(10), 0, None)?,
+            coordinator_admission(request.reference(), target(10), 0, None)?,
         ),
         Err(ErasureErrorV1::PolicyConflict)
     );
@@ -807,7 +807,7 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
         ),
     ] {
         assert_eq!(
-            api.dispatch_destruction(request.reference(), &invalid),
+            api.dispatch_destruction(request.reference(), invalid),
             Err(expected)
         );
     }
