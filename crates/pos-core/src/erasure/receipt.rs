@@ -292,6 +292,12 @@ impl ErasureAcknowledgementOutcomeV1 {
 }
 
 impl ErasureReceiptV1 {
+    /// Return the ERQ1 digest bound into this receipt.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.0.request
+    }
+
     /// Return the terminal outcome derived from the frozen closure.
     #[must_use]
     pub const fn lifecycle(&self) -> ErasureLifecycleV1 {
@@ -301,6 +307,36 @@ impl ErasureReceiptV1 {
     #[must_use]
     pub const fn replay_claim(&self) -> ErasureReplayClaimV1 {
         self.0.replay_claim
+    }
+
+    /// Return the frozen Tick Boundary position.
+    #[must_use]
+    pub const fn freeze_position(&self) -> u64 {
+        self.0.freeze_position
+    }
+
+    /// Return the policy revision admitted for this receipt.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.0.policy
+    }
+
+    /// Return the trust snapshot admitted for this receipt.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.0.trust
+    }
+
+    /// Return the logical position at which this receipt was issued.
+    #[must_use]
+    pub const fn issue_position(&self) -> u64 {
+        self.0.issue_position
+    }
+
+    /// Return the signature or commitment digest admitted for this receipt.
+    #[must_use]
+    pub const fn signature(&self) -> ErasureReferenceV1 {
+        self.0.signature
     }
     /// Validate ERC1 and normalize acknowledgement arrival order.
     ///

@@ -13,7 +13,6 @@ const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
 const ERS1: &str = "ERS1";
 const ERC1: &str = "ERC1";
-const ERCR1: &str = "ERCR1";
 const ERCRP1: &str = "ERCRP1";
 const ERASURE_INVENTORY_CATEGORY_COUNT: usize = ErasureInventoryCategoryV1::CANONICAL.len();
 
@@ -21,8 +20,8 @@ const ERASURE_INVENTORY_CATEGORY_COUNT: usize = ErasureInventoryCategoryV1::CANO
 pub const ERASURE_REQUEST_OR_STATE_MAX_BYTES: usize = 1024 * 1024;
 /// Largest encoded ERC1 accepted by V1.
 pub const ERASURE_RECEIPT_MAX_BYTES: usize = 16 * 1024 * 1024;
-/// Largest aggregate ERCR1 envelope or normalized persistence manifest.
-pub const ERASURE_COORDINATOR_RECORD_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Largest normalized ERCRP1 persistence manifest.
+pub const ERASURE_COORDINATOR_RECORD_MAX_BYTES: usize = 1024 * 1024;
 /// Largest selector or owner collection accepted by V1.
 pub const ERASURE_MAX_REFERENCES: usize = 4_096;
 /// Largest number of entries in each ERC1 inventory.
@@ -38,7 +37,7 @@ pub const ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT: usize = 16_384;
 /// Largest combined pending- and failed-owner set in ERS1 or ERC1.
 pub const ERASURE_MAX_OUTCOME_OWNERS: usize = 16_384;
 /// Largest number of immutable scope extensions retained for one ERQ1.
-pub const ERASURE_MAX_SCOPE_EXTENSIONS: usize = 65_536;
+pub const ERASURE_MAX_SCOPE_EXTENSIONS: usize = 4_096;
 /// Largest encoded portable supporting record, except explicitly bounded large ledgers.
 pub const ERASURE_PORTABLE_RECORD_MAX_BYTES: usize = 1024 * 1024;
 /// Largest encoded immutable scope commitment or scope-extension ledger.
@@ -108,8 +107,14 @@ pub const ERASURE_OBLIGATION_TAG_V1: &str = "ERO1";
 pub const ERASURE_OBLIGATION_SET_TAG_V1: &str = "EROS1";
 /// Domain tag for immutable future-Fork scope extensions.
 pub const ERASURE_SCOPE_EXTENSION_TAG_V1: &str = "ERSE1";
-/// Domain tag for immutable scope-extension ledgers.
-pub const ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1: &str = "ERSEL1";
+/// Domain tag for the canonical resolved-target closure.
+pub const ERASURE_TARGET_CLOSURE_TAG_V1: &str = "ERTC1";
+/// Domain tag for one bounded acknowledgement-reference inventory.
+pub const ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1: &str = "ERAI1";
+/// Domain tag for one immutable completed-attempt history page.
+pub const ERASURE_ATTEMPT_HISTORY_TAG_V1: &str = "ERAH1";
+/// Domain tag for one immutable scope-extension head node.
+pub const ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1: &str = "ERSEH1";
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1912,82 +1917,187 @@ pub struct ErasureAdministrativeResolutionV1 {
     content_digest: ErasureReferenceV1,
 }
 
-/// Portable immutable evidence persisted with an erasure coordinator record.
-///
-/// This envelope is shared by every storage adapter. Empty evidence is valid
-/// before the first attempt outcome; once appended, entries are never removed
-/// or replaced.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ErasureSupportingRecordsV1 {
-    correction_provenance: Option<ErasureCorrectionProvenanceV1>,
-    authorization_rejection: Option<ErasureAuthorizationRejectionV1>,
-    scope_commitment: Option<ErasureScopeCommitmentV1>,
-    freeze_admission_evidence: Option<ErasureFreezeAdmissionEvidenceV1>,
-    freeze_authorization_evidence: Option<ErasureFreezeAuthorizationEvidenceV1>,
-    freeze_provenance: Option<ErasureFreezeProvenanceV1>,
-    freeze_failure: Option<ErasureFreezeFailureV1>,
-    obligations: Vec<ErasureObligationV1>,
-    obligation_set: Option<ErasureObligationSetV1>,
-    scope_extensions: Vec<ErasureScopeExtensionV1>,
-    scope_extension_ledgers: Vec<ErasureScopeExtensionLedgerV1>,
-    retry_admissions: Vec<ErasureRetryAdmissionV1>,
-    acknowledgement_provenance: Vec<ErasureAcknowledgementProvenanceV1>,
-    attempt_outcomes: Vec<ErasureAttemptOutcomeV1>,
-    receipts: Vec<ErasureReceiptV1>,
-    receipt_provenance: Vec<ErasureReceiptProvenanceV1>,
-    administrative_resolutions: Vec<ErasureAdministrativeResolutionV1>,
+impl ErasureAdministrativeResolutionV1 {
+    /// Construct, normalize, and content-address an administrative resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed scope error for an empty, duplicate, or oversized set.
+    pub fn new(mut input: ErasureAdministrativeResolutionInputV1) -> Result<Self, ErasureErrorV1> {
+        if input.affected_digests.is_empty()
+            || input.affected_digests.len() > ERASURE_MAX_REFERENCES
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        input.affected_digests.sort_unstable();
+        if has_duplicate(&input.affected_digests) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        Self {
+            input,
+            content_digest: reference_zero(),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 digest.
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.input.request
+    }
+
+    /// Return affected state/evidence digests in bytewise order.
+    #[must_use]
+    pub fn affected_digests(&self) -> &[ErasureReferenceV1] {
+        &self.input.affected_digests
+    }
+
+    /// Return the closed recovery action.
+    #[must_use]
+    pub const fn action(&self) -> ErasureAdministrativeResolutionActionV1 {
+        self.input.action
+    }
+
+    /// Return the affected scope-commitment digest.
+    #[must_use]
+    pub const fn scope_commitment(&self) -> ErasureReferenceV1 {
+        self.input.scope_commitment
+    }
+
+    /// Return the pinned policy revision.
+    #[must_use]
+    pub const fn policy(&self) -> ErasureReferenceV1 {
+        self.input.policy
+    }
+
+    /// Return the pinned trust revision.
+    #[must_use]
+    pub const fn trust(&self) -> ErasureReferenceV1 {
+        self.input.trust
+    }
+
+    /// Return the authorizing Principal digest.
+    #[must_use]
+    pub const fn principal(&self) -> ErasureReferenceV1 {
+        self.input.principal
+    }
+
+    /// Return the host authorization-provenance digest.
+    #[must_use]
+    pub const fn authorization_provenance(&self) -> ErasureReferenceV1 {
+        self.input.authorization_provenance
+    }
+
+    /// Return the resolution-reason digest.
+    #[must_use]
+    pub const fn reason(&self) -> ErasureReferenceV1 {
+        self.input.reason
+    }
+
+    /// Return the issue logical position.
+    #[must_use]
+    pub const fn issue_position(&self) -> u64 {
+        self.input.issue_position
+    }
+
+    /// Return the preceding resolution digest, if any.
+    #[must_use]
+    pub const fn predecessor_resolution(&self) -> Option<ErasureReferenceV1> {
+        self.input.predecessor_resolution
+    }
+
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+
+    /// Alias for [`Self::reference`].
+    #[must_use]
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.reference()
+    }
+
+    /// Encode the exact-length deterministic record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding error if serialization exceeds its bound.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &administrative_resolution_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical administrative-resolution record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or invalid bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_REFERENCES,
+        )
+        .and_then(|value| exact_array(&value, 13).and_then(administrative_resolution_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &administrative_resolution_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
 }
 
-type ErasureObligationOwnerV1 = (ErasureReferenceV1, ErasureReferenceV1);
-type ErasureSelectedPositiveProvenanceV1<'a> = (
-    (u64, ErasureReferenceV1),
-    &'a ErasureAcknowledgementProvenanceV1,
-);
-type ErasurePositiveProvenanceIndexV1<'a> =
-    BTreeMap<ErasureObligationOwnerV1, ErasureSelectedPositiveProvenanceV1<'a>>;
-
-mod evidence;
-#[cfg(test)]
-use evidence::option_is_unchanged;
-use evidence::{acknowledgement_provenance_ordering_key, normalize_retry_admission};
-/// Construction fields for [`ErasureSupportingRecordsV1`].
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ErasureSupportingRecordsInputV1 {
-    /// Provenance linking a corrected ERQ1 to a rejected predecessor.
-    pub correction_provenance: Option<ErasureCorrectionProvenanceV1>,
-    /// Canonical evidence for a rejection before scope/freeze work.
-    pub authorization_rejection: Option<ErasureAuthorizationRejectionV1>,
-    /// Immutable resolved scope, once freeze resolution succeeds.
-    pub scope_commitment: Option<ErasureScopeCommitmentV1>,
-    /// Complete canonical category-by-target freeze-admission evidence.
-    pub freeze_admission_evidence: Option<ErasureFreezeAdmissionEvidenceV1>,
-    /// Retained #187-owned authorization proof for the admission body.
-    pub freeze_authorization_evidence: Option<ErasureFreezeAuthorizationEvidenceV1>,
-    /// Immutable successful freeze evidence.
-    pub freeze_provenance: Option<ErasureFreezeProvenanceV1>,
-    /// Immutable scope/freeze failure evidence for an authorized rejection.
-    pub freeze_failure: Option<ErasureFreezeFailureV1>,
-    /// Immutable policy-selected category/target/owner obligations.
-    pub obligations: Vec<ErasureObligationV1>,
-    /// Immutable set of policy-admitted obligation references.
-    pub obligation_set: Option<ErasureObligationSetV1>,
-    /// Append-only future-Fork scope-extension objects.
-    pub scope_extensions: Vec<ErasureScopeExtensionV1>,
-    /// Immutable extension-ledger snapshots from the empty root onward.
-    pub scope_extension_ledgers: Vec<ErasureScopeExtensionLedgerV1>,
-    /// Initial-attempt and retry admissions in ordinal order.
-    pub retry_admissions: Vec<ErasureRetryAdmissionV1>,
-    /// Canonical acknowledgement-result evidence retained across attempts.
-    pub acknowledgement_provenance: Vec<ErasureAcknowledgementProvenanceV1>,
-    /// Immutable attempt outcomes in ordinal order.
-    pub attempt_outcomes: Vec<ErasureAttemptOutcomeV1>,
-    /// Immutable ERC1 receipts in ordinal order.
-    pub receipts: Vec<ErasureReceiptV1>,
-    /// Provenance for each receipt in ordinal order.
-    pub receipt_provenance: Vec<ErasureReceiptProvenanceV1>,
-    /// Non-branching administrative-resolution chain.
-    pub administrative_resolutions: Vec<ErasureAdministrativeResolutionV1>,
+fn normalize_retry_admission(
+    input: &mut ErasureRetryAdmissionInputV1,
+) -> Result<(), ErasureErrorV1> {
+    if !(0..ERASURE_MAX_ATTEMPT_OUTCOMES as u64).contains(&input.attempt_ordinal)
+        || (input.attempt_ordinal == 0) != input.source_receipt.is_none()
+        || input
+            .deadline_position
+            .checked_sub(input.admitted_position)
+            .is_none()
+    {
+        return Err(ErasureErrorV1::PolicyConflict);
+    }
+    if input.unresolved_obligations.len() != input.command_identities.len()
+        || input.unresolved_obligations.len() > ERASURE_MAX_OBLIGATIONS
+    {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    let mut pairs = input
+        .unresolved_obligations
+        .iter()
+        .copied()
+        .zip(input.command_identities.iter().copied())
+        .collect::<Vec<_>>();
+    pairs.sort_unstable_by_key(|(obligation, _)| *obligation);
+    let obligations = pairs
+        .iter()
+        .map(|(obligation, _)| *obligation)
+        .collect::<Vec<_>>();
+    if has_duplicate(&obligations) {
+        return Err(ErasureErrorV1::ScopeInvalid);
+    }
+    input.unresolved_obligations = obligations;
+    input.command_identities = pairs.iter().map(|(_, command)| *command).collect();
+    Ok(())
 }
+
+// Coordinator recovery intentionally has no aggregate evidence ledger.  The
+// authoritative durable shape is ERCRP1 plus independently addressed immutable
+// objects.  `persistence` owns the bounded recovered working state.
 
 /// Host-admitted outcome for a submitted ERQ1.
 ///
@@ -2703,116 +2813,6 @@ impl ErasureScopeExtensionV1 {
     }
 }
 
-/// Construction fields for an immutable extension ledger snapshot.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErasureScopeExtensionLedgerInputV1 {
-    /// Initial immutable scope commitment.
-    pub scope_commitment: ErasureReferenceV1,
-    /// Extension addresses in oldest-to-newest predecessor order.
-    pub extensions: Vec<ErasureReferenceV1>,
-    /// The final extension address, or `None` for the empty ledger.
-    pub head: Option<ErasureReferenceV1>,
-}
-
-/// Content-addressed immutable scope-extension ledger (`ERSEL1`).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErasureScopeExtensionLedgerV1 {
-    input: ErasureScopeExtensionLedgerInputV1,
-    content_digest: ErasureReferenceV1,
-}
-
-impl ErasureScopeExtensionLedgerV1 {
-    /// Construct one exact ledger snapshot without normalizing its chain order.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed scope error for an oversized, duplicate, or
-    /// head-inconsistent extension list.
-    pub fn new(input: ErasureScopeExtensionLedgerInputV1) -> Result<Self, ErasureErrorV1> {
-        let mut extension_identities = input.extensions.clone();
-        extension_identities.sort_unstable();
-        if input.extensions.len() > ERASURE_MAX_SCOPE_EXTENSIONS
-            || has_duplicate(&extension_identities)
-            || (input.extensions.is_empty() != input.head.is_none())
-            || input
-                .extensions
-                .last()
-                .is_some_and(|extension| Some(*extension) != input.head)
-        {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        Self {
-            input,
-            content_digest: reference_zero(),
-        }
-        .with_digest()
-    }
-
-    /// Return the initial immutable scope commitment.
-    #[must_use]
-    pub const fn scope_commitment(&self) -> ErasureReferenceV1 {
-        self.input.scope_commitment
-    }
-
-    /// Return extension addresses in oldest-to-newest predecessor order.
-    #[must_use]
-    pub fn extensions(&self) -> &[ErasureReferenceV1] {
-        &self.input.extensions
-    }
-
-    /// Return the explicit durable head, if the ledger is non-empty.
-    #[must_use]
-    pub const fn head(&self) -> Option<ErasureReferenceV1> {
-        self.input.head
-    }
-
-    /// Return this immutable ledger snapshot's content address.
-    #[must_use]
-    pub const fn reference(&self) -> ErasureReferenceV1 {
-        self.content_digest
-    }
-
-    /// Encode one exact `ERSEL1` record.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed encoding error when serialization exceeds the V1 bound.
-    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
-        encode_limited(
-            &scope_extension_ledger_value(self),
-            ERASURE_SCOPE_LEDGER_MAX_BYTES,
-        )
-    }
-
-    /// Decode and validate one exact `ERSEL1` record.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed error for malformed, noncanonical, or oversized bytes.
-    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(
-            bytes,
-            ERASURE_SCOPE_LEDGER_MAX_BYTES,
-            ERASURE_MAX_SCOPE_EXTENSIONS,
-        )
-        .and_then(|value| exact_array(&value, 5).and_then(scope_extension_ledger_from_fields))
-    }
-
-    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
-        encode_limited(
-            &scope_extension_ledger_value(&self),
-            ERASURE_SCOPE_LEDGER_MAX_BYTES,
-        )
-        .map(|bytes| Self {
-            content_digest: ErasureReferenceV1::from_digest(domain_digest(
-                ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1,
-                &bytes,
-            )),
-            ..self
-        })
-    }
-}
-
 /// One payload-free ERC1 inventory result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureInventoryResultV1 {
@@ -3032,134 +3032,371 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
-/// Coordinator record whose retained freeze authorization has been verified
-/// for one persistence operation.
-///
-/// The inner record is intentionally private so persistence adapters cannot
-/// construct a frozen commit without invoking the host-owned verifier. A
-/// pre-freeze record also uses this capability and succeeds without evidence.
+/// Exact stored ERCRP1 bytes and their content address. Adapters return this
+/// envelope unchanged; decoding and recovery remain core-owned.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedErasureCoordinatorRecordV1(ErasureCoordinatorRecordV1);
+pub struct StoredErasureManifestV1 {
+    digest: ErasureReferenceV1,
+    canonical_cbor: Vec<u8>,
+}
 
-impl VerifiedErasureCoordinatorRecordV1 {
-    /// Verify a record before it crosses the durable commit boundary.
+impl StoredErasureManifestV1 {
+    /// Construct an adapter-returned manifest after checking its content address.
     ///
     /// # Errors
     ///
-    /// Returns a closed provenance or authorization error when retained freeze
-    /// evidence is incomplete or rejected by the host-owned verifier.
+    /// Returns [`ErasureErrorV1::ProvenanceMissing`] when `digest` does not
+    /// authenticate the supplied canonical ERCRP1 bytes.
     pub fn new(
-        record: ErasureCoordinatorRecordV1,
-        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+        digest: ErasureReferenceV1,
+        canonical_cbor: Vec<u8>,
     ) -> Result<Self, ErasureErrorV1> {
-        record
-            .verify_recovered_freeze_authorization(verifier)
-            .map(|()| Self(record))
+        (ErasureReferenceV1::from_digest(domain_digest(ERCRP1, &canonical_cbor)) == digest)
+            .then_some(Self {
+                digest,
+                canonical_cbor,
+            })
+            .ok_or(ErasureErrorV1::ProvenanceMissing)
     }
 
-    /// Borrow the verified record for adapter validation and encoding.
+    /// Return the content address used for CAS.
     #[must_use]
-    pub const fn record(&self) -> &ErasureCoordinatorRecordV1 {
-        &self.0
+    pub const fn digest(&self) -> ErasureReferenceV1 {
+        self.digest
     }
 
-    /// Consume the capability after a successful staged commit.
+    /// Return the canonical ERCRP1 bytes.
     #[must_use]
-    pub fn into_record(self) -> ErasureCoordinatorRecordV1 {
-        self.0
+    pub fn canonical_cbor(&self) -> &[u8] {
+        &self.canonical_cbor
     }
 }
 
-/// Durable persistence SPI for the complete ERQ1/ERS1/ERC1 coordinator record.
-///
-/// This port contains persistence plus the mandatory recovery-verification
-/// call supplied by the host. Authentication policy, target discovery,
-/// destruction dispatch, acknowledgement admission, and receipt trust remain
-/// host-owned operations on [`ErasureCoordinatorPortV1`]. It is an adapter
-/// seam, not an application command surface: application code must submit
-/// erasure operations through [`ErasureCoordinatorStateMachineV1`] so the
-/// core validation and lifecycle checks cannot be skipped. Adapters must
-/// store canonical bytes and make an exact retry idempotent while rejecting a
-/// conflicting replacement.
-pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
-    /// Load the authoritative record for one request after a process restart.
-    /// Implementations must validate the complete bounded ERS1 predecessor
-    /// chain before returning a record; validating only the current row is not
-    /// sufficient provenance. Frozen-or-later records must also pass the
-    /// supplied host authorization verifier before they leave the adapter.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed storage or encoding error when the record cannot be
-    /// read or does not satisfy the V1 contract.
-    fn load_record(
-        &self,
-        request: ErasureReferenceV1,
-        verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
-    ) -> Result<Option<ErasureCoordinatorRecordV1>, ErasureErrorV1>;
+/// One immutable addressed object inserted by a core-prepared delta.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasurePersistenceObjectV1 {
+    kind: &'static str,
+    reference: ErasureReferenceV1,
+    canonical_cbor: Vec<u8>,
+}
 
-    /// Atomically persist an ordered batch of coordinator records.
-    ///
-    /// The batch is committed as one storage transaction. It is used when a
-    /// single coordinator operation needs to record an intermediate recovery
-    /// state and its terminal receipt together. Implementations must validate
-    /// every record before making any externally visible change.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed storage, encoding, or conflict error and leaves the
-    /// durable state unchanged.
-    fn commit_records(
-        &mut self,
-        records: &[VerifiedErasureCoordinatorRecordV1],
-    ) -> Result<(), ErasureErrorV1>;
-
-    /// Persist one record through the batch transaction seam.
-    ///
-    /// Adapters normally implement only [`Self::commit_records`]; this wrapper
-    /// keeps single-record operations on the same atomic validation path.
-    ///
-    /// # Errors
-    ///
-    /// Returns the adapter's closed storage, encoding, or conflict error.
-    fn commit_record(
-        &mut self,
-        record: VerifiedErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1> {
-        self.commit_records(std::slice::from_ref(&record))
+impl ErasurePersistenceObjectV1 {
+    pub(crate) fn new(
+        kind: &'static str,
+        reference: ErasureReferenceV1,
+        canonical_cbor: Vec<u8>,
+    ) -> Self {
+        Self {
+            kind,
+            reference,
+            canonical_cbor,
+        }
     }
 
-    /// Atomically append a scope-extension ledger successor.
-    ///
-    /// The adapter compares the durable ledger reference before it makes the
-    /// successor visible. It must accept an exact retry and reject a competing
-    /// successor so the chain cannot branch.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed storage or policy conflict error.
-    fn compare_and_swap_scope_extension(
-        &mut self,
-        request: ErasureReferenceV1,
-        expected_ledger: ErasureReferenceV1,
-        record: VerifiedErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1>;
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        self.kind
+    }
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.reference
+    }
+    #[must_use]
+    pub fn canonical_cbor(&self) -> &[u8] {
+        &self.canonical_cbor
+    }
+}
 
-    /// Atomically append an administrative-resolution successor.
-    ///
-    /// The adapter compares the durable resolution head before it makes the
-    /// successor visible. It must accept an exact retry and reject a competing
-    /// successor so the recovery chain remains non-branching.
+/// One immutable ERS1 object inserted with a manifest delta.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasurePersistedStateV1 {
+    state: ErasureStateV1,
+    canonical_cbor: Vec<u8>,
+}
+
+impl ErasurePersistedStateV1 {
+    pub(crate) fn new(state: ErasureStateV1, canonical_cbor: Vec<u8>) -> Self {
+        Self {
+            state,
+            canonical_cbor,
+        }
+    }
+    #[must_use]
+    pub const fn reference(&self) -> ErasureReferenceV1 {
+        self.state.state_digest()
+    }
+    #[must_use]
+    pub const fn state(&self) -> &ErasureStateV1 {
+        &self.state
+    }
+    #[must_use]
+    pub fn canonical_cbor(&self) -> &[u8] {
+        &self.canonical_cbor
+    }
+}
+
+/// Index rows inserted atomically with their immutable node.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureIndexInsertV1 {
+    /// `(request, ordinal) -> ERAH1`, unique and non-authoritative.
+    AttemptPage {
+        ordinal: u64,
+        reference: ErasureReferenceV1,
+    },
+    /// `(request, ordinal) -> ERSEH1`, unique and non-authoritative.
+    ScopeNode {
+        ordinal: u64,
+        reference: ErasureReferenceV1,
+    },
+    /// `(request, ordinal) -> ERAR1`, unique and non-authoritative.
+    AdministrativeResolution {
+        ordinal: u64,
+        reference: ErasureReferenceV1,
+    },
+}
+
+/// Adapter effects coupled to one durable manifest advance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ErasureCasEffectV1 {
+    /// No external admission is consumed by this transition.
+    None,
+    /// Consume a previously granted quota reservation and create outbox intents.
+    AttemptAdmission {
+        reservation: ErasureAttemptQuotaReservationV1,
+        commands: Vec<ErasureDestructionCommandV1>,
+    },
+    /// Store the authenticated acknowledgement inbox identity.
+    AcknowledgementAdmission { acknowledgement: ErasureReferenceV1 },
+    /// Store the admitted receipt identity.
+    ReceiptAdmission { receipt: ErasureReferenceV1 },
+}
+
+impl ErasureCasEffectV1 {
+    /// Return a deterministic identity covering the complete adapter effect.
+    #[must_use]
+    pub fn identity(&self) -> ErasureReferenceV1 {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"pigloros/erasure-cas-effect/v1");
+        match self {
+            Self::None => {
+                hasher.update(&[0]);
+            }
+            Self::AttemptAdmission {
+                reservation,
+                commands,
+            } => {
+                hasher.update(&[1]);
+                hasher.update(&reservation.admission().digest());
+                hasher.update(&reservation.reference().digest());
+                hasher.update(&(commands.len() as u64).to_be_bytes());
+                for command in commands {
+                    hasher.update(&command.obligation.digest());
+                    hasher.update(&command.category.code().to_be_bytes());
+                    hasher.update(&command.target.artifact_class.code().to_be_bytes());
+                    hasher.update(&command.target.artifact_digest.digest());
+                    hasher.update(&command.target.key_role.code().to_be_bytes());
+                    hasher.update(&command.target.key_digest.digest());
+                    hasher.update(&command.target.replica_set.digest());
+                    hasher.update(&command.target.replica_id.digest());
+                    hasher.update(&command.owner.digest());
+                    hasher.update(&command.command.digest());
+                    hasher.update(&command.provenance.digest());
+                }
+            }
+            Self::AcknowledgementAdmission { acknowledgement } => {
+                hasher.update(&[2]);
+                hasher.update(&acknowledgement.digest());
+            }
+            Self::ReceiptAdmission { receipt } => {
+                hasher.update(&[3]);
+                hasher.update(&receipt.digest());
+            }
+        }
+        ErasureReferenceV1::from_digest(*hasher.finalize().as_bytes())
+    }
+}
+
+/// Host-issued, idempotent attempt quota reservation consumed by one CAS.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureAttemptQuotaReservationV1 {
+    admission: ErasureReferenceV1,
+    reference: ErasureReferenceV1,
+}
+
+impl ErasureAttemptQuotaReservationV1 {
+    /// Construct a host-issued reservation capability.
+    #[must_use]
+    pub const fn new(admission: ErasureReferenceV1, reference: ErasureReferenceV1) -> Self {
+        Self {
+            admission,
+            reference,
+        }
+    }
+    /// Return the admission identity this reservation authorizes.
+    #[must_use]
+    pub const fn admission(self) -> ErasureReferenceV1 {
+        self.admission
+    }
+    /// Return the durable reservation identity.
+    #[must_use]
+    pub const fn reference(self) -> ErasureReferenceV1 {
+        self.reference
+    }
+}
+
+/// Opaque core-prepared, append-only ERCRP1 delta. Adapters inspect getters
+/// only and must not decode or reconstruct recovered coordinator state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedErasureCasV1 {
+    request: ErasureReferenceV1,
+    expected_manifest_digest: Option<ErasureReferenceV1>,
+    next_manifest: StoredErasureManifestV1,
+    new_objects: Vec<ErasurePersistenceObjectV1>,
+    new_states: Vec<ErasurePersistedStateV1>,
+    index_inserts: Vec<ErasureIndexInsertV1>,
+    effect: ErasureCasEffectV1,
+}
+
+impl PreparedErasureCasV1 {
+    pub(crate) fn new(
+        request: ErasureReferenceV1,
+        expected_manifest_digest: Option<ErasureReferenceV1>,
+        next_manifest: StoredErasureManifestV1,
+        new_objects: Vec<ErasurePersistenceObjectV1>,
+        new_states: Vec<ErasurePersistedStateV1>,
+        index_inserts: Vec<ErasureIndexInsertV1>,
+        effect: ErasureCasEffectV1,
+    ) -> Self {
+        Self {
+            request,
+            expected_manifest_digest,
+            next_manifest,
+            new_objects,
+            new_states,
+            index_inserts,
+            effect,
+        }
+    }
+    #[must_use]
+    pub const fn request(&self) -> ErasureReferenceV1 {
+        self.request
+    }
+    #[must_use]
+    pub const fn expected_manifest_digest(&self) -> Option<ErasureReferenceV1> {
+        self.expected_manifest_digest
+    }
+    #[must_use]
+    pub const fn next_manifest(&self) -> &StoredErasureManifestV1 {
+        &self.next_manifest
+    }
+    #[must_use]
+    pub fn new_objects(&self) -> &[ErasurePersistenceObjectV1] {
+        &self.new_objects
+    }
+    #[must_use]
+    pub fn new_states(&self) -> &[ErasurePersistedStateV1] {
+        &self.new_states
+    }
+    #[must_use]
+    pub fn index_inserts(&self) -> &[ErasureIndexInsertV1] {
+        &self.index_inserts
+    }
+    #[must_use]
+    pub const fn effect(&self) -> &ErasureCasEffectV1 {
+        &self.effect
+    }
+}
+
+/// Result of applying a core-prepared manifest delta.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErasureCasOutcomeV1 {
+    Applied,
+    ExactRetry,
+}
+
+/// Raw persistence SPI. The core owns ERCRP1 decoding, recovery, validation,
+/// and construction of every mutation. Adapters own only canonical byte/object
+/// storage and one atomic compare-and-swap transaction.
+pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
+    /// Return the current ERCRP1 envelope for one request, if any.
     ///
     /// # Errors
     ///
-    /// Returns a closed storage or policy conflict error.
-    fn compare_and_swap_administrative_resolution(
-        &mut self,
+    /// Returns a closed adapter read or decoding error.
+    fn read_manifest(
+        &self,
         request: ErasureReferenceV1,
-        expected_head: Option<ErasureReferenceV1>,
-        record: VerifiedErasureCoordinatorRecordV1,
-    ) -> Result<(), ErasureErrorV1>;
+    ) -> Result<Option<StoredErasureManifestV1>, ErasureErrorV1>;
+    /// Return one immutable object by content address.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error for an unavailable object.
+    fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1>;
+    /// Return the non-authoritative ERAH1 ordinal-index entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn attempt_page_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
+    /// Return the exact ERAH1 ordinal-index cardinality.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn attempt_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1>;
+    /// Return the non-authoritative ERSEH1 ordinal-index entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn scope_node_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
+    /// Return the number of indexed ERSEH1 nodes for one request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn scope_index_count(&self, request: ErasureReferenceV1) -> Result<u64, ErasureErrorV1>;
+    /// Return the non-authoritative administrative-resolution index entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn administrative_resolution_ref(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+    ) -> Result<Option<ErasureReferenceV1>, ErasureErrorV1>;
+    /// Return the number of indexed administrative-resolution records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn administrative_resolution_index_count(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<u64, ErasureErrorV1>;
+    /// Atomically apply a core-prepared delta. If the current manifest already
+    /// equals the supplied next manifest and every referenced delta is equal,
+    /// return [`ErasureCasOutcomeV1::ExactRetry`]; otherwise stale heads fail
+    /// closed with [`ErasureErrorV1::PolicyConflict`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed transaction error or [`ErasureErrorV1::PolicyConflict`]
+    /// for a non-identical stale manifest head.
+    fn compare_and_swap(
+        &mut self,
+        mutation: PreparedErasureCasV1,
+    ) -> Result<ErasureCasOutcomeV1, ErasureErrorV1>;
 }
 
 fn verify_predecessor_chain<R: ErasureStateResolverV1>(
@@ -3403,8 +3640,14 @@ pub trait ErasureCoordinatorPortV1:
     ///
     /// # Errors
     ///
-    /// Returns a closed policy/trust error when the admission is stale or unauthorized.
-    fn admit_attempt(&self, admission: &ErasureRetryAdmissionV1) -> Result<(), ErasureErrorV1>;
+    /// Returns an idempotent quota reservation which the core places in the
+    /// prepared CAS effect. The adapter consumes that exact reservation when
+    /// it persists the active attempt and durable outbox intents, so refusal
+    /// happens before any state/object/outbox delta is constructed.
+    fn admit_attempt(
+        &self,
+        admission: &ErasureRetryAdmissionV1,
+    ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1>;
     /// Admit an acknowledgement from the authenticated owner and evidence boundary.
     ///
     /// The structural owner/target equality check in the core is necessary but
@@ -3672,83 +3915,13 @@ pub enum ErasureAtomicFreezeResultV1 {
     Rejected(ErasureFreezeFailureV1),
 }
 
-/// Public durable fields for reconstructing an ERQ1/ERS1/ERC1 coordinator record.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErasureCoordinatorRecordPartsV1 {
-    /// The exact authenticated request identity.
-    pub request: ErasureRequestV1,
-    /// The latest digest-linked ERS1 state.
-    pub state: ErasureStateV1,
-    /// The frozen required-target closure returned by the one atomic host
-    /// admission. Each `(request, target)` tuple is the deterministic identity
-    /// of one destruction command; no payload is persisted here.
-    pub targets: Vec<ErasureRequiredTargetV1>,
-    /// Acknowledgements accepted for the frozen closure and therefore the
-    /// durable command results.
-    pub acknowledgements: Vec<ErasureAcknowledgementV1>,
-    /// The committed terminal receipt, if any.
-    pub receipt: Option<ErasureReceiptV1>,
-    /// Canonical normalized terminal input used for idempotent retries.
-    pub receipt_input: Option<ErasureReceiptInputV1>,
-    /// Authenticated authorization provenance, if present.
-    pub authorize_provenance: Option<ErasureReferenceV1>,
-    /// Host-authenticated freeze provenance, if present.
-    pub freeze_provenance: Option<ErasureReferenceV1>,
-    /// Host-authenticated dispatch provenance, if present.
-    pub dispatch_provenance: Option<ErasureReferenceV1>,
-    /// Durable reference to the current immutable scope-extension ledger.
-    pub scope_extension_ledger: Option<ErasureReferenceV1>,
-    /// Durable reference to the non-branching administrative-resolution head.
-    pub administrative_resolution_head: Option<ErasureReferenceV1>,
-    /// Immutable retry, acknowledgement, receipt, and recovery evidence.
-    pub supporting_records: ErasureSupportingRecordsV1,
-}
-
-/// Durable ERQ1/ERS1/ERC1 coordinator record.
-///
-/// Hosts persist this complete record (or an equivalent representation) and
-/// return it from [`ErasurePersistencePortV1::load_record`]. The core state
-/// machine keeps only a query cache; it never treats that cache as authority.
-/// The `ERCR1` encoding is an internal sidecar envelope for this SPI; ERQ1,
-/// ERS1, and ERC1 remain the public contracts described by ADR-060.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErasureCoordinatorRecordV1 {
-    /// The exact authenticated request identity.
-    request: ErasureRequestV1,
-    /// The latest digest-linked ERS1 state.
-    state: ErasureStateV1,
-    /// The frozen required-target closure. Each `(request, target)` tuple is
-    /// the deterministic identity of one destruction command.
-    targets: Vec<ErasureRequiredTargetV1>,
-    /// Acknowledgements accepted for the frozen closure and therefore the
-    /// durable command results.
-    acknowledgements: Vec<ErasureAcknowledgementV1>,
-    /// The committed terminal receipt, if any.
-    receipt: Option<ErasureReceiptV1>,
-    /// Canonical normalized terminal input used for idempotent retries.
-    receipt_input: Option<ErasureReceiptInputV1>,
-    authorize_provenance: Option<ErasureReferenceV1>,
-    freeze_provenance: Option<ErasureReferenceV1>,
-    dispatch_provenance: Option<ErasureReferenceV1>,
-    scope_extension_ledger: Option<ErasureReferenceV1>,
-    administrative_resolution_head: Option<ErasureReferenceV1>,
-    supporting_records: ErasureSupportingRecordsV1,
-}
-
-/// One independently bounded, content-addressed supporting-evidence object.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErasurePersistenceEvidenceV1 {
-    reference: ErasureReferenceV1,
-    canonical_cbor: Vec<u8>,
-}
-
 mod persistence;
-pub use persistence::ErasurePersistenceBundleV1;
+pub(crate) use persistence::RecoveredErasureV1;
 /// Core-owned, idempotent ERQ1/ERS1/ERC1 state machine; adapters cannot bypass it.
 pub struct ErasureCoordinatorStateMachineV1<P> {
     port: P,
     coordinator: ErasureReferenceV1,
-    records: Vec<ErasureCoordinatorRecordV1>,
+    records: Vec<RecoveredErasureV1>,
 }
 
 #[path = "erasure_codec.rs"]
@@ -3768,14 +3941,12 @@ use codec::{
     has_duplicate_acknowledgement_identity, invalid_owner_sets, inventories_are_within_closure,
     inventories_exceed_bound, inventories_have_duplicate_targets, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, obligation_from_fields, obligation_set_from_fields,
-    obligation_set_value, obligation_value, persistence_manifest_value, receipt_core_value,
-    receipt_from_fields, receipt_provenance_from_fields, receipt_provenance_value, receipt_value,
-    record_from_fields, record_from_persistence_manifest, record_value, reference_zero,
+    obligation_set_value, obligation_value, receipt_core_value, receipt_from_fields,
+    receipt_provenance_from_fields, receipt_provenance_value, receipt_value, reference_zero,
     request_from_fields, request_value, retry_admission_from_fields, retry_admission_value,
     scope_commitment_from_fields, scope_commitment_value, scope_extension_from_fields,
-    scope_extension_ledger_from_fields, scope_extension_ledger_value, scope_extension_value,
-    sort_inventories, state_core_value, state_from_fields, state_value, strictly_increasing,
-    supporting_records_from_value, supporting_records_value, weakest_inventory_claim,
+    scope_extension_value, sort_inventories, state_core_value, state_from_fields, state_value,
+    strictly_increasing, weakest_inventory_claim,
 };
 
 #[cfg(test)]
