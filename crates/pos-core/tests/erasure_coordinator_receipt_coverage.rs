@@ -1436,7 +1436,7 @@ fn coordinator_public_requires_persisted_scope_and_lineage_before_extensions(
         ErasureCoordinatorStateMachineV1::new(coordinator_port(vec![target], None), COORDINATOR);
     submitted.submit(request.clone(), request.provenance())?;
     assert_eq!(
-        submitted.append_scope_extension(request.reference(), extension.clone()),
+        submitted.append_scope_extension(request.reference(), extension),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     assert_eq!(
