@@ -534,16 +534,23 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
         TrustMutation::Epoch,
         TrustMutation::RootsEmpty,
         TrustMutation::RootsMultiple,
+        TrustMutation::RootsTooMany,
+        TrustMutation::DuplicateRootKey,
         TrustMutation::Revocations,
+        TrustMutation::RevocationsTooMany,
+        TrustMutation::RevocationsOrder,
+        TrustMutation::RevokedArtifact,
         TrustMutation::Replacements,
+        TrustMutation::ReplacementsTooMany,
+        TrustMutation::ReplacementsOrder,
         TrustMutation::KeyId,
         TrustMutation::KeyEpoch,
         TrustMutation::Algorithm,
         TrustMutation::PublicKey,
-        TrustMutation::VersionsEmpty,
+        TrustMutation::VersionsTooMany,
         TrustMutation::VersionsOrder,
         TrustMutation::Expiry,
-        TrustMutation::Previous,
+        TrustMutation::PreviousInvalid,
         TrustMutation::Signature,
     ];
     for mutation in mutations {
@@ -562,6 +569,31 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
             ),
             Err(EvaluatorError::Bundle)
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_accepts_supported_trust_policy_evolution() -> TestResult {
+    for mutation in [
+        TrustMutation::AdditionalRoot,
+        TrustMutation::NonMatchingRevocations,
+        TrustMutation::VersionsEmpty,
+        TrustMutation::Previous,
+    ] {
+        let corpus = support::corpus_with_trust_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        let report = evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        )?;
+        assert!(report.is_passing());
     }
     Ok(())
 }

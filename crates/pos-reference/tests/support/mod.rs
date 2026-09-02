@@ -108,16 +108,27 @@ pub enum TrustMutation {
     Epoch,
     RootsEmpty,
     RootsMultiple,
+    RootsTooMany,
+    AdditionalRoot,
+    DuplicateRootKey,
     Revocations,
+    RevocationsTooMany,
+    RevocationsOrder,
+    NonMatchingRevocations,
+    RevokedArtifact,
     Replacements,
+    ReplacementsTooMany,
+    ReplacementsOrder,
     KeyId,
     KeyEpoch,
     Algorithm,
     PublicKey,
     VersionsEmpty,
+    VersionsTooMany,
     VersionsOrder,
     Expiry,
     Previous,
+    PreviousInvalid,
     Signature,
 }
 
@@ -238,10 +249,10 @@ fn corpus_for_mode(
     trust_mutation: Option<TrustMutation>,
 ) -> TestResult<Corpus> {
     let signing_key = SigningKey::from_bytes(&[9; 32]);
-    let trust_policy = trust_policy(&signing_key, trust_mutation)?;
-    let trust_digest = hash(&trust_policy);
     let execution_profile = execution_profile(profile_mutation)?;
     let execution_digest = hash(&execution_profile);
+    let trust_policy = trust_policy(&signing_key, trust_mutation, execution_digest)?;
+    let trust_digest = hash(&trust_policy);
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
     add_provider_contracts(&mut members, profile_mutation)?;
@@ -673,7 +684,7 @@ fn add_provider_registry(
         ])]),
     ];
     if let Some(mutation) = mutation {
-        mutate_provider_registry(&mut registry_fields, mutation)?;
+        mutate_provider_registry(&mut registry_fields, mutation);
     }
     let registry_digest = hash_contract(
         "PiglorOS.Conformance.ProviderRegistry.v1",
@@ -708,21 +719,18 @@ fn mutate_provider_package(
         ProfileMutation::PackageSupportRole => {
             fields[6] = descriptor(members, "providers/test-provider/NOTICE")?;
         }
-        ProfileMutation::PackageDigest => {}
         _ => {}
     }
     Ok(())
 }
 
-fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
+fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) {
     match mutation {
         ProfileMutation::RegistryMagic => fields[0] = text("FPR0"),
         ProfileMutation::RegistryVersion => fields[1] = uint(2),
         ProfileMutation::RegistryProviders => fields[2] = array(Vec::new()),
-        ProfileMutation::RegistryDigest => {}
         _ => {}
     }
-    Ok(())
 }
 
 fn profile(
@@ -1050,7 +1058,11 @@ fn mutate_archive_root(root: &mut Value, mutation: BundleMutation) -> TestResult
     Ok(())
 }
 
-fn trust_policy(signing_key: &SigningKey, mutation: Option<TrustMutation>) -> TestResult<Vec<u8>> {
+fn trust_policy(
+    signing_key: &SigningKey,
+    mutation: Option<TrustMutation>,
+    revoked_artifact: [u8; 32],
+) -> TestResult<Vec<u8>> {
     let mut fields = vec![
         text("TPS1"),
         uint(1),
@@ -1070,7 +1082,7 @@ fn trust_policy(signing_key: &SigningKey, mutation: Option<TrustMutation>) -> Te
         Value::Null,
     ];
     if let Some(mutation) = mutation {
-        mutate_trust_policy(&mut fields, mutation)?;
+        mutate_trust_policy(&mut fields, mutation, revoked_artifact)?;
     }
     let signature = signing_key
         .sign(&canonical(&array(fields.clone()))?)
@@ -1083,7 +1095,11 @@ fn trust_policy(signing_key: &SigningKey, mutation: Option<TrustMutation>) -> Te
     canonical(&array(fields))
 }
 
-fn mutate_trust_policy(fields: &mut [Value], mutation: TrustMutation) -> TestResult<()> {
+fn mutate_trust_policy(
+    fields: &mut [Value],
+    mutation: TrustMutation,
+    revoked_artifact: [u8; 32],
+) -> TestResult<()> {
     match mutation {
         TrustMutation::Magic => fields[0] = text("TPS0"),
         TrustMutation::Version => fields[1] = uint(2),
@@ -1094,8 +1110,26 @@ fn mutate_trust_policy(fields: &mut [Value], mutation: TrustMutation) -> TestRes
             let roots = array_fields_mut(&mut fields[5])?;
             roots.push(roots[0].clone());
         }
-        TrustMutation::Revocations => fields[6] = array(vec![text("revoked")]),
+        TrustMutation::RootsTooMany => fields[5] = excessive_trust_roots(),
+        TrustMutation::AdditionalRoot => add_secondary_root(fields, false)?,
+        TrustMutation::Revocations => fields[6] = array(vec![text("test-key")]),
+        TrustMutation::RevocationsTooMany => fields[6] = excessive_revocations(),
+        TrustMutation::RevocationsOrder => {
+            fields[6] = array(vec![text("z-key"), text("a-key")]);
+        }
+        TrustMutation::NonMatchingRevocations => {
+            fields[6] = array(vec![text("retired-key")]);
+            fields[7] = array(vec![bytes(&[7; 32])]);
+        }
+        TrustMutation::RevokedArtifact => fields[7] = array(vec![bytes(&revoked_artifact)]),
         TrustMutation::Replacements => fields[7] = array(vec![text("replacement")]),
+        TrustMutation::ReplacementsTooMany => {
+            fields[7] = array((0..4_097).map(|_| bytes(&[1; 32])).collect());
+        }
+        TrustMutation::ReplacementsOrder => {
+            fields[7] = array(vec![bytes(&[2; 32]), bytes(&[1; 32])]);
+        }
+        TrustMutation::DuplicateRootKey => add_secondary_root(fields, true)?,
         TrustMutation::KeyId => {
             let roots = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut roots[0])?[0] = text("Invalid");
@@ -1113,6 +1147,7 @@ fn mutate_trust_policy(fields: &mut [Value], mutation: TrustMutation) -> TestRes
             array_fields_mut(&mut roots[0])?[3] = bytes(&[8; 32]);
         }
         TrustMutation::VersionsEmpty => fields[8] = array(Vec::new()),
+        TrustMutation::VersionsTooMany => fields[8] = excessive_minimum_versions(),
         TrustMutation::VersionsOrder => {
             fields[8] = array(vec![
                 array(vec![text("z-contract"), text("1.0.0")]),
@@ -1121,8 +1156,60 @@ fn mutate_trust_policy(fields: &mut [Value], mutation: TrustMutation) -> TestRes
         }
         TrustMutation::Expiry => fields[9] = text("invalid expiry!"),
         TrustMutation::Previous => fields[10] = bytes(&[1; 32]),
+        TrustMutation::PreviousInvalid => fields[10] = bytes(&[1; 31]),
         TrustMutation::Signature => {}
     }
+    Ok(())
+}
+
+fn excessive_trust_roots() -> Value {
+    array(
+        (0_u8..65)
+            .map(|index| {
+                let key = SigningKey::from_bytes(&[index; 32]);
+                array(vec![
+                    text(&format!("key-{index:02}")),
+                    uint(1),
+                    text("Ed25519"),
+                    bytes(&key.verifying_key().to_bytes()),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn excessive_revocations() -> Value {
+    array(
+        (0..4_097)
+            .map(|index| text(&format!("key-{index:04}")))
+            .collect(),
+    )
+}
+
+fn excessive_minimum_versions() -> Value {
+    array(
+        (0..257)
+            .map(|index| array(vec![text(&format!("kind-{index:03}")), text("1.0.0")]))
+            .collect(),
+    )
+}
+
+fn add_secondary_root(fields: &mut [Value], duplicate_key: bool) -> TestResult<()> {
+    let roots = array_fields_mut(&mut fields[5])?;
+    let public_key = if duplicate_key {
+        array_fields_mut(&mut roots[0])?[3].clone()
+    } else {
+        bytes(&SigningKey::from_bytes(&[8; 32]).verifying_key().to_bytes())
+    };
+    roots.insert(
+        0,
+        array(vec![
+            text("secondary-key"),
+            uint(1),
+            text("Ed25519"),
+            public_key,
+        ]),
+    );
     Ok(())
 }
 
@@ -1203,7 +1290,6 @@ fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> 
             fields[14] = array(vec![text("invalid"), text("1.0.0")]);
         }
         ProfileMutation::ExecutionPrevious => fields[15] = bytes(&[1; 32]),
-        ProfileMutation::ExecutionDigest => {}
         _ => {}
     }
     Ok(())
