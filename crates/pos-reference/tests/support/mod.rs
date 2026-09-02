@@ -1817,7 +1817,7 @@ fn select_hard_cap_boundary(hard_caps: &mut Value, index: u8) -> TestResult<()> 
         5 => 7,
         _ => 9,
     };
-    array_fields_mut(hard_caps)?[cap_index] = uint(if cap_index == 9 { 0 } else { 1 });
+    array_fields_mut(hard_caps)?[cap_index] = uint(u64::from(cap_index != 9));
     Ok(())
 }
 
