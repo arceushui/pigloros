@@ -7,22 +7,23 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
-use pos_core::erasure::{destruction_command_reference, target_closure_digest};
+use pos_core::erasure::{
+    destruction_command_reference, target_closure_digest, ErasureAuthorizationDecisionV1,
+};
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
     ErasureArtifactClassV1, ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
     ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1,
-    ErasureAuthorizationDecisionV1, ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1,
-    ErasureDestructionCommandV1, ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
-    ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
-    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1,
+    ErasureCoordinatorPortV1, ErasureCoordinatorStateMachineV1, ErasureDestructionCommandV1,
+    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReceiptInventoriesV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -413,12 +414,13 @@ fn assert_raw_backend<S: ErasurePersistencePortV1>(
 
     let mut restarted = ErasureCoordinatorStateMachineV1::new(
         Host {
-            store: Rc::clone(&shared),
+            store: shared,
             targets: vec![target()],
         },
         reference(30),
     );
-    let recovered = restarted.submit(request.clone(), request.provenance())?;
+    let provenance = request.provenance();
+    let recovered = restarted.submit(request, provenance)?;
     assert_eq!(recovered.lifecycle(), ErasureLifecycleV1::Complete);
     Ok(())
 }

@@ -407,48 +407,73 @@ fn exact_bounded_array(value: &Value, maximum: usize) -> Result<&[Value], Erasur
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RecoveredScopeHeadV1 {
-    pub(crate) node: ErasureReferenceV1,
-    pub(crate) extension: ErasureReferenceV1,
-    pub(crate) ordinal: u64,
+pub(super) struct RecoveredScopeHeadV1 {
+    pub(super) node: ErasureReferenceV1,
+    pub(super) extension: ErasureReferenceV1,
+    pub(super) ordinal: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecoveredAttemptV1 {
-    pub(crate) ordinal: u64,
-    pub(crate) admission: ErasureRetryAdmissionV1,
-    pub(crate) admitted:
+pub(super) struct RecoveredAttemptV1 {
+    pub(super) ordinal: u64,
+    pub(super) admission: ErasureRetryAdmissionV1,
+    pub(super) admitted:
         BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ErasureAcknowledgementProvenanceV1>,
 }
 
 /// Bounded working state returned only after the complete persistence graph verifies.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RecoveredErasureV1 {
+pub(super) struct RecoveredErasureV1 {
     manifest: ManifestV1,
-    pub(crate) manifest_digest: ErasureReferenceV1,
-    pub(crate) request: ErasureRequestV1,
-    pub(crate) state: ErasureStateV1,
-    pub(crate) targets: Vec<ErasureRequiredTargetV1>,
-    pub(crate) correction: Option<ErasureCorrectionProvenanceV1>,
-    pub(crate) rejection: Option<ErasureAuthorizationRejectionV1>,
-    pub(crate) scope: Option<ErasureScopeCommitmentV1>,
-    pub(crate) freeze_admission: Option<ErasureFreezeAdmissionEvidenceV1>,
-    pub(crate) freeze_authorization: Option<ErasureFreezeAuthorizationEvidenceV1>,
-    pub(crate) freeze_provenance: Option<ErasureFreezeProvenanceV1>,
-    pub(crate) freeze_failure: Option<ErasureFreezeFailureV1>,
-    pub(crate) obligation_set: Option<ErasureObligationSetV1>,
-    pub(crate) obligations: Vec<ErasureObligationV1>,
-    pub(crate) active: Option<RecoveredAttemptV1>,
-    pub(crate) effective:
+    pub(super) manifest_digest: ErasureReferenceV1,
+    pub(super) request: ErasureRequestV1,
+    pub(super) state: ErasureStateV1,
+    pub(super) targets: Vec<ErasureRequiredTargetV1>,
+    pub(super) correction: Option<ErasureCorrectionProvenanceV1>,
+    pub(super) rejection: Option<ErasureAuthorizationRejectionV1>,
+    pub(super) scope: Option<ErasureScopeCommitmentV1>,
+    pub(super) freeze_admission: Option<ErasureFreezeAdmissionEvidenceV1>,
+    pub(super) freeze_authorization: Option<ErasureFreezeAuthorizationEvidenceV1>,
+    pub(super) freeze_provenance: Option<ErasureFreezeProvenanceV1>,
+    pub(super) freeze_failure: Option<ErasureFreezeFailureV1>,
+    pub(super) obligation_set: Option<ErasureObligationSetV1>,
+    pub(super) obligations: Vec<ErasureObligationV1>,
+    pub(super) active: Option<RecoveredAttemptV1>,
+    pub(super) effective:
         BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ErasureAcknowledgementProvenanceV1>,
-    pub(crate) attempt_history_head: Option<ErasureReferenceV1>,
-    pub(crate) completed_attempt_count: u64,
-    pub(crate) latest_receipt: Option<ErasureReferenceV1>,
-    pub(crate) scope_head: Option<RecoveredScopeHeadV1>,
-    pub(crate) administrative_resolution_head: Option<ErasureReferenceV1>,
-    pub(crate) administrative_resolution_count: u64,
-    pub(crate) authorize_provenance: Option<ErasureReferenceV1>,
-    pub(crate) dispatch_provenance: Option<ErasureReferenceV1>,
+    pub(super) attempt_history_head: Option<ErasureReferenceV1>,
+    pub(super) completed_attempt_count: u64,
+    pub(super) latest_receipt: Option<ErasureReferenceV1>,
+    pub(super) scope_head: Option<RecoveredScopeHeadV1>,
+    pub(super) administrative_resolution_head: Option<ErasureReferenceV1>,
+    pub(super) administrative_resolution_count: u64,
+    pub(super) authorize_provenance: Option<ErasureReferenceV1>,
+    pub(super) dispatch_provenance: Option<ErasureReferenceV1>,
+}
+
+struct RecoveredFoundationV1 {
+    request: ErasureRequestV1,
+    state: ErasureStateV1,
+    targets: Vec<ErasureRequiredTargetV1>,
+}
+
+struct RecoveredFixedEvidenceV1 {
+    correction: Option<ErasureCorrectionProvenanceV1>,
+    rejection: Option<ErasureAuthorizationRejectionV1>,
+    scope: Option<ErasureScopeCommitmentV1>,
+    freeze_admission: Option<ErasureFreezeAdmissionEvidenceV1>,
+    freeze_authorization: Option<ErasureFreezeAuthorizationEvidenceV1>,
+    freeze_provenance: Option<ErasureFreezeProvenanceV1>,
+    freeze_failure: Option<ErasureFreezeFailureV1>,
+    obligation_set: Option<ErasureObligationSetV1>,
+    obligations: Vec<ErasureObligationV1>,
+}
+
+struct RecoveredFreezeEvidenceV1 {
+    admission: Option<ErasureFreezeAdmissionEvidenceV1>,
+    authorization: Option<ErasureFreezeAuthorizationEvidenceV1>,
+    provenance: Option<ErasureFreezeProvenanceV1>,
+    failure: Option<ErasureFreezeFailureV1>,
 }
 
 fn load<T>(
@@ -477,8 +502,133 @@ fn optional<T>(
     })
 }
 
+fn recover_foundation(
+    port: &dyn ErasurePersistencePortV1,
+    requested: ErasureReferenceV1,
+    manifest: &ManifestV1,
+) -> Result<RecoveredFoundationV1, ErasureErrorV1> {
+    let request = load(
+        port,
+        requested,
+        ErasureRequestV1::from_canonical_cbor,
+        ErasureRequestV1::reference,
+    )?;
+    let state = port
+        .resolve_state(manifest.state)?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    if request.reference() != requested || state.request() != requested {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    verify_predecessor_chain(state.clone(), port)?;
+    let closure = optional(
+        port,
+        manifest.target_closure,
+        TargetClosureV1::decode,
+        |value| value.reference,
+    )?;
+    if closure
+        .as_ref()
+        .is_some_and(|value| value.request != requested)
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(RecoveredFoundationV1 {
+        request,
+        state,
+        targets: closure.map_or_else(Vec::new, |value| value.targets),
+    })
+}
+
+fn recover_fixed_evidence(
+    port: &dyn ErasurePersistencePortV1,
+    manifest: &ManifestV1,
+) -> Result<RecoveredFixedEvidenceV1, ErasureErrorV1> {
+    let correction = optional(
+        port,
+        manifest.correction,
+        ErasureCorrectionProvenanceV1::from_canonical_cbor,
+        ErasureCorrectionProvenanceV1::reference,
+    )?;
+    let rejection = optional(
+        port,
+        manifest.rejection,
+        ErasureAuthorizationRejectionV1::from_canonical_cbor,
+        ErasureAuthorizationRejectionV1::reference,
+    )?;
+    let scope = optional(
+        port,
+        manifest.scope,
+        ErasureScopeCommitmentV1::from_canonical_cbor,
+        ErasureScopeCommitmentV1::reference,
+    )?;
+    let freeze = recover_freeze_evidence(port, manifest)?;
+    let obligation_set = optional(
+        port,
+        manifest.obligation_set,
+        ErasureObligationSetV1::from_canonical_cbor,
+        ErasureObligationSetV1::reference,
+    )?;
+    let obligations = obligation_set.as_ref().map_or(Ok(Vec::new()), |set| {
+        set.obligations()
+            .iter()
+            .copied()
+            .map(|reference| {
+                load(
+                    port,
+                    reference,
+                    ErasureObligationV1::from_canonical_cbor,
+                    ErasureObligationV1::reference,
+                )
+            })
+            .collect()
+    })?;
+    Ok(RecoveredFixedEvidenceV1 {
+        correction,
+        rejection,
+        scope,
+        freeze_admission: freeze.admission,
+        freeze_authorization: freeze.authorization,
+        freeze_provenance: freeze.provenance,
+        freeze_failure: freeze.failure,
+        obligation_set,
+        obligations,
+    })
+}
+
+fn recover_freeze_evidence(
+    port: &dyn ErasurePersistencePortV1,
+    manifest: &ManifestV1,
+) -> Result<RecoveredFreezeEvidenceV1, ErasureErrorV1> {
+    Ok(RecoveredFreezeEvidenceV1 {
+        admission: optional(
+            port,
+            manifest.freeze_admission,
+            ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor,
+            ErasureFreezeAdmissionEvidenceV1::reference,
+        )?,
+        authorization: optional(
+            port,
+            manifest.freeze_authorization,
+            ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor,
+            ErasureFreezeAuthorizationEvidenceV1::reference,
+        )?,
+        provenance: optional(
+            port,
+            manifest.freeze_provenance,
+            ErasureFreezeProvenanceV1::from_canonical_cbor,
+            ErasureFreezeProvenanceV1::reference,
+        )?,
+        failure: optional(
+            port,
+            manifest.freeze_failure,
+            ErasureFreezeFailureV1::from_canonical_cbor,
+            ErasureFreezeFailureV1::reference,
+        )?,
+    })
+}
+
 impl RecoveredErasureV1 {
-    pub(crate) fn initial(request: ErasureRequestV1, state: ErasureStateV1) -> Self {
+    pub(super) const fn initial(request: ErasureRequestV1, state: ErasureStateV1) -> Self {
         let manifest = ManifestV1 {
             request: request.reference(),
             state: state.state_digest(),
@@ -528,119 +678,49 @@ impl RecoveredErasureV1 {
         }
     }
 
-    pub(crate) fn recover(
+    pub(super) fn recover(
         port: &dyn ErasurePersistencePortV1,
         verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
         requested: ErasureReferenceV1,
-        stored: StoredErasureManifestV1,
+        stored: &StoredErasureManifestV1,
     ) -> Result<Self, ErasureErrorV1> {
         let manifest = ManifestV1::decode(stored.canonical_cbor())?;
         if manifest.request != requested {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        let request = load(
-            port,
+        let foundation = recover_foundation(port, requested, &manifest)?;
+        let evidence = recover_fixed_evidence(port, &manifest)?;
+        validate_fixed_graph(&FixedGraphV1 {
             requested,
-            ErasureRequestV1::from_canonical_cbor,
-            ErasureRequestV1::reference,
-        )?;
-        let state = port
-            .resolve_state(manifest.state)?
-            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if request.reference() != requested || state.request() != requested {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        verify_predecessor_chain(state.clone(), port)?;
-
-        let closure = optional(
-            port,
-            manifest.target_closure,
-            TargetClosureV1::decode,
-            |value| value.reference,
-        )?;
-        if closure
-            .as_ref()
-            .is_some_and(|value| value.request != requested)
-        {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        let targets = closure.map_or_else(Vec::new, |value| value.targets);
-        let correction = optional(
-            port,
-            manifest.correction,
-            ErasureCorrectionProvenanceV1::from_canonical_cbor,
-            ErasureCorrectionProvenanceV1::reference,
-        )?;
-        let rejection = optional(
-            port,
-            manifest.rejection,
-            ErasureAuthorizationRejectionV1::from_canonical_cbor,
-            ErasureAuthorizationRejectionV1::reference,
-        )?;
-        let scope = optional(
-            port,
-            manifest.scope,
-            ErasureScopeCommitmentV1::from_canonical_cbor,
-            ErasureScopeCommitmentV1::reference,
-        )?;
-        let freeze_admission = optional(
-            port,
-            manifest.freeze_admission,
-            ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor,
-            ErasureFreezeAdmissionEvidenceV1::reference,
-        )?;
-        let freeze_authorization = optional(
-            port,
-            manifest.freeze_authorization,
-            ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor,
-            ErasureFreezeAuthorizationEvidenceV1::reference,
-        )?;
-        let freeze_provenance = optional(
-            port,
-            manifest.freeze_provenance,
-            ErasureFreezeProvenanceV1::from_canonical_cbor,
-            ErasureFreezeProvenanceV1::reference,
-        )?;
-        let freeze_failure = optional(
-            port,
-            manifest.freeze_failure,
-            ErasureFreezeFailureV1::from_canonical_cbor,
-            ErasureFreezeFailureV1::reference,
-        )?;
-        let obligation_set = optional(
-            port,
-            manifest.obligation_set,
-            ErasureObligationSetV1::from_canonical_cbor,
-            ErasureObligationSetV1::reference,
-        )?;
-        let obligations = obligation_set.as_ref().map_or(Ok(Vec::new()), |set| {
-            set.obligations()
-                .iter()
-                .copied()
-                .map(|reference| {
-                    load(
-                        port,
-                        reference,
-                        ErasureObligationV1::from_canonical_cbor,
-                        ErasureObligationV1::reference,
-                    )
-                })
-                .collect()
-        })?;
-        validate_fixed_graph(FixedGraphV1 {
-            requested,
-            erq: &request,
-            targets: &targets,
-            rejection: rejection.as_ref(),
-            scope: scope.as_ref(),
-            admission: freeze_admission.as_ref(),
-            authorization: freeze_authorization.as_ref(),
-            freeze: freeze_provenance.as_ref(),
-            failure: freeze_failure.as_ref(),
-            obligation_set: obligation_set.as_ref(),
-            obligations: &obligations,
+            erq: &foundation.request,
+            targets: &foundation.targets,
+            rejection: evidence.rejection.as_ref(),
+            scope: evidence.scope.as_ref(),
+            admission: evidence.freeze_admission.as_ref(),
+            authorization: evidence.freeze_authorization.as_ref(),
+            freeze: evidence.freeze_provenance.as_ref(),
+            failure: evidence.freeze_failure.as_ref(),
+            obligation_set: evidence.obligation_set.as_ref(),
+            obligations: &evidence.obligations,
             verifier,
         })?;
+
+        let RecoveredFoundationV1 {
+            request,
+            state,
+            targets,
+        } = foundation;
+        let RecoveredFixedEvidenceV1 {
+            correction,
+            rejection,
+            scope,
+            freeze_admission,
+            freeze_authorization,
+            freeze_provenance,
+            freeze_failure,
+            obligation_set,
+            obligations,
+        } = evidence;
 
         let mut recovered = Self {
             manifest: manifest.clone(),
@@ -674,11 +754,11 @@ impl RecoveredErasureV1 {
         Ok(recovered)
     }
 
-    pub(crate) const fn state(&self) -> &ErasureStateV1 {
+    pub(super) const fn state(&self) -> &ErasureStateV1 {
         &self.state
     }
 
-    pub(crate) fn prepare(
+    pub(super) fn prepare(
         &self,
         expected_manifest_digest: Option<ErasureReferenceV1>,
         new_objects: Vec<ErasurePersistenceObjectV1>,
@@ -701,29 +781,29 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn request_object(&self) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+    pub(super) fn request_object(&self) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
         self.request
             .to_canonical_cbor()
             .map(|bytes| ErasurePersistenceObjectV1::new(ERQ1, self.request.reference(), bytes))
     }
 
-    pub(crate) fn state_object(&self) -> Result<ErasurePersistedStateV1, ErasureErrorV1> {
+    pub(super) fn state_object(&self) -> Result<ErasurePersistedStateV1, ErasureErrorV1> {
         self.state
             .to_canonical_cbor()
             .map(|bytes| ErasurePersistedStateV1::new(self.state.clone(), bytes))
     }
 
-    pub(crate) fn replace_state(&mut self, state: ErasureStateV1) {
+    pub(super) fn replace_state(&mut self, state: ErasureStateV1) {
         self.manifest.state = state.state_digest();
         self.state = state;
     }
 
-    pub(crate) fn set_authorize_provenance(&mut self, provenance: ErasureReferenceV1) {
+    pub(super) const fn set_authorize_provenance(&mut self, provenance: ErasureReferenceV1) {
         self.manifest.authorize_provenance = Some(provenance);
         self.authorize_provenance = Some(provenance);
     }
 
-    pub(crate) fn set_authorization_rejection(
+    pub(super) fn set_authorization_rejection(
         &mut self,
         rejection: ErasureAuthorizationRejectionV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
@@ -740,7 +820,7 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn set_correction(
+    pub(super) fn set_correction(
         &mut self,
         correction: ErasureCorrectionProvenanceV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
@@ -757,7 +837,7 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn retain_atomic_freeze(
+    pub(super) fn retain_atomic_freeze(
         &mut self,
         admission: &ErasureAtomicFreezeAdmissionV1,
         scope: ErasureScopeCommitmentV1,
@@ -827,7 +907,7 @@ impl RecoveredErasureV1 {
         Ok(objects)
     }
 
-    pub(crate) fn set_freeze_failure(
+    pub(super) fn set_freeze_failure(
         &mut self,
         failure: ErasureFreezeFailureV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
@@ -844,7 +924,7 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn begin_attempt(
+    pub(super) fn begin_attempt(
         &mut self,
         admission: ErasureRetryAdmissionV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
@@ -879,9 +959,9 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn retain_acknowledgement(
+    pub(super) fn retain_acknowledgement(
         &mut self,
-        acknowledgement: ErasureAcknowledgementProvenanceV1,
+        acknowledgement: &ErasureAcknowledgementProvenanceV1,
     ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
         let active = self
             .active
@@ -898,8 +978,8 @@ impl RecoveredErasureV1 {
         }
         let bytes = acknowledgement.to_canonical_cbor()?;
         let reference = acknowledgement.reference();
-        active.admitted.insert(identity, acknowledgement.clone());
-        self.effective.insert(identity, acknowledgement);
+        active.admitted.insert(identity, *acknowledgement);
+        self.effective.insert(identity, *acknowledgement);
         self.manifest
             .active
             .as_mut()
@@ -913,7 +993,7 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn append_scope_extension(
+    pub(super) fn append_scope_extension(
         &mut self,
         extension: ErasureScopeExtensionV1,
     ) -> Result<
@@ -967,9 +1047,9 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn append_administrative_resolution(
+    pub(super) fn append_administrative_resolution(
         &mut self,
-        resolution: ErasureAdministrativeResolutionV1,
+        resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<(ErasurePersistenceObjectV1, ErasureIndexInsertV1), ErasureErrorV1> {
         let ordinal = self.administrative_resolution_count;
         if ordinal >= ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64 {
@@ -992,11 +1072,11 @@ impl RecoveredErasureV1 {
         ))
     }
 
-    pub(crate) fn finish_attempt(
+    pub(super) fn finish_attempt(
         &mut self,
-        outcome: ErasureAttemptOutcomeV1,
-        receipt_provenance: ErasureReceiptProvenanceV1,
-        receipt: ErasureReceiptV1,
+        outcome: &ErasureAttemptOutcomeV1,
+        receipt_provenance: &ErasureReceiptProvenanceV1,
+        receipt: &ErasureReceiptV1,
     ) -> Result<(Vec<ErasurePersistenceObjectV1>, ErasureIndexInsertV1), ErasureErrorV1> {
         let active = self
             .active
@@ -1007,13 +1087,13 @@ impl RecoveredErasureV1 {
             self.request.reference(),
             ordinal,
             INVENTORY_ADMITTED,
-            canonical_acknowledgement_references(active.admitted.values().cloned()),
+            canonical_acknowledgement_references(active.admitted.values().copied()),
         )?;
         let effective = InventoryV1::new(
             self.request.reference(),
             ordinal,
             INVENTORY_EFFECTIVE,
-            canonical_acknowledgement_references(self.effective.values().cloned()),
+            canonical_acknowledgement_references(self.effective.values().copied()),
         )?;
         let page = AttemptPageV1 {
             request: self.request.reference(),
@@ -1095,7 +1175,7 @@ impl RecoveredErasureV1 {
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-            predecessor_receipt = Some(self.replay_page(port, page, predecessor_receipt)?);
+            predecessor_receipt = Some(self.replay_page(port, &page, predecessor_receipt)?);
             predecessor = Some(reference);
         }
         if predecessor != self.attempt_history_head || predecessor_receipt != self.latest_receipt {
@@ -1132,7 +1212,7 @@ impl RecoveredErasureV1 {
     fn replay_page(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
-        page: AttemptPageV1,
+        page: &AttemptPageV1,
         predecessor_receipt: Option<ErasureReferenceV1>,
     ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         let admission = load(
@@ -1402,7 +1482,7 @@ struct FixedGraphV1<'a> {
     verifier: &'a dyn ErasureFreezeAuthorizationVerifierV1,
 }
 
-fn validate_fixed_graph(graph: FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> {
+fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> {
     if graph.erq.reference() != graph.requested
         || graph
             .rejection

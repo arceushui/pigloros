@@ -3073,7 +3073,7 @@ pub struct ErasurePersistenceObjectV1 {
 }
 
 impl ErasurePersistenceObjectV1 {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         kind: &'static str,
         reference: ErasureReferenceV1,
         canonical_cbor: Vec<u8>,
@@ -3107,7 +3107,7 @@ pub struct ErasurePersistedStateV1 {
 }
 
 impl ErasurePersistedStateV1 {
-    pub(crate) fn new(state: ErasureStateV1, canonical_cbor: Vec<u8>) -> Self {
+    pub(crate) const fn new(state: ErasureStateV1, canonical_cbor: Vec<u8>) -> Self {
         Self {
             state,
             canonical_cbor,
@@ -3254,7 +3254,7 @@ pub struct PreparedErasureCasV1 {
 }
 
 impl PreparedErasureCasV1 {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         request: ErasureReferenceV1,
         expected_manifest_digest: Option<ErasureReferenceV1>,
         next_manifest: StoredErasureManifestV1,
@@ -3310,9 +3310,11 @@ pub enum ErasureCasOutcomeV1 {
     ExactRetry,
 }
 
-/// Raw persistence SPI. The core owns ERCRP1 decoding, recovery, validation,
-/// and construction of every mutation. Adapters own only canonical byte/object
-/// storage and one atomic compare-and-swap transaction.
+/// Raw persistence SPI.
+///
+/// The core owns ERCRP1 decoding, recovery, validation, and construction of
+/// every mutation. Adapters own only canonical byte/object storage and one
+/// atomic compare-and-swap transaction.
 pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
     /// Return the current ERCRP1 envelope for one request, if any.
     ///

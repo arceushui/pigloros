@@ -49,22 +49,25 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
-fn encode(value: &Value) -> Vec<u8> {
+fn encode(value: &Value) -> Result<Vec<u8>, ErasureErrorV1> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).expect("test values are serializable");
-    bytes
+    ciborium::into_writer(value, &mut bytes)
+        .map(|()| bytes)
+        .map_err(|_| ErasureErrorV1::InvalidEncoding)
 }
 
-fn decode(bytes: &[u8]) -> Value {
-    ciborium::from_reader(bytes).expect("test bytes are valid CBOR")
+fn decode(bytes: &[u8]) -> Result<Value, ErasureErrorV1> {
+    ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)
 }
 
-fn replace(bytes: &[u8], index: usize) -> Vec<u8> {
-    let mut value = decode(bytes);
+fn replace(bytes: &[u8], index: usize) -> Result<Vec<u8>, ErasureErrorV1> {
+    let mut value = decode(bytes)?;
     let Value::Array(fields) = &mut value else {
-        panic!("all V1 evidence records use arrays");
+        return Err(ErasureErrorV1::InvalidEncoding);
     };
-    fields[index] = Value::Text("mutated".to_owned());
+    *fields
+        .get_mut(index)
+        .ok_or(ErasureErrorV1::InvalidEncoding)? = Value::Text("mutated".to_owned());
     encode(&value)
 }
 
@@ -76,7 +79,7 @@ macro_rules! evidence_roundtrip {
             let bytes = value.to_canonical_cbor()?;
             assert_eq!(<$ty>::from_canonical_cbor(&bytes)?, value);
             assert_eq!(
-                <$ty>::from_canonical_cbor(&replace(&bytes, 0)),
+                <$ty>::from_canonical_cbor(&replace(&bytes, 0)?),
                 Err(ErasureErrorV1::InvalidEncoding)
             );
             Ok(())
@@ -289,7 +292,7 @@ fn freeze_admission_roundtrip_preserves_the_complete_applicability_matrix(
         ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&bytes)?,
         admission
     );
-    assert!(ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace(&bytes, 5)).is_err());
+    assert!(ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace(&bytes, 5)?).is_err());
     Ok(())
 }
 
@@ -297,9 +300,9 @@ fn freeze_admission_roundtrip_preserves_the_complete_applicability_matrix(
 fn request_and_state_codec_mutations_fail_closed() -> Result<(), ErasureErrorV1> {
     let request = request()?;
     let request_bytes = request.to_canonical_cbor()?;
-    assert!(ErasureRequestV1::from_canonical_cbor(&replace(&request_bytes, 5)).is_err());
+    assert!(ErasureRequestV1::from_canonical_cbor(&replace(&request_bytes, 5)?).is_err());
     let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     let state_bytes = state.to_canonical_cbor()?;
-    assert!(ErasureStateV1::from_canonical_cbor(&replace(&state_bytes, 2)).is_err());
+    assert!(ErasureStateV1::from_canonical_cbor(&replace(&state_bytes, 2)?).is_err());
     Ok(())
 }

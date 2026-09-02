@@ -114,33 +114,38 @@ fn receipt() -> Result<ErasureReceiptV1, ErasureErrorV1> {
     })
 }
 
-fn encode_value(value: &Value) -> Vec<u8> {
+fn encode_value(value: &Value) -> Result<Vec<u8>, ErasureErrorV1> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).expect("test value is serializable");
-    bytes
+    ciborium::into_writer(value, &mut bytes)
+        .map(|()| bytes)
+        .map_err(|_| ErasureErrorV1::InvalidEncoding)
 }
 
-fn decode_value(bytes: &[u8]) -> Value {
-    ciborium::from_reader(bytes).expect("test bytes are valid CBOR")
+fn decode_value(bytes: &[u8]) -> Result<Value, ErasureErrorV1> {
+    ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)
 }
 
-fn replace_field(bytes: &[u8], index: usize, replacement: Value) -> Vec<u8> {
-    let mut value = decode_value(bytes);
-    if let Value::Array(fields) = &mut value {
-        fields[index] = replacement;
-    } else {
-        panic!("test record is an array");
-    }
+fn replace_field(
+    bytes: &[u8],
+    index: usize,
+    replacement: Value,
+) -> Result<Vec<u8>, ErasureErrorV1> {
+    let mut value = decode_value(bytes)?;
+    let Value::Array(fields) = &mut value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    *fields
+        .get_mut(index)
+        .ok_or(ErasureErrorV1::InvalidEncoding)? = replacement;
     encode_value(&value)
 }
 
-fn append_field(bytes: &[u8]) -> Vec<u8> {
-    let mut value = decode_value(bytes);
-    if let Value::Array(fields) = &mut value {
-        fields.push(Value::Null);
-    } else {
-        panic!("test record is an array");
-    }
+fn append_field(bytes: &[u8]) -> Result<Vec<u8>, ErasureErrorV1> {
+    let mut value = decode_value(bytes)?;
+    let Value::Array(fields) = &mut value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields.push(Value::Null);
     encode_value(&value)
 }
 
@@ -329,9 +334,9 @@ roundtrip!(receipt_codec_roundtrips, ErasureReceiptV1, receipt());
 macro_rules! codec_shape_guards {
     ($bytes:expr_2021, $decoder:expr_2021) => {{
         let bytes = $bytes;
-        let wrong_tag = replace_field(&bytes, 0, Value::Text("wrong".to_owned()));
-        let wrong_version = replace_field(&bytes, 1, Value::Text("wrong".to_owned()));
-        let extra_field = append_field(&bytes);
+        let wrong_tag = replace_field(&bytes, 0, Value::Text("wrong".to_owned()))?;
+        let wrong_version = replace_field(&bytes, 1, Value::Text("wrong".to_owned()))?;
+        let extra_field = append_field(&bytes)?;
         assert!(($decoder)(&wrong_tag).is_err());
         assert!(($decoder)(&wrong_version).is_err());
         assert!(($decoder)(&extra_field).is_err());
@@ -339,7 +344,8 @@ macro_rules! codec_shape_guards {
 }
 
 #[test]
-fn every_public_codec_rejects_header_and_length_mutations() -> Result<(), ErasureErrorV1> {
+fn request_and_submission_codecs_reject_header_and_length_mutations() -> Result<(), ErasureErrorV1>
+{
     let request = request()?;
     codec_shape_guards!(
         request.to_canonical_cbor()?,
@@ -368,6 +374,11 @@ fn every_public_codec_rejects_header_and_length_mutations() -> Result<(), Erasur
         rejection.to_canonical_cbor()?,
         ErasureAuthorizationRejectionV1::from_canonical_cbor
     );
+    Ok(())
+}
+
+#[test]
+fn freeze_and_scope_codecs_reject_header_and_length_mutations() -> Result<(), ErasureErrorV1> {
     let scope = scope()?;
     codec_shape_guards!(
         scope.to_canonical_cbor()?,
@@ -429,6 +440,11 @@ fn every_public_codec_rejects_header_and_length_mutations() -> Result<(), Erasur
         extension.to_canonical_cbor()?,
         ErasureScopeExtensionV1::from_canonical_cbor
     );
+    Ok(())
+}
+
+#[test]
+fn attempt_and_receipt_codecs_reject_header_and_length_mutations() -> Result<(), ErasureErrorV1> {
     let retry = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
         request: reference(1),
         attempt_ordinal: 0,
@@ -514,16 +530,20 @@ fn every_public_codec_rejects_header_and_length_mutations() -> Result<(), Erasur
         receipt()?.to_canonical_cbor()?,
         ErasureReceiptV1::from_canonical_cbor
     );
+    Ok(())
+}
+
+#[test]
+fn bounded_cbor_rejects_malformed_and_empty_inputs() {
     assert!(decode_limited(&[0xff], 16, 1).is_err());
     assert!(decode_limited(&[], 16, 1).is_err());
-    Ok(())
 }
 
 #[test]
 fn prepared_cas_exposes_only_raw_delta_parts() -> Result<(), ErasureErrorV1> {
     let request = request()?;
     let state = ErasureStateV1::submitted(request.reference(), reference(2), reference(3))?;
-    let recovered = RecoveredErasureV1::initial(request, state.clone());
+    let recovered = RecoveredErasureV1::initial(request, state);
     let request_object = recovered.request_object()?;
     let state_object = recovered.state_object()?;
     let mutation = recovered.prepare(
@@ -544,6 +564,17 @@ fn prepared_cas_exposes_only_raw_delta_parts() -> Result<(), ErasureErrorV1> {
     Ok(())
 }
 
+struct StateMapResolver(BTreeMap<ErasureReferenceV1, ErasureStateV1>);
+
+impl ErasureStateResolverV1 for StateMapResolver {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        Ok(self.0.get(&digest).cloned())
+    }
+}
+
 #[test]
 fn state_recovery_requires_the_complete_predecessor_chain() -> Result<(), ErasureErrorV1> {
     let root = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
@@ -556,22 +587,13 @@ fn state_recovery_requires_the_complete_predecessor_chain() -> Result<(), Erasur
         replay_claim: ErasureReplayClaimV1::Exact,
         provenance: reference(4),
     })?;
-    struct Resolver(BTreeMap<ErasureReferenceV1, ErasureStateV1>);
-    impl ErasureStateResolverV1 for Resolver {
-        fn resolve_state(
-            &self,
-            digest: ErasureReferenceV1,
-        ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
-            Ok(self.0.get(&digest).cloned())
-        }
-    }
     assert!(successor
-        .verify_predecessor_chain(&Resolver(BTreeMap::new()))
+        .verify_predecessor_chain(&StateMapResolver(BTreeMap::new()))
         .is_err());
     let mut states = BTreeMap::new();
     states.insert(root.state_digest(), root);
     assert!(successor
-        .verify_predecessor_chain(&Resolver(states))
+        .verify_predecessor_chain(&StateMapResolver(states))
         .is_ok());
     Ok(())
 }

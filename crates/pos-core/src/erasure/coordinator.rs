@@ -22,6 +22,15 @@ use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
 };
 
+struct TerminalAttemptV1 {
+    admission: ErasureRetryAdmissionV1,
+    acknowledgements: Vec<ErasureAcknowledgementV1>,
+    lifecycle: ErasureLifecycleV1,
+    outcome: ErasureAttemptOutcomeV1,
+    state: ErasureStateV1,
+    receipt_provenance: ErasureReceiptProvenanceV1,
+}
+
 impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     /// Construct a coordinator. The cache is a bounded working projection;
     /// durable ERCRP1 remains authoritative.
@@ -52,7 +61,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
         self.port
             .read_manifest(request)?
-            .map(|stored| RecoveredErasureV1::recover(&self.port, &self.port, request, stored))
+            .map(|stored| RecoveredErasureV1::recover(&self.port, &self.port, request, &stored))
             .transpose()
     }
 
@@ -69,9 +78,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }
         self.recover(request)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .map(|record| {
+            .inspect(|record| {
                 self.cache(record.clone());
-                record
             })
     }
 
@@ -295,7 +303,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     pub fn freeze_inventory(
         &mut self,
         request: ErasureReferenceV1,
-        transition: ErasureStateTransitionV1,
+        transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let mut record = self.record(request)?;
         if record.state.lifecycle() == ErasureLifecycleV1::Rejected
@@ -311,7 +319,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if record.state.lifecycle() != ErasureLifecycleV1::Authorized {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        match self.port.admit_atomic_freeze(request, &transition)? {
+        match self.port.admit_atomic_freeze(request, transition)? {
             ErasureAtomicFreezeResultV1::Admitted(admission) => {
                 self.persist_atomic_freeze(&mut record, &admission)
             }
@@ -584,9 +592,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     pub fn dispatch_destruction(
         &mut self,
         request: ErasureReferenceV1,
-        admission: ErasureRetryAdmissionV1,
+        admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        self.dispatch_attempt(request, &admission)
+        self.dispatch_attempt(request, admission)
     }
     /// Persist one authenticated acknowledgement for the active attempt.
     ///
@@ -662,7 +670,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return Ok(record.state);
         }
         self.port.admit_acknowledgement(&provenance)?;
-        let object = record.retain_acknowledgement(provenance.clone())?;
+        let object = record.retain_acknowledgement(&provenance)?;
         self.commit_delta(
             record.clone(),
             Some(record.manifest_digest),
@@ -673,38 +681,38 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             },
         )
     }
-    /// Finalize the active attempt and persist its terminal receipt.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed lifecycle, receipt-admission, or CAS error.
-    pub fn finalize(
-        &mut self,
-        request: ErasureReferenceV1,
-        mut input: ErasureReceiptInputV1,
+
+    fn finalize_exact_retry(
+        &self,
+        record: &RecoveredErasureV1,
+        input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
-        if record.active.is_none() {
-            let reference = record
-                .latest_receipt
-                .ok_or(ErasureErrorV1::PolicyConflict)?;
-            let stored = ErasureReceiptV1::from_canonical_cbor(&self.port.read_object(reference)?)?;
-            if stored.receipt_digest() != reference {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            }
-            let normalized = self.normalize_terminal_input(
-                &record,
-                input,
-                stored.policy(),
-                stored.trust(),
-                stored.provenance(),
-            )?;
-            let candidate = ErasureReceiptV1::new(normalized)?;
-            candidate.validate_frozen_obligations(&record.obligations)?;
-            return (candidate == stored)
-                .then_some(stored)
-                .ok_or(ErasureErrorV1::PolicyConflict);
+        let reference = record
+            .latest_receipt
+            .ok_or(ErasureErrorV1::PolicyConflict)?;
+        let stored = ErasureReceiptV1::from_canonical_cbor(&self.port.read_object(reference)?)?;
+        if stored.receipt_digest() != reference {
+            return Err(ErasureErrorV1::ProvenanceMissing);
         }
+        let normalized = self.normalize_terminal_input(
+            record,
+            input,
+            stored.policy(),
+            stored.trust(),
+            stored.provenance(),
+        )?;
+        let candidate = ErasureReceiptV1::new(normalized)?;
+        candidate.validate_frozen_obligations(&record.obligations)?;
+        (candidate == stored)
+            .then_some(stored)
+            .ok_or(ErasureErrorV1::PolicyConflict)
+    }
+
+    fn terminal_attempt(
+        request: ErasureReferenceV1,
+        record: &RecoveredErasureV1,
+        input: &ErasureReceiptInputV1,
+    ) -> Result<TerminalAttemptV1, ErasureErrorV1> {
         if !matches!(
             record.state.lifecycle(),
             ErasureLifecycleV1::AwaitingAcknowledgements | ErasureLifecycleV1::PartialFailure
@@ -720,7 +728,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if !inventories_match_frozen_obligations(&input.inventories, &record.obligations) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let acknowledgements = Self::effective_acknowledgements(&record)?;
+        let acknowledgements = Self::effective_acknowledgements(record)?;
         let complete =
             acknowledgements_close_frozen_obligations(&acknowledgements, &record.obligations);
         if !complete && input.issue_position < admission.deadline_position() {
@@ -753,7 +761,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         })?;
         let (pending_owners, failed_owners) =
             derived_outcome_owners_for_obligations(&record.obligations, &acknowledgements);
-        let terminal = record.state.transition(ErasureStateTransitionV1 {
+        let state = record.state.transition(ErasureStateTransitionV1 {
             lifecycle,
             freeze_position: record.state.freeze_position(),
             pending_owners,
@@ -772,36 +780,61 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                 attempt: admission.reference(),
                 attempt_ordinal: admission.attempt_ordinal(),
                 predecessor_receipt: admission.source_receipt(),
-                terminal_state: terminal.state_digest(),
+                terminal_state: state.state_digest(),
                 evidence_set: erasure_evidence_set_reference(&acknowledgement_references),
                 policy: admission.policy(),
                 trust: admission.trust(),
                 issue_position: input.issue_position,
             })?;
-        record.replace_state(terminal);
+        Ok(TerminalAttemptV1 {
+            admission,
+            acknowledgements,
+            lifecycle,
+            outcome,
+            state,
+            receipt_provenance,
+        })
+    }
+
+    /// Finalize the active attempt and persist its terminal receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed lifecycle, receipt-admission, or CAS error.
+    pub fn finalize(
+        &mut self,
+        request: ErasureReferenceV1,
+        mut input: ErasureReceiptInputV1,
+    ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
+        let mut record = self.record(request)?;
+        if record.active.is_none() {
+            return self.finalize_exact_retry(&record, input);
+        }
+        let terminal = Self::terminal_attempt(request, &record, &input)?;
+        record.replace_state(terminal.state);
         input.request = request;
         input.coordinator = self.coordinator;
         input.terminal_state = record.state.state_digest();
-        input.lifecycle = lifecycle;
+        input.lifecycle = terminal.lifecycle;
         input.freeze_position = record
             .state
             .freeze_position()
             .ok_or(ErasureErrorV1::PolicyConflict)?;
         input.frozen_targets.clone_from(&record.targets);
-        input.acknowledgements = acknowledgements;
+        input.acknowledgements = terminal.acknowledgements;
         input.pending_owners = record.state.pending_owners().to_vec();
         input.failed_owners = record.state.failed_owners().to_vec();
         sort_inventories(&mut input.inventories);
         input.replay_claim = weakest_inventory_claim(&input.inventories);
-        input.policy = admission.policy();
-        input.trust = admission.trust();
-        input.provenance = receipt_provenance.reference();
+        input.policy = terminal.admission.policy();
+        input.trust = terminal.admission.trust();
+        input.provenance = terminal.receipt_provenance.reference();
         input.receipt_digest = reference_zero();
         self.port.admit_receipt(&input)?;
         let receipt = ErasureReceiptV1::new(input)?;
         receipt.validate_frozen_obligations(&record.obligations)?;
         let (objects, index) =
-            record.finish_attempt(outcome, receipt_provenance, receipt.clone())?;
+            record.finish_attempt(&terminal.outcome, &terminal.receipt_provenance, &receipt)?;
         let prepared = record.prepare(
             Some(record.manifest_digest),
             objects,
@@ -900,7 +933,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         self.port.admit_administrative_resolution(&resolution)?;
-        let (object, index) = record.append_administrative_resolution(resolution)?;
+        let (object, index) = record.append_administrative_resolution(&resolution)?;
         self.commit_delta(
             record.clone(),
             Some(record.manifest_digest),
@@ -941,14 +974,14 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinator for ErasureCoordinatorState
         request: ErasureReferenceV1,
         transition: ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        Self::freeze_inventory(self, request, transition)
+        Self::freeze_inventory(self, request, &transition)
     }
     fn dispatch_destruction(
         &mut self,
         request: ErasureReferenceV1,
         admission: ErasureRetryAdmissionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        Self::dispatch_destruction(self, request, admission)
+        Self::dispatch_destruction(self, request, &admission)
     }
     fn acknowledge(
         &mut self,
