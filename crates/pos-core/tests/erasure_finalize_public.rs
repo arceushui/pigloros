@@ -100,6 +100,7 @@ fn public_lifecycle_persists_raw_manifest_objects_and_attempt_index() -> Result<
         scope_member: reference(7),
         freeze_evidence: reference(9),
         lineage_rule: None,
+        freeze_rejection: None,
     });
     let adapter = port.clone();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, reference(2));

@@ -11,10 +11,10 @@ use pos_core::{
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
     ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeAuthorizationVerifierV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
-    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
-    ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1, ErasureReferenceV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureIndexInsertV1,
+    ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
+    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
     ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
 };
@@ -31,6 +31,7 @@ pub struct PublicCoordinatorPortConfig {
     pub scope_member: ErasureReferenceV1,
     pub freeze_evidence: ErasureReferenceV1,
     pub lineage_rule: Option<ErasureReferenceV1>,
+    pub freeze_rejection: Option<(ErasureErrorV1, ErasureReferenceV1)>,
 }
 
 #[derive(Default)]
@@ -447,6 +448,15 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
         request: ErasureReferenceV1,
         _requested: &ErasureStateTransitionV1,
     ) -> Result<ErasureAtomicFreezeResultV1, ErasureErrorV1> {
+        if let Some((error, authorization_provenance)) = self.config.freeze_rejection {
+            return ErasureFreezeFailureV1::new(pos_core::ErasureFreezeFailureInputV1 {
+                request,
+                error,
+                authorization_provenance,
+                evidence: self.config.freeze_evidence,
+            })
+            .map(ErasureAtomicFreezeResultV1::Rejected);
+        }
         let mut obligations = self
             .config
             .targets

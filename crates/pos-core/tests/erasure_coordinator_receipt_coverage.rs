@@ -324,6 +324,7 @@ fn coordinator_port(
         scope_member: reference(7),
         freeze_evidence: reference(8),
         lineage_rule,
+        freeze_rejection: None,
     })
 }
 
@@ -695,6 +696,93 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
     assert_eq!(api.finalize(request.reference(), terminal_input)?, receipt);
 
     verify_rejection_path(&request)
+}
+
+#[test]
+fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<(), ErasureErrorV1> {
+    let original = coordinator_request()?;
+    let port = coordinator_port(Vec::new(), None);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(original.clone(), original.provenance())?;
+    let rejected = coordinator.reject(original.reference(), reference(21))?;
+    let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+        rejected_request: original.reference(),
+        rejected_terminal_state: rejected.state_digest(),
+        correction_reason: reference(22),
+        authorization_provenance: reference(23),
+    })?;
+    let corrected = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(50),
+        subject: original.subject(),
+        scope: original.scope(),
+        selectors: original.selectors().to_vec(),
+        requester: original.requester(),
+        authorization: original.authorization(),
+        policy: original.policy(),
+        request_position: 11,
+        horizon_position: original.horizon_position(),
+        provenance: correction.reference(),
+    })?;
+    let corrected_state = coordinator.submit_corrected(corrected.clone(), correction.clone())?;
+    assert_eq!(corrected_state.lifecycle(), ErasureLifecycleV1::Submitted);
+    assert_eq!(
+        coordinator.submit_corrected(corrected.clone(), correction.clone())?,
+        corrected_state
+    );
+    let wrong_request = ErasureRequestV1::new(ErasureRequestInputV1 {
+        request: reference(51),
+        subject: corrected.subject(),
+        scope: corrected.scope(),
+        selectors: corrected.selectors().to_vec(),
+        requester: corrected.requester(),
+        authorization: corrected.authorization(),
+        policy: corrected.policy(),
+        request_position: 12,
+        horizon_position: corrected.horizon_position(),
+        provenance: reference(52),
+    })?;
+    assert_eq!(
+        coordinator.submit_corrected(wrong_request, correction),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
+fn coordinator_persists_typed_freeze_rejection_and_rejects_wrong_provenance(
+) -> Result<(), ErasureErrorV1> {
+    let request = coordinator_request()?;
+    for (authorization, expected) in [
+        (reference(21), Ok(ErasureLifecycleV1::Rejected)),
+        (reference(22), Err(ErasureErrorV1::ProvenanceMissing)),
+    ] {
+        let port = PublicCoordinatorPort::new(PublicCoordinatorPortConfig {
+            targets: Vec::new(),
+            fail_commits: false,
+            policy: reference(5),
+            trust: reference(6),
+            scope_member: reference(7),
+            freeze_evidence: reference(8),
+            lineage_rule: None,
+            freeze_rejection: Some((ErasureErrorV1::ScopeInvalid, authorization)),
+        });
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        let result = coordinator
+            .freeze_inventory(request.reference(), &coordinator_freeze_transition())
+            .map(|state| state.lifecycle());
+        assert_eq!(result, expected);
+        if result.is_ok() {
+            assert_eq!(
+                coordinator
+                    .freeze_inventory(request.reference(), &coordinator_freeze_transition())?
+                    .lifecycle(),
+                ErasureLifecycleV1::Rejected
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]

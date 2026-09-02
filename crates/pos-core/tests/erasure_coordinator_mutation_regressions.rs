@@ -67,6 +67,7 @@ const fn config(
         scope_member: reference(9),
         freeze_evidence: reference(10),
         lineage_rule: None,
+        freeze_rejection: None,
     }
 }
 
