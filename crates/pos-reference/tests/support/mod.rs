@@ -49,6 +49,34 @@ pub enum ProfileMutation {
     FixtureProvenance,
     FixtureDowngradeBinding,
     FixtureDigest,
+    ExecutionMagic,
+    ExecutionVersion,
+    ExecutionId,
+    ExecutionSemver,
+    ExecutionModes,
+    ExecutionArchitecture,
+    ExecutionNumerics,
+    ExecutionDriverOrder,
+    ExecutionTickPolicy,
+    ExecutionSchemas,
+    ExecutionArtifacts,
+    ExecutionNetwork,
+    ExecutionBudget,
+    ExecutionCompatibility,
+    ExecutionPrevious,
+    ExecutionDigest,
+    RegistryMagic,
+    RegistryVersion,
+    RegistryProviders,
+    RegistryDigest,
+    PackageMagic,
+    PackageVersion,
+    PackageProvider,
+    PackageClaimLayer,
+    PackageAdapter,
+    PackageSchemas,
+    PackageSupportRole,
+    PackageDigest,
 }
 
 #[derive(Clone, Copy)]
@@ -93,6 +121,24 @@ pub enum TrustMutation {
     Signature,
 }
 
+#[derive(Clone, Copy)]
+pub enum ReleaseMutation {
+    Magic,
+    Version,
+    Lifecycle,
+    CaseId,
+    ExecutionDigest,
+    TrustDigest,
+    FromProvider,
+    ToProvider,
+    AllowFallback,
+    SignerId,
+    Signature,
+    MissingMember,
+    ExtraMember,
+    MissingBinding,
+}
+
 pub type TestResult<T> = Result<T, Box<dyn Error>>;
 
 struct FixtureExpectation {
@@ -107,7 +153,7 @@ struct FixtureExpectation {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false, false, None, None, None)
+    corpus_for_mode(0, None, None, false, None, None, None)
 }
 
 /// Build a signed corpus containing additional bytes for secret-scan tests.
@@ -115,7 +161,7 @@ pub fn corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
-    corpus_for_mode(0, Some(secret), false, false, None, None, None)
+    corpus_for_mode(0, Some(secret), None, false, None, None, None)
 }
 
 /// Build a complete Air-Gapped corpus with non-network capabilities.
@@ -123,7 +169,7 @@ pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn air_gapped_corpus() -> TestResult<Corpus> {
-    corpus_for_mode(1, None, false, false, None, None, None)
+    corpus_for_mode(1, None, None, false, None, None, None)
 }
 
 /// Build a signed corpus whose downgrade admission enables fallback.
@@ -131,7 +177,15 @@ pub fn air_gapped_corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, true, false, None, None, None)
+    corpus_for_mode(
+        0,
+        None,
+        Some(ReleaseMutation::AllowFallback),
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build a signed corpus containing output, typed-failure, and divergence oracles.
@@ -139,7 +193,7 @@ pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false, true, None, None, None)
+    corpus_for_mode(0, None, None, true, None, None, None)
 }
 
 /// Build a cryptographically bound corpus with one invalid CPF1 contract field.
@@ -147,7 +201,7 @@ pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false, false, Some(mutation), None, None)
+    corpus_for_mode(0, None, None, false, Some(mutation), None, None)
 }
 
 /// Build a request-bound corpus containing one signed CFB1 attack shape.
@@ -155,7 +209,7 @@ pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Cor
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_bundle_mutation(mutation: BundleMutation) -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false, false, None, Some(mutation), None)
+    corpus_for_mode(0, None, None, false, None, Some(mutation), None)
 }
 
 /// Build a request-bound corpus containing one invalid TPS1 authority contract.
@@ -163,13 +217,21 @@ pub fn corpus_with_bundle_mutation(mutation: BundleMutation) -> TestResult<Corpu
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_trust_mutation(mutation: TrustMutation) -> TestResult<Corpus> {
-    corpus_for_mode(0, None, false, false, None, None, Some(mutation))
+    corpus_for_mode(0, None, None, false, None, None, Some(mutation))
+}
+
+/// Build a signed corpus containing one invalid RAD1 admission contract.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Corpus> {
+    corpus_for_mode(0, None, Some(mutation), false, None, None, None)
 }
 
 fn corpus_for_mode(
     mode: u64,
     extra: Option<&[u8]>,
-    invalid_release_admission: bool,
+    release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
     profile_mutation: Option<ProfileMutation>,
     bundle_mutation: Option<BundleMutation>,
@@ -178,11 +240,11 @@ fn corpus_for_mode(
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let trust_policy = trust_policy(&signing_key, trust_mutation)?;
     let trust_digest = hash(&trust_policy);
-    let execution_profile = execution_profile()?;
+    let execution_profile = execution_profile(profile_mutation)?;
     let execution_digest = hash(&execution_profile);
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
-    add_provider_contracts(&mut members)?;
+    add_provider_contracts(&mut members, profile_mutation)?;
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
     }
@@ -193,7 +255,7 @@ fn corpus_for_mode(
         execution_digest,
         trust_digest,
         &expected_output,
-        invalid_release_admission,
+        release_mutation,
         mixed_oracles,
     )?;
     let mut profile = profile(
@@ -309,7 +371,7 @@ fn fixtures(
     execution: [u8; 32],
     trust: [u8; 32],
     expected: &[u8],
-    invalid_release_admission: bool,
+    release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
 ) -> TestResult<Vec<Value>> {
     (0_u64..=6)
@@ -341,14 +403,26 @@ fn fixtures(
                     trust,
                     &provider_key(2),
                     &provider_key(1),
-                    invalid_release_admission,
+                    release_mutation,
                 )?;
                 let digest = hash(&admission);
-                members.insert(
-                    format!("authority/release-admissions/{case_id}.rad1"),
-                    (admission, 16),
-                );
-                bytes(&digest)
+                if !matches!(release_mutation, Some(ReleaseMutation::MissingMember)) {
+                    members.insert(
+                        format!("authority/release-admissions/{case_id}.rad1"),
+                        (admission.clone(), 16),
+                    );
+                }
+                if matches!(release_mutation, Some(ReleaseMutation::ExtraMember)) {
+                    members.insert(
+                        "authority/release-admissions/extra.rad1".to_owned(),
+                        (admission, 16),
+                    );
+                }
+                if matches!(release_mutation, Some(ReleaseMutation::MissingBinding)) {
+                    Value::Null
+                } else {
+                    bytes(&digest)
+                }
             } else {
                 Value::Null
             };
@@ -446,7 +520,7 @@ fn release_admission(
     trust: [u8; 32],
     from: &Value,
     to: &Value,
-    allow_fallback: bool,
+    mutation: Option<ReleaseMutation>,
 ) -> TestResult<Vec<u8>> {
     let mut fields = vec![
         text("RAD1"),
@@ -457,17 +531,81 @@ fn release_admission(
         bytes(&trust),
         from.clone(),
         to.clone(),
-        Value::Bool(allow_fallback),
+        Value::Bool(false),
         text("test-key"),
     ];
+    if let Some(mutation) = mutation {
+        match mutation {
+            ReleaseMutation::Magic => fields[0] = text("RAD0"),
+            ReleaseMutation::Version => fields[1] = uint(2),
+            ReleaseMutation::Lifecycle => fields[2] = uint(1),
+            ReleaseMutation::CaseId => fields[3] = text("different-case"),
+            ReleaseMutation::ExecutionDigest => fields[4] = bytes(&[8; 32]),
+            ReleaseMutation::TrustDigest => fields[5] = bytes(&[8; 32]),
+            ReleaseMutation::FromProvider => fields[6] = provider_key(3),
+            ReleaseMutation::ToProvider => fields[7] = provider_key(0),
+            ReleaseMutation::AllowFallback => fields[8] = Value::Bool(true),
+            ReleaseMutation::SignerId => fields[9] = text("different-key"),
+            ReleaseMutation::Signature
+            | ReleaseMutation::MissingMember
+            | ReleaseMutation::ExtraMember
+            | ReleaseMutation::MissingBinding => {}
+        }
+    }
     let signature = signing_key
         .sign(&canonical(&array(fields.clone()))?)
         .to_bytes();
-    fields.push(bytes(&signature));
+    fields.push(if matches!(mutation, Some(ReleaseMutation::Signature)) {
+        bytes(&[0; 64])
+    } else {
+        bytes(&signature)
+    });
     canonical(&array(fields))
 }
 
-fn add_provider_contracts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<()> {
+fn add_provider_contracts(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    mutation: Option<ProfileMutation>,
+) -> TestResult<()> {
+    add_provider_artifacts(members);
+    let schemas = provider_schemas(members)?;
+    let mut package_fields = vec![
+        text("FPP1"),
+        uint(1),
+        provider_key(1),
+        uint(0),
+        uint(0),
+        array(schemas),
+        descriptor(members, "providers/test-provider/LICENSE")?,
+        descriptor(members, "providers/test-provider/NOTICE")?,
+        descriptor(members, "providers/test-provider/sbom.json")?,
+        descriptor(members, "providers/test-provider/provenance.json")?,
+        descriptor(members, "providers/test-provider/limitations.md")?,
+    ];
+    if let Some(mutation) = mutation {
+        mutate_provider_package(&mut package_fields, members, mutation)?;
+    }
+    let package_digest = hash_contract(
+        "PiglorOS.Conformance.ProviderPackage.v1",
+        &array(package_fields.clone()),
+    )?;
+    package_fields.push(
+        if matches!(mutation, Some(ProfileMutation::PackageDigest)) {
+            bytes(&[99; 32])
+        } else {
+            bytes(&package_digest)
+        },
+    );
+    let package_path = "providers/test-provider/package.cbor";
+    members.insert(
+        package_path.to_owned(),
+        (canonical(&array(package_fields))?, 13),
+    );
+
+    add_provider_registry(members, package_path, mutation)
+}
+
+fn add_provider_artifacts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) {
     let support = [
         (
             "providers/test-provider/LICENSE",
@@ -500,8 +638,10 @@ fn add_provider_contracts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) -> Test
             (format!("{{\"family\":{family}}}").into_bytes(), 4),
         );
     }
+}
 
-    let schemas = (0_u64..=6)
+fn provider_schemas(members: &BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<Vec<Value>> {
+    (0_u64..=6)
         .map(|family| -> TestResult<Value> {
             Ok(array(vec![
                 uint(family),
@@ -511,31 +651,14 @@ fn add_provider_contracts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) -> Test
                 )?,
             ]))
         })
-        .collect::<TestResult<Vec<_>>>()?;
-    let mut package_fields = vec![
-        text("FPP1"),
-        uint(1),
-        provider_key(1),
-        uint(0),
-        uint(0),
-        array(schemas),
-        descriptor(members, "providers/test-provider/LICENSE")?,
-        descriptor(members, "providers/test-provider/NOTICE")?,
-        descriptor(members, "providers/test-provider/sbom.json")?,
-        descriptor(members, "providers/test-provider/provenance.json")?,
-        descriptor(members, "providers/test-provider/limitations.md")?,
-    ];
-    let package_digest = hash_contract(
-        "PiglorOS.Conformance.ProviderPackage.v1",
-        &array(package_fields.clone()),
-    )?;
-    package_fields.push(bytes(&package_digest));
-    let package_path = "providers/test-provider/package.cbor";
-    members.insert(
-        package_path.to_owned(),
-        (canonical(&array(package_fields))?, 13),
-    );
+        .collect()
+}
 
+fn add_provider_registry(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    package_path: &str,
+    mutation: Option<ProfileMutation>,
+) -> TestResult<()> {
     let mut registry_fields = vec![
         text("FPR1"),
         uint(1),
@@ -549,15 +672,56 @@ fn add_provider_contracts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) -> Test
             descriptor_with_media(members, package_path, "application/cbor")?,
         ])]),
     ];
+    if let Some(mutation) = mutation {
+        mutate_provider_registry(&mut registry_fields, mutation)?;
+    }
     let registry_digest = hash_contract(
         "PiglorOS.Conformance.ProviderRegistry.v1",
         &array(registry_fields.clone()),
     )?;
-    registry_fields.push(bytes(&registry_digest));
+    registry_fields.push(
+        if matches!(mutation, Some(ProfileMutation::RegistryDigest)) {
+            bytes(&[99; 32])
+        } else {
+            bytes(&registry_digest)
+        },
+    );
     members.insert(
         "authority/fixture-provider-registry.cbor".to_owned(),
         (canonical(&array(registry_fields))?, 12),
     );
+    Ok(())
+}
+
+fn mutate_provider_package(
+    fields: &mut [Value],
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    mutation: ProfileMutation,
+) -> TestResult<()> {
+    match mutation {
+        ProfileMutation::PackageMagic => fields[0] = text("FPP0"),
+        ProfileMutation::PackageVersion => fields[1] = uint(2),
+        ProfileMutation::PackageProvider => fields[2] = provider_key(2),
+        ProfileMutation::PackageClaimLayer => fields[3] = uint(1),
+        ProfileMutation::PackageAdapter => fields[4] = uint(2),
+        ProfileMutation::PackageSchemas => fields[5] = array(Vec::new()),
+        ProfileMutation::PackageSupportRole => {
+            fields[6] = descriptor(members, "providers/test-provider/NOTICE")?;
+        }
+        ProfileMutation::PackageDigest => {}
+        _ => {}
+    }
+    Ok(())
+}
+
+fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
+    match mutation {
+        ProfileMutation::RegistryMagic => fields[0] = text("FPR0"),
+        ProfileMutation::RegistryVersion => fields[1] = uint(2),
+        ProfileMutation::RegistryProviders => fields[2] = array(Vec::new()),
+        ProfileMutation::RegistryDigest => {}
+        _ => {}
+    }
     Ok(())
 }
 
@@ -645,6 +809,34 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::RequirementDigest => {
             array_fields_mut(&mut profile_fields[12])?[3] = bytes(&[0; 32]);
         }
+        ProfileMutation::ExecutionMagic
+        | ProfileMutation::ExecutionVersion
+        | ProfileMutation::ExecutionId
+        | ProfileMutation::ExecutionSemver
+        | ProfileMutation::ExecutionModes
+        | ProfileMutation::ExecutionArchitecture
+        | ProfileMutation::ExecutionNumerics
+        | ProfileMutation::ExecutionDriverOrder
+        | ProfileMutation::ExecutionTickPolicy
+        | ProfileMutation::ExecutionSchemas
+        | ProfileMutation::ExecutionArtifacts
+        | ProfileMutation::ExecutionNetwork
+        | ProfileMutation::ExecutionBudget
+        | ProfileMutation::ExecutionCompatibility
+        | ProfileMutation::ExecutionPrevious
+        | ProfileMutation::ExecutionDigest
+        | ProfileMutation::RegistryMagic
+        | ProfileMutation::RegistryVersion
+        | ProfileMutation::RegistryProviders
+        | ProfileMutation::RegistryDigest
+        | ProfileMutation::PackageMagic
+        | ProfileMutation::PackageVersion
+        | ProfileMutation::PackageProvider
+        | ProfileMutation::PackageClaimLayer
+        | ProfileMutation::PackageAdapter
+        | ProfileMutation::PackageSchemas
+        | ProfileMutation::PackageSupportRole
+        | ProfileMutation::PackageDigest => {}
         fixture_mutation => mutate_fixture(profile_fields, fixture_mutation)?,
     }
     Ok(())
@@ -678,8 +870,8 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         }
         ProfileMutation::FixtureCapabilities => {
             array_fields_mut(&mut fields[18])?[1] = array(
-                (0..65)
-                    .map(|index| text(&format!("capability-{index:02}")))
+                (0..257)
+                    .map(|index| text(&format!("capability-{index:03}")))
                     .collect(),
             );
         }
@@ -955,7 +1147,7 @@ fn provider_key(minor: u64) -> Value {
     ])
 }
 
-fn execution_profile() -> TestResult<Vec<u8>> {
+fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
     let mut fields = vec![
         text("EPF1"),
         uint(1),
@@ -974,9 +1166,47 @@ fn execution_profile() -> TestResult<Vec<u8>> {
         array(vec![text("1.0.0"), text("1.0.0")]),
         Value::Null,
     ];
+    if let Some(mutation) = mutation {
+        mutate_execution_profile(&mut fields, mutation)?;
+    }
     let digest = hash_contract("PiglorOS.ExecutionProfile.v1", &array(fields.clone()))?;
-    fields.push(bytes(&digest));
+    fields.push(
+        if matches!(mutation, Some(ProfileMutation::ExecutionDigest)) {
+            bytes(&[99; 32])
+        } else {
+            bytes(&digest)
+        },
+    );
     canonical(&array(fields))
+}
+
+fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
+    match mutation {
+        ProfileMutation::ExecutionMagic => fields[0] = text("EPF0"),
+        ProfileMutation::ExecutionVersion => fields[1] = uint(2),
+        ProfileMutation::ExecutionId => fields[2] = text("Invalid"),
+        ProfileMutation::ExecutionSemver => fields[3] = text("invalid"),
+        ProfileMutation::ExecutionModes => fields[4] = array(vec![uint(1), uint(0)]),
+        ProfileMutation::ExecutionArchitecture => fields[5] = array(Vec::new()),
+        ProfileMutation::ExecutionNumerics => fields[6] = array(Vec::new()),
+        ProfileMutation::ExecutionDriverOrder => fields[7] = array(Vec::new()),
+        ProfileMutation::ExecutionTickPolicy => fields[8] = text("Invalid"),
+        ProfileMutation::ExecutionSchemas => fields[9] = array(Vec::new()),
+        ProfileMutation::ExecutionArtifacts => fields[10] = array(Vec::new()),
+        ProfileMutation::ExecutionNetwork => {
+            fields[11] = array(vec![Value::Bool(true), array(Vec::new())]);
+        }
+        ProfileMutation::ExecutionBudget => {
+            array_fields_mut(&mut fields[12])?[0] = uint(0);
+        }
+        ProfileMutation::ExecutionCompatibility => {
+            fields[14] = array(vec![text("invalid"), text("1.0.0")]);
+        }
+        ProfileMutation::ExecutionPrevious => fields[15] = bytes(&[1; 32]),
+        ProfileMutation::ExecutionDigest => {}
+        _ => {}
+    }
+    Ok(())
 }
 
 fn hard_caps() -> Value {
