@@ -193,6 +193,9 @@ struct Host<S> {
     targets: Vec<ErasureRequiredTargetV1>,
 }
 
+type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
+type CompletedErasure<S> = (Rc<RefCell<S>>, ErasureRequestV1, Vec<RetainedEffect>);
+
 impl<S: ErasurePersistencePortV1> ErasureStateResolverV1 for Host<S> {
     fn resolve_state(
         &self,
@@ -415,16 +418,7 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
     }
 }
 
-fn complete<S: ErasurePersistencePortV1>(
-    store: S,
-) -> Result<
-    (
-        Rc<RefCell<S>>,
-        ErasureRequestV1,
-        Vec<(ErasureReferenceV1, pos_core::ErasureCasEffectV1)>,
-    ),
-    ErasureErrorV1,
-> {
+fn complete<S: ErasurePersistencePortV1>(store: S) -> Result<CompletedErasure<S>, ErasureErrorV1> {
     let shared = Rc::new(RefCell::new(store));
     let request = request()?;
     let target = target();
@@ -510,7 +504,7 @@ fn complete<S: ErasurePersistencePortV1>(
 fn retained_effect<S: ErasurePersistencePortV1>(
     store: &Rc<RefCell<S>>,
     request: ErasureReferenceV1,
-) -> Result<(ErasureReferenceV1, pos_core::ErasureCasEffectV1), ErasureErrorV1> {
+) -> Result<RetainedEffect, ErasureErrorV1> {
     let store = store.borrow();
     let manifest = store
         .read_manifest(request)?
