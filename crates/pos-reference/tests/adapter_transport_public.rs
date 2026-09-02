@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::ffi::OsString;
 
 use ciborium::value::Value;
@@ -10,6 +11,8 @@ use pos_reference::evaluator::{
 use pos_reference::evaluator_protocol::SubjectAdapterKind;
 use pos_reference::process_adapter::ProcessAdapter;
 use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
+
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 fn budget() -> DeterministicBudget {
     DeterministicBudget {
@@ -54,10 +57,21 @@ fn attempt() -> CaseAttempt {
     }
 }
 
-fn canonical(value: &Value) -> Vec<u8> {
+fn canonical(value: &Value) -> TestResult<Vec<u8>> {
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes).expect("test value should encode");
-    bytes
+    ciborium::into_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn replace_field(value: &mut Value, index: usize, replacement: Value) -> TestResult {
+    let Value::Array(fields) = value else {
+        return Err("test value is not an array".into());
+    };
+    let field = fields
+        .get_mut(index)
+        .ok_or("test field index is out of bounds")?;
+    *field = replacement;
+    Ok(())
 }
 
 fn attempt_value() -> Value {
@@ -87,12 +101,13 @@ fn attempt_value() -> Value {
 }
 
 #[test]
-fn attempt_transport_round_trips_the_exact_public_contract() {
+fn attempt_transport_round_trips_the_exact_public_contract() -> TestResult {
     let expected = attempt();
-    let bytes = encode_attempt(&expected).expect("bounded attempt should encode");
+    let bytes = encode_attempt(&expected)?;
 
-    assert_eq!(bytes, canonical(&attempt_value()));
+    assert_eq!(bytes, canonical(&attempt_value())?);
     assert_eq!(decode_attempt(&bytes), Ok(expected));
+    Ok(())
 }
 
 #[test]
@@ -127,39 +142,44 @@ fn attempt_transport_rejects_each_bounded_identity_failure() {
 }
 
 #[test]
-fn attempt_transport_rejects_wrong_versions_shapes_types_and_codes() {
+fn attempt_transport_rejects_wrong_versions_shapes_types_and_codes() -> TestResult {
     let mut value = attempt_value();
-    let Value::Array(fields) = &mut value else {
-        unreachable!("fixture root is an array");
-    };
-    fields[0] = Value::Text("EAI0".to_owned());
+    replace_field(&mut value, 0, Value::Text("EAI0".to_owned()))?;
     assert_eq!(
-        decode_attempt(&canonical(&value)),
+        decode_attempt(&canonical(&value)?),
         Err(TransportError::UnsupportedVersion)
     );
 
-    fields[0] = Value::Text("EAI1".to_owned());
-    fields[3] = Value::Integer(7_u64.into());
+    replace_field(&mut value, 0, Value::Text("EAI1".to_owned()))?;
+    replace_field(&mut value, 3, Value::Integer(7_u64.into()))?;
     assert_eq!(
-        decode_attempt(&canonical(&value)),
+        decode_attempt(&canonical(&value)?),
         Err(TransportError::InvalidEncoding)
     );
 
-    fields[3] = Value::Integer(6_u64.into());
-    fields[10] = Value::Array(vec![Value::Integer(0_u64.into()); 8]);
+    replace_field(&mut value, 3, Value::Integer(6_u64.into()))?;
+    replace_field(
+        &mut value,
+        10,
+        Value::Array(vec![Value::Integer(0_u64.into()); 8]),
+    )?;
     assert_eq!(
-        decode_attempt(&canonical(&value)),
+        decode_attempt(&canonical(&value)?),
         Err(TransportError::FieldOutOfBounds)
     );
 
-    fields[10] = Value::Array(
-        (1_u64..=8)
-            .map(|item| Value::Integer(item.into()))
-            .collect(),
-    );
-    fields[12] = Value::Null;
+    replace_field(
+        &mut value,
+        10,
+        Value::Array(
+            (1_u64..=8)
+                .map(|item| Value::Integer(item.into()))
+                .collect(),
+        ),
+    )?;
+    replace_field(&mut value, 12, Value::Null)?;
     assert_eq!(
-        decode_attempt(&canonical(&value)),
+        decode_attempt(&canonical(&value)?),
         Err(TransportError::InvalidEncoding)
     );
 
@@ -167,10 +187,11 @@ fn attempt_transport_rejects_wrong_versions_shapes_types_and_codes() {
         decode_attempt(&[0xff]),
         Err(TransportError::InvalidEncoding)
     );
+    Ok(())
 }
 
 #[test]
-fn observation_transport_round_trips_every_closed_result() {
+fn observation_transport_round_trips_every_closed_result() -> TestResult {
     let results = [
         SubjectResult::Output(vec![1, 2, 3]),
         SubjectResult::Failure(NamespacedFailure {
@@ -189,13 +210,14 @@ fn observation_transport_round_trips_every_closed_result() {
             result,
             usage: usage(),
         };
-        let encoded = encode_observation(&expected).expect("bounded observation should encode");
+        let encoded = encode_observation(&expected)?;
         assert_eq!(decode_observation(&encoded), Ok(expected));
     }
+    Ok(())
 }
 
 #[test]
-fn observation_transport_rejects_nonexclusive_or_unbounded_results() {
+fn observation_transport_rejects_nonexclusive_or_unbounded_results() -> TestResult {
     let invalid_union = Value::Array(vec![
         Value::Text("EAO1".to_owned()),
         Value::Integer(1_u64.into()),
@@ -206,7 +228,7 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() {
         Value::Array(vec![Value::Integer(0_u64.into()); 8]),
     ]);
     assert_eq!(
-        decode_observation(&canonical(&invalid_union)),
+        decode_observation(&canonical(&invalid_union)?),
         Err(TransportError::InvalidEncoding)
     );
 
@@ -234,6 +256,7 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() {
         encode_observation(&invalid_failure),
         Err(TransportError::FieldOutOfBounds)
     );
+    Ok(())
 }
 
 #[test]

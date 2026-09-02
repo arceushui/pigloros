@@ -351,17 +351,30 @@ impl Profile {
     ) -> Result<(), ProfileError> {
         validate_descriptor(bundle, registry)?;
         for fixture in &self.fixtures {
-            validate_descriptor(bundle, &fixture.schema)?;
-            validate_descriptor(bundle, &fixture.payload)?;
-            fixture
-                .auxiliary
-                .iter()
-                .try_for_each(|descriptor| validate_descriptor(bundle, descriptor))?;
+            validate_descriptor_roles(bundle, &fixture.schema, &[4])?;
+            validate_descriptor_roles(bundle, &fixture.payload, &[0])?;
+            fixture.auxiliary.iter().try_for_each(|descriptor| {
+                validate_descriptor_roles(bundle, descriptor, &[0, 1, 17])
+            })?;
             if let StrictOracle::Output(descriptor) = &fixture.oracle {
-                validate_descriptor(bundle, descriptor)?;
+                validate_descriptor_roles(bundle, descriptor, &[1])?;
+            }
+            if fixture.modes.contains(&bundle.mode) {
+                let evidence_count = fixture
+                    .auxiliary
+                    .iter()
+                    .filter(|descriptor| {
+                        bundle
+                            .member(&descriptor.member_path)
+                            .is_some_and(|member| member.role == 17)
+                    })
+                    .count();
+                if evidence_count != 1 {
+                    return Err(ProfileError::ClosureIncomplete);
+                }
             }
         }
-        Ok(())
+        validate_expected_results(bundle, &self.fixtures)
     }
 }
 
@@ -1114,6 +1127,67 @@ fn validate_descriptor(
     } else {
         Ok(())
     }
+}
+
+fn validate_descriptor_roles(
+    bundle: &VerifiedBundle,
+    descriptor: &ArtifactDescriptor,
+    roles: &[u8],
+) -> Result<(), ProfileError> {
+    validate_descriptor(bundle, descriptor)?;
+    if bundle
+        .member(&descriptor.member_path)
+        .is_some_and(|member| roles.contains(&member.role))
+    {
+        Ok(())
+    } else {
+        Err(ProfileError::ClosureIncomplete)
+    }
+}
+
+fn validate_expected_results(
+    bundle: &VerifiedBundle,
+    fixtures: &[Fixture],
+) -> Result<(), ProfileError> {
+    let selected = fixtures
+        .iter()
+        .filter(|fixture| fixture.modes.contains(&bundle.mode))
+        .count();
+    if bundle.expected_results.len() != selected {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    for (key, path) in &bundle.expected_results {
+        let fixture = fixtures
+            .iter()
+            .find(|fixture| {
+                fixture.case_id == key.case_id
+                    && fixture.claim_layer == key.claim_layer
+                    && fixture.execution_profile_digest == key.execution_profile_digest
+                    && fixture.modes.contains(&key.mode)
+            })
+            .ok_or(ProfileError::ClosureIncomplete)?;
+        if key.mode != bundle.mode {
+            return Err(ProfileError::ClosureIncomplete);
+        }
+        let member = bundle.member(path).ok_or(ProfileError::ClosureIncomplete)?;
+        let member_length =
+            u64::try_from(member.bytes.len()).map_err(|_| ProfileError::FieldOutOfBounds)?;
+        let bound = fixture.auxiliary.iter().any(|artifact| {
+            artifact.member_path == path.as_str()
+                && artifact.digest == member.digest
+                && artifact.byte_length == member_length
+        }) || matches!(
+            &fixture.oracle,
+            StrictOracle::Output(artifact)
+                if artifact.member_path == path.as_str()
+                    && artifact.digest == member.digest
+                    && artifact.byte_length == member_length
+        );
+        if member.role != 1 || !bound {
+            return Err(ProfileError::ClosureIncomplete);
+        }
+    }
+    Ok(())
 }
 
 fn fixture_key(value: &Fixture) -> ((&[u8], &[u8], u16, u16), u8, &[u8], [u8; 32], &[u8]) {
