@@ -10,10 +10,10 @@ mod coordinator_support;
 mod erasure_support;
 
 use ciborium::value::Value;
-use pos_core::erasure::ERASURE_CAS_EFFECT_TAG_V1;
+use pos_core::erasure::{target_closure_digest, ERASURE_CAS_EFFECT_TAG_V1};
 use pos_core::{
     acknowledgement_inventory_reference, destruction_command_reference,
-    erasure_evidence_set_reference, selected_obligations_reference, target_closure_digest,
+    erasure_evidence_set_reference, selected_obligations_reference,
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
