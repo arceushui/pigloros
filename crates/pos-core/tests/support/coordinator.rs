@@ -651,6 +651,26 @@ impl PublicCoordinatorPort {
             .remove(&(request, ordinal));
     }
 
+    /// Move an attempt index entry without changing its cardinality.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance error when the selected entry is absent.
+    pub fn relocate_attempt_page(
+        &self,
+        request: ErasureReferenceV1,
+        from: u64,
+        to: u64,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let reference = storage
+            .attempts
+            .remove(&(request, from))
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        storage.attempts.insert((request, to), reference);
+        Ok(())
+    }
+
     pub fn remove_scope_node(&self, request: ErasureReferenceV1, ordinal: u64) {
         self.storage.borrow_mut().scopes.remove(&(request, ordinal));
     }

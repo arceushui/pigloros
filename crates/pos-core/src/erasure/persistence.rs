@@ -997,11 +997,7 @@ impl RecoveredErasureV1 {
         ),
         ErasureErrorV1,
     > {
-        let ordinal = self.scope_head.map_or(Ok(0), |head| {
-            head.ordinal
-                .checked_add(1)
-                .ok_or(ErasureErrorV1::PolicyConflict)
-        })?;
+        let ordinal = self.scope_head.map_or(0, |head| head.ordinal + 1);
         if ordinal >= ERASURE_MAX_SCOPE_EXTENSIONS as u64 {
             return Err(ErasureErrorV1::PolicyConflict);
         }
@@ -1052,9 +1048,7 @@ impl RecoveredErasureV1 {
             return Err(ErasureErrorV1::PolicyConflict);
         }
         let reference = resolution.reference();
-        let next_count = ordinal
-            .checked_add(1)
-            .ok_or(ErasureErrorV1::PolicyConflict)?;
+        let next_count = ordinal + 1;
         resolution.to_canonical_cbor().map(|bytes| {
             let object =
                 persistence_object(ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, reference, bytes);
@@ -1142,9 +1136,7 @@ impl RecoveredErasureV1 {
         ));
         self.manifest.active = None;
         self.manifest.attempt_history_head = Some(page_reference);
-        let completed = ordinal
-            .checked_add(1)
-            .ok_or(ErasureErrorV1::PolicyConflict)?;
+        let completed = ordinal + 1;
         self.manifest.completed_attempt_count = completed;
         self.manifest.latest_receipt = Some(receipt.receipt_digest());
         self.active = None;

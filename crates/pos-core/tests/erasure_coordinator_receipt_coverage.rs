@@ -1768,6 +1768,12 @@ fn coordinator_recovery_rejects_missing_attempt_graph_components() -> Result<(),
     assert_public_recovery_fails(graph.adapter, &graph.request);
 
     let graph = complete_persisted_graph(None)?;
+    graph
+        .adapter
+        .relocate_attempt_page(graph.request.reference(), 0, 1)?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+
+    let graph = complete_persisted_graph(None)?;
     let page = graph
         .adapter
         .attempt_page_ref(graph.request.reference(), 0)?
