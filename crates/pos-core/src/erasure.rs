@@ -7338,10 +7338,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
                     .map(|provenance| (admission, provenance))
                 })
                 .and_then(|(admission, acknowledgement_provenance)| {
-                    if Self::has_acknowledgement_identity(
-                        &record,
-                        &acknowledgement_provenance,
-                    ) {
+                    if Self::has_acknowledgement_identity(&record, &acknowledgement_provenance) {
                         return Err(ErasureErrorV1::PolicyConflict);
                     }
                     self.port
