@@ -207,6 +207,70 @@ fn obligation(
     })
 }
 
+fn atomic_freeze_input(
+    mut targets: Vec<ErasureRequiredTargetV1>,
+    mut obligations: Vec<ErasureObligationV1>,
+    applicability_matrix: Vec<ErasureFreezeApplicabilityRowV1>,
+) -> Result<ErasureAtomicFreezeAdmissionInputV1, ErasureErrorV1> {
+    let request = reference(1);
+    targets.sort_unstable();
+    obligations.sort_unstable_by_key(ErasureObligationV1::reference);
+    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
+        request,
+        obligations: obligations
+            .iter()
+            .map(ErasureObligationV1::reference)
+            .collect(),
+        policy: reference(4),
+        trust: reference(5),
+    })?;
+    let scope = ErasureScopeCommitmentInputV1 {
+        request,
+        scope_members: vec![reference(2)],
+        target_closure: target_closure_digest(&targets),
+        lineage_rule: Some(reference(3)),
+    };
+    let evidence_input = ErasureFreezeAdmissionEvidenceInputV1 {
+        request,
+        scope_commitment: ErasureScopeCommitmentV1::new(scope.clone())?.reference(),
+        obligation_set: obligation_set.reference(),
+        applicability_matrix,
+        freeze_position: 40,
+        policy: reference(4),
+        trust: reference(5),
+        authorization_provenance: reference(6),
+    };
+    let provisional = ErasureFreezeAdmissionEvidenceV1::new(evidence_input.clone())?;
+    let freeze_authorization_evidence =
+        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
+            admission_body_digest: provisional.authorization_body_digest()?,
+            policy: reference(4),
+            trust: reference(5),
+            evidence: vec![9, 8, 7],
+        })?;
+    let freeze_admission_evidence =
+        ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+            authorization_provenance: freeze_authorization_evidence.reference(),
+            ..evidence_input
+        })?;
+    Ok(ErasureAtomicFreezeAdmissionInputV1 {
+        targets,
+        scope,
+        obligations,
+        obligation_set,
+        freeze_position: 40,
+        freeze_admission_evidence,
+        freeze_authorization_evidence,
+    })
+}
+
+fn assert_atomic_freeze_rejected(
+    input: ErasureAtomicFreezeAdmissionInputV1,
+    expected: ErasureErrorV1,
+) {
+    assert_eq!(ErasureAtomicFreezeAdmissionV1::new(input), Err(expected));
+}
+
 const fn inventory(
     category: ErasureInventoryCategoryV1,
     target: ErasureRequiredTargetV1,
@@ -573,6 +637,22 @@ fn submit_authorize_and_freeze(
     let submitted = api.submit(request.clone())?;
     assert_eq!(submitted.lifecycle(), ErasureLifecycleV1::Submitted);
     assert_eq!(api.submit(request.clone())?, submitted);
+    assert_eq!(
+        api.freeze_access(request.reference(), coordinator_freeze_transition()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        api.acknowledge(
+            request.reference(),
+            coordinator_acknowledgement(
+                request.reference(),
+                target(10),
+                reference(98),
+                ErasureAcknowledgementOutcomeV1::Acknowledged,
+            )?,
+        ),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
 
     let conflicting_request = ErasureRequestV1::new(ErasureRequestInputV1 {
         request: request.reference(),
@@ -603,6 +683,13 @@ fn submit_authorize_and_freeze(
     );
     assert_eq!(
         api.reject(request.reference(), reference(23)),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(
+        api.dispatch_attempt(
+            request.reference(),
+            &coordinator_admission(request.reference(), target(10), 0, None)?,
+        ),
         Err(ErasureErrorV1::PolicyConflict)
     );
 
@@ -690,6 +777,40 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
     submit_authorize_and_freeze(api, &request)?;
 
     let admission = coordinator_admission(request.reference(), target, 0, None)?;
+    for (invalid, expected) in [
+        (
+            coordinator_admission(reference(201), target, 0, None)?,
+            ErasureErrorV1::PolicyConflict,
+        ),
+        (
+            coordinator_admission(request.reference(), target, 1, None)?,
+            ErasureErrorV1::PolicyConflict,
+        ),
+        (
+            coordinator_admission(request.reference(), target, 0, Some(reference(202)))?,
+            ErasureErrorV1::PolicyConflict,
+        ),
+        (
+            ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+                request: request.reference(),
+                attempt_ordinal: 0,
+                source_receipt: None,
+                unresolved_obligations: Vec::new(),
+                command_identities: Vec::new(),
+                policy: reference(5),
+                trust: reference(6),
+                admitted_position: 11,
+                deadline_position: 20,
+                authorization_provenance: reference(32),
+            })?,
+            ErasureErrorV1::ScopeInvalid,
+        ),
+    ] {
+        assert_eq!(
+            api.dispatch_attempt(request.reference(), &invalid),
+            Err(expected)
+        );
+    }
     let invalid_admission = ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
         request: admission.request(),
         attempt_ordinal: admission.attempt_ordinal(),
@@ -1669,22 +1790,8 @@ fn public_constructors_reject_each_bounded_collection_violation() {
 fn atomic_freeze_admission_exposes_its_complete_public_commitments() -> Result<(), ErasureErrorV1> {
     let request = reference(1);
     let frozen_target = target(11);
-    let targets = vec![frozen_target];
     let frozen_obligation =
         obligation(request, ErasureInventoryCategoryV1::Artifact, frozen_target)?;
-    let obligation_set = ErasureObligationSetV1::new(ErasureObligationSetInputV1 {
-        request,
-        obligations: vec![frozen_obligation.reference()],
-        policy: reference(4),
-        trust: reference(5),
-    })?;
-    let scope = ErasureScopeCommitmentInputV1 {
-        request,
-        scope_members: vec![reference(2)],
-        target_closure: target_closure_digest(&targets),
-        lineage_rule: Some(reference(3)),
-    };
-    let scope_reference = ErasureScopeCommitmentV1::new(scope.clone())?.reference();
     let matrix = applicability_matrix(
         1,
         Some((
@@ -1693,54 +1800,25 @@ fn atomic_freeze_admission_exposes_its_complete_public_commitments() -> Result<(
             frozen_target.replica_id,
         )),
     )?;
-    let admission_input = ErasureFreezeAdmissionEvidenceInputV1 {
-        request,
-        scope_commitment: scope_reference,
-        obligation_set: obligation_set.reference(),
-        applicability_matrix: matrix,
-        freeze_position: 40,
-        policy: reference(4),
-        trust: reference(5),
-        authorization_provenance: reference(6),
-    };
-    let provisional = ErasureFreezeAdmissionEvidenceV1::new(admission_input.clone())?;
-    let authorization =
-        ErasureFreezeAuthorizationEvidenceV1::new(ErasureFreezeAuthorizationEvidenceInputV1 {
-            admission_body_digest: provisional.authorization_body_digest()?,
-            policy: reference(4),
-            trust: reference(5),
-            evidence: vec![9, 8, 7],
-        })?;
-    let freeze_admission =
-        ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
-            authorization_provenance: authorization.reference(),
-            ..admission_input
-        })?;
-    let admission = ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
-        targets: targets.clone(),
-        scope: scope.clone(),
-        obligations: vec![frozen_obligation],
-        obligation_set: obligation_set.clone(),
-        freeze_position: 40,
-        freeze_admission_evidence: freeze_admission.clone(),
-        freeze_authorization_evidence: authorization.clone(),
-    })?;
-    assert_eq!(admission.targets(), targets.as_slice());
-    assert_eq!(admission.scope(), &scope);
+    let input = atomic_freeze_input(vec![frozen_target], vec![frozen_obligation], matrix)?;
+    let admission = ErasureAtomicFreezeAdmissionV1::new(input.clone())?;
+    assert_eq!(admission.targets(), input.targets.as_slice());
+    assert_eq!(admission.scope(), &input.scope);
     assert_eq!(admission.obligations(), &[frozen_obligation]);
-    assert_eq!(admission.obligation_set(), &obligation_set);
+    assert_eq!(admission.obligation_set(), &input.obligation_set);
     assert_eq!(admission.freeze_position(), 40);
-    assert_eq!(admission.freeze_admission_evidence(), &freeze_admission);
-    assert_eq!(admission.freeze_authorization_evidence(), &authorization);
+    assert_eq!(
+        admission.freeze_admission_evidence(),
+        &input.freeze_admission_evidence
+    );
+    assert_eq!(
+        admission.freeze_authorization_evidence(),
+        &input.freeze_authorization_evidence
+    );
     assert_eq!(
         ErasureAtomicFreezeAdmissionV1::new(ErasureAtomicFreezeAdmissionInputV1 {
             targets: Vec::new(),
-            scope,
-            obligations: vec![frozen_obligation],
-            obligation_set,
-            freeze_position: 40,
-            freeze_admission_evidence: freeze_admission,
-            freeze_authorization_evidence: authorization,
+            ..input
         }),
         Err(ErasureErrorV1::ScopeInvalid)
     );
@@ -1761,6 +1839,142 @@ fn atomic_freeze_admission_exposes_its_complete_public_commitments() -> Result<(
             Some(reference(9)),
         ),
         Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
+}
+
+#[test]
+fn atomic_freeze_admission_rejects_inconsistent_public_commitments() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let frozen_target = target(11);
+    let valid_obligation =
+        obligation(request, ErasureInventoryCategoryV1::Artifact, frozen_target)?;
+    let applicable = applicability_matrix(
+        1,
+        Some((
+            ErasureInventoryCategoryV1::Artifact,
+            0,
+            frozen_target.replica_id,
+        )),
+    )?;
+
+    let mut mismatched_evidence = atomic_freeze_input(
+        vec![frozen_target],
+        vec![valid_obligation],
+        applicable.clone(),
+    )?;
+    mismatched_evidence.freeze_position += 1;
+    assert_atomic_freeze_rejected(mismatched_evidence, ErasureErrorV1::ProvenanceMissing);
+
+    let mut mismatched_set = atomic_freeze_input(
+        vec![frozen_target],
+        vec![valid_obligation],
+        applicable.clone(),
+    )?;
+    mismatched_set.obligations[0] = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target: frozen_target,
+        owner: reference(44),
+        command_identity: destruction_command_reference(request, frozen_target),
+    })?;
+    assert_atomic_freeze_rejected(mismatched_set, ErasureErrorV1::ScopeInvalid);
+
+    let outside_target = target(12);
+    let outside_obligation = obligation(
+        request,
+        ErasureInventoryCategoryV1::Artifact,
+        outside_target,
+    )?;
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(
+            vec![frozen_target],
+            vec![outside_obligation],
+            applicability_matrix(
+                1,
+                Some((
+                    ErasureInventoryCategoryV1::Artifact,
+                    0,
+                    outside_target.replica_id,
+                )),
+            )?,
+        )?,
+        ErasureErrorV1::ScopeInvalid,
+    );
+
+    let wrong_command = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target: frozen_target,
+        owner: frozen_target.replica_id,
+        command_identity: reference(88),
+    })?;
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(vec![frozen_target], vec![wrong_command], applicable.clone())?,
+        ErasureErrorV1::ScopeInvalid,
+    );
+
+    let duplicate_target = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Artifact,
+        target: frozen_target,
+        owner: reference(45),
+        command_identity: destruction_command_reference(request, frozen_target),
+    })?;
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(
+            vec![frozen_target],
+            vec![valid_obligation, duplicate_target],
+            applicable.clone(),
+        )?,
+        ErasureErrorV1::ScopeInvalid,
+    );
+
+    let duplicate_command_owner = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: ErasureInventoryCategoryV1::Key,
+        target: frozen_target,
+        owner: frozen_target.replica_id,
+        command_identity: destruction_command_reference(request, frozen_target),
+    })?;
+    let mut two_applicable = applicability_matrix(
+        1,
+        Some((
+            ErasureInventoryCategoryV1::Artifact,
+            0,
+            frozen_target.replica_id,
+        )),
+    )?;
+    two_applicable[1] = ErasureFreezeApplicabilityRowV1::new(
+        ErasureInventoryCategoryV1::Key,
+        0,
+        ErasureApplicabilityDecisionV1::Applicable,
+        Some(frozen_target.replica_id),
+    )?;
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(
+            vec![frozen_target],
+            vec![valid_obligation, duplicate_command_owner],
+            two_applicable,
+        )?,
+        ErasureErrorV1::ScopeInvalid,
+    );
+
+    let wrong_owner_matrix = applicability_matrix(
+        1,
+        Some((ErasureInventoryCategoryV1::Artifact, 0, reference(99))),
+    )?;
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(
+            vec![frozen_target],
+            vec![valid_obligation],
+            wrong_owner_matrix,
+        )?,
+        ErasureErrorV1::ScopeInvalid,
+    );
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(
+            vec![frozen_target],
+            vec![valid_obligation],
+            applicability_matrix(1, None)?,
+        )?,
+        ErasureErrorV1::ScopeInvalid,
     );
     Ok(())
 }
@@ -1963,6 +2177,40 @@ fn receipt_rejects_inconsistent_closures_and_history_sources() -> Result<(), Era
         Err(ErasureErrorV1::ScopeInvalid)
     );
 
+    let mut acknowledgement_without_inventory = input.clone();
+    acknowledgement_without_inventory
+        .inventories
+        .artifacts
+        .clear();
+    assert_eq!(
+        ErasureReceiptV1::new(acknowledgement_without_inventory),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let mut wrong_derived_owners = input.clone();
+    wrong_derived_owners.pending_owners = vec![input.inventories.artifacts[0].transition.owner];
+    assert_eq!(
+        ErasureReceiptV1::new(wrong_derived_owners),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
+    let mut inventory_outside_closure = input.clone();
+    let old_target = inventory_outside_closure.inventories.artifacts[0].target;
+    let outside_target = target(250);
+    inventory_outside_closure.inventories.artifacts[0].target = outside_target;
+    inventory_outside_closure.inventories.artifacts[0]
+        .transition
+        .owner = outside_target.replica_id;
+    inventory_outside_closure
+        .acknowledgements
+        .retain(|acknowledgement| acknowledgement.target != old_target);
+    inventory_outside_closure.lifecycle = ErasureLifecycleV1::PartialFailure;
+    inventory_outside_closure.pending_owners = vec![outside_target.replica_id];
+    assert_eq!(
+        ErasureReceiptV1::new(inventory_outside_closure),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+
     let mut incomplete_complete = input.clone();
     incomplete_complete.acknowledgements.clear();
     incomplete_complete.pending_owners = input
@@ -2006,6 +2254,17 @@ fn receipt_rejects_wrong_obligations_and_history_sources() -> Result<(), Erasure
     assert_eq!(
         receipt.validate_frozen_obligations(&wrong_owner),
         Err(ErasureErrorV1::ScopeInvalid)
+    );
+    let mut changed_identity = wrong_owner;
+    changed_identity[0] = ErasureObligationV1::new(ErasureObligationInputV1 {
+        category: changed_identity[0].category(),
+        target: changed_identity[0].target(),
+        owner: changed_identity[0].target().replica_id,
+        command_identity: reference(241),
+    })?;
+    assert_eq!(
+        receipt.validate_frozen_obligations(&changed_identity),
+        Err(ErasureErrorV1::PolicyConflict)
     );
 
     let root = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
