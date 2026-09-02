@@ -885,6 +885,40 @@ fn active_persisted_graph() -> Result<ActiveGraph, ErasureErrorV1> {
     })
 }
 
+fn retry_persisted_graph() -> Result<ActiveGraph, ErasureErrorV1> {
+    let target = target(10);
+    let request = coordinator_request()?;
+    let port = coordinator_port(vec![target], None);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    let first = coordinator_admission(request.reference(), target, 0, None)?;
+    coordinator.dispatch_attempt(request.reference(), &first)?;
+    coordinator.acknowledge(
+        request.reference(),
+        coordinator_acknowledgement(
+            request.reference(),
+            target,
+            reference(171),
+            ErasureAcknowledgementOutcomeV1::Negative,
+        )?,
+    )?;
+    let partial =
+        coordinator.finalize(request.reference(), coordinator_receipt_input(target, 30))?;
+    let admission = coordinator_admission(
+        request.reference(),
+        target,
+        1,
+        Some(partial.receipt_digest()),
+    )?;
+    coordinator.dispatch_attempt(request.reference(), &admission)?;
+    Ok(ActiveGraph {
+        adapter,
+        request,
+        admission,
+    })
+}
+
 fn complete_persisted_graph(
     lineage_rule: Option<ErasureReferenceV1>,
 ) -> Result<CompletedGraph, ErasureErrorV1> {
@@ -943,6 +977,15 @@ fn assert_active_graph_mutation_rejected(
     mutate: impl FnOnce(&ActiveGraph) -> Result<(), ErasureErrorV1>,
 ) -> Result<(), ErasureErrorV1> {
     let graph = active_persisted_graph()?;
+    mutate(&graph)?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+fn assert_retry_graph_mutation_rejected(
+    mutate: impl FnOnce(&ActiveGraph) -> Result<(), ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    let graph = retry_persisted_graph()?;
     mutate(&graph)?;
     assert_public_recovery_fails(graph.adapter, &graph.request);
     Ok(())
@@ -1538,6 +1581,39 @@ fn coordinator_recovery_rejects_mismatched_persisted_effects() -> Result<(), Era
             &ErasureCasEffectV1::ReceiptAdmission {
                 receipt: reference(240),
             },
+        )
+    })
+}
+
+#[test]
+fn coordinator_recovery_rejects_retry_admission_commitment_mismatches() -> Result<(), ErasureErrorV1>
+{
+    for (field, replacement) in [
+        (
+            6,
+            Value::Array(vec![Value::Bytes(reference(240).digest().to_vec())]),
+        ),
+        (7, Value::Bytes(reference(240).digest().to_vec())),
+        (8, Value::Bytes(reference(240).digest().to_vec())),
+    ] {
+        assert_retry_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_active_admission_field(
+                graph.request.reference(),
+                field,
+                replacement,
+            )
+        })?;
+    }
+    assert_retry_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_active_admission_field(
+            graph.request.reference(),
+            5,
+            Value::Array(Vec::new()),
+        )?;
+        graph.adapter.replace_active_admission_field(
+            graph.request.reference(),
+            6,
+            Value::Array(Vec::new()),
         )
     })
 }

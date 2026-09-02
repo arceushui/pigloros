@@ -8,7 +8,8 @@ use ciborium::value::Value;
 use pos_core::erasure::{
     target_closure_digest, ErasureAuthorizationDecisionV1,
     ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1,
+    ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1,
 };
 use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
@@ -475,6 +476,66 @@ impl PublicCoordinatorPort {
             page_field,
             Value::Bytes(changed_reference.digest().to_vec()),
         )
+    }
+
+    /// Replace and re-address one active retry admission and its manifest link.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error when the active graph is absent or malformed.
+    pub fn replace_active_admission_field(
+        &self,
+        request: ErasureReferenceV1,
+        index: usize,
+        replacement: Value,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let (_, manifest_bytes) = storage
+            .manifests
+            .get(&request)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let mut manifest: Value = ciborium::from_reader(manifest_bytes.as_slice())
+            .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        let Value::Array(manifest_fields) = &mut manifest else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        let Value::Array(active_fields) = manifest_fields
+            .get_mut(14)
+            .ok_or(ErasureErrorV1::InvalidEncoding)?
+        else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        let Value::Bytes(previous_bytes) = active_fields
+            .get(1)
+            .ok_or(ErasureErrorV1::InvalidEncoding)?
+        else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        let previous = ErasureReferenceV1::from_digest(
+            previous_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ErasureErrorV1::InvalidEncoding)?,
+        );
+        let admission = storage
+            .objects
+            .get(&previous)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let changed = replace_array_field(&admission, index, replacement)?;
+        let changed_reference = addressed(ERASURE_RETRY_ADMISSION_TAG_V1, &changed);
+        storage.objects.remove(&previous);
+        storage.objects.insert(changed_reference, changed);
+        active_fields[1] = Value::Bytes(changed_reference.digest().to_vec());
+        let mut changed_manifest = Vec::new();
+        ciborium::into_writer(&manifest, &mut changed_manifest)
+            .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        storage.manifests.insert(
+            request,
+            (addressed("ERCRP1", &changed_manifest), changed_manifest),
+        );
+        Ok(())
     }
 
     /// Replace and re-address one scope node and its manifest/index links.
