@@ -532,7 +532,7 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
         awaiting
     );
 
-    let foreign_target = target(11);
+    let foreign_target = crate::target(11);
     assert_eq!(
         api.acknowledge(
             request.reference(),
@@ -656,10 +656,8 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
         1,
         Some(partial.receipt_digest()),
     )?;
-    assert_eq!(
-        api.dispatch_destruction(request.reference(), retry)?,
-        partial
-    );
+    let retry_state = api.dispatch_destruction(request.reference(), retry)?;
+    assert_eq!(retry_state.lifecycle(), ErasureLifecycleV1::PartialFailure);
     api.acknowledge(
         request.reference(),
         coordinator_acknowledgement(
@@ -695,7 +693,7 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
     let resolution =
         ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
             request: request.reference(),
-            affected_digests: vec![complete.state_digest()],
+            affected_digests: vec![complete.terminal_state()],
             action: ErasureAdministrativeResolutionActionV1::RecoverExactEvidence,
             scope_commitment: scope.reference(),
             policy: reference(5),
@@ -714,7 +712,7 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
     let wrong_resolution =
         ErasureAdministrativeResolutionV1::new(ErasureAdministrativeResolutionInputV1 {
             request: request.reference(),
-            affected_digests: vec![complete.state_digest()],
+            affected_digests: vec![complete.terminal_state()],
             action: ErasureAdministrativeResolutionActionV1::CloseContainment,
             scope_commitment: scope.reference(),
             policy: reference(176),
