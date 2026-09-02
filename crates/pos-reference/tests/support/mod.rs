@@ -830,9 +830,7 @@ fn profile(
 fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<()> {
     let profile_fields = array_fields_mut(profile)?;
     match mutation {
-        ProfileMutation::RawProfileField(index) => {
-            profile_fields[usize::from(index)] = Value::Null;
-        }
+        ProfileMutation::RawProfileField(index) => profile_fields[usize::from(index)] = Value::Null,
         ProfileMutation::Magic => profile_fields[0] = text("CPF0"),
         ProfileMutation::Version => profile_fields[1] = uint(2),
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
@@ -849,7 +847,7 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             profile_fields[7] = array(vec![bytes(&[2; 32]), bytes(&[1; 32])]);
         }
         ProfileMutation::ProvidersEmpty => {
-            array_fields_mut(&mut profile_fields[8])?[1] = array(Vec::new());
+            array_fields_mut(&mut profile_fields[8])?[1] = array(Vec::new())
         }
         ProfileMutation::ProvidersUnsorted => {
             let binding = array_fields_mut(&mut profile_fields[8])?;
@@ -872,7 +870,7 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[])])]);
         }
         ProfileMutation::ProtocolId => {
-            array_fields_mut(&mut profile_fields[11])?[0] = text("Invalid");
+            array_fields_mut(&mut profile_fields[11])?[0] = text("Invalid")
         }
         ProfileMutation::ProtocolDigest => {
             array_fields_mut(&mut profile_fields[11])?[1] = bytes(&[0; 32]);
@@ -891,44 +889,11 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             let protocol = array_fields_mut(&mut profile_fields[11])?;
             array_fields_mut(&mut protocol[4])?[0] = uint(16 * 1024 * 1024 + 1);
         }
-        ProfileMutation::RequirementDigest => {
-            array_fields_mut(&mut profile_fields[12])?[3] = bytes(&[0; 32]);
+        ProfileMutation::RequirementDigest | ProfileMutation::RequirementDeclaration => {
+            let index = usize::from(mutation == ProfileMutation::RequirementDeclaration) + 3;
+            array_fields_mut(&mut profile_fields[12])?[index] = bytes(&[0; 32]);
         }
-        ProfileMutation::RequirementDeclaration => {
-            array_fields_mut(&mut profile_fields[12])?[4] = bytes(&[0; 32]);
-        }
-        ProfileMutation::ExecutionMagic
-        | ProfileMutation::ExecutionVersion
-        | ProfileMutation::ExecutionId
-        | ProfileMutation::ExecutionSemver
-        | ProfileMutation::ExecutionModes
-        | ProfileMutation::ExecutionArchitecture
-        | ProfileMutation::ExecutionNumerics
-        | ProfileMutation::ExecutionDriverOrder
-        | ProfileMutation::ExecutionTickPolicy
-        | ProfileMutation::ExecutionSchemas
-        | ProfileMutation::ExecutionArtifacts
-        | ProfileMutation::ExecutionNetwork
-        | ProfileMutation::ExecutionBudget
-        | ProfileMutation::ExecutionCompatibility
-        | ProfileMutation::ExecutionPrevious
-        | ProfileMutation::ExecutionDigest
-        | ProfileMutation::RegistryMagic
-        | ProfileMutation::RegistryVersion
-        | ProfileMutation::RegistryProviders
-        | ProfileMutation::RegistryDigest
-        | ProfileMutation::PackageMagic
-        | ProfileMutation::PackageVersion
-        | ProfileMutation::PackageProvider
-        | ProfileMutation::PackageClaimLayer
-        | ProfileMutation::PackageAdapter
-        | ProfileMutation::PackageSchemas
-        | ProfileMutation::PackageSupportRole
-        | ProfileMutation::PackageDigest
-        | ProfileMutation::RawExecutionField(_)
-        | ProfileMutation::RawRegistryField(_)
-        | ProfileMutation::RawPackageField(_) => {}
-        fixture_mutation => mutate_fixture(profile_fields, fixture_mutation)?,
+        remaining => mutate_fixture(profile_fields, remaining)?,
     }
     Ok(())
 }
@@ -1020,7 +985,7 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         }
         ProfileMutation::FixtureDowngradeBinding => fields[19] = bytes(&[1; 32]),
         ProfileMutation::FixtureDigest => fields[23] = bytes(&[99; 32]),
-        _ => return Err(io::Error::other("mutation does not target a fixture").into()),
+        _ => return Ok(()),
     }
     if mutation != ProfileMutation::FixtureDigest {
         let digest = hash_contract(
