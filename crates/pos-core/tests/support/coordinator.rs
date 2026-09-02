@@ -103,6 +103,13 @@ impl PublicCoordinatorPort {
         *self.attempt_admissions.borrow()
     }
 
+    pub fn remove_effect_for_subject(&self, subject: ErasureReferenceV1) {
+        let mut storage = self.storage.borrow_mut();
+        if let Some(manifest) = storage.effect_subjects.remove(&subject) {
+            storage.effects.remove(&manifest);
+        }
+    }
+
     fn verify_delta_exists(
         storage: &RawStorage,
         mutation: &pos_core::PreparedErasureCasV1,

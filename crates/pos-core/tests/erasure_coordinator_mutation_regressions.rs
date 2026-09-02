@@ -195,6 +195,25 @@ fn restart_recovers_the_state_from_the_raw_manifest() -> Result<(), ErasureError
 }
 
 #[test]
+fn restart_revalidates_authorization_rejection_provenance() -> Result<(), ErasureErrorV1> {
+    let port = PublicCoordinatorPort::new(config(Vec::new(), false));
+    let request = request()?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port.clone(), COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.reject(request.reference(), reference(21))?;
+    }
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    assert_eq!(
+        restarted
+            .submit(request.clone(), request.provenance())?
+            .lifecycle(),
+        ErasureLifecycleV1::Rejected
+    );
+    Ok(())
+}
+
+#[test]
 fn restart_recovers_a_frozen_state_and_verifies_retained_authorization(
 ) -> Result<(), ErasureErrorV1> {
     let port = PublicCoordinatorPort::new(config(vec![target()], false));
@@ -241,6 +260,55 @@ fn attempt_admission_is_coupled_to_the_raw_cas_effect() -> Result<(), ErasureErr
 }
 
 #[test]
+fn restart_recovers_an_active_attempt_from_its_durable_outbox() -> Result<(), ErasureErrorV1> {
+    let target = target();
+    let port = PublicCoordinatorPort::new(config(vec![target], false));
+    let request = request()?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port.clone(), COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+        coordinator.dispatch_attempt(
+            request.reference(),
+            &admission(request.reference(), target)?,
+        )?;
+    }
+
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    assert_eq!(
+        restarted
+            .submit(request.clone(), request.provenance())?
+            .lifecycle(),
+        ErasureLifecycleV1::AwaitingAcknowledgements
+    );
+    Ok(())
+}
+
+#[test]
+fn restart_rejects_an_active_attempt_without_its_durable_outbox() -> Result<(), ErasureErrorV1> {
+    let target = target();
+    let port = PublicCoordinatorPort::new(config(vec![target], false));
+    let request = request()?;
+    let admitted = admission(request.reference(), target)?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port.clone(), COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+        coordinator.dispatch_attempt(request.reference(), &admitted)?;
+    }
+    port.remove_effect_for_subject(admitted.reference());
+
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    assert_eq!(
+        restarted.submit(request.clone(), request.provenance()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[test]
 fn failed_commit_does_not_publish_a_manifest() -> Result<(), ErasureErrorV1> {
     let port = PublicCoordinatorPort::new(config(Vec::new(), true));
     let observer = port.clone();
@@ -271,6 +339,14 @@ fn corrected_submission_retains_correction_as_a_raw_object() -> Result<(), Erasu
     let corrected_state = coordinator.submit_corrected(corrected.clone(), correction)?;
     assert_eq!(corrected_state.lifecycle(), ErasureLifecycleV1::Submitted);
     assert!(port.current_manifest(corrected.reference()).is_some());
+    drop(coordinator);
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    assert_eq!(
+        restarted
+            .submit(corrected.clone(), corrected.provenance())?
+            .lifecycle(),
+        ErasureLifecycleV1::Submitted
+    );
     Ok(())
 }
 

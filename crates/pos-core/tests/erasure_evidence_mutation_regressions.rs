@@ -6,18 +6,19 @@ use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
     ErasureApplicabilityDecisionV1, ErasureArtifactClassV1, ErasureAttemptOutcomeInputV1,
-    ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1,
-    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureFreezeAdmissionEvidenceInputV1,
-    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeApplicabilityRowV1,
-    ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
-    ErasureFreezeFailureInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
-    ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
-    ErasureObligationV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
-    ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateV1,
+    ErasureAttemptOutcomeV1, ErasureAttemptQuotaReservationV1,
+    ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
+    ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeFailureInputV1, ErasureFreezeFailureV1,
+    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1,
+    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
+    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptProvenanceInputV1,
+    ErasureReceiptProvenanceV1, ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -305,5 +306,85 @@ fn request_and_state_codec_mutations_fail_closed() -> Result<(), ErasureErrorV1>
     let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     let state_bytes = state.to_canonical_cbor()?;
     assert!(ErasureStateV1::from_canonical_cbor(&replace(&state_bytes, 2)?).is_err());
+    Ok(())
+}
+
+#[test]
+fn cas_effect_codec_roundtrips_every_durable_variant() -> Result<(), ErasureErrorV1> {
+    let admission = reference(20);
+    let effects = [
+        ErasureCasEffectV1::None,
+        ErasureCasEffectV1::AttemptAdmission {
+            reservation: ErasureAttemptQuotaReservationV1::new(admission, reference(21)),
+            commands: vec![ErasureDestructionCommandV1 {
+                obligation: reference(22),
+                category: ErasureInventoryCategoryV1::Artifact,
+                target: target(),
+                owner: reference(23),
+                command: reference(24),
+                provenance: admission,
+            }],
+        },
+        ErasureCasEffectV1::AcknowledgementAdmission {
+            acknowledgement: reference(25),
+        },
+        ErasureCasEffectV1::ReceiptAdmission {
+            receipt: reference(26),
+        },
+    ];
+    for effect in effects {
+        let bytes = effect.to_canonical_cbor()?;
+        assert_eq!(ErasureCasEffectV1::from_canonical_cbor(&bytes)?, effect);
+        assert_eq!(
+            ErasureCasEffectV1::from_canonical_cbor(&replace(&bytes, 0)?),
+            Err(ErasureErrorV1::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn cas_effect_codec_rejects_unknown_kinds_and_mismatched_command_provenance(
+) -> Result<(), ErasureErrorV1> {
+    let admission = reference(20);
+    let effect = ErasureCasEffectV1::AttemptAdmission {
+        reservation: ErasureAttemptQuotaReservationV1::new(admission, reference(21)),
+        commands: vec![ErasureDestructionCommandV1 {
+            obligation: reference(22),
+            category: ErasureInventoryCategoryV1::Key,
+            target: target(),
+            owner: reference(23),
+            command: reference(24),
+            provenance: admission,
+        }],
+    };
+    let mut value = decode(&effect.to_canonical_cbor()?)?;
+    let Value::Array(fields) = &mut value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    fields[2] = Value::Integer(9.into());
+    assert_eq!(
+        ErasureCasEffectV1::from_canonical_cbor(&encode(&value)?),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
+
+    let mut value = decode(&effect.to_canonical_cbor()?)?;
+    let Value::Array(fields) = &mut value else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(payload) = &mut fields[4] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(commands) = &mut payload[1] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let Value::Array(command) = &mut commands[0] else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    command[5] = Value::Bytes(reference(99).digest().to_vec());
+    assert_eq!(
+        ErasureCasEffectV1::from_canonical_cbor(&encode(&value)?),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
     Ok(())
 }
