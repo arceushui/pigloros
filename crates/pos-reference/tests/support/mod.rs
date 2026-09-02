@@ -18,10 +18,18 @@ pub struct Corpus {
 
 pub type TestResult<T> = Result<T, Box<dyn Error>>;
 
+/// Build a complete independently signed public evaluator corpus.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus() -> TestResult<Corpus> {
     corpus_with_extra(None)
 }
 
+/// Build a signed corpus containing additional bytes for secret-scan tests.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
     corpus_with_extra(Some(secret))
 }
