@@ -625,7 +625,7 @@ fn complete_consent_references_bind_every_authority_dimension() {
 fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     let principal_ref = principal(1);
     let actor = entity(10);
-    let request = request(principal_ref.clone(), actor);
+    let current_request = request(principal_ref.clone(), actor);
     let grant = root_grant(principal_ref, vec![actor]);
     let untrusted = ok(AuthorityRegistrySnapshotV1::try_new(
         hash(7),
@@ -635,7 +635,7 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     ));
     let chain = ok(DelegationChainV1::try_from_grants(vec![grant]));
     assert_eq!(untrusted.registry_digest(), hash(7));
-    let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &untrusted);
+    let decision = AuthorityEvaluatorV1::authorize(&current_request, &chain, &untrusted);
     assert_eq!(
         decision.outcome(),
         AuthorizationOutcomeV1::IndeterminateFailClosed
@@ -649,7 +649,7 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
     assert!(decision.acting_delegates().is_empty());
 
     let substituted_request = request(principal(2), actor);
-    let original_binding = request.authenticated().registry_binding_digest();
+    let original_binding = current_request.authenticated().registry_binding_digest();
     let substituted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
         hash(7),
         vec![original_binding],
