@@ -1485,14 +1485,14 @@ fn validate_delegation_chain(
         {
             return ChainValidity::ParentInvalid;
         }
-        if request.subject_id.is_some() && !grant_covers_consent(grant, &request.consent) {
-            return ChainValidity::ParentInvalid;
-        }
         if let Some(parent) = previous {
             if !valid_child(parent, grant) {
                 return ChainValidity::DelegationInvalid;
             }
         } else if grant.parent_grant_id.is_some() || grant.delegation_depth != 0 {
+            return ChainValidity::ParentInvalid;
+        }
+        if request.subject_id.is_some() && !grant_covers_consent(grant, &request.consent) {
             return ChainValidity::ParentInvalid;
         }
         previous = Some(grant);

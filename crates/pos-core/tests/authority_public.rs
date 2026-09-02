@@ -947,44 +947,47 @@ fn scope_and_request_fields_are_explicit_and_every_dimension_is_enforced() {
     let mut mismatches = Vec::new();
     let mut draft = valid.clone();
     draft.resource = "unknown".to_owned();
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    let mut draft = valid.clone();
+    draft.data_category = "medical".to_owned();
+    mismatches.push((draft, AuthorizationOutcomeV1::ConsentMissing));
     let mut draft = valid.clone();
     draft.action = "write".to_owned();
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ConsentMissing));
     let mut draft = valid.clone();
     draft.purpose = "sale".to_owned();
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ConsentMissing));
     let mut draft = valid.clone();
     draft.audience = "remote".to_owned();
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ConsentMissing));
     let mut draft = valid.clone();
     draft.actor_entity_id = entity(99);
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
     let mut draft = valid.clone();
     draft.participant_id = Some(entity(99));
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
     let mut draft = valid.clone();
     draft.participant_id = None;
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
     let mut draft = valid.clone();
     draft.plugin_id = Some(plugin(5));
     draft.installation_id = Some([5; 16]);
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
     let mut draft = valid.clone();
     draft.use_count = 11;
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
     let mut draft = valid.clone();
     draft.budget = 101;
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
     let mut draft = valid;
     draft.environment_constraints = vec!["local-only".to_owned()];
-    mismatches.push(draft);
+    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
 
-    for draft in mismatches {
+    for (draft, expected) in mismatches {
         let request = ok(AuthorizationRequestV1::try_from_draft(draft));
         assert_eq!(
             decision_for(&request, std::slice::from_ref(&grant)).outcome(),
-            AuthorizationOutcomeV1::ScopeMismatch
+            expected
         );
     }
 }
@@ -1104,7 +1107,14 @@ fn authentication_revocation_expiry_and_coordinates_fail_closed() {
         let mut draft = request_draft(authenticated(principal.clone()), actor);
         match change {
             0 => draft.revocation_epoch = 4,
-            1 => draft.policy_revision = hash(10),
+            1 => {
+                draft.policy_revision = hash(10);
+                let mut consent = consent_draft(8);
+                consent.policy_revision = hash(10);
+                draft.consent = ConsentEvidenceV1::Active {
+                    grants: vec![ok(ConsentGrantRefV1::try_from_draft(consent))],
+                };
+            }
             _ => draft.authority_timeline = timeline(31),
         }
         assert_eq!(
