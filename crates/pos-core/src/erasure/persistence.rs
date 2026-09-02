@@ -1670,9 +1670,10 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> 
         (None, None) => {}
         _ => return Err(ErasureErrorV1::ProvenanceMissing),
     }
-    if let (Some(scope), Some(admission), Some(freeze), Some(set)) = (
+    if let (Some(scope), Some(admission), Some(authorization), Some(freeze), Some(set)) = (
         graph.scope,
         graph.admission,
+        graph.authorization,
         graph.freeze,
         graph.obligation_set,
     ) {
@@ -1689,10 +1690,7 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> 
                 obligation_set: set.clone(),
                 freeze_position: admission.freeze_position(),
                 freeze_admission_evidence: admission.clone(),
-                freeze_authorization_evidence: graph
-                    .authorization
-                    .cloned()
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+                freeze_authorization_evidence: authorization.clone(),
             })?;
         if reconstructed.targets() != graph.targets
             || scope.target_closure() != target_closure_digest(graph.targets)
