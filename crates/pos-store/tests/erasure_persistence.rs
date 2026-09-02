@@ -191,6 +191,7 @@ const fn transition() -> ErasureStateTransitionV1 {
 struct Host<S> {
     store: Rc<RefCell<S>>,
     targets: Vec<ErasureRequiredTargetV1>,
+    verify_exact_retry: bool,
 }
 
 type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
@@ -278,7 +279,15 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
         &mut self,
         mutation: pos_core::PreparedErasureCasV1,
     ) -> Result<pos_core::ErasureCasOutcomeV1, ErasureErrorV1> {
-        self.store.borrow_mut().compare_and_swap(mutation)
+        let retry = self.verify_exact_retry.then_some(mutation.clone());
+        let outcome = self.store.borrow_mut().compare_and_swap(mutation)?;
+        if let Some(retry) = retry {
+            let retry_outcome = self.store.borrow_mut().compare_and_swap(retry)?;
+            if retry_outcome != pos_core::ErasureCasOutcomeV1::ExactRetry {
+                return Err(ErasureErrorV1::PolicyConflict);
+            }
+        }
+        Ok(outcome)
     }
 }
 
@@ -419,6 +428,13 @@ impl<S: ErasurePersistencePortV1> ErasureCoordinatorPortV1 for Host<S> {
 }
 
 fn complete<S: ErasurePersistencePortV1>(store: S) -> Result<CompletedErasure<S>, ErasureErrorV1> {
+    complete_with_retry_validation(store, false)
+}
+
+fn complete_with_retry_validation<S: ErasurePersistencePortV1>(
+    store: S,
+    verify_exact_retry: bool,
+) -> Result<CompletedErasure<S>, ErasureErrorV1> {
     let shared = Rc::new(RefCell::new(store));
     let request = request()?;
     let target = target();
@@ -426,6 +442,7 @@ fn complete<S: ErasurePersistencePortV1>(store: S) -> Result<CompletedErasure<S>
         Host {
             store: Rc::clone(&shared),
             targets: vec![target],
+            verify_exact_retry,
         },
         reference(30),
     );
@@ -537,6 +554,7 @@ fn assert_raw_backend<S: ErasurePersistencePortV1>(
         Host {
             store: shared,
             targets: vec![target()],
+            verify_exact_retry: false,
         },
         reference(30),
     );
@@ -555,6 +573,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
         Host {
             store: Rc::clone(&shared),
             targets: Vec::new(),
+            verify_exact_retry: false,
         },
         reference(30),
     );
@@ -562,6 +581,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
         Host {
             store: shared,
             targets: Vec::new(),
+            verify_exact_retry: false,
         },
         reference(30),
     );
@@ -572,6 +592,29 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
         second.authorize(request.reference(), reference(35)),
         Err(ErasureErrorV1::PolicyConflict)
     );
+    Ok(())
+}
+
+fn assert_empty_backend<S: ErasurePersistencePortV1>(
+    store: S,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let missing = reference(250);
+    assert_eq!(store.read_manifest(missing)?, None);
+    assert_eq!(
+        store.read_object(missing),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        store.read_effect(missing),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(store.effect_manifest(missing)?, None);
+    assert_eq!(store.attempt_page_ref(missing, 0)?, None);
+    assert_eq!(store.attempt_index_count(missing)?, 0);
+    assert_eq!(store.scope_node_ref(missing, 0)?, None);
+    assert_eq!(store.scope_index_count(missing)?, 0);
+    assert_eq!(store.administrative_resolution_ref(missing, 0)?, None);
+    assert_eq!(store.administrative_resolution_index_count(missing)?, 0);
     Ok(())
 }
 
@@ -586,6 +629,19 @@ fn memory_manifest_cas_rejects_a_stale_head() -> Result<(), Box<dyn std::error::
     assert_stale_head(MemoryStore::new())
 }
 
+#[test]
+fn memory_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_empty_backend(MemoryStore::new())
+}
+
+#[test]
+fn memory_manifest_cas_accepts_exact_retry_for_every_effect(
+) -> Result<(), Box<dyn std::error::Error>> {
+    complete_with_retry_validation(MemoryStore::new(), true)?;
+    Ok(())
+}
+
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_manifest_cas_survives_restart_and_retains_indexes(
@@ -597,6 +653,21 @@ fn sqlite_manifest_cas_survives_restart_and_retains_indexes(
 #[test]
 fn sqlite_manifest_cas_rejects_a_stale_head() -> Result<(), Box<dyn std::error::Error>> {
     assert_stale_head(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn std::error::Error>>
+{
+    assert_empty_backend(SqliteStore::open_in_memory()?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_manifest_cas_accepts_exact_retry_for_every_effect(
+) -> Result<(), Box<dyn std::error::Error>> {
+    complete_with_retry_validation(SqliteStore::open_in_memory()?, true)?;
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]
@@ -621,6 +692,7 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
         Host {
             store: Rc::new(RefCell::new(reopened)),
             targets: vec![target()],
+            verify_exact_retry: false,
         },
         reference(30),
     );
@@ -628,6 +700,86 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
     assert_eq!(
         coordinator.submit(request, provenance)?.lifecycle(),
         ErasureLifecycleV1::Complete
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_rejects_a_missing_durable_attempt_effect(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, effects) = complete(SqliteStore::open(path)?)?;
+    let attempt = effects
+        .first()
+        .and_then(|(_, effect)| effect.subject())
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    drop(shared);
+    let raw = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        raw.execute(
+            "DELETE FROM erasure_effects WHERE subject_digest=?1",
+            rusqlite::params![attempt.digest().as_slice()],
+        )?,
+        1
+    );
+    drop(raw);
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        coordinator.submit(request.clone(), request.provenance()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_rejects_a_corrupted_durable_attempt_effect(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, effects) = complete(SqliteStore::open(path)?)?;
+    let manifest = effects
+        .first()
+        .map(|(manifest, _)| *manifest)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    drop(shared);
+    let raw = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        raw.execute(
+            "UPDATE erasure_effects SET effect_cbor=?1 WHERE manifest_digest=?2",
+            rusqlite::params![&[0xff_u8], manifest.digest().as_slice()],
+        )?,
+        1
+    );
+    drop(raw);
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+        },
+        reference(30),
+    );
+    assert_eq!(
+        coordinator.submit(request.clone(), request.provenance()),
+        Err(ErasureErrorV1::InvalidEncoding)
     );
     Ok(())
 }
