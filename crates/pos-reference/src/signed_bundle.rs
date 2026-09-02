@@ -321,9 +321,7 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
                 .map_err(|_| ProtocolError::InvalidEncoding)
         })
         .ok();
-    if u64::try_from(bytes.len()).is_ok_and(|length| cursor.position() == length)
-        && cbor.is_some_and(|value| cbor_secret(&value))
-    {
+    if cursor.position() == bytes.len() as u64 && cbor.is_some_and(|value| cbor_secret(&value)) {
         return true;
     }
     let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
@@ -662,8 +660,7 @@ fn validate_closure(
         let member = members
             .get(&descriptor.path)
             .ok_or(BundleError::ClosureIncomplete)?;
-        if descriptor.size
-            != u64::try_from(member.bytes.len()).map_err(|_| BundleError::FieldOutOfBounds)?
+        if descriptor.size != member.bytes.len() as u64
             || descriptor.digest != member.digest
             || descriptor.role != member.role
         {

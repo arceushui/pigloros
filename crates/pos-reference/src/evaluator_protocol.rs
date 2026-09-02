@@ -720,12 +720,9 @@ pub(crate) fn decode_canonical_with_limit(
     let mut cursor = Cursor::new(bytes);
     let value: Value =
         ciborium::from_reader(&mut cursor).map_err(|_| ProtocolError::InvalidEncoding)?;
-    if cursor.position()
-        != u64::try_from(bytes.len()).map_err(|_| ProtocolError::FieldOutOfBounds)?
-    {
+    if cursor.position() != bytes.len() as u64 {
         return Err(ProtocolError::InvalidEncoding);
     }
-    validate_value_shape(&value, 0, maximum_bytes)?;
     if encode_with_limit(&value, maximum_bytes)? != bytes {
         return Err(ProtocolError::InvalidEncoding);
     }
@@ -834,27 +831,6 @@ pub(crate) fn preflight_cbor(
     }
 }
 
-fn validate_value_shape(
-    value: &Value,
-    depth: usize,
-    maximum_bytes: usize,
-) -> Result<(), ProtocolError> {
-    if depth > MAX_NESTING {
-        return Err(ProtocolError::FieldOutOfBounds);
-    }
-    match value {
-        Value::Array(values) if values.len() <= MAX_CASES => values
-            .iter()
-            .try_for_each(|item| validate_value_shape(item, depth + 1, maximum_bytes)),
-        Value::Array(_) | Value::Map(_) | Value::Tag(_, _) | Value::Float(_) => {
-            Err(ProtocolError::InvalidEncoding)
-        }
-        Value::Bytes(value) if value.len() > maximum_bytes => Err(ProtocolError::FieldOutOfBounds),
-        Value::Text(value) if value.len() > maximum_bytes => Err(ProtocolError::FieldOutOfBounds),
-        _ => Ok(()),
-    }
-}
-
 pub(crate) fn encode(value: &Value) -> Result<Vec<u8>, ProtocolError> {
     encode_with_limit(value, MAX_DOCUMENT_BYTES)
 }
@@ -873,12 +849,7 @@ pub(crate) fn encode_with_limit(
 }
 
 pub(crate) fn domain_digest(domain: &[u8], bytes: &[u8]) -> Result<[u8; 32], ProtocolError> {
-    let capacity = domain
-        .len()
-        .checked_add(bytes.len())
-        .and_then(|value| value.checked_add(1))
-        .ok_or(ProtocolError::FieldOutOfBounds)?;
-    let mut input = Vec::with_capacity(capacity);
+    let mut input = Vec::new();
     input.extend_from_slice(domain);
     input.push(0);
     input.extend_from_slice(bytes);
@@ -890,7 +861,7 @@ pub(crate) fn contract_digest(domain: &[u8], value: &Value) -> Result<[u8; 32], 
     let mut input = Vec::with_capacity(domain.len() + 9 + bytes.len());
     input.extend_from_slice(domain);
     input.push(0);
-    let encoded_length = u64::try_from(bytes.len()).map_err(|_| ProtocolError::FieldOutOfBounds)?;
+    let encoded_length = bytes.len() as u64;
     input.extend_from_slice(&encoded_length.to_be_bytes());
     input.extend_from_slice(&bytes);
     Ok(*blake3::hash(&input).as_bytes())

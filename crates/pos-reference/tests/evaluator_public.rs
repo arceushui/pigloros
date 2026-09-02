@@ -30,6 +30,11 @@ struct MixedOracleAdapter {
     output: Vec<u8>,
 }
 
+struct MismatchedOracleAdapter {
+    subject_digest: [u8; 32],
+    output: Vec<u8>,
+}
+
 enum AdverseBehavior {
     WrongOutput,
     AdapterUnavailable,
@@ -97,6 +102,35 @@ impl SubjectAdapter for MixedOracleAdapter {
             2 => SubjectResult::Divergence {
                 classification: 2,
                 first_coordinate: vec![1, 2],
+            },
+            _ => SubjectResult::Output(self.output.clone()),
+        };
+        Ok(SubjectObservation {
+            result,
+            usage: ResourceUsage::default(),
+        })
+    }
+}
+
+impl SubjectAdapter for MismatchedOracleAdapter {
+    fn kind(&self) -> SubjectAdapterKind {
+        SubjectAdapterKind::ExportedArtifact
+    }
+
+    fn subject_artifact_digest(&self) -> [u8; 32] {
+        self.subject_digest
+    }
+
+    fn execute(&mut self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        let result = match attempt.family {
+            1 => SubjectResult::Failure(NamespacedFailure {
+                owner_id: "test-provider".to_owned(),
+                contract_version: "1.0.0".to_owned(),
+                code_id: "different".to_owned(),
+            }),
+            2 => SubjectResult::Divergence {
+                classification: 3,
+                first_coordinate: vec![9],
             },
             _ => SubjectResult::Output(self.output.clone()),
         };
@@ -385,6 +419,32 @@ fn evaluator_matches_output_failure_and_divergence_oracles() -> TestResult {
         .cases
         .iter()
         .any(|case| { case.first_coordinate.as_deref() == Some([1_u8, 2_u8].as_slice()) }));
+    Ok(())
+}
+
+#[test]
+fn evaluator_reports_mismatched_failure_and_divergence_oracles() -> TestResult {
+    let corpus = support::mixed_oracle_corpus()?;
+    let mut adapter = MismatchedOracleAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+    };
+    let result = evaluate(
+        &corpus.request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity(),
+        &mut adapter,
+    )?;
+    assert_eq!(
+        result
+            .report
+            .cases
+            .iter()
+            .filter(|case| case.outcome == CaseStatus::Fail)
+            .count(),
+        2
+    );
     Ok(())
 }
 

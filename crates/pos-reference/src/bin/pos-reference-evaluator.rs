@@ -223,7 +223,7 @@ fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, CommandError> {
     file.take(maximum.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| CommandError::Input)?;
-    if u64::try_from(bytes.len()).map_err(|_| CommandError::Input)? > maximum {
+    if bytes.len() as u64 > maximum {
         Err(CommandError::Input)
     } else {
         Ok(bytes)

@@ -1,5 +1,7 @@
 use std::error::Error;
 use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 use ciborium::value::Value;
 use pos_reference::adapter_transport::{
@@ -437,6 +439,106 @@ fn observation_transport_rejects_versions_codes_and_field_types() -> TestResult 
 }
 
 #[test]
+fn observation_transport_rejects_wrong_types_at_every_public_field() -> TestResult {
+    let observations = [
+        SubjectObservation {
+            result: SubjectResult::Output(vec![1]),
+            usage: usage(),
+        },
+        SubjectObservation {
+            result: SubjectResult::Failure(NamespacedFailure {
+                owner_id: "owner".to_owned(),
+                contract_version: "1.0.0".to_owned(),
+                code_id: "failure".to_owned(),
+            }),
+            usage: usage(),
+        },
+        SubjectObservation {
+            result: SubjectResult::Divergence {
+                classification: 1,
+                first_coordinate: vec![1],
+            },
+            usage: usage(),
+        },
+    ];
+
+    for observation in observations {
+        let encoded = encode_observation(&observation)?;
+        let valid: Value = ciborium::from_reader(encoded.as_slice())?;
+        for index in 0..7 {
+            let mut changed = valid.clone();
+            replace_field(&mut changed, index, Value::Null)?;
+            assert!(decode_observation(&canonical(&changed)?).is_err());
+        }
+
+        let Value::Array(fields) = &valid else {
+            return Err("observation is not an array".into());
+        };
+        for usage_index in 0..8 {
+            let mut changed = valid.clone();
+            let Value::Array(changed_fields) = &mut changed else {
+                return Err("observation is not an array".into());
+            };
+            let Value::Array(usage_fields) = &mut changed_fields[6] else {
+                return Err("usage is not an array".into());
+            };
+            usage_fields[usage_index] = Value::Null;
+            assert!(decode_observation(&canonical(&changed)?).is_err());
+        }
+        assert_eq!(fields.len(), 7);
+    }
+
+    let failure = encode_observation(&SubjectObservation {
+        result: SubjectResult::Failure(NamespacedFailure {
+            owner_id: "owner".to_owned(),
+            contract_version: "1.0.0".to_owned(),
+            code_id: "failure".to_owned(),
+        }),
+        usage: usage(),
+    })?;
+    for field_index in 0..3 {
+        let mut changed: Value = ciborium::from_reader(failure.as_slice())?;
+        let Value::Array(fields) = &mut changed else {
+            return Err("observation is not an array".into());
+        };
+        let Value::Array(failure_fields) = &mut fields[4] else {
+            return Err("failure is not an array".into());
+        };
+        failure_fields[field_index] = Value::Null;
+        assert!(decode_observation(&canonical(&changed)?).is_err());
+    }
+
+    let divergence = encode_observation(&SubjectObservation {
+        result: SubjectResult::Divergence {
+            classification: 1,
+            first_coordinate: vec![1],
+        },
+        usage: usage(),
+    })?;
+    for field_index in 0..2 {
+        let mut changed: Value = ciborium::from_reader(divergence.as_slice())?;
+        let Value::Array(fields) = &mut changed else {
+            return Err("observation is not an array".into());
+        };
+        let Value::Array(divergence_fields) = &mut fields[5] else {
+            return Err("divergence is not an array".into());
+        };
+        divergence_fields[field_index] = Value::Null;
+        assert!(decode_observation(&canonical(&changed)?).is_err());
+    }
+
+    for malformed in [
+        &[][..],
+        &[0xff][..],
+        &[0x80][..],
+        &[0x87, 0x64, b'E', b'A', b'O'][..],
+    ] {
+        assert!(decode_observation(malformed).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn process_adapter_requires_an_absolute_subject_executable() {
     assert_eq!(
         ProcessAdapter::new(
@@ -505,6 +607,13 @@ fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestRe
         Err(AdapterError::ProtocolFailure)
     );
 
+    let mut unrepresentable_response = attempt();
+    unrepresentable_response.budget.output_bytes = u64::MAX;
+    assert_eq!(
+        malformed.execute(&unrepresentable_response),
+        Err(AdapterError::ProtocolFailure)
+    );
+
     let mut oversized = ProcessAdapter::new(
         SubjectAdapterKind::ExportedArtifact,
         [1; 32],
@@ -515,5 +624,26 @@ fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestRe
         oversized.execute(&operational_attempt),
         Err(AdapterError::ProtocolFailure)
     );
+
+    let expected = SubjectObservation {
+        result: SubjectResult::Unavailable,
+        usage: usage(),
+    };
+    let response = encode_observation(&expected)?;
+    if response.contains(&0) {
+        return Err("test response cannot be represented as a process argument".into());
+    }
+    let mut successful = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/sh",
+        vec![
+            OsString::from("-c"),
+            OsString::from("/bin/cat >/dev/null; printf %s \"$1\""),
+            OsString::from("adapter"),
+            OsString::from_vec(response),
+        ],
+    )?;
+    assert_eq!(successful.execute(&operational_attempt), Ok(expected));
     Ok(())
 }
