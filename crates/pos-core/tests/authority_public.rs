@@ -472,7 +472,7 @@ fn authenticated_result_decoder_rejects_every_malformed_public_field() {
     let encoded = ok(authenticated(principal(1)).encode());
     for field in 2..8 {
         let malformed = changed_array(&encoded, |fields| {
-            fields[field] = Value::Text("wrong-type".to_owned());
+            fields[field] = Value::Bool(false);
         });
         assert_eq!(
             AuthenticatedPrincipalResultV1::decode(&malformed),
