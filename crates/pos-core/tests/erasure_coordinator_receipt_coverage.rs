@@ -1030,8 +1030,8 @@ fn assert_retry_graph_mutation_rejected(
     Ok(())
 }
 
-fn acknowledgement_input(
-    acknowledgement: ErasureAcknowledgementProvenanceV1,
+const fn acknowledgement_input(
+    acknowledgement: &ErasureAcknowledgementProvenanceV1,
 ) -> ErasureAcknowledgementProvenanceInputV1 {
     ErasureAcknowledgementProvenanceInputV1 {
         request: acknowledgement.request(),
@@ -1051,7 +1051,7 @@ fn assert_acknowledgement_mutation_rejected(
     mutate: fn(&mut ErasureAcknowledgementProvenanceInputV1),
 ) -> Result<(), ErasureErrorV1> {
     let (graph, original) = acknowledging_persisted_graph()?;
-    let mut input = acknowledgement_input(original);
+    let mut input = acknowledgement_input(&original);
     mutate(&mut input);
     let changed = ErasureAcknowledgementProvenanceV1::new(input)?;
     graph
@@ -1714,7 +1714,7 @@ fn coordinator_recovery_rejects_acknowledgement_binding_mismatches() -> Result<(
     }
 
     let (graph, original) = acknowledging_persisted_graph()?;
-    let mut input = acknowledgement_input(original);
+    let mut input = acknowledgement_input(&original);
     input.evidence = reference(240);
     let changed = ErasureAcknowledgementProvenanceV1::new(input)?;
     graph
