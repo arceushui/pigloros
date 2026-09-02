@@ -23,12 +23,13 @@ use super::{
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
     ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
     ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
-    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_INVENTORY_RESULTS,
-    ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS,
-    ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1,
-    ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1, ERC1, ERCR1, ERCRP1,
-    ERQ1, ERS1, VERSION,
+    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
+    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
+    ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES,
+    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_LEDGER_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERC1, ERCR1, ERCRP1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -717,13 +718,17 @@ pub(super) fn state_owners(
     ),
     ErasureErrorV1,
 > {
-    references_from_value(&fields[6], false).and_then(|pending_owners| {
-        references_from_value(&fields[7], false).and_then(|failed_owners| {
-            unsigned(&fields[8])
-                .and_then(ErasureReplayClaimV1::from_code)
-                .map(|replay_claim| (pending_owners, failed_owners, replay_claim))
-        })
-    })
+    bounded_references_from_value(&fields[6], ERASURE_MAX_OUTCOME_OWNERS, false).and_then(
+        |pending_owners| {
+            bounded_references_from_value(&fields[7], ERASURE_MAX_OUTCOME_OWNERS, false).and_then(
+                |failed_owners| {
+                    unsigned(&fields[8])
+                        .and_then(ErasureReplayClaimV1::from_code)
+                        .map(|replay_claim| (pending_owners, failed_owners, replay_claim))
+                },
+            )
+        },
+    )
 }
 pub(super) fn state_provenance(
     fields: &[Value],
@@ -796,8 +801,10 @@ pub(super) fn receipt_from_fields(fields: &[Value]) -> Result<ErasureReceiptV1, 
     let freeze_position = unsigned(&fields[5])?;
     let frozen_targets = targets_from_value(&fields[6])?;
     let acknowledgements = acknowledgements_from_value(&fields[7])?;
-    let pending_owners = references_from_value(&fields[8], false)?;
-    let failed_owners = references_from_value(&fields[9], false)?;
+    let pending_owners =
+        bounded_references_from_value(&fields[8], ERASURE_MAX_OUTCOME_OWNERS, false)?;
+    let failed_owners =
+        bounded_references_from_value(&fields[9], ERASURE_MAX_OUTCOME_OWNERS, false)?;
     let inventories = inventories_from_value(&fields[10])?;
     let replay_claim = ErasureReplayClaimV1::from_code(unsigned(&fields[11])?)?;
     let (policy, trust, provenance, issue_position, receipt_digest, signature) =
@@ -1410,7 +1417,7 @@ pub(super) fn receipt_proof(
 pub(super) fn acknowledgements_from_value(
     value: &Value,
 ) -> Result<Vec<ErasureAcknowledgementV1>, ErasureErrorV1> {
-    array(value, ERASURE_MAX_INVENTORY_RESULTS).and_then(|values| {
+    array(value, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT).and_then(|values| {
         values
             .iter()
             .map(|value| {
@@ -1486,7 +1493,7 @@ pub(super) fn targets_value(targets: &[ErasureRequiredTargetV1]) -> Value {
 pub(super) fn targets_from_value(
     value: &Value,
 ) -> Result<Vec<ErasureRequiredTargetV1>, ErasureErrorV1> {
-    array(value, ERASURE_MAX_INVENTORY_RESULTS).and_then(|values| {
+    array(value, ERASURE_MAX_TARGETS).and_then(|values| {
         values
             .iter()
             .map(target_from_value)
@@ -1733,7 +1740,7 @@ pub(super) fn references_from_value(
 pub(super) fn portable_references_from_value(
     value: &Value,
 ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-    bounded_references_from_value(value, ERASURE_MAX_INVENTORY_RESULTS, false)
+    bounded_references_from_value(value, ERASURE_MAX_OBLIGATIONS, false)
 }
 
 pub(super) fn bounded_references_from_value(
@@ -1776,8 +1783,7 @@ pub(super) fn invalid_owner_sets(
     pending: &[ErasureReferenceV1],
     failed: &[ErasureReferenceV1],
 ) -> bool {
-    pending.len() > ERASURE_MAX_REFERENCES
-        || failed.len() > ERASURE_MAX_REFERENCES
+    pending.len().saturating_add(failed.len()) > ERASURE_MAX_OUTCOME_OWNERS
         || !strictly_increasing(pending)
         || !strictly_increasing(failed)
         || pending

@@ -26,13 +26,17 @@ pub const ERASURE_COORDINATOR_RECORD_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Largest selector or owner collection accepted by V1.
 pub const ERASURE_MAX_REFERENCES: usize = 4_096;
 /// Largest number of entries in each ERC1 inventory.
-pub const ERASURE_MAX_INVENTORY_RESULTS: usize = 65_536;
+pub const ERASURE_MAX_INVENTORY_RESULTS: usize = 4_096;
 /// Largest canonical target closure admitted for one ERQ1.
-pub const ERASURE_MAX_TARGETS: usize = 65_536;
+pub const ERASURE_MAX_TARGETS: usize = 4_096;
 /// Largest number of frozen obligations in one category.
-pub const ERASURE_MAX_OBLIGATIONS_PER_CATEGORY: usize = 65_536;
+pub const ERASURE_MAX_OBLIGATIONS_PER_CATEGORY: usize = 4_096;
 /// Largest number of frozen obligations across all categories.
-pub const ERASURE_MAX_OBLIGATIONS: usize = 262_144;
+pub const ERASURE_MAX_OBLIGATIONS: usize = 16_384;
+/// Largest acknowledgement result set admitted for one attempt.
+pub const ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT: usize = 16_384;
+/// Largest combined pending- and failed-owner set in ERS1 or ERC1.
+pub const ERASURE_MAX_OUTCOME_OWNERS: usize = 16_384;
 /// Largest number of immutable scope extensions retained for one ERQ1.
 pub const ERASURE_MAX_SCOPE_EXTENSIONS: usize = 65_536;
 /// Largest encoded portable supporting record, except explicitly bounded large ledgers.

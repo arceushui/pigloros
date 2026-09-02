@@ -3448,7 +3448,7 @@ fn receipt_public_seam_rejections() {
         vec![reference(8)],
         Vec::new(),
     );
-    oversized.acknowledgements = vec![ack; ERASURE_MAX_INVENTORY_RESULTS + 1];
+    oversized.acknowledgements = vec![ack; ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT + 1];
     assert_eq!(
         ErasureReceiptV1::new(oversized),
         Err(ErasureErrorV1::ScopeInvalid)
@@ -3834,6 +3834,12 @@ fn public_constants_display_and_state_digests_are_observable() -> Result<(), Era
     assert_eq!(ERASURE_OBLIGATION_SET_MAX_BYTES, 16_777_216);
     assert_eq!(ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES, 16_777_216);
     assert_eq!(ERASURE_RETRY_ADMISSION_MAX_BYTES, 16_777_216);
+    assert_eq!(ERASURE_MAX_TARGETS, 4_096);
+    assert_eq!(ERASURE_MAX_INVENTORY_RESULTS, 4_096);
+    assert_eq!(ERASURE_MAX_OBLIGATIONS_PER_CATEGORY, 4_096);
+    assert_eq!(ERASURE_MAX_OBLIGATIONS, 16_384);
+    assert_eq!(ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, 16_384);
+    assert_eq!(ERASURE_MAX_OUTCOME_OWNERS, 16_384);
     assert_eq!(
         ErasureErrorV1::PolicyConflict.to_string(),
         "erasure contract error 4"
@@ -3842,6 +3848,19 @@ fn public_constants_display_and_state_digests_are_observable() -> Result<(), Era
     let second = ErasureStateV1::submitted(reference(4), reference(2), reference(3))?;
     assert_ne!(first.state_digest(), second.state_digest());
     Ok(())
+}
+
+#[test]
+fn outcome_owner_bound_applies_to_the_combined_disjoint_sets() {
+    let midpoint = ERASURE_MAX_OUTCOME_OWNERS / 2;
+    let pending = (0..midpoint).map(indexed_reference).collect::<Vec<_>>();
+    let mut failed = (midpoint..ERASURE_MAX_OUTCOME_OWNERS)
+        .map(indexed_reference)
+        .collect::<Vec<_>>();
+
+    assert!(!invalid_owner_sets(&pending, &failed));
+    failed.push(indexed_reference(ERASURE_MAX_OUTCOME_OWNERS));
+    assert!(invalid_owner_sets(&pending, &failed));
 }
 
 #[test]

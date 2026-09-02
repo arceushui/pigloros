@@ -11,8 +11,9 @@ use super::{
     ErasureLifecycleV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
     ErasureRequiredTargetV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    Ordering, ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES, ERASURE_RECEIPT_MAX_BYTES,
-    ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERC1, ERS1,
+    Ordering, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
+    ERASURE_MAX_OUTCOME_OWNERS, ERASURE_RECEIPT_MAX_BYTES, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+    ERC1, ERS1,
 };
 
 impl ErasureStateV1 {
@@ -198,7 +199,7 @@ impl ErasureStateV1 {
         decode_limited(
             bytes,
             ERASURE_REQUEST_OR_STATE_MAX_BYTES,
-            ERASURE_MAX_REFERENCES,
+            ERASURE_MAX_OUTCOME_OWNERS,
         )
         .and_then(|value| exact_array(&value, 12).and_then(state_from_fields))
     }
@@ -315,10 +316,8 @@ impl ErasureReceiptV1 {
         ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        if input.acknowledgements.len() > ERASURE_MAX_INVENTORY_RESULTS
+        if input.acknowledgements.len() > ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT
             || input.frozen_targets.len() > ERASURE_MAX_INVENTORY_RESULTS
-            || input.pending_owners.len() > ERASURE_MAX_REFERENCES
-            || input.failed_owners.len() > ERASURE_MAX_REFERENCES
             || inventories_exceed_bound(&input.inventories)
         {
             return Err(ErasureErrorV1::ScopeInvalid);
@@ -402,7 +401,7 @@ impl ErasureReceiptV1 {
         decode_limited(
             bytes,
             ERASURE_RECEIPT_MAX_BYTES,
-            ERASURE_MAX_INVENTORY_RESULTS,
+            ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
         )
         .and_then(|value| exact_array(&value, 19).and_then(receipt_from_fields))
     }
