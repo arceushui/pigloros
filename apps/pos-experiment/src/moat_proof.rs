@@ -9,12 +9,12 @@ use crate::{Experiment, ExperimentConfig, ExperimentError, ExperimentSession, St
 use pos_conformance::{
     compare, compare_authoritative_outputs, schema_id_for_event_type, verify_counterfactual_fork,
     verify_evidence, wave8_non_interference_matrix, wave8_plugin_boundary, AuthoritativeEventV1,
-    AuthorizationDecisionV1, CapabilityGrantV1, CaseOutcomeStatusV1, CaseOutcomeV1,
-    CausalTraceEntryV1, ClaimLayerV1, ComparisonV1, ConformanceReportV1, CounterfactualContractV1,
-    DependencyClassV1, DependencyNodeV1, DivergenceClassV1, ExecutionModeV1, HostClosureAuditV1,
-    ImplementationIdentityV1, IndependenceEvidenceV1, InputDependencyV1, InterventionV1,
-    InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1, MoatProofInputV1,
-    ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1, PrincipalRefV1,
+    CaseOutcomeStatusV1, CaseOutcomeV1, CausalTraceEntryV1, ClaimLayerV1, ComparisonV1,
+    ConformanceReportV1, CounterfactualContractV1, DependencyClassV1, DependencyNodeV1,
+    DivergenceClassV1, ExecutionModeV1, FixtureAuthorizationDecisionV1, FixtureCapabilityGrantV1,
+    FixturePrincipalRefV1, HostClosureAuditV1, ImplementationIdentityV1, IndependenceEvidenceV1,
+    InputDependencyV1, InterventionV1, InvalidArtifactV1, KnowledgeSnapshotV1, MoatProofEvidenceV1,
+    MoatProofInputV1, ParticipantEventV1, ParticipantViewV1, PluginFailureClassV1, PluginFailureV1,
     ProjectionEvidenceV1, RecomputationFrontierV1, RedactionStateV1, ReplayClaimV1,
     ReproManifestV1, ReproducibilityClassV1, ScenarioRoomFixtureV1, SuffixInvalidationReasonV1,
     SuffixInvalidationV1, TickAtomicityV1, UncertaintyV1, UnknownEdgePolicyV1,
@@ -864,8 +864,8 @@ fn zero_node() -> DependencyNodeV1 {
 
 struct ContractRoomParts {
     room: ScenarioRoomFixtureV1,
-    principals: Vec<PrincipalRefV1>,
-    grants: Vec<CapabilityGrantV1>,
+    principals: Vec<FixturePrincipalRefV1>,
+    grants: Vec<FixtureCapabilityGrantV1>,
     exogenous_digest: [u8; 32],
 }
 
@@ -889,7 +889,7 @@ fn build_room_parts(
     );
     let principals = participant_views
         .iter()
-        .map(|view| PrincipalRefV1 {
+        .map(|view| FixturePrincipalRefV1 {
             principal_id: format!("principal:{}", view.participant),
             participant_id: view.participant.clone(),
             subject_id: (view.participant == "proof-agent").then(|| "proof-subject".to_owned()),
@@ -898,7 +898,7 @@ fn build_room_parts(
         .collect::<Vec<_>>();
     let grants = principals
         .iter()
-        .map(|principal| CapabilityGrantV1 {
+        .map(|principal| FixtureCapabilityGrantV1 {
             grant_id: format!("grant:{}", principal.participant_id),
             principal_id: principal.principal_id.clone(),
             capability: "observe:authorized-snapshot".to_owned(),
@@ -936,9 +936,12 @@ fn build_room_parts(
 fn build_knowledge_snapshots(
     input: &MoatProofInputV1,
     participant_views: &[ParticipantViewV1],
-    principals: &[PrincipalRefV1],
-    grants: &[CapabilityGrantV1],
-) -> (Vec<KnowledgeSnapshotV1>, Vec<AuthorizationDecisionV1>) {
+    principals: &[FixturePrincipalRefV1],
+    grants: &[FixtureCapabilityGrantV1],
+) -> (
+    Vec<KnowledgeSnapshotV1>,
+    Vec<FixtureAuthorizationDecisionV1>,
+) {
     let knowledge_snapshots = participant_views
         .iter()
         .zip(principals.iter().zip(grants.iter()))
@@ -950,7 +953,7 @@ fn build_knowledge_snapshots(
                 .map(|event| event.payload_digest)
                 .collect::<Vec<_>>();
             let revoked = grant.consent_epoch > 0;
-            let mut decision = AuthorizationDecisionV1 {
+            let mut decision = FixtureAuthorizationDecisionV1 {
                 principal_id: principal.principal_id.clone(),
                 resource: "scenario-room".to_owned(),
                 operation: "observe".to_owned(),

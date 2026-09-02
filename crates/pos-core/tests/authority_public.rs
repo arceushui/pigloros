@@ -5,9 +5,9 @@ use pos_core::{
     AuthorityRoleV1, AuthorizationDecisionV1, AuthorizationOutcomeV1, AuthorizationRequestDraftV1,
     AuthorizationRequestV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
     CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
-    ConsentGrantRefV1, DelegateClassV1, EntityId, Hash, PluginId, PrincipalRefV1, Seq, TimelineId,
-    WallTime, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_SELECTORS,
-    MAX_AUTHORITY_TEXT_BYTES,
+    ConsentGrantRefV1, ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, EntityId, Hash,
+    PluginId, PrincipalRefV1, Seq, TimelineId, WallTime, DELEGATE_ACTION_V1,
+    MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_SELECTORS, MAX_AUTHORITY_TEXT_BYTES,
 };
 use ulid::Ulid;
 
@@ -72,6 +72,7 @@ fn consent_draft(consent_id: u8) -> ConsentGrantRefDraftV1 {
         policy_revision: hash(9),
         issuer: principal(4),
         issuer_evidence: hash(6),
+        status: ConsentGrantStatusV1::Active,
         revocation_fence: None,
         authority_registry_digest: hash(7),
     }
@@ -133,6 +134,7 @@ fn grant_draft(
         grant_id: hash(grant_id),
         grantor,
         grantee,
+        trust_domain: "local.test".to_owned(),
         scope,
         valid_from_position: Seq::from_u64(10),
         valid_until_position: Seq::from_u64(100),
@@ -184,20 +186,17 @@ fn delegation_child() -> CapabilityGrantDraftV1 {
     draft.max_delegation_depth = 1;
     draft.valid_from_position = Seq::from_u64(20);
     draft.valid_until_position = Seq::from_u64(90);
+    draft.issuance_seq = Seq::from_u64(15);
     draft
 }
 
 fn assert_delegation_invalid(child: CapabilityGrantDraftV1) {
     assert_eq!(
-        decision_for(
-            &request(principal(3), entity(10)),
-            &[
-                delegation_parent(),
-                ok(CapabilityGrantV1::try_from_draft(child)),
-            ],
-        )
-        .outcome(),
-        AuthorizationOutcomeV1::DelegationInvalid
+        DelegationChainV1::try_from_grants(vec![
+            delegation_parent(),
+            ok(CapabilityGrantV1::try_from_draft(child)),
+        ]),
+        Err(AuthorityErrorV1::DelegationInvalid)
     );
 }
 
@@ -227,7 +226,7 @@ fn request_draft(
         revocation_epoch: 3,
         revocation_state_current: true,
         authority_registry_digest: hash(7),
-        consent: ConsentEvidenceV1::Active {
+        consent: ConsentEvidenceV1::Resolved {
             grants: vec![consent_grant()],
         },
         environment_constraints: vec!["device-bound".to_owned(), "local-only".to_owned()],
@@ -251,7 +250,7 @@ fn decision_for(
         .collect();
     capability_bindings.sort_unstable();
     let consent_bindings = match request.consent() {
-        ConsentEvidenceV1::Active { grants } => grants
+        ConsentEvidenceV1::Resolved { grants } => grants
             .iter()
             .map(ConsentGrantRefV1::binding_digest)
             .collect(),
@@ -259,11 +258,12 @@ fn decision_for(
     };
     let trusted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
         hash(7),
-        vec![hash(7)],
+        vec![request.authenticated().registry_binding_digest()],
         capability_bindings,
         consent_bindings,
     ));
-    let decision = AuthorityEvaluatorV1::authorize(request, chain, &trusted_registry);
+    let chain = ok(DelegationChainV1::try_from_grants(chain.to_vec()));
+    let decision = AuthorityEvaluatorV1::authorize(request, &chain, &trusted_registry);
     assert_eq!(
         ok(AuthorizationDecisionV1::decode(&ok(decision.encode()))),
         decision
@@ -303,6 +303,57 @@ fn changed_array(encoded: &CanonicalBytes, change: impl FnOnce(&mut Vec<Value>))
 }
 
 #[test]
+fn authority_error_and_outcome_codes_are_exhaustive_and_stable() {
+    let errors = [
+        AuthorityErrorV1::InvalidEncoding,
+        AuthorityErrorV1::UnsupportedVersion,
+        AuthorityErrorV1::FieldOutOfBounds,
+        AuthorityErrorV1::UnknownEnum,
+        AuthorityErrorV1::NonCanonicalOrder,
+        AuthorityErrorV1::DuplicateIdentity,
+        AuthorityErrorV1::PrincipalUnresolved,
+        AuthorityErrorV1::ConsentMissing,
+        AuthorityErrorV1::CapabilityMissing,
+        AuthorityErrorV1::DelegationInvalid,
+        AuthorityErrorV1::RevokedAtFence,
+        AuthorityErrorV1::RevocationStateStale,
+        AuthorityErrorV1::PolicyIndeterminate,
+        AuthorityErrorV1::SourceUnavailable,
+        AuthorityErrorV1::UnauthorizedSource,
+        AuthorityErrorV1::ProvenanceMissing,
+        AuthorityErrorV1::DigestMismatch,
+        AuthorityErrorV1::BudgetExceeded,
+        AuthorityErrorV1::NonInterferenceDivergence,
+    ];
+    for (code, error) in (0_u8..).zip(errors) {
+        assert_eq!(error.code(), code);
+        assert_eq!(AuthorityErrorV1::from_code(code), Ok(error));
+    }
+    assert_eq!(
+        AuthorityErrorV1::from_code(19),
+        Err(AuthorityErrorV1::UnknownEnum)
+    );
+
+    let outcomes = [
+        AuthorizationOutcomeV1::Active,
+        AuthorizationOutcomeV1::RevokedAtFence,
+        AuthorizationOutcomeV1::Expired,
+        AuthorizationOutcomeV1::ParentInvalid,
+        AuthorizationOutcomeV1::ConsentMissing,
+        AuthorizationOutcomeV1::RevocationStateStale,
+        AuthorizationOutcomeV1::IndeterminateFailClosed,
+    ];
+    for (code, outcome) in (0_u8..).zip(outcomes) {
+        assert_eq!(outcome.code(), code);
+        assert_eq!(AuthorizationOutcomeV1::from_code(code), Ok(outcome));
+    }
+    assert_eq!(
+        AuthorizationOutcomeV1::from_code(7),
+        Err(AuthorityErrorV1::UnknownEnum)
+    );
+}
+
+#[test]
 fn principal_and_adapter_results_are_canonical_public_contracts() {
     let principal = principal(1);
     assert_eq!(principal.principal_id(), &[1; 16]);
@@ -319,12 +370,7 @@ fn principal_and_adapter_results_are_canonical_public_contracts() {
     assert_eq!(authenticated.issued_at(), WallTime::from_micros(10));
     assert_eq!(authenticated.expires_at(), WallTime::from_micros(100));
     assert_eq!(authenticated.binding_digest(), hash(7));
-    assert_eq!(
-        ok(AuthenticatedPrincipalResultV1::decode(&ok(
-            authenticated.encode()
-        ))),
-        authenticated
-    );
+    assert_ne!(authenticated.registry_binding_digest(), hash(7));
 
     assert_eq!(
         AssuranceLevelV1::try_new(0),
@@ -397,14 +443,22 @@ fn one_principal_can_act_through_multiple_explicit_entity_contexts() {
         &request(other_principal, entity(10)),
         std::slice::from_ref(&grant),
     );
-    assert_eq!(denied.outcome(), AuthorizationOutcomeV1::PrincipalMismatch);
+    assert_eq!(
+        denied.outcome(),
+        AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
     assert!(!denied.is_allowed());
 }
 
 #[test]
 fn consent_is_evaluated_before_capability_and_fails_closed() {
     let principal_ref = principal(1);
-    let cases = [
+    let mut revoked = consent_draft(8);
+    revoked.status = ConsentGrantStatusV1::RevokedAtFence;
+    revoked.revocation_fence = Some(Seq::from_u64(50));
+    let mut expired = consent_draft(8);
+    expired.status = ConsentGrantStatusV1::Expired;
+    let cases = vec![
         (
             ConsentEvidenceV1::Missing,
             AuthorizationOutcomeV1::ConsentMissing,
@@ -414,12 +468,16 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
             AuthorizationOutcomeV1::ConsentMissing,
         ),
         (
-            ConsentEvidenceV1::RevokedAtFence,
-            AuthorizationOutcomeV1::ConsentRevokedAtFence,
+            ConsentEvidenceV1::Resolved {
+                grants: vec![ok(ConsentGrantRefV1::try_from_draft(revoked))],
+            },
+            AuthorizationOutcomeV1::RevokedAtFence,
         ),
         (
-            ConsentEvidenceV1::Expired,
-            AuthorizationOutcomeV1::ConsentExpired,
+            ConsentEvidenceV1::Resolved {
+                grants: vec![ok(ConsentGrantRefV1::try_from_draft(expired))],
+            },
+            AuthorizationOutcomeV1::Expired,
         ),
         (
             ConsentEvidenceV1::Indeterminate,
@@ -432,6 +490,27 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
         let request = ok(AuthorizationRequestV1::try_from_draft(draft));
         assert_eq!(decision_for(&request, &[]).outcome(), expected);
     }
+
+    let grant = root_grant(principal_ref.clone(), vec![entity(99)]);
+    let chain = ok(DelegationChainV1::try_from_grants(vec![grant]));
+    let missing_request = ok(AuthorizationRequestV1::try_from_draft({
+        let mut draft = request_draft(authenticated(principal_ref.clone()), entity(99));
+        draft.consent = ConsentEvidenceV1::Missing;
+        draft
+    }));
+    let registry_without_capability = ok(AuthorityRegistrySnapshotV1::try_new(
+        hash(7),
+        vec![missing_request.authenticated().registry_binding_digest()],
+        Vec::new(),
+        Vec::new(),
+    ));
+    let decision =
+        AuthorityEvaluatorV1::authorize(&missing_request, &chain, &registry_without_capability);
+    assert_eq!(decision.outcome(), AuthorizationOutcomeV1::ConsentMissing);
+    assert_eq!(decision.error(), Some(AuthorityErrorV1::ConsentMissing));
+    assert_eq!(decision.grant_id(), None);
+    assert_eq!(decision.originating_principal(), None);
+    assert!(decision.acting_delegates().is_empty());
 
     let mut no_subject = request_draft(authenticated(principal_ref.clone()), entity(10));
     no_subject.subject_id = None;
@@ -462,7 +541,7 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
 
     assert_eq!(
         decision_for(&request(principal(1), entity(10)), &[]).outcome(),
-        AuthorizationOutcomeV1::CapabilityMissing
+        AuthorizationOutcomeV1::IndeterminateFailClosed
     );
 }
 
@@ -481,8 +560,16 @@ fn complete_consent_references_bind_every_authority_dimension() {
     assert_eq!(consent.policy_revision(), hash(9));
     assert_eq!(consent.issuer(), &principal(4));
     assert_eq!(consent.issuer_evidence(), hash(6));
+    assert_eq!(consent.status(), ConsentGrantStatusV1::Active);
     assert_eq!(consent.revocation_fence(), None);
     assert_eq!(consent.authority_registry_digest(), hash(7));
+
+    let mut revoked_without_fence = consent_draft(8);
+    revoked_without_fence.status = ConsentGrantStatusV1::RevokedAtFence;
+    assert_eq!(
+        ConsentGrantRefV1::try_from_draft(revoked_without_fence),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    );
 
     let principal_ref = principal(1);
     let actor = entity(10);
@@ -497,7 +584,7 @@ fn complete_consent_references_bind_every_authority_dimension() {
             _ => consent.action_classes = vec!["write".to_owned()],
         }
         let mut request = request_draft(authenticated(principal_ref.clone()), actor);
-        request.consent = ConsentEvidenceV1::Active {
+        request.consent = ConsentEvidenceV1::Resolved {
             grants: vec![ok(ConsentGrantRefV1::try_from_draft(consent))],
         };
         assert_eq!(
@@ -511,15 +598,16 @@ fn complete_consent_references_bind_every_authority_dimension() {
     }
 
     let mut expired = consent_draft(8);
-    expired.valid_until = WallTime::from_micros(50);
+    expired.status = ConsentGrantStatusV1::Expired;
     let mut revoked = consent_draft(8);
+    revoked.status = ConsentGrantStatusV1::RevokedAtFence;
     revoked.revocation_fence = Some(Seq::from_u64(50));
     for (consent, expected) in [
-        (expired, AuthorizationOutcomeV1::ConsentExpired),
-        (revoked, AuthorizationOutcomeV1::ConsentRevokedAtFence),
+        (expired, AuthorizationOutcomeV1::Expired),
+        (revoked, AuthorizationOutcomeV1::RevokedAtFence),
     ] {
         let mut request = request_draft(authenticated(principal_ref.clone()), actor);
-        request.consent = ConsentEvidenceV1::Active {
+        request.consent = ConsentEvidenceV1::Resolved {
             grants: vec![ok(ConsentGrantRefV1::try_from_draft(consent))],
         };
         assert_eq!(
@@ -545,10 +633,38 @@ fn host_registry_snapshot_is_required_for_authoritative_evaluation() {
         vec![hash(1)],
         vec![hash(8)],
     ));
+    let chain = ok(DelegationChainV1::try_from_grants(vec![grant]));
     assert_eq!(untrusted.registry_digest(), hash(7));
+    let decision = AuthorityEvaluatorV1::authorize(&request, &chain, &untrusted);
     assert_eq!(
-        AuthorityEvaluatorV1::authorize(&request, &[grant], &untrusted).outcome(),
+        decision.outcome(),
         AuthorizationOutcomeV1::IndeterminateFailClosed
+    );
+    assert_eq!(
+        decision.error(),
+        Some(AuthorityErrorV1::PrincipalUnresolved)
+    );
+    assert_eq!(decision.grant_id(), None);
+    assert_eq!(decision.originating_principal(), None);
+    assert!(decision.acting_delegates().is_empty());
+
+    let substituted_request = request(principal(2), actor);
+    let original_binding = request.authenticated().registry_binding_digest();
+    let substituted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
+        hash(7),
+        vec![original_binding],
+        chain
+            .grants()
+            .iter()
+            .map(|grant| ok(grant.binding_digest()))
+            .collect(),
+        vec![consent_grant().binding_digest()],
+    ));
+    let decision =
+        AuthorityEvaluatorV1::authorize(&substituted_request, &chain, &substituted_registry);
+    assert_eq!(
+        decision.error(),
+        Some(AuthorityErrorV1::PrincipalUnresolved)
     );
 }
 
@@ -633,6 +749,7 @@ fn valid_delegation_is_bounded_and_strictly_attenuated() {
     child_draft.max_delegation_depth = 1;
     child_draft.valid_from_position = Seq::from_u64(20);
     child_draft.valid_until_position = Seq::from_u64(90);
+    child_draft.issuance_seq = Seq::from_u64(15);
     let child = ok(CapabilityGrantV1::try_from_draft(child_draft));
     let request = request(recipient, actor);
 
@@ -644,8 +761,14 @@ fn valid_delegation_is_bounded_and_strictly_attenuated() {
     assert_eq!(decision.originating_principal(), Some(&principal(1)));
     assert_eq!(decision.acting_delegates(), &[principal(2), principal(3)]);
     assert_eq!(decision.authority_registry_digest(), hash(7));
+    assert_eq!(decision.error(), None);
     assert_eq!(ok(CapabilityGrantV1::decode(&ok(parent.encode()))), parent);
     assert_eq!(ok(CapabilityGrantV1::decode(&ok(child.encode()))), child);
+    let chain = ok(DelegationChainV1::try_from_grants(vec![parent, child]));
+    assert_eq!(
+        ok(DelegationChainV1::decode_grants(&ok(chain.encode_grants()))),
+        chain
+    );
 }
 
 #[test]
@@ -712,36 +835,31 @@ fn authority_records_reject_noncanonical_and_malformed_encodings() {
         AuthorizationDecisionV1::decode(&CanonicalBytes::from_vec(tampered)),
         Err(AuthorityErrorV1::DigestMismatch)
     );
-}
 
-#[test]
-fn authenticated_result_decoder_rejects_every_malformed_public_field() {
-    let encoded = ok(authenticated(principal(1)).encode());
-    for field in 2..8 {
-        let malformed = changed_array(&encoded, |fields| {
-            fields[field] = Value::Bool(false);
-        });
+    for (size, expected) in [
+        (1_024, AuthorityErrorV1::InvalidEncoding),
+        (1_025, AuthorityErrorV1::FieldOutOfBounds),
+    ] {
         assert_eq!(
-            AuthenticatedPrincipalResultV1::decode(&malformed),
-            Err(AuthorityErrorV1::InvalidEncoding),
-            "field {field} accepted the wrong CBOR type"
+            PrincipalRefV1::decode(&CanonicalBytes::from_vec(vec![0; size])),
+            Err(expected)
         );
     }
-
-    let wrong_principal_length = changed_array(&encoded, |fields| {
-        fields[2] = Value::Array(Vec::new());
-    });
-    assert_eq!(
-        AuthenticatedPrincipalResultV1::decode(&wrong_principal_length),
-        Err(AuthorityErrorV1::InvalidEncoding)
-    );
+    for (size, expected) in [
+        (65_536, AuthorityErrorV1::InvalidEncoding),
+        (65_537, AuthorityErrorV1::FieldOutOfBounds),
+    ] {
+        let oversized = CanonicalBytes::from_vec(vec![0; size]);
+        assert_eq!(CapabilityGrantV1::decode(&oversized), Err(expected));
+        assert_eq!(AuthorizationDecisionV1::decode(&oversized), Err(expected));
+    }
 }
 
 #[test]
 fn capability_decoder_rejects_every_malformed_public_field() {
     let principal_ref = principal(1);
     let encoded = ok(root_grant(principal_ref, vec![entity(10)]).encode());
-    for field in 2..19 {
+    for field in 2..20 {
         let malformed = changed_array(&encoded, |fields| {
             fields[field] = Value::Text("wrong-type".to_owned());
         });
@@ -754,7 +872,7 @@ fn capability_decoder_rejects_every_malformed_public_field() {
 
     for scope_field in 0..12 {
         let malformed = changed_array(&encoded, |fields| {
-            let scope_fields = array_fields_mut(&mut fields[5]);
+            let scope_fields = array_fields_mut(&mut fields[6]);
             scope_fields[scope_field] = Value::Text("wrong-type".to_owned());
         });
         assert_eq!(
@@ -765,7 +883,7 @@ fn capability_decoder_rejects_every_malformed_public_field() {
     }
 
     let wrong_scope_length = changed_array(&encoded, |fields| {
-        fields[5] = Value::Array(Vec::new());
+        fields[6] = Value::Array(Vec::new());
     });
     assert_eq!(
         CapabilityGrantV1::decode(&wrong_scope_length),
@@ -815,7 +933,7 @@ fn decision_decoder_rejects_every_malformed_public_field() {
     let grant = root_grant(principal(1), vec![entity(10)]);
     let encoded = ok(decision_for(&request, &[grant]).encode());
 
-    for field in 2..19 {
+    for field in 2..20 {
         let malformed = changed_array(&encoded, |fields| {
             fields[field] = Value::Text("wrong-type".to_owned());
         });
@@ -833,7 +951,65 @@ fn decision_decoder_rejects_every_malformed_public_field() {
         AuthorizationDecisionV1::decode(&invalid_outcome),
         Err(AuthorityErrorV1::UnknownEnum)
     );
-    for digest_field in [12, 15, 17, 18] {
+    let invalid_error = changed_array(&encoded, |fields| {
+        fields[17] = Value::Integer(99.into());
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&invalid_error),
+        Err(AuthorityErrorV1::UnknownEnum)
+    );
+    let missing_grant_evidence = changed_array(&encoded, |fields| {
+        fields[11] = Value::Null;
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&missing_grant_evidence),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+    let missing_origin = changed_array(&encoded, |fields| {
+        fields[9] = Value::Null;
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&missing_origin),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+    let active_with_error = changed_array(&encoded, |fields| {
+        fields[17] = Value::Integer(AuthorityErrorV1::CapabilityMissing.code().into());
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&active_with_error),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+    let inconsistent_revocation = changed_array(&encoded, |fields| {
+        fields[16] = Value::Integer(AuthorizationOutcomeV1::RevokedAtFence.code().into());
+        fields[17] = Value::Integer(AuthorityErrorV1::CapabilityMissing.code().into());
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&inconsistent_revocation),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+    let mut missing_draft = request_draft(authenticated(principal(1)), entity(10));
+    missing_draft.consent = ConsentEvidenceV1::Missing;
+    let denied = decision_for(
+        &ok(AuthorizationRequestV1::try_from_draft(missing_draft)),
+        &[],
+    );
+    let denied_without_error = changed_array(&ok(denied.encode()), |fields| {
+        fields[17] = Value::Null;
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&denied_without_error),
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    );
+    let duplicate_delegate = changed_array(&encoded, |fields| {
+        let delegates = array_fields_mut(&mut fields[10]);
+        let duplicate = delegates[0].clone();
+        delegates.push(duplicate);
+    });
+    assert_eq!(
+        AuthorizationDecisionV1::decode(&duplicate_delegate),
+        Err(AuthorityErrorV1::DuplicateIdentity)
+    );
+    for digest_field in [12, 15, 18, 19] {
         let zero_digest = changed_array(&encoded, |fields| {
             fields[digest_field] = Value::Bytes(vec![0; 32]);
         });
@@ -935,7 +1111,7 @@ fn scope_and_request_fields_are_explicit_and_every_dimension_is_enforced() {
     assert_eq!(request.authority_registry_digest(), hash(7));
     assert_eq!(
         request.consent(),
-        &ConsentEvidenceV1::Active {
+        &ConsentEvidenceV1::Resolved {
             grants: vec![consent_grant()]
         }
     );
@@ -947,7 +1123,7 @@ fn scope_and_request_fields_are_explicit_and_every_dimension_is_enforced() {
     let mut mismatches = Vec::new();
     let mut draft = valid.clone();
     draft.resource = "unknown".to_owned();
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
     let mut draft = valid.clone();
     draft.data_category = "medical".to_owned();
     mismatches.push((draft, AuthorizationOutcomeV1::ConsentMissing));
@@ -962,26 +1138,26 @@ fn scope_and_request_fields_are_explicit_and_every_dimension_is_enforced() {
     mismatches.push((draft, AuthorizationOutcomeV1::ConsentMissing));
     let mut draft = valid.clone();
     draft.actor_entity_id = entity(99);
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
     let mut draft = valid.clone();
     draft.participant_id = Some(entity(99));
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
     let mut draft = valid.clone();
     draft.participant_id = None;
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
     let mut draft = valid.clone();
     draft.plugin_id = Some(plugin(5));
     draft.installation_id = Some([5; 16]);
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
     let mut draft = valid.clone();
     draft.use_count = 11;
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
     let mut draft = valid.clone();
     draft.budget = 101;
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
     let mut draft = valid;
     draft.environment_constraints = vec!["local-only".to_owned()];
-    mismatches.push((draft, AuthorizationOutcomeV1::ScopeMismatch));
+    mismatches.push((draft, AuthorizationOutcomeV1::IndeterminateFailClosed));
 
     for (draft, expected) in mismatches {
         let request = ok(AuthorizationRequestV1::try_from_draft(draft));
@@ -1012,6 +1188,7 @@ fn grant_contract_exposes_all_bound_authority_and_plugin_context() {
     assert_eq!(grant.grantee().principal(), &principal);
     assert_eq!(grant.grantee().plugin_id(), Some(plugin_id));
     assert_eq!(grant.grantee().installation_id(), Some([3; 16]));
+    assert_eq!(grant.trust_domain(), "local.test");
     assert_eq!(grant.scope().resources(), &["journal", "profile"]);
     assert_eq!(grant.scope().actions(), &["read"]);
     assert_eq!(grant.scope().purposes(), &["care", "planning"]);
@@ -1046,6 +1223,29 @@ fn grant_contract_exposes_all_bound_authority_and_plugin_context() {
     assert_ne!(ok(grant.binding_digest()), Hash::zero());
     assert_eq!(ok(CapabilityGrantV1::decode(&ok(grant.encode()))), grant);
 
+    let mut wrong_domain = grant_draft(
+        5,
+        principal.clone(),
+        AuthorityGranteeV1::Principal(principal.clone()),
+        scope(vec![entity(10)], vec!["read"], None),
+    );
+    wrong_domain.trust_domain = "remote.test".to_owned();
+    assert_eq!(
+        CapabilityGrantV1::try_from_draft(wrong_domain),
+        Err(AuthorityErrorV1::PrincipalUnresolved)
+    );
+    let mut cross_domain = grant_draft(
+        5,
+        principal.clone(),
+        AuthorityGranteeV1::Principal(ok(PrincipalRefV1::try_new([2; 16], "remote.test"))),
+        scope(vec![entity(10)], vec!["read"], None),
+    );
+    cross_domain.trust_domain = "local.test".to_owned();
+    assert_eq!(
+        CapabilityGrantV1::try_from_draft(cross_domain),
+        Err(AuthorityErrorV1::PrincipalUnresolved)
+    );
+
     let mut request = request_draft(authenticated(principal), entity(10));
     request.plugin_id = Some(plugin_id);
     request.installation_id = Some([3; 16]);
@@ -1062,7 +1262,7 @@ fn grant_contract_exposes_all_bound_authority_and_plugin_context() {
             &[grant]
         )
         .outcome(),
-        AuthorizationOutcomeV1::ScopeMismatch
+        AuthorizationOutcomeV1::IndeterminateFailClosed
     );
 }
 
@@ -1076,11 +1276,11 @@ fn authentication_revocation_expiry_and_coordinates_fail_closed() {
     draft.at_time = WallTime::from_micros(100);
     assert_eq!(
         decision_for(&ok(AuthorizationRequestV1::try_from_draft(draft)), &[]).outcome(),
-        AuthorizationOutcomeV1::AuthenticationExpired
+        AuthorizationOutcomeV1::Expired
     );
 
     let mut draft = request_draft(authenticated(principal.clone()), actor);
-    draft.consent = ConsentEvidenceV1::Active {
+    draft.consent = ConsentEvidenceV1::Resolved {
         grants: vec![consent_grant_with_id(7)],
     };
     assert_eq!(
@@ -1111,7 +1311,7 @@ fn authentication_revocation_expiry_and_coordinates_fail_closed() {
                 draft.policy_revision = hash(10);
                 let mut consent = consent_draft(8);
                 consent.policy_revision = hash(10);
-                draft.consent = ConsentEvidenceV1::Active {
+                draft.consent = ConsentEvidenceV1::Resolved {
                     grants: vec![ok(ConsentGrantRefV1::try_from_draft(consent))],
                 };
             }
@@ -1268,14 +1468,14 @@ fn malformed_requests_are_rejected_before_evaluation() {
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
     let mut invalid = base;
-    invalid.consent = ConsentEvidenceV1::Active { grants: Vec::new() };
+    invalid.consent = ConsentEvidenceV1::Resolved { grants: Vec::new() };
     assert_eq!(
         AuthorizationRequestV1::try_from_draft(invalid),
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 
     let mut invalid = request_draft(authenticated(principal), actor);
-    invalid.consent = ConsentEvidenceV1::Active {
+    invalid.consent = ConsentEvidenceV1::Resolved {
         grants: vec![consent_grant_with_id(9), consent_grant_with_id(8)],
     };
     assert_eq!(
@@ -1309,6 +1509,12 @@ fn delegation_rejects_broken_links_impersonation_cycles_and_amplification() {
     variants.push(child);
     let mut child = delegation_child();
     child.consent_references = vec![hash(8), hash(10)];
+    variants.push(child);
+    let mut child = delegation_child();
+    child.issuance_seq = Seq::from_u64(4);
+    variants.push(child);
+    let mut child = delegation_child();
+    child.scope = scope_with_subjects(vec![actor], vec![entity(51)], vec!["read"], None);
     variants.push(child);
     let mut child = delegation_child();
     child.scope = scope(vec![actor, entity(12)], vec!["read"], None);
@@ -1371,16 +1577,37 @@ fn delegation_rejects_broken_links_impersonation_cycles_and_amplification() {
 
     let mut repeated = delegation_child();
     repeated.grant_id = hash(1);
-    assert_delegation_invalid(repeated);
+    assert_eq!(
+        DelegationChainV1::try_from_grants(vec![
+            delegation_parent(),
+            ok(CapabilityGrantV1::try_from_draft(repeated)),
+        ]),
+        Err(AuthorityErrorV1::DuplicateIdentity)
+    );
+
+    let mut repeated_delegate = delegation_child();
+    repeated_delegate.grantee = AuthorityGranteeV1::Principal(principal(2));
+    assert_eq!(
+        DelegationChainV1::try_from_grants(vec![
+            delegation_parent(),
+            ok(CapabilityGrantV1::try_from_draft(repeated_delegate)),
+        ]),
+        Err(AuthorityErrorV1::DuplicateIdentity)
+    );
 
     let orphan = delegation_child();
     assert_eq!(
-        decision_for(
-            &request(principal(3), actor),
-            &[ok(CapabilityGrantV1::try_from_draft(orphan))]
-        )
-        .outcome(),
-        AuthorizationOutcomeV1::ParentInvalid
+        DelegationChainV1::try_from_grants(vec![ok(CapabilityGrantV1::try_from_draft(orphan))]),
+        Err(AuthorityErrorV1::DelegationInvalid)
+    );
+
+    let encoded_root = ok(delegation_parent().encode());
+    assert_eq!(
+        DelegationChainV1::decode_grants(&vec![
+            encoded_root;
+            usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 2
+        ]),
+        Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 }
 
@@ -1417,12 +1644,11 @@ fn plugins_cannot_delegate_or_escape_their_installation_scope() {
     child.valid_until_position = Seq::from_u64(90);
 
     assert_eq!(
-        decision_for(
-            &request(recipient, actor),
-            &[plugin_parent, ok(CapabilityGrantV1::try_from_draft(child))]
-        )
-        .outcome(),
-        AuthorizationOutcomeV1::DelegationInvalid
+        DelegationChainV1::try_from_grants(vec![
+            plugin_parent,
+            ok(CapabilityGrantV1::try_from_draft(child)),
+        ]),
+        Err(AuthorityErrorV1::DelegationInvalid)
     );
 }
 
@@ -1449,15 +1675,15 @@ fn ancestor_changes_invalidate_every_descendant() {
     child_draft.max_delegation_depth = 1;
     child_draft.valid_from_position = Seq::from_u64(20);
     child_draft.valid_until_position = Seq::from_u64(90);
+    child_draft.issuance_seq = Seq::from_u64(15);
     let child = ok(CapabilityGrantV1::try_from_draft(child_draft));
     let request = request(recipient, actor);
 
-    for change in 0..3 {
+    for change in 0..2 {
         let mut parent = parent_draft.clone();
         match change {
             0 => parent.policy_revision = hash(10),
-            1 => parent.revocation_epoch = 4,
-            _ => parent.issuance_timeline = timeline(31),
+            _ => parent.revocation_epoch = 4,
         }
         assert_eq!(
             decision_for(
@@ -1469,6 +1695,16 @@ fn ancestor_changes_invalidate_every_descendant() {
         );
     }
 
+    let mut wrong_timeline = parent_draft.clone();
+    wrong_timeline.issuance_timeline = timeline(31);
+    assert_eq!(
+        DelegationChainV1::try_from_grants(vec![
+            ok(CapabilityGrantV1::try_from_draft(wrong_timeline)),
+            child.clone(),
+        ]),
+        Err(AuthorityErrorV1::DelegationInvalid)
+    );
+
     let mut parent = parent_draft;
     parent.revocation_fence = Some(Seq::from_u64(50));
     assert_eq!(
@@ -1477,6 +1713,6 @@ fn ancestor_changes_invalidate_every_descendant() {
             &[ok(CapabilityGrantV1::try_from_draft(parent)), child]
         )
         .outcome(),
-        AuthorizationOutcomeV1::RevokedAtFence
+        AuthorizationOutcomeV1::ParentInvalid
     );
 }

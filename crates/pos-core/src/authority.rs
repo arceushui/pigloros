@@ -12,10 +12,13 @@ use ciborium::Value;
 use crate::{CanonicalBytes, EntityId, Hash, PluginId, Seq, TimelineId, WallTime};
 
 const PRINCIPAL_MAGIC: [u8; 4] = *b"PRN1";
-const AUTHENTICATED_MAGIC: [u8; 4] = *b"APV1";
 const GRANT_MAGIC: [u8; 4] = *b"CPG1";
 const DECISION_MAGIC: [u8; 4] = *b"AUD1";
 const VERSION: u8 = 1;
+
+const MAX_PRINCIPAL_RECORD_BYTES: usize = 1_024;
+const MAX_CAPABILITY_RECORD_BYTES: usize = 64 * 1_024;
+const MAX_DECISION_RECORD_BYTES: usize = 64 * 1_024;
 
 /// Capability action required before a child grant may be issued.
 pub const DELEGATE_ACTION_V1: &str = "authority.grant.delegate";
@@ -69,6 +72,63 @@ pub enum AuthorityErrorV1 {
     BudgetExceeded,
     #[error("non-interference evaluation diverged")]
     NonInterferenceDivergence,
+}
+
+impl AuthorityErrorV1 {
+    /// Return the stable AUD1 safe-error code.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::InvalidEncoding => 0,
+            Self::UnsupportedVersion => 1,
+            Self::FieldOutOfBounds => 2,
+            Self::UnknownEnum => 3,
+            Self::NonCanonicalOrder => 4,
+            Self::DuplicateIdentity => 5,
+            Self::PrincipalUnresolved => 6,
+            Self::ConsentMissing => 7,
+            Self::CapabilityMissing => 8,
+            Self::DelegationInvalid => 9,
+            Self::RevokedAtFence => 10,
+            Self::RevocationStateStale => 11,
+            Self::PolicyIndeterminate => 12,
+            Self::SourceUnavailable => 13,
+            Self::UnauthorizedSource => 14,
+            Self::ProvenanceMissing => 15,
+            Self::DigestMismatch => 16,
+            Self::BudgetExceeded => 17,
+            Self::NonInterferenceDivergence => 18,
+        }
+    }
+
+    /// Decode one stable AUD1 safe-error code.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityErrorV1::UnknownEnum`] for an unknown code.
+    pub const fn from_code(code: u8) -> Result<Self, Self> {
+        match code {
+            0 => Ok(Self::InvalidEncoding),
+            1 => Ok(Self::UnsupportedVersion),
+            2 => Ok(Self::FieldOutOfBounds),
+            3 => Ok(Self::UnknownEnum),
+            4 => Ok(Self::NonCanonicalOrder),
+            5 => Ok(Self::DuplicateIdentity),
+            6 => Ok(Self::PrincipalUnresolved),
+            7 => Ok(Self::ConsentMissing),
+            8 => Ok(Self::CapabilityMissing),
+            9 => Ok(Self::DelegationInvalid),
+            10 => Ok(Self::RevokedAtFence),
+            11 => Ok(Self::RevocationStateStale),
+            12 => Ok(Self::PolicyIndeterminate),
+            13 => Ok(Self::SourceUnavailable),
+            14 => Ok(Self::UnauthorizedSource),
+            15 => Ok(Self::ProvenanceMissing),
+            16 => Ok(Self::DigestMismatch),
+            17 => Ok(Self::BudgetExceeded),
+            18 => Ok(Self::NonInterferenceDivergence),
+            _ => Err(Self::UnknownEnum),
+        }
+    }
 }
 
 /// Stable authorization identity within one trust domain.
@@ -125,7 +185,8 @@ impl PrincipalRefV1 {
     /// # Errors
     /// Returns a closed validation or codec error for malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, AuthorityErrorV1> {
-        decode_array(bytes.as_slice(), 4).and_then(|fields| decode_principal(&fields))
+        decode_bounded_array(bytes.as_slice(), MAX_PRINCIPAL_RECORD_BYTES, 4)
+            .and_then(|fields| decode_principal(&fields))
     }
 }
 
@@ -223,39 +284,10 @@ impl AuthenticatedPrincipalResultV1 {
         self.binding_digest
     }
 
-    /// Encode the exact deterministic-CBOR adapter result.
-    ///
-    /// # Errors
-    /// Returns a closed codec error if encoding fails.
-    pub fn encode(&self) -> Result<CanonicalBytes, AuthorityErrorV1> {
-        encode_value(&Value::Array(vec![
-            bytes(&AUTHENTICATED_MAGIC),
-            uint(VERSION),
-            encode_principal(self.principal()),
-            text(self.adapter_id()),
-            uint(self.assurance.get()),
-            uint(self.issued_at.as_micros()),
-            uint(self.expires_at.as_micros()),
-            hash_value(self.binding_digest),
-        ]))
-        .map(CanonicalBytes::from_vec)
-    }
-
-    /// Decode and validate an exact deterministic-CBOR adapter result.
-    ///
-    /// # Errors
-    /// Returns a closed validation or codec error for malformed input.
-    pub fn decode(bytes: &CanonicalBytes) -> Result<Self, AuthorityErrorV1> {
-        let fields = decode_array(bytes.as_slice(), 8)?;
-        expect_header(&fields, AUTHENTICATED_MAGIC)?;
-        Self::try_from_draft(AuthenticatedPrincipalDraftV1 {
-            principal: decode_principal_value(&fields[2])?,
-            adapter_id: decode_text(&fields[3])?,
-            assurance: AssuranceLevelV1::try_new(decode_u8(&fields[4])?)?,
-            issued_at: WallTime::from_micros(decode_u64(&fields[5])?),
-            expires_at: WallTime::from_micros(decode_u64(&fields[6])?),
-            binding_digest: decode_hash(&fields[7])?,
-        })
+    /// Return the complete adapter-result binding attested by the host registry.
+    #[must_use]
+    pub fn registry_binding_digest(&self) -> Hash {
+        authenticated_registry_binding_digest(self)
     }
 }
 
@@ -356,33 +388,43 @@ impl AuthorityRegistrySnapshotV1 {
         self.registry_digest
     }
 
-    fn trusts_request(
-        &self,
-        request: &AuthorizationRequestV1,
-        grant_chain: &[CapabilityGrantV1],
-    ) -> bool {
+    fn trusts_authentication(&self, request: &AuthorizationRequestV1) -> bool {
         request.authority_registry_digest == self.registry_digest
             && self
                 .authentication_bindings
-                .binary_search(&request.authenticated.binding_digest)
+                .binary_search(&request.authenticated.registry_binding_digest())
                 .is_ok()
-            && grant_chain.iter().all(|grant| {
-                grant.authority_registry_digest == self.registry_digest
-                    && grant.binding_digest().is_ok_and(|binding| {
-                        self.capability_bindings.binary_search(&binding).is_ok()
-                    })
-            })
-            && match &request.consent {
-                ConsentEvidenceV1::Active { grants } => grants.iter().all(|grant| {
-                    grant.authority_registry_digest == self.registry_digest
-                        && self
-                            .consent_bindings
-                            .binary_search(&grant.binding_digest())
-                            .is_ok()
-                }),
-                _ => true,
-            }
     }
+
+    fn trusts_consent(&self, request: &AuthorizationRequestV1) -> bool {
+        match &request.consent {
+            ConsentEvidenceV1::Resolved { grants } => grants.iter().all(|grant| {
+                grant.authority_registry_digest == self.registry_digest
+                    && self
+                        .consent_bindings
+                        .binary_search(&grant.binding_digest())
+                        .is_ok()
+            }),
+            _ => true,
+        }
+    }
+
+    fn trusts_capabilities(&self, grant_chain: &DelegationChainV1) -> bool {
+        grant_chain.grants.iter().all(|grant| {
+            grant.authority_registry_digest == self.registry_digest
+                && grant
+                    .binding_digest()
+                    .is_ok_and(|binding| self.capability_bindings.binary_search(&binding).is_ok())
+        })
+    }
+}
+
+/// Host-resolved status of one immutable consent record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsentGrantStatusV1 {
+    Active,
+    RevokedAtFence,
+    Expired,
 }
 
 /// Unvalidated fields for an immutable ADR-039 consent reference.
@@ -400,6 +442,7 @@ pub struct ConsentGrantRefDraftV1 {
     pub policy_revision: Hash,
     pub issuer: PrincipalRefV1,
     pub issuer_evidence: Hash,
+    pub status: ConsentGrantStatusV1,
     pub revocation_fence: Option<Seq>,
     pub authority_registry_digest: Hash,
 }
@@ -419,6 +462,7 @@ pub struct ConsentGrantRefV1 {
     policy_revision: Hash,
     issuer: PrincipalRefV1,
     issuer_evidence: Hash,
+    status: ConsentGrantStatusV1,
     revocation_fence: Option<Seq>,
     authority_registry_digest: Hash,
 }
@@ -440,6 +484,7 @@ impl ConsentGrantRefV1 {
             .and_then(|()| validate_hash(draft.policy_revision))
             .and_then(|()| validate_hash(draft.issuer_evidence))
             .and_then(|()| validate_hash(draft.authority_registry_digest))
+            .and_then(|()| validate_consent_status(draft.status, draft.revocation_fence))
             .map(|()| Self {
                 consent_id: draft.consent_id,
                 subject_id: draft.subject_id,
@@ -453,6 +498,7 @@ impl ConsentGrantRefV1 {
                 policy_revision: draft.policy_revision,
                 issuer: draft.issuer,
                 issuer_evidence: draft.issuer_evidence,
+                status: draft.status,
                 revocation_fence: draft.revocation_fence,
                 authority_registry_digest: draft.authority_registry_digest,
             })
@@ -505,6 +551,10 @@ impl ConsentGrantRefV1 {
     #[must_use]
     pub const fn issuer_evidence(&self) -> Hash {
         self.issuer_evidence
+    }
+    #[must_use]
+    pub const fn status(&self) -> ConsentGrantStatusV1 {
+        self.status
     }
     #[must_use]
     pub const fn revocation_fence(&self) -> Option<Seq> {
@@ -714,6 +764,7 @@ pub struct CapabilityGrantDraftV1 {
     pub grant_id: Hash,
     pub grantor: PrincipalRefV1,
     pub grantee: AuthorityGranteeV1,
+    pub trust_domain: String,
     pub scope: CapabilityScopeV1,
     pub valid_from_position: Seq,
     pub valid_until_position: Seq,
@@ -736,6 +787,7 @@ pub struct CapabilityGrantV1 {
     grant_id: Hash,
     grantor: PrincipalRefV1,
     grantee: AuthorityGranteeV1,
+    trust_domain: String,
     scope: CapabilityScopeV1,
     valid_from_position: Seq,
     valid_until_position: Seq,
@@ -762,6 +814,16 @@ impl CapabilityGrantV1 {
             .and_then(|()| validate_hash(draft.policy_revision))
             .and_then(|()| validate_hash(draft.authority_registry_digest))
             .and_then(|()| validate_grantee(&draft.grantee))
+            .and_then(|()| validate_text(&draft.trust_domain))
+            .and_then(|()| {
+                if draft.grantor.trust_domain() == draft.trust_domain
+                    && draft.grantee.principal().trust_domain() == draft.trust_domain
+                {
+                    Ok(())
+                } else {
+                    Err(AuthorityErrorV1::PrincipalUnresolved)
+                }
+            })
             .and_then(|()| validate_grantee_scope(&draft.grantee, &draft.scope))
             .and_then(|()| validate_timeline_id(draft.issuance_timeline))
             .and_then(|()| {
@@ -786,6 +848,7 @@ impl CapabilityGrantV1 {
                 grant_id: draft.grant_id,
                 grantor: draft.grantor,
                 grantee: draft.grantee,
+                trust_domain: draft.trust_domain,
                 scope: draft.scope,
                 valid_from_position: draft.valid_from_position,
                 valid_until_position: draft.valid_until_position,
@@ -814,6 +877,10 @@ impl CapabilityGrantV1 {
     #[must_use]
     pub const fn grantee(&self) -> &AuthorityGranteeV1 {
         &self.grantee
+    }
+    #[must_use]
+    pub fn trust_domain(&self) -> &str {
+        &self.trust_domain
     }
     #[must_use]
     pub const fn scope(&self) -> &CapabilityScopeV1 {
@@ -894,7 +961,55 @@ impl CapabilityGrantV1 {
     /// # Errors
     /// Returns a closed validation or codec error for malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, AuthorityErrorV1> {
-        decode_array(bytes.as_slice(), 19).and_then(|fields| decode_grant(&fields))
+        decode_bounded_array(bytes.as_slice(), MAX_CAPABILITY_RECORD_BYTES, 20)
+            .and_then(|fields| decode_grant(&fields))
+    }
+}
+
+/// Bounded root-to-leaf capability chain. Each element uses the canonical CPG1 codec.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationChainV1 {
+    grants: Vec<CapabilityGrantV1>,
+}
+
+impl DelegationChainV1 {
+    /// Validate canonical root-to-leaf order and strict attenuation.
+    ///
+    /// An empty chain represents a request for which no capability was resolved.
+    ///
+    /// # Errors
+    /// Returns a closed error for excessive depth, duplicate identity, broken links,
+    /// backdated issuance, or widened authority.
+    pub fn try_from_grants(grants: Vec<CapabilityGrantV1>) -> Result<Self, AuthorityErrorV1> {
+        validate_chain_structure(&grants).map(|()| Self { grants })
+    }
+
+    #[must_use]
+    pub fn grants(&self) -> &[CapabilityGrantV1] {
+        &self.grants
+    }
+
+    /// Encode each grant using the approved CPG1 record representation.
+    ///
+    /// # Errors
+    /// Returns a closed codec error if a grant cannot be encoded.
+    pub fn encode_grants(&self) -> Result<Vec<CanonicalBytes>, AuthorityErrorV1> {
+        self.grants.iter().map(CapabilityGrantV1::encode).collect()
+    }
+
+    /// Decode a bounded root-to-leaf sequence of canonical CPG1 records.
+    ///
+    /// # Errors
+    /// Returns a closed codec or delegation error for malformed input.
+    pub fn decode_grants(records: &[CanonicalBytes]) -> Result<Self, AuthorityErrorV1> {
+        if records.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1 {
+            return Err(AuthorityErrorV1::FieldOutOfBounds);
+        }
+        records
+            .iter()
+            .map(CapabilityGrantV1::decode)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(Self::try_from_grants)
     }
 }
 
@@ -902,10 +1017,8 @@ impl CapabilityGrantV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConsentEvidenceV1 {
     NotRequired,
-    Active { grants: Vec<ConsentGrantRefV1> },
+    Resolved { grants: Vec<ConsentGrantRefV1> },
     Missing,
-    RevokedAtFence,
-    Expired,
     Indeterminate,
 }
 
@@ -1113,17 +1226,10 @@ impl AuthorizationRequestV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthorizationOutcomeV1 {
     Active,
-    AuthenticationExpired,
-    PrincipalMismatch,
-    ConsentMissing,
-    ConsentRevokedAtFence,
-    ConsentExpired,
-    CapabilityMissing,
-    ScopeMismatch,
-    DelegationInvalid,
-    ParentInvalid,
-    Expired,
     RevokedAtFence,
+    Expired,
+    ParentInvalid,
+    ConsentMissing,
     RevocationStateStale,
     IndeterminateFailClosed,
 }
@@ -1134,41 +1240,33 @@ impl AuthorizationOutcomeV1 {
         matches!(self, Self::Active)
     }
 
-    const fn code(self) -> u8 {
+    /// Return the stable AUD1 outcome code.
+    #[must_use]
+    pub const fn code(self) -> u8 {
         match self {
             Self::Active => 0,
-            Self::AuthenticationExpired => 1,
-            Self::PrincipalMismatch => 2,
-            Self::ConsentMissing => 3,
-            Self::ConsentRevokedAtFence => 4,
-            Self::ConsentExpired => 5,
-            Self::CapabilityMissing => 6,
-            Self::ScopeMismatch => 7,
-            Self::DelegationInvalid => 8,
-            Self::ParentInvalid => 9,
-            Self::Expired => 10,
-            Self::RevokedAtFence => 11,
-            Self::RevocationStateStale => 12,
-            Self::IndeterminateFailClosed => 13,
+            Self::RevokedAtFence => 1,
+            Self::Expired => 2,
+            Self::ParentInvalid => 3,
+            Self::ConsentMissing => 4,
+            Self::RevocationStateStale => 5,
+            Self::IndeterminateFailClosed => 6,
         }
     }
 
-    const fn from_code(code: u8) -> Result<Self, AuthorityErrorV1> {
+    /// Decode one stable AUD1 outcome code.
+    ///
+    /// # Errors
+    /// Returns [`AuthorityErrorV1::UnknownEnum`] for an unknown code.
+    pub const fn from_code(code: u8) -> Result<Self, AuthorityErrorV1> {
         match code {
             0 => Ok(Self::Active),
-            1 => Ok(Self::AuthenticationExpired),
-            2 => Ok(Self::PrincipalMismatch),
-            3 => Ok(Self::ConsentMissing),
-            4 => Ok(Self::ConsentRevokedAtFence),
-            5 => Ok(Self::ConsentExpired),
-            6 => Ok(Self::CapabilityMissing),
-            7 => Ok(Self::ScopeMismatch),
-            8 => Ok(Self::DelegationInvalid),
-            9 => Ok(Self::ParentInvalid),
-            10 => Ok(Self::Expired),
-            11 => Ok(Self::RevokedAtFence),
-            12 => Ok(Self::RevocationStateStale),
-            13 => Ok(Self::IndeterminateFailClosed),
+            1 => Ok(Self::RevokedAtFence),
+            2 => Ok(Self::Expired),
+            3 => Ok(Self::ParentInvalid),
+            4 => Ok(Self::ConsentMissing),
+            5 => Ok(Self::RevocationStateStale),
+            6 => Ok(Self::IndeterminateFailClosed),
             _ => Err(AuthorityErrorV1::UnknownEnum),
         }
     }
@@ -1192,6 +1290,7 @@ pub struct AuthorizationDecisionV1 {
     at_position: Seq,
     authority_registry_digest: Hash,
     outcome: AuthorizationOutcomeV1,
+    error: Option<AuthorityErrorV1>,
     request_digest: Hash,
     decision_digest: Hash,
 }
@@ -1258,6 +1357,10 @@ impl AuthorizationDecisionV1 {
         self.outcome
     }
     #[must_use]
+    pub const fn error(&self) -> Option<AuthorityErrorV1> {
+        self.error
+    }
+    #[must_use]
     pub const fn request_digest(&self) -> Hash {
         self.request_digest
     }
@@ -1280,10 +1383,15 @@ impl AuthorizationDecisionV1 {
 
     /// Decode and validate an exact deterministic-CBOR authorization decision.
     ///
+    /// Decoding establishes structural and digest integrity only. A caller must
+    /// obtain authoritative decisions from its trusted host boundary; decoded
+    /// plugin or transport input does not become authoritative by parsing it.
+    ///
     /// # Errors
     /// Returns a closed validation, digest, or codec error for malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, AuthorityErrorV1> {
-        decode_array(bytes.as_slice(), 19).and_then(|fields| decode_decision(&fields))
+        decode_bounded_array(bytes.as_slice(), MAX_DECISION_RECORD_BYTES, 20)
+            .and_then(|fields| decode_decision(&fields))
     }
 }
 
@@ -1297,17 +1405,28 @@ impl AuthorityEvaluatorV1 {
     #[must_use]
     pub fn authorize(
         request: &AuthorizationRequestV1,
-        grant_chain: &[CapabilityGrantV1],
+        grant_chain: &DelegationChainV1,
         trusted_registry: &AuthorityRegistrySnapshotV1,
     ) -> AuthorizationDecisionV1 {
-        let outcome = authorization_outcome(request, grant_chain, trusted_registry);
-        let grant_id = grant_chain.last().map(CapabilityGrantV1::grant_id);
+        let evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
-        let originating_principal = grant_chain.first().map(|grant| grant.grantor.clone());
-        let acting_delegates = grant_chain
-            .iter()
-            .map(|grant| grant.grantee.principal().clone())
-            .collect();
+        let (originating_principal, acting_delegates, grant_id) =
+            if evaluation.grant_evidence_is_trusted {
+                (
+                    grant_chain
+                        .grants
+                        .first()
+                        .map(|grant| grant.grantor.clone()),
+                    grant_chain
+                        .grants
+                        .iter()
+                        .map(|grant| grant.grantee.principal().clone())
+                        .collect(),
+                    grant_chain.grants.last().map(CapabilityGrantV1::grant_id),
+                )
+            } else {
+                (None, Vec::new(), None)
+            };
         let mut decision = AuthorizationDecisionV1 {
             principal: request.authenticated.principal.clone(),
             principal_role: request.principal_role,
@@ -1323,7 +1442,8 @@ impl AuthorityEvaluatorV1 {
             authority_timeline: request.authority_timeline,
             at_position: request.at_position,
             authority_registry_digest: request.authority_registry_digest,
-            outcome,
+            outcome: evaluation.outcome,
+            error: evaluation.error,
             request_digest,
             decision_digest: Hash::zero(),
         };
@@ -1332,28 +1452,85 @@ impl AuthorityEvaluatorV1 {
     }
 }
 
-fn authorization_outcome(
+#[derive(Clone, Copy)]
+struct AuthorizationEvaluationV1 {
+    outcome: AuthorizationOutcomeV1,
+    error: Option<AuthorityErrorV1>,
+    grant_evidence_is_trusted: bool,
+}
+
+impl AuthorizationEvaluationV1 {
+    const fn active() -> Self {
+        Self {
+            outcome: AuthorizationOutcomeV1::Active,
+            error: None,
+            grant_evidence_is_trusted: true,
+        }
+    }
+
+    const fn denied(outcome: AuthorizationOutcomeV1, error: Option<AuthorityErrorV1>) -> Self {
+        Self {
+            outcome,
+            error,
+            grant_evidence_is_trusted: false,
+        }
+    }
+
+    const fn denied_with_trusted_grant(
+        outcome: AuthorizationOutcomeV1,
+        error: Option<AuthorityErrorV1>,
+    ) -> Self {
+        Self {
+            outcome,
+            error,
+            grant_evidence_is_trusted: true,
+        }
+    }
+}
+
+fn authorization_evaluation(
     request: &AuthorizationRequestV1,
-    grant_chain: &[CapabilityGrantV1],
+    grant_chain: &DelegationChainV1,
     trusted_registry: &AuthorityRegistrySnapshotV1,
-) -> AuthorizationOutcomeV1 {
+) -> AuthorizationEvaluationV1 {
     if request.at_time < request.authenticated.issued_at
         || request.at_time >= request.authenticated.expires_at
     {
-        return AuthorizationOutcomeV1::AuthenticationExpired;
+        return AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None);
     }
-    if !trusted_registry.trusts_request(request, grant_chain) {
-        return AuthorizationOutcomeV1::IndeterminateFailClosed;
+    if !trusted_registry.trusts_authentication(request) {
+        return AuthorizationEvaluationV1::denied(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::PrincipalUnresolved),
+        );
     }
-    let consent_outcome = evaluate_consent(request);
-    if consent_outcome != AuthorizationOutcomeV1::Active {
-        return consent_outcome;
+    let consent_evaluation = evaluate_consent(request);
+    if consent_evaluation.outcome != AuthorizationOutcomeV1::Active {
+        return consent_evaluation;
     }
-    let Some(leaf) = grant_chain.last() else {
-        return AuthorizationOutcomeV1::CapabilityMissing;
+    if !trusted_registry.trusts_consent(request) {
+        return AuthorizationEvaluationV1::denied(
+            AuthorizationOutcomeV1::ConsentMissing,
+            Some(AuthorityErrorV1::ConsentMissing),
+        );
+    }
+    let Some(leaf) = grant_chain.grants.last() else {
+        return AuthorizationEvaluationV1::denied(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::CapabilityMissing),
+        );
     };
+    if !trusted_registry.trusts_capabilities(grant_chain) {
+        return AuthorizationEvaluationV1::denied(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::CapabilityMissing),
+        );
+    }
     if leaf.grantee.principal() != request.authenticated.principal() {
-        return AuthorizationOutcomeV1::PrincipalMismatch;
+        return AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::PrincipalUnresolved),
+        );
     }
     let grantee_context_matches = match &leaf.grantee {
         AuthorityGranteeV1::Principal(_) => {
@@ -1370,61 +1547,95 @@ fn authorization_outcome(
         }
     };
     if !grantee_context_matches {
-        return AuthorizationOutcomeV1::ScopeMismatch;
+        return AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::CapabilityMissing),
+        );
     }
     if !leaf.scope.permits(request) {
-        return AuthorizationOutcomeV1::ScopeMismatch;
+        return AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::CapabilityMissing),
+        );
     }
     match validate_delegation_chain(request, grant_chain) {
         ChainValidity::Valid => {}
-        ChainValidity::DelegationInvalid => {
-            return AuthorizationOutcomeV1::DelegationInvalid;
+        ChainValidity::ParentInvalid => {
+            return AuthorizationEvaluationV1::denied_with_trusted_grant(
+                AuthorizationOutcomeV1::ParentInvalid,
+                Some(AuthorityErrorV1::DelegationInvalid),
+            );
         }
-        ChainValidity::ParentInvalid => return AuthorizationOutcomeV1::ParentInvalid,
     }
     if !request.revocation_state_current {
-        return AuthorizationOutcomeV1::RevocationStateStale;
+        return AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::RevocationStateStale,
+            Some(AuthorityErrorV1::RevocationStateStale),
+        );
     }
     let timeline_is_current = request.authority_timeline == leaf.issuance_timeline;
     let revocation_epoch_is_current = request.revocation_epoch == leaf.revocation_epoch;
     let policy_is_current = request.policy_revision == leaf.policy_revision;
     if !timeline_is_current || !revocation_epoch_is_current || !policy_is_current {
-        return AuthorizationOutcomeV1::IndeterminateFailClosed;
+        return AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::PolicyIndeterminate),
+        );
     }
     match validate_temporal_chain(request, grant_chain) {
-        TemporalValidity::Valid => AuthorizationOutcomeV1::Active,
-        TemporalValidity::Expired => AuthorizationOutcomeV1::Expired,
-        TemporalValidity::RevokedAtFence => AuthorizationOutcomeV1::RevokedAtFence,
+        TemporalValidity::Valid => AuthorizationEvaluationV1::active(),
+        TemporalValidity::Expired => AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::Expired,
+            None,
+        ),
+        TemporalValidity::RevokedAtFence => AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::RevokedAtFence,
+            Some(AuthorityErrorV1::RevokedAtFence),
+        ),
+        TemporalValidity::ParentInvalid => AuthorizationEvaluationV1::denied_with_trusted_grant(
+            AuthorizationOutcomeV1::ParentInvalid,
+            Some(AuthorityErrorV1::DelegationInvalid),
+        ),
     }
 }
 
-fn evaluate_consent(request: &AuthorizationRequestV1) -> AuthorizationOutcomeV1 {
+fn evaluate_consent(request: &AuthorizationRequestV1) -> AuthorizationEvaluationV1 {
     if request.subject_id.is_none() {
         return match &request.consent {
-            ConsentEvidenceV1::NotRequired => AuthorizationOutcomeV1::Active,
-            ConsentEvidenceV1::Indeterminate => AuthorizationOutcomeV1::IndeterminateFailClosed,
-            _ => AuthorizationOutcomeV1::ConsentMissing,
+            ConsentEvidenceV1::NotRequired => AuthorizationEvaluationV1::active(),
+            ConsentEvidenceV1::Indeterminate => AuthorizationEvaluationV1::denied(
+                AuthorizationOutcomeV1::IndeterminateFailClosed,
+                Some(AuthorityErrorV1::PolicyIndeterminate),
+            ),
+            _ => AuthorizationEvaluationV1::denied(
+                AuthorizationOutcomeV1::ConsentMissing,
+                Some(AuthorityErrorV1::ConsentMissing),
+            ),
         };
     }
     match &request.consent {
-        ConsentEvidenceV1::Active { grants } => grants
+        ConsentEvidenceV1::Resolved { grants } => grants
             .iter()
             .map(|grant| evaluate_consent_grant(request, grant))
-            .find(|outcome| *outcome != AuthorizationOutcomeV1::Active)
-            .unwrap_or(AuthorizationOutcomeV1::Active),
+            .find(|evaluation| evaluation.outcome != AuthorizationOutcomeV1::Active)
+            .unwrap_or_else(AuthorizationEvaluationV1::active),
         ConsentEvidenceV1::Missing | ConsentEvidenceV1::NotRequired => {
-            AuthorizationOutcomeV1::ConsentMissing
+            AuthorizationEvaluationV1::denied(
+                AuthorizationOutcomeV1::ConsentMissing,
+                Some(AuthorityErrorV1::ConsentMissing),
+            )
         }
-        ConsentEvidenceV1::RevokedAtFence => AuthorizationOutcomeV1::ConsentRevokedAtFence,
-        ConsentEvidenceV1::Expired => AuthorizationOutcomeV1::ConsentExpired,
-        ConsentEvidenceV1::Indeterminate => AuthorizationOutcomeV1::IndeterminateFailClosed,
+        ConsentEvidenceV1::Indeterminate => AuthorizationEvaluationV1::denied(
+            AuthorizationOutcomeV1::IndeterminateFailClosed,
+            Some(AuthorityErrorV1::PolicyIndeterminate),
+        ),
     }
 }
 
 fn evaluate_consent_grant(
     request: &AuthorizationRequestV1,
     grant: &ConsentGrantRefV1,
-) -> AuthorizationOutcomeV1 {
+) -> AuthorizationEvaluationV1 {
     let matches_request = Some(grant.subject_id) == request.subject_id
         && grant
             .data_categories
@@ -1436,23 +1647,32 @@ fn evaluate_consent_grant(
         && grant.policy_revision == request.policy_revision
         && grant.authority_registry_digest == request.authority_registry_digest;
     if !matches_request {
-        AuthorizationOutcomeV1::ConsentMissing
-    } else if request.at_time < grant.valid_from || request.at_time >= grant.valid_until {
-        AuthorizationOutcomeV1::ConsentExpired
-    } else if grant
-        .revocation_fence
-        .is_some_and(|fence| request.at_position >= fence)
+        AuthorizationEvaluationV1::denied(
+            AuthorizationOutcomeV1::ConsentMissing,
+            Some(AuthorityErrorV1::ConsentMissing),
+        )
+    } else if grant.status == ConsentGrantStatusV1::Expired
+        || request.at_time < grant.valid_from
+        || request.at_time >= grant.valid_until
     {
-        AuthorizationOutcomeV1::ConsentRevokedAtFence
+        AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None)
+    } else if grant.status == ConsentGrantStatusV1::RevokedAtFence
+        || grant
+            .revocation_fence
+            .is_some_and(|fence| request.at_position >= fence)
+    {
+        AuthorizationEvaluationV1::denied(
+            AuthorizationOutcomeV1::RevokedAtFence,
+            Some(AuthorityErrorV1::RevokedAtFence),
+        )
     } else {
-        AuthorizationOutcomeV1::Active
+        AuthorizationEvaluationV1::active()
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChainValidity {
     Valid,
-    DelegationInvalid,
     ParentInvalid,
 }
 
@@ -1461,20 +1681,42 @@ enum TemporalValidity {
     Valid,
     Expired,
     RevokedAtFence,
+    ParentInvalid,
+}
+
+fn validate_chain_structure(chain: &[CapabilityGrantV1]) -> Result<(), AuthorityErrorV1> {
+    if chain.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1 {
+        return Err(AuthorityErrorV1::FieldOutOfBounds);
+    }
+    let mut seen_grants = Vec::with_capacity(chain.len());
+    let mut seen_delegates = Vec::with_capacity(chain.len());
+    let mut previous: Option<&CapabilityGrantV1> = None;
+    for grant in chain {
+        if seen_grants.contains(&grant.grant_id)
+            || seen_delegates.contains(grant.grantee.principal())
+        {
+            return Err(AuthorityErrorV1::DuplicateIdentity);
+        }
+        seen_grants.push(grant.grant_id);
+        seen_delegates.push(grant.grantee.principal().clone());
+        if let Some(parent) = previous {
+            if !valid_child(parent, grant) {
+                return Err(AuthorityErrorV1::DelegationInvalid);
+            }
+        } else if grant.parent_grant_id.is_some() || grant.delegation_depth != 0 {
+            return Err(AuthorityErrorV1::DelegationInvalid);
+        }
+        previous = Some(grant);
+    }
+    Ok(())
 }
 
 fn validate_delegation_chain(
     request: &AuthorizationRequestV1,
-    chain: &[CapabilityGrantV1],
+    chain: &DelegationChainV1,
 ) -> ChainValidity {
-    let mut previous: Option<&CapabilityGrantV1> = None;
-    let mut seen_grants = Vec::with_capacity(chain.len());
-    for (index, grant) in chain.iter().enumerate() {
-        if seen_grants.contains(&grant.grant_id) {
-            return ChainValidity::DelegationInvalid;
-        }
-        seen_grants.push(grant.grant_id);
-        let is_leaf = index + 1 == chain.len();
+    for (index, grant) in chain.grants.iter().enumerate() {
+        let is_leaf = index + 1 == chain.grants.len();
         let parent_timeline_is_current = grant.issuance_timeline == request.authority_timeline;
         let parent_policy_is_current = grant.policy_revision == request.policy_revision;
         let parent_revocation_is_current = grant.revocation_epoch == request.revocation_epoch;
@@ -1485,36 +1727,37 @@ fn validate_delegation_chain(
         {
             return ChainValidity::ParentInvalid;
         }
-        if let Some(parent) = previous {
-            if !valid_child(parent, grant) {
-                return ChainValidity::DelegationInvalid;
-            }
-        } else if grant.parent_grant_id.is_some() || grant.delegation_depth != 0 {
-            return ChainValidity::ParentInvalid;
-        }
         if request.subject_id.is_some() && !grant_covers_consent(grant, &request.consent) {
             return ChainValidity::ParentInvalid;
         }
-        previous = Some(grant);
     }
     ChainValidity::Valid
 }
 
 fn validate_temporal_chain(
     request: &AuthorizationRequestV1,
-    chain: &[CapabilityGrantV1],
+    chain: &DelegationChainV1,
 ) -> TemporalValidity {
-    for grant in chain {
+    for (index, grant) in chain.grants.iter().enumerate() {
+        let is_leaf = index + 1 == chain.grants.len();
         if request.at_position < grant.valid_from_position
             || request.at_position >= grant.valid_until_position
         {
-            return TemporalValidity::Expired;
+            return if is_leaf {
+                TemporalValidity::Expired
+            } else {
+                TemporalValidity::ParentInvalid
+            };
         }
         if grant
             .revocation_fence
             .is_some_and(|fence| request.at_position >= fence)
         {
-            return TemporalValidity::RevokedAtFence;
+            return if is_leaf {
+                TemporalValidity::RevokedAtFence
+            } else {
+                TemporalValidity::ParentInvalid
+            };
         }
     }
     TemporalValidity::Valid
@@ -1532,12 +1775,19 @@ fn valid_child(parent: &CapabilityGrantV1, child: &CapabilityGrantV1) -> bool {
         .permitted_delegate_classes
         .binary_search(&DelegateClassV1::Principal)
         .is_ok();
+    let issuance_is_ordered = child.issuance_timeline == parent.issuance_timeline
+        && child.issuance_seq > parent.issuance_seq
+        && child.issuance_seq >= parent.valid_from_position
+        && parent
+            .revocation_fence
+            .is_none_or(|fence| child.issuance_seq < fence);
     child.parent_grant_id == Some(parent.grant_id)
         && depth_is_next
         && depth_is_bounded
         && descendants_are_bounded
         && grantor_is_delegate
         && delegate_class_is_permitted
+        && issuance_is_ordered
         && parent
             .scope
             .actions
@@ -1551,7 +1801,7 @@ fn valid_child(parent: &CapabilityGrantV1, child: &CapabilityGrantV1) -> bool {
 
 fn grant_covers_consent(grant: &CapabilityGrantV1, evidence: &ConsentEvidenceV1) -> bool {
     match evidence {
-        ConsentEvidenceV1::Active { grants } => {
+        ConsentEvidenceV1::Resolved { grants } => {
             grant.consent_references.len() == grants.len()
                 && grants
                     .iter()
@@ -1646,7 +1896,7 @@ fn validate_required_hash_set(values: &[Hash]) -> Result<(), AuthorityErrorV1> {
 
 fn validate_consent_evidence(value: &ConsentEvidenceV1) -> Result<(), AuthorityErrorV1> {
     match value {
-        ConsentEvidenceV1::Active { grants } => {
+        ConsentEvidenceV1::Resolved { grants } => {
             if grants.is_empty() || grants.len() > MAX_AUTHORITY_SCOPE_MEMBERS {
                 return Err(AuthorityErrorV1::FieldOutOfBounds);
             }
@@ -1660,6 +1910,17 @@ fn validate_consent_evidence(value: &ConsentEvidenceV1) -> Result<(), AuthorityE
             }
         }
         _ => Ok(()),
+    }
+}
+
+const fn validate_consent_status(
+    status: ConsentGrantStatusV1,
+    revocation_fence: Option<Seq>,
+) -> Result<(), AuthorityErrorV1> {
+    if matches!(status, ConsentGrantStatusV1::RevokedAtFence) && revocation_fence.is_none() {
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    } else {
+        Ok(())
     }
 }
 
@@ -1800,6 +2061,7 @@ fn request_digest(request: &AuthorizationRequestV1) -> Hash {
     hasher.update(&[u8::from(request.revocation_state_current)]);
     hasher.update(request.authority_registry_digest.as_bytes());
     digest_consent(&mut hasher, &request.consent);
+    hasher.update(&(request.environment_constraints.len() as u64).to_be_bytes());
     for constraint in &request.environment_constraints {
         digest_part(&mut hasher, constraint.as_bytes());
     }
@@ -1818,6 +2080,7 @@ fn decision_digest(decision: &AuthorizationDecisionV1) -> Hash {
     digest_optional_fixed(&mut hasher, decision.plugin_id.map(plugin_bytes));
     digest_optional_fixed(&mut hasher, decision.installation_id);
     digest_optional_principal(&mut hasher, decision.originating_principal.as_ref());
+    hasher.update(&(decision.acting_delegates.len() as u64).to_be_bytes());
     for delegate in &decision.acting_delegates {
         digest_principal(&mut hasher, delegate);
     }
@@ -1827,7 +2090,15 @@ fn decision_digest(decision: &AuthorizationDecisionV1) -> Hash {
     hasher.update(&decision.at_position.as_u64().to_be_bytes());
     hasher.update(decision.authority_registry_digest.as_bytes());
     hasher.update(&[decision.outcome.code()]);
+    digest_optional_error(&mut hasher, decision.error);
     hasher.update(decision.request_digest.as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn authenticated_registry_binding_digest(value: &AuthenticatedPrincipalResultV1) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.AuthenticatedPrincipalResult.registry.v1\0");
+    digest_authenticated(&mut hasher, value);
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -1880,12 +2151,23 @@ fn digest_optional_principal(hasher: &mut blake3::Hasher, value: Option<&Princip
     }
 }
 
+fn digest_optional_error(hasher: &mut blake3::Hasher, value: Option<AuthorityErrorV1>) {
+    match value {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(error) => {
+            hasher.update(&[1, error.code()]);
+        }
+    }
+}
+
 fn digest_consent(hasher: &mut blake3::Hasher, consent: &ConsentEvidenceV1) {
     match consent {
         ConsentEvidenceV1::NotRequired => {
             hasher.update(&[0]);
         }
-        ConsentEvidenceV1::Active { grants } => {
+        ConsentEvidenceV1::Resolved { grants } => {
             hasher.update(&[1]);
             hasher.update(&(grants.len() as u64).to_be_bytes());
             for grant in grants {
@@ -1895,14 +2177,8 @@ fn digest_consent(hasher: &mut blake3::Hasher, consent: &ConsentEvidenceV1) {
         ConsentEvidenceV1::Missing => {
             hasher.update(&[2]);
         }
-        ConsentEvidenceV1::RevokedAtFence => {
-            hasher.update(&[3]);
-        }
-        ConsentEvidenceV1::Expired => {
-            hasher.update(&[4]);
-        }
         ConsentEvidenceV1::Indeterminate => {
-            hasher.update(&[5]);
+            hasher.update(&[3]);
         }
     }
 }
@@ -1927,6 +2203,7 @@ fn digest_consent_grant(hasher: &mut blake3::Hasher, grant: &ConsentGrantRefV1) 
     hasher.update(grant.policy_revision.as_bytes());
     digest_principal(hasher, &grant.issuer);
     hasher.update(grant.issuer_evidence.as_bytes());
+    hasher.update(&[consent_status_code(grant.status)]);
     digest_optional_fixed(
         hasher,
         grant
@@ -1986,6 +2263,18 @@ fn decode_array(bytes: &[u8], expected_len: usize) -> Result<Vec<Value>, Authori
         })
 }
 
+fn decode_bounded_array(
+    bytes: &[u8],
+    max_bytes: usize,
+    expected_len: usize,
+) -> Result<Vec<Value>, AuthorityErrorV1> {
+    if bytes.len() > max_bytes {
+        Err(AuthorityErrorV1::FieldOutOfBounds)
+    } else {
+        decode_array(bytes, expected_len)
+    }
+}
+
 fn expect_header(fields: &[Value], magic: [u8; 4]) -> Result<(), AuthorityErrorV1> {
     match &fields[0] {
         Value::Bytes(value) if value.as_slice() == magic => {
@@ -2032,6 +2321,10 @@ fn optional_principal_value(value: Option<&PrincipalRefV1>) -> Value {
     value.map_or(Value::Null, encode_principal)
 }
 
+fn optional_error_value(value: Option<AuthorityErrorV1>) -> Value {
+    value.map_or(Value::Null, |error| uint(error.code()))
+}
+
 const fn role_code(value: AuthorityRoleV1) -> u8 {
     match value {
         AuthorityRoleV1::Actor => 0,
@@ -2043,6 +2336,14 @@ const fn role_code(value: AuthorityRoleV1) -> u8 {
 const fn delegate_class_code(value: DelegateClassV1) -> u8 {
     match value {
         DelegateClassV1::Principal => 0,
+    }
+}
+
+const fn consent_status_code(value: ConsentGrantStatusV1) -> u8 {
+    match value {
+        ConsentGrantStatusV1::Active => 0,
+        ConsentGrantStatusV1::RevokedAtFence => 1,
+        ConsentGrantStatusV1::Expired => 2,
     }
 }
 
@@ -2196,6 +2497,7 @@ fn encode_grant(value: &CapabilityGrantV1) -> Value {
         hash_value(value.grant_id),
         encode_principal(&value.grantor),
         encode_grantee(&value.grantee),
+        text(&value.trust_domain),
         encode_scope(&value.scope),
         uint(value.valid_from_position.as_u64()),
         uint(value.valid_until_position.as_u64()),
@@ -2219,20 +2521,21 @@ fn decode_grant(fields: &[Value]) -> Result<CapabilityGrantV1, AuthorityErrorV1>
         grant_id: decode_hash(&fields[2])?,
         grantor: decode_principal_value(&fields[3])?,
         grantee: decode_grantee(&fields[4])?,
-        scope: decode_scope(&fields[5])?,
-        valid_from_position: Seq::from_u64(decode_u64(&fields[6])?),
-        valid_until_position: Seq::from_u64(decode_u64(&fields[7])?),
-        parent_grant_id: decode_optional_hash(&fields[8])?,
-        delegation_depth: decode_u8(&fields[9])?,
-        max_delegation_depth: decode_u8(&fields[10])?,
-        permitted_delegate_classes: decode_delegate_class_set(&fields[11])?,
-        consent_references: decode_hash_set(&fields[12])?,
-        policy_revision: decode_hash(&fields[13])?,
-        issuance_timeline: decode_timeline(&fields[14])?,
-        issuance_seq: Seq::from_u64(decode_u64(&fields[15])?),
-        revocation_epoch: decode_u64(&fields[16])?,
-        revocation_fence: decode_optional_seq(&fields[17])?,
-        authority_registry_digest: decode_hash(&fields[18])?,
+        trust_domain: decode_text(&fields[5])?,
+        scope: decode_scope(&fields[6])?,
+        valid_from_position: Seq::from_u64(decode_u64(&fields[7])?),
+        valid_until_position: Seq::from_u64(decode_u64(&fields[8])?),
+        parent_grant_id: decode_optional_hash(&fields[9])?,
+        delegation_depth: decode_u8(&fields[10])?,
+        max_delegation_depth: decode_u8(&fields[11])?,
+        permitted_delegate_classes: decode_delegate_class_set(&fields[12])?,
+        consent_references: decode_hash_set(&fields[13])?,
+        policy_revision: decode_hash(&fields[14])?,
+        issuance_timeline: decode_timeline(&fields[15])?,
+        issuance_seq: Seq::from_u64(decode_u64(&fields[16])?),
+        revocation_epoch: decode_u64(&fields[17])?,
+        revocation_fence: decode_optional_seq(&fields[18])?,
+        authority_registry_digest: decode_hash(&fields[19])?,
     })
 }
 
@@ -2255,6 +2558,7 @@ fn encode_decision(value: &AuthorizationDecisionV1) -> Value {
         uint(value.at_position.as_u64()),
         hash_value(value.authority_registry_digest),
         uint(value.outcome.code()),
+        optional_error_value(value.error),
         hash_value(value.request_digest),
         hash_value(value.decision_digest),
     ])
@@ -2283,8 +2587,9 @@ fn decode_decision_fields(fields: &[Value]) -> Result<AuthorizationDecisionV1, A
         at_position: Seq::from_u64(decode_u64(&fields[14])?),
         authority_registry_digest: decode_hash(&fields[15])?,
         outcome: AuthorizationOutcomeV1::from_code(decode_u8(&fields[16])?)?,
-        request_digest: decode_hash(&fields[17])?,
-        decision_digest: decode_hash(&fields[18])?,
+        error: decode_optional_error(&fields[17])?,
+        request_digest: decode_hash(&fields[18])?,
+        decision_digest: decode_hash(&fields[19])?,
     })
 }
 
@@ -2302,6 +2607,7 @@ fn validate_decision(
         .and_then(|()| validate_optional_entity_id(decoded.participant_id))
         .and_then(|()| validate_optional_plugin_id(decoded.plugin_id))
         .and_then(|()| validate_plugin_context(decoded.plugin_id, decoded.installation_id))
+        .and_then(|()| validate_decision_evidence(&decoded))
         .and_then(|()| {
             if decoded.acting_delegates.len() > usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1 {
                 Err(AuthorityErrorV1::FieldOutOfBounds)
@@ -2311,6 +2617,61 @@ fn validate_decision(
                 Err(AuthorityErrorV1::DigestMismatch)
             }
         })
+}
+
+fn validate_decision_evidence(decision: &AuthorizationDecisionV1) -> Result<(), AuthorityErrorV1> {
+    if decision
+        .acting_delegates
+        .iter()
+        .enumerate()
+        .any(|(index, principal)| decision.acting_delegates[..index].contains(principal))
+    {
+        return Err(AuthorityErrorV1::DuplicateIdentity);
+    }
+    let complete_grant_evidence = match decision.grant_id {
+        Some(_) => {
+            decision.originating_principal.is_some() && !decision.acting_delegates.is_empty()
+        }
+        None => decision.originating_principal.is_none() && decision.acting_delegates.is_empty(),
+    };
+    let active_is_complete = decision.outcome != AuthorizationOutcomeV1::Active
+        || (decision.grant_id.is_some()
+            && decision.acting_delegates.last() == Some(&decision.principal));
+    let outcome_matches_error = match decision.outcome {
+        AuthorizationOutcomeV1::Active | AuthorizationOutcomeV1::Expired => {
+            decision.error.is_none()
+        }
+        AuthorizationOutcomeV1::RevokedAtFence => {
+            decision.error == Some(AuthorityErrorV1::RevokedAtFence)
+        }
+        AuthorizationOutcomeV1::ParentInvalid => {
+            decision.error == Some(AuthorityErrorV1::DelegationInvalid)
+        }
+        AuthorizationOutcomeV1::ConsentMissing => {
+            decision.error == Some(AuthorityErrorV1::ConsentMissing)
+        }
+        AuthorizationOutcomeV1::RevocationStateStale => {
+            decision.error == Some(AuthorityErrorV1::RevocationStateStale)
+        }
+        AuthorizationOutcomeV1::IndeterminateFailClosed => matches!(
+            decision.error,
+            Some(
+                AuthorityErrorV1::PrincipalUnresolved
+                    | AuthorityErrorV1::CapabilityMissing
+                    | AuthorityErrorV1::PolicyIndeterminate
+                    | AuthorityErrorV1::SourceUnavailable
+                    | AuthorityErrorV1::UnauthorizedSource
+                    | AuthorityErrorV1::ProvenanceMissing
+                    | AuthorityErrorV1::BudgetExceeded
+                    | AuthorityErrorV1::NonInterferenceDivergence
+            )
+        ),
+    };
+    if complete_grant_evidence && active_is_complete && outcome_matches_error {
+        Ok(())
+    } else {
+        Err(AuthorityErrorV1::ProvenanceMissing)
+    }
 }
 
 fn decode_text(value: &Value) -> Result<String, AuthorityErrorV1> {
@@ -2394,6 +2755,15 @@ fn decode_optional_principal(value: &Value) -> Result<Option<PrincipalRefV1>, Au
     match value {
         Value::Null => Ok(None),
         _ => decode_principal_value(value).map(Some),
+    }
+}
+
+fn decode_optional_error(value: &Value) -> Result<Option<AuthorityErrorV1>, AuthorityErrorV1> {
+    match value {
+        Value::Null => Ok(None),
+        _ => decode_u8(value)
+            .and_then(AuthorityErrorV1::from_code)
+            .map(Some),
     }
 }
 fn decode_role(value: &Value) -> Result<AuthorityRoleV1, AuthorityErrorV1> {

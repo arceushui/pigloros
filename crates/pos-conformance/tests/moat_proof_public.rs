@@ -219,14 +219,18 @@ fn public_evidence_fixture() -> MoatProofEvidenceV1 {
     }
 }
 
-fn authorization_fixtures() -> (PrincipalRefV1, CapabilityGrantV1, AuthorizationDecisionV1) {
-    let principal = PrincipalRefV1 {
+fn authorization_fixtures() -> (
+    FixturePrincipalRefV1,
+    FixtureCapabilityGrantV1,
+    FixtureAuthorizationDecisionV1,
+) {
+    let principal = FixturePrincipalRefV1 {
         principal_id: "principal:operator".to_owned(),
         participant_id: "operator".to_owned(),
         subject_id: None,
         trust_domain: "test".to_owned(),
     };
-    let grant = CapabilityGrantV1 {
+    let grant = FixtureCapabilityGrantV1 {
         grant_id: "grant:operator".to_owned(),
         principal_id: principal.principal_id.clone(),
         capability: "observe".to_owned(),
@@ -234,7 +238,7 @@ fn authorization_fixtures() -> (PrincipalRefV1, CapabilityGrantV1, Authorization
         consent_epoch: 0,
         policy_digest: [3; 32],
     };
-    let decision = AuthorizationDecisionV1 {
+    let decision = FixtureAuthorizationDecisionV1 {
         principal_id: principal.principal_id.clone(),
         resource: "room".to_owned(),
         operation: "observe".to_owned(),
