@@ -172,8 +172,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if request.provenance() != correction.reference() {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if self.recover(request.reference())?.is_some() {
-            return Err(ErasureErrorV1::PolicyConflict);
+        match self.recover(request.reference())? {
+            Some(record)
+                if record.request == request
+                    && record.correction.as_ref() == Some(&correction) =>
+            {
+                let state = record.state.clone();
+                self.cache(record);
+                return Ok(state);
+            }
+            Some(_) => return Err(ErasureErrorV1::PolicyConflict),
+            None => {}
         }
         let predecessor = self
             .recover(correction.rejected_request())?
@@ -437,6 +446,59 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .collect()
     }
 
+    fn effective_acknowledgements(
+        record: &RecoveredErasureV1,
+    ) -> Result<Vec<ErasureAcknowledgementV1>, ErasureErrorV1> {
+        record
+            .effective
+            .values()
+            .map(|value| {
+                let target = record
+                    .obligations
+                    .iter()
+                    .find(|obligation| obligation.reference() == value.obligation())
+                    .map(super::ErasureObligationV1::target)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+                Ok(ErasureAcknowledgementV1 {
+                    target,
+                    obligation: value.obligation(),
+                    owner: value.owner(),
+                    evidence: value.evidence(),
+                    outcome: value.outcome(),
+                })
+            })
+            .collect()
+    }
+
+    fn normalize_terminal_input(
+        &self,
+        record: &RecoveredErasureV1,
+        mut input: ErasureReceiptInputV1,
+        policy: ErasureReferenceV1,
+        trust: ErasureReferenceV1,
+        provenance: ErasureReferenceV1,
+    ) -> Result<ErasureReceiptInputV1, ErasureErrorV1> {
+        input.request = record.request.reference();
+        input.coordinator = self.coordinator;
+        input.terminal_state = record.state.state_digest();
+        input.lifecycle = record.state.lifecycle();
+        input.freeze_position = record
+            .state
+            .freeze_position()
+            .ok_or(ErasureErrorV1::PolicyConflict)?;
+        input.frozen_targets.clone_from(&record.targets);
+        input.acknowledgements = Self::effective_acknowledgements(record)?;
+        input.pending_owners = record.state.pending_owners().to_vec();
+        input.failed_owners = record.state.failed_owners().to_vec();
+        sort_inventories(&mut input.inventories);
+        input.replay_claim = weakest_inventory_claim(&input.inventories);
+        input.policy = policy;
+        input.trust = trust;
+        input.provenance = provenance;
+        input.receipt_digest = reference_zero();
+        Ok(input)
+    }
+
     /// Admit and atomically persist one destruction attempt.
     ///
     /// # Errors
@@ -623,6 +685,27 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         mut input: ErasureReceiptInputV1,
     ) -> Result<ErasureReceiptV1, ErasureErrorV1> {
         let mut record = self.record(request)?;
+        if record.active.is_none() {
+            let reference = record
+                .latest_receipt
+                .ok_or(ErasureErrorV1::PolicyConflict)?;
+            let stored = ErasureReceiptV1::from_canonical_cbor(&self.port.read_object(reference)?)?;
+            if stored.receipt_digest() != reference {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            let normalized = self.normalize_terminal_input(
+                &record,
+                input,
+                stored.policy(),
+                stored.trust(),
+                stored.provenance(),
+            )?;
+            let candidate = ErasureReceiptV1::new(normalized)?;
+            candidate.validate_frozen_obligations(&record.obligations)?;
+            return (candidate == stored)
+                .then_some(stored)
+                .ok_or(ErasureErrorV1::PolicyConflict);
+        }
         if !matches!(
             record.state.lifecycle(),
             ErasureLifecycleV1::AwaitingAcknowledgements | ErasureLifecycleV1::PartialFailure
@@ -638,25 +721,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         if !inventories_match_frozen_obligations(&input.inventories, &record.obligations) {
             return Err(ErasureErrorV1::ScopeInvalid);
         }
-        let acknowledgements = record
-            .effective
-            .values()
-            .map(|value| {
-                let target = record
-                    .obligations
-                    .iter()
-                    .find(|obligation| obligation.reference() == value.obligation())
-                    .map(super::ErasureObligationV1::target)
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-                Ok(ErasureAcknowledgementV1 {
-                    target,
-                    obligation: value.obligation(),
-                    owner: value.owner(),
-                    evidence: value.evidence(),
-                    outcome: value.outcome(),
-                })
-            })
-            .collect::<Result<Vec<_>, ErasureErrorV1>>()?;
+        let acknowledgements = Self::effective_acknowledgements(&record)?;
         let complete =
             acknowledgements_close_frozen_obligations(&acknowledgements, &record.obligations);
         if !complete && input.issue_position < admission.deadline_position() {
