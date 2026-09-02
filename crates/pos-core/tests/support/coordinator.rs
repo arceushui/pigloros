@@ -333,6 +333,14 @@ impl PublicCoordinatorPort {
             .insert(reference, canonical_cbor);
     }
 
+    /// Insert one deliberately selected immutable state for recovery tests.
+    pub fn insert_state(&self, reference: ErasureReferenceV1, canonical_cbor: Vec<u8>) {
+        self.storage
+            .borrow_mut()
+            .states
+            .insert(reference, canonical_cbor);
+    }
+
     /// Replace one field in the single completed attempt page and re-address
     /// the page, its index entry, and the manifest history head.
     ///

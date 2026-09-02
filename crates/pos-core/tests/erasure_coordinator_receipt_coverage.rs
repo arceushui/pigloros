@@ -785,6 +785,28 @@ struct CompletedGraph {
     acknowledgement: ErasureReferenceV1,
 }
 
+struct ActiveGraph {
+    adapter: PublicCoordinatorPort,
+    request: ErasureRequestV1,
+    admission: ErasureRetryAdmissionV1,
+}
+
+fn active_persisted_graph() -> Result<ActiveGraph, ErasureErrorV1> {
+    let target = target(10);
+    let request = coordinator_request()?;
+    let port = coordinator_port(vec![target], None);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    let admission = coordinator_admission(request.reference(), target, 0, None)?;
+    coordinator.dispatch_attempt(request.reference(), &admission)?;
+    Ok(ActiveGraph {
+        adapter,
+        request,
+        admission,
+    })
+}
+
 fn complete_persisted_graph(
     lineage_rule: Option<ErasureReferenceV1>,
 ) -> Result<CompletedGraph, ErasureErrorV1> {
@@ -834,6 +856,15 @@ fn assert_graph_mutation_rejected(
     mutate: impl FnOnce(&CompletedGraph) -> Result<(), ErasureErrorV1>,
 ) -> Result<(), ErasureErrorV1> {
     let graph = complete_persisted_graph(None)?;
+    mutate(&graph)?;
+    assert_public_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+fn assert_active_graph_mutation_rejected(
+    mutate: impl FnOnce(&ActiveGraph) -> Result<(), ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    let graph = active_persisted_graph()?;
     mutate(&graph)?;
     assert_public_recovery_fails(graph.adapter, &graph.request);
     Ok(())
@@ -1212,6 +1243,30 @@ fn coordinator_recovery_rejects_wrong_type_in_every_manifest_field() -> Result<(
 }
 
 #[test]
+fn coordinator_recovery_rejects_manifest_and_state_request_mismatches() -> Result<(), ErasureErrorV1>
+{
+    assert_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            2,
+            Value::Bytes(reference(240).digest().to_vec()),
+        )
+    })?;
+
+    assert_graph_mutation_rejected(|graph| {
+        let foreign = ErasureStateV1::submitted(reference(240), COORDINATOR, reference(241))?;
+        graph
+            .adapter
+            .insert_state(foreign.state_digest(), foreign.to_canonical_cbor()?);
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            3,
+            Value::Bytes(foreign.state_digest().digest().to_vec()),
+        )
+    })
+}
+
+#[test]
 fn coordinator_recovery_rejects_each_unresolved_manifest_reference() -> Result<(), ErasureErrorV1> {
     let missing = Value::Bytes(reference(240).digest().to_vec());
     for index in [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 17, 18, 19, 20] {
@@ -1288,6 +1343,32 @@ fn coordinator_recovery_rejects_missing_attempt_graph_components() -> Result<(),
     graph.adapter.remove_object(graph.receipt.receipt_digest());
     assert_public_recovery_fails(graph.adapter, &graph.request);
     Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_active_and_completed_dispatch_mismatches(
+) -> Result<(), ErasureErrorV1> {
+    assert_active_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            14,
+            Value::Array(vec![
+                Value::Integer(1.into()),
+                Value::Bytes(graph.admission.reference().digest().to_vec()),
+                Value::Array(Vec::new()),
+            ]),
+        )
+    })?;
+    assert_active_graph_mutation_rejected(|graph| {
+        graph
+            .adapter
+            .replace_manifest_field(graph.request.reference(), 20, Value::Null)
+    })?;
+    assert_graph_mutation_rejected(|graph| {
+        graph
+            .adapter
+            .replace_manifest_field(graph.request.reference(), 20, Value::Null)
+    })
 }
 
 #[test]
