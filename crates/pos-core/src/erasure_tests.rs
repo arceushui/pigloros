@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use ciborium::value::Value;
 
+use super::persistence::{AttemptPageV1, InventoryV1, ManifestV1, ScopeNodeV1, TargetClosureV1};
 use super::*;
 
 const fn reference(value: u8) -> ErasureReferenceV1 {
@@ -138,6 +139,50 @@ fn replace_field(
         .get_mut(index)
         .ok_or(ErasureErrorV1::InvalidEncoding)? = replacement;
     encode_value(&value)
+}
+
+fn assert_each_field_rejected<T>(
+    bytes: &[u8],
+    field_count: usize,
+    decode: impl Fn(&[u8]) -> Result<T, ErasureErrorV1>,
+) -> Result<(), ErasureErrorV1> {
+    for index in 0..field_count {
+        assert!(
+            decode(&replace_field(bytes, index, Value::Bool(true))?).is_err(),
+            "field {index} accepted the wrong type"
+        );
+    }
+    Ok(())
+}
+
+fn reference_value(byte: u8) -> Value {
+    Value::Bytes(reference(byte).digest().to_vec())
+}
+
+fn private_manifest_value(active: Value, completed_attempt_count: u64) -> Value {
+    Value::Array(vec![
+        Value::Text(ERCRP1.to_owned()),
+        Value::Integer(VERSION.into()),
+        reference_value(1),
+        reference_value(2),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        active,
+        Value::Null,
+        Value::Integer(completed_attempt_count.into()),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+    ])
 }
 
 fn append_field(bytes: &[u8]) -> Result<Vec<u8>, ErasureErrorV1> {
@@ -618,4 +663,73 @@ fn bounded_predicates_keep_raw_collections_canonical() {
         }),
         ErasureReplayClaimV1::UnverifiableArtifactsMissing
     );
+}
+
+#[test]
+fn private_persistence_decoders_reject_every_wrong_field_type() -> Result<(), ErasureErrorV1> {
+    let bytes = encode_value(&private_manifest_value(Value::Null, 0))?;
+    assert_each_field_rejected(&bytes, 21, ManifestV1::decode)?;
+
+    let closure = TargetClosureV1::new(reference(1), Vec::new())?;
+    let bytes = closure.canonical_cbor()?;
+    assert_each_field_rejected(&bytes, 4, TargetClosureV1::decode)?;
+
+    let inventory = InventoryV1::new(reference(1), 0, 0, Vec::new())?;
+    let bytes = inventory.canonical_cbor()?;
+    assert_each_field_rejected(&bytes, 6, InventoryV1::decode)?;
+
+    let bytes = encode_value(&Value::Array(vec![
+        Value::Text(ERASURE_ATTEMPT_HISTORY_TAG_V1.to_owned()),
+        Value::Integer(VERSION.into()),
+        reference_value(1),
+        Value::Integer(0.into()),
+        reference_value(2),
+        reference_value(3),
+        reference_value(4),
+        reference_value(5),
+        reference_value(6),
+        reference_value(7),
+        reference_value(8),
+        Value::Null,
+    ]))?;
+    assert_each_field_rejected(&bytes, 12, AttemptPageV1::decode)?;
+
+    let bytes = encode_value(&Value::Array(vec![
+        Value::Text(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1.to_owned()),
+        Value::Integer(VERSION.into()),
+        reference_value(1),
+        reference_value(2),
+        reference_value(3),
+        Value::Integer(0.into()),
+        Value::Null,
+    ]))?;
+    assert_each_field_rejected(&bytes, 7, ScopeNodeV1::decode)
+}
+
+#[test]
+fn private_persistence_shapes_fail_closed() -> Result<(), ErasureErrorV1> {
+    let active_fields = vec![
+        Value::Integer(0.into()),
+        reference_value(3),
+        Value::Array(Vec::new()),
+    ];
+    for index in 0..active_fields.len() {
+        let mut nested = active_fields.clone();
+        *nested
+            .get_mut(index)
+            .ok_or(ErasureErrorV1::InvalidEncoding)? = Value::Bool(true);
+        let bytes = encode_value(&private_manifest_value(Value::Array(nested), 0))?;
+        assert!(ManifestV1::decode(&bytes).is_err());
+    }
+
+    assert!(ManifestV1::decode(&encode_value(&private_manifest_value(Value::Null, 1))?).is_err());
+    assert_eq!(
+        TargetClosureV1::new(reference(1), vec![target(), target()]),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    assert_eq!(
+        InventoryV1::new(reference(1), 0, 2, Vec::new()),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
+    Ok(())
 }

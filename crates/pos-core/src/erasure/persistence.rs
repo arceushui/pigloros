@@ -37,7 +37,7 @@ const INVENTORY_ADMITTED: u64 = 0;
 const INVENTORY_EFFECTIVE: u64 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ManifestV1 {
+pub(super) struct ManifestV1 {
     request: ErasureReferenceV1,
     state: ErasureReferenceV1,
     target_closure: Option<ErasureReferenceV1>,
@@ -67,7 +67,7 @@ struct ActiveAttemptRefV1 {
 }
 
 impl ManifestV1 {
-    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
         decode_limited(
             bytes,
             ERASURE_COORDINATOR_RECORD_MAX_BYTES,
@@ -167,14 +167,14 @@ impl ManifestV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct TargetClosureV1 {
+pub(super) struct TargetClosureV1 {
     request: ErasureReferenceV1,
     targets: Vec<ErasureRequiredTargetV1>,
     reference: ErasureReferenceV1,
 }
 
 impl TargetClosureV1 {
-    fn new(
+    pub(super) fn new(
         request: ErasureReferenceV1,
         targets: Vec<ErasureRequiredTargetV1>,
     ) -> Result<Self, ErasureErrorV1> {
@@ -192,7 +192,7 @@ impl TargetClosureV1 {
         Ok(value)
     }
 
-    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+    pub(super) fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
         encode_limited(
             &Value::Array(vec![
                 text(ERASURE_TARGET_CLOSURE_TAG_V1),
@@ -204,7 +204,7 @@ impl TargetClosureV1 {
         )
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
         decode_limited(
             bytes,
             ERASURE_PORTABLE_RECORD_MAX_BYTES,
@@ -227,7 +227,7 @@ impl TargetClosureV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct InventoryV1 {
+pub(super) struct InventoryV1 {
     request: ErasureReferenceV1,
     ordinal: u64,
     kind: u64,
@@ -236,7 +236,7 @@ struct InventoryV1 {
 }
 
 impl InventoryV1 {
-    fn new(
+    pub(super) fn new(
         request: ErasureReferenceV1,
         ordinal: u64,
         kind: u64,
@@ -258,7 +258,7 @@ impl InventoryV1 {
         Ok(value)
     }
 
-    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+    pub(super) fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
         encode_limited(
             &Value::Array(vec![
                 text(ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1),
@@ -272,7 +272,7 @@ impl InventoryV1 {
         )
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
         decode_limited(
             bytes,
             ERASURE_PORTABLE_RECORD_MAX_BYTES,
@@ -298,7 +298,7 @@ impl InventoryV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AttemptPageV1 {
+pub(super) struct AttemptPageV1 {
     request: ErasureReferenceV1,
     ordinal: u64,
     retry_admission: ErasureReferenceV1,
@@ -313,7 +313,7 @@ struct AttemptPageV1 {
 }
 
 impl AttemptPageV1 {
-    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+    pub(super) fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
         encode_limited(
             &Value::Array(vec![
                 text(ERASURE_ATTEMPT_HISTORY_TAG_V1),
@@ -333,7 +333,7 @@ impl AttemptPageV1 {
         )
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
         decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 12).and_then(|value| {
             let fields = exact_array(&value, 12)?;
             header(fields, ERASURE_ATTEMPT_HISTORY_TAG_V1)?;
@@ -355,7 +355,7 @@ impl AttemptPageV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ScopeNodeV1 {
+pub(super) struct ScopeNodeV1 {
     request: ErasureReferenceV1,
     scope: ErasureReferenceV1,
     extension: ErasureReferenceV1,
@@ -365,7 +365,7 @@ struct ScopeNodeV1 {
 }
 
 impl ScopeNodeV1 {
-    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+    pub(super) fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
         encode_limited(
             &Value::Array(vec![
                 text(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1),
@@ -380,7 +380,7 @@ impl ScopeNodeV1 {
         )
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
         decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 7).and_then(|value| {
             let fields = exact_array(&value, 7)?;
             header(fields, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1)?;
@@ -1811,171 +1811,4 @@ fn validate_state_provenance(
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
     }
     Err(ErasureErrorV1::ProvenanceMissing)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const fn reference(byte: u8) -> ErasureReferenceV1 {
-        ErasureReferenceV1::from_digest([byte; 32])
-    }
-
-    fn replace_field(
-        bytes: &[u8],
-        index: usize,
-        replacement: Value,
-    ) -> Result<Vec<u8>, ErasureErrorV1> {
-        let mut value: Value =
-            ciborium::from_reader(bytes).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-        let Value::Array(fields) = &mut value else {
-            return Err(ErasureErrorV1::InvalidEncoding);
-        };
-        *fields
-            .get_mut(index)
-            .ok_or(ErasureErrorV1::InvalidEncoding)? = replacement;
-        let mut changed = Vec::new();
-        ciborium::into_writer(&value, &mut changed).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-        Ok(changed)
-    }
-
-    fn assert_each_field_rejected<T>(
-        bytes: &[u8],
-        field_count: usize,
-        decode: impl Fn(&[u8]) -> Result<T, ErasureErrorV1>,
-    ) -> Result<(), ErasureErrorV1> {
-        for index in 0..field_count {
-            assert!(
-                decode(&replace_field(bytes, index, Value::Bool(true))?).is_err(),
-                "field {index} accepted the wrong type"
-            );
-        }
-        Ok(())
-    }
-
-    fn manifest(active: Option<ActiveAttemptRefV1>) -> ManifestV1 {
-        ManifestV1 {
-            request: reference(1),
-            state: reference(2),
-            target_closure: None,
-            correction: None,
-            rejection: None,
-            scope: None,
-            freeze_admission: None,
-            freeze_authorization: None,
-            freeze_provenance: None,
-            freeze_failure: None,
-            obligation_set: None,
-            scope_extension_head: None,
-            active,
-            attempt_history_head: None,
-            completed_attempt_count: 0,
-            latest_receipt: None,
-            administrative_resolution_head: None,
-            authorize_provenance: None,
-            dispatch_provenance: None,
-        }
-    }
-
-    #[test]
-    fn private_persistence_decoders_reject_every_wrong_field_type() -> Result<(), ErasureErrorV1> {
-        let manifest = manifest(None);
-        let bytes = manifest.canonical_cbor()?;
-        assert_each_field_rejected(&bytes, 21, ManifestV1::decode)?;
-
-        let closure = TargetClosureV1::new(reference(1), Vec::new())?;
-        let bytes = closure.canonical_cbor()?;
-        assert_each_field_rejected(&bytes, 4, TargetClosureV1::decode)?;
-
-        let inventory = InventoryV1::new(reference(1), 0, INVENTORY_ADMITTED, Vec::new())?;
-        let bytes = inventory.canonical_cbor()?;
-        assert_each_field_rejected(&bytes, 6, InventoryV1::decode)?;
-
-        let page = AttemptPageV1 {
-            request: reference(1),
-            ordinal: 0,
-            retry_admission: reference(2),
-            admitted_inventory: reference(3),
-            effective_inventory: reference(4),
-            outcome: reference(5),
-            receipt: reference(6),
-            receipt_provenance: reference(7),
-            terminal_state: reference(8),
-            predecessor: None,
-            reference: reference(9),
-        };
-        let bytes = page.canonical_cbor()?;
-        assert_each_field_rejected(&bytes, 12, AttemptPageV1::decode)?;
-
-        let node = ScopeNodeV1 {
-            request: reference(1),
-            scope: reference(2),
-            extension: reference(3),
-            ordinal: 0,
-            predecessor: None,
-            reference: reference(4),
-        };
-        let bytes = node.canonical_cbor()?;
-        assert_each_field_rejected(&bytes, 7, ScopeNodeV1::decode)?;
-        Ok(())
-    }
-
-    #[test]
-    fn private_persistence_shapes_fail_closed() -> Result<(), ErasureErrorV1> {
-        let active = ActiveAttemptRefV1 {
-            ordinal: 0,
-            admission: reference(3),
-            acknowledgements: Vec::new(),
-        };
-        let active_bytes = manifest(Some(active)).canonical_cbor()?;
-        let mut active_value: Value = ciborium::from_reader(active_bytes.as_slice())
-            .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-        let Value::Array(fields) = &mut active_value else {
-            return Err(ErasureErrorV1::InvalidEncoding);
-        };
-        let active = fields
-            .get(14)
-            .cloned()
-            .ok_or(ErasureErrorV1::InvalidEncoding)?;
-        let Value::Array(active_fields) = active else {
-            return Err(ErasureErrorV1::InvalidEncoding);
-        };
-        for index in 0..active_fields.len() {
-            let mut changed = fields.clone();
-            let mut nested = active_fields.clone();
-            *nested
-                .get_mut(index)
-                .ok_or(ErasureErrorV1::InvalidEncoding)? = Value::Bool(true);
-            *changed.get_mut(14).ok_or(ErasureErrorV1::InvalidEncoding)? = Value::Array(nested);
-            let mut bytes = Vec::new();
-            ciborium::into_writer(&Value::Array(changed), &mut bytes)
-                .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
-            assert!(ManifestV1::decode(&bytes).is_err());
-        }
-
-        let mut missing_history = manifest(None);
-        missing_history.completed_attempt_count = 1;
-        assert!(ManifestV1::decode(&missing_history.canonical_cbor()?).is_err());
-
-        assert_eq!(
-            TargetClosureV1::new(reference(1), vec![target(2), target(2)]),
-            Err(ErasureErrorV1::ScopeInvalid)
-        );
-        assert_eq!(
-            InventoryV1::new(reference(1), 0, INVENTORY_EFFECTIVE + 1, Vec::new()),
-            Err(ErasureErrorV1::ScopeInvalid)
-        );
-        Ok(())
-    }
-
-    const fn target(byte: u8) -> ErasureRequiredTargetV1 {
-        ErasureRequiredTargetV1 {
-            artifact_class: super::super::ErasureArtifactClassV1::TimelineReplay,
-            artifact_digest: reference(byte),
-            key_role: super::super::ErasureKeyRoleV1::DataEncryption,
-            key_digest: reference(byte + 1),
-            replica_set: reference(byte + 2),
-            replica_id: reference(byte + 3),
-        }
-    }
 }
