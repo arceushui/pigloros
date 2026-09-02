@@ -1480,7 +1480,7 @@ pub(super) fn array(value: &Value, maximum: usize) -> Result<&[Value], ErasureEr
         _ => Err(ErasureErrorV1::InvalidEncoding),
     }
 }
-fn bounded_array(values: &[Value], maximum: usize) -> Result<&[Value], ErasureErrorV1> {
+const fn bounded_array(values: &[Value], maximum: usize) -> Result<&[Value], ErasureErrorV1> {
     if values.len() <= maximum {
         Ok(values)
     } else {
