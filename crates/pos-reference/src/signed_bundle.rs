@@ -78,6 +78,8 @@ pub struct VerifiedBundle {
     pub archive_digest: [u8; 32],
     pub members: BTreeMap<String, VerifiedMember>,
     pub expected_results: BTreeMap<ExpectedResultKey, String>,
+    pub(crate) authority_key_id: String,
+    pub(crate) authority_public_key: [u8; 32],
 }
 
 impl VerifiedBundle {
@@ -111,6 +113,11 @@ struct ExpectedResult {
     digest: [u8; 32],
 }
 
+struct TrustedAuthority {
+    key_id: String,
+    public_key: [u8; 32],
+}
+
 /// Verify exact CFB1 bytes against an externally selected, immutable TPS1
 /// snapshot and the authority identities carried by EVR1.
 ///
@@ -129,7 +136,7 @@ pub fn verify_signed_bundle(
     if trust_digest != request.trust_policy_snapshot_digest {
         return Err(BundleError::TrustPolicyMismatch);
     }
-    let trusted_key = decode_trusted_key(trust_policy_bytes)?;
+    let trusted_authority = decode_trusted_authority(trust_policy_bytes)?;
     let archive_digest = *blake3::hash(archive_bytes).as_bytes();
     if archive_digest != request.fixture_bundle_digest {
         return Err(BundleError::DigestMismatch);
@@ -157,7 +164,7 @@ pub fn verify_signed_bundle(
 
     let signer_key: [u8; 32] = fixed_bytes(&archive[2])?;
     let signature: [u8; 64] = fixed_bytes(&archive[3])?;
-    if signer_key != trusted_key {
+    if signer_key != trusted_authority.public_key {
         return Err(BundleError::SignatureInvalid);
     }
     let manifest_bytes = encode(&archive[0])?;
@@ -185,6 +192,8 @@ pub fn verify_signed_bundle(
         archive_digest,
         members,
         expected_results,
+        authority_key_id: trusted_authority.key_id,
+        authority_public_key: trusted_authority.public_key,
     })
 }
 
@@ -306,7 +315,7 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
     })
 }
 
-fn decode_trusted_key(bytes: &[u8]) -> Result<[u8; 32], BundleError> {
+fn decode_trusted_authority(bytes: &[u8]) -> Result<TrustedAuthority, BundleError> {
     let value = decode_canonical(bytes)?;
     let fields = array(&value, 12)?;
     if text(&fields[0])? != "TPS1" || uint(&fields[1])? != 1 {
@@ -324,7 +333,8 @@ fn decode_trusted_key(bytes: &[u8]) -> Result<[u8; 32], BundleError> {
         return Err(BundleError::TrustPolicyMismatch);
     }
     let root = array(&roots[0], 4)?;
-    if !valid_identifier(text(&root[0])?)
+    let key_id = text(&root[0])?;
+    if !valid_identifier(key_id)
         || uint(&root[1])? == 0
         || text(&root[2])? != "Ed25519"
         || !valid_minimum_versions(&fields[8])?
@@ -341,7 +351,10 @@ fn decode_trusted_key(bytes: &[u8]) -> Result<[u8; 32], BundleError> {
     verifier
         .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
         .map_err(|_| BundleError::TrustPolicyMismatch)?;
-    Ok(key)
+    Ok(TrustedAuthority {
+        key_id: key_id.to_owned(),
+        public_key: key,
+    })
 }
 
 fn valid_minimum_versions(value: &Value) -> Result<bool, BundleError> {

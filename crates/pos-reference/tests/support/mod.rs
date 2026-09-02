@@ -23,7 +23,7 @@ pub type TestResult<T> = Result<T, Box<dyn Error>>;
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus() -> TestResult<Corpus> {
-    corpus_with_extra(None)
+    corpus_for_mode(0, None, false)
 }
 
 /// Build a signed corpus containing additional bytes for secret-scan tests.
@@ -31,10 +31,30 @@ pub fn corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
-    corpus_with_extra(Some(secret))
+    corpus_for_mode(0, Some(secret), false)
 }
 
-fn corpus_with_extra(extra: Option<&[u8]>) -> TestResult<Corpus> {
+/// Build a complete Air-Gapped corpus with non-network capabilities.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn air_gapped_corpus() -> TestResult<Corpus> {
+    corpus_for_mode(1, None, false)
+}
+
+/// Build a signed corpus whose downgrade admission enables fallback.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
+    corpus_for_mode(0, None, true)
+}
+
+fn corpus_for_mode(
+    mode: u64,
+    extra: Option<&[u8]>,
+    invalid_release_admission: bool,
+) -> TestResult<Corpus> {
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let trust_policy = trust_policy(&signing_key)?;
     let trust_digest = hash(&trust_policy);
@@ -49,9 +69,11 @@ fn corpus_with_extra(extra: Option<&[u8]>) -> TestResult<Corpus> {
     let hard_caps = hard_caps();
     let fixtures = fixtures(
         &mut members,
+        &signing_key,
         execution_digest,
         trust_digest,
         &expected_output,
+        invalid_release_admission,
     )?;
     let profile = profile(
         &members,
@@ -67,7 +89,13 @@ fn corpus_with_extra(extra: Option<&[u8]>) -> TestResult<Corpus> {
         "profile/CPF1.cbor".to_owned(),
         (canonical(&array(profile_fields))?, 2),
     );
-    let archive = archive(&signing_key, &members, profile_digest, execution_digest)?;
+    let archive = archive(
+        &signing_key,
+        &members,
+        profile_digest,
+        execution_digest,
+        mode,
+    )?;
     let archive_digest = hash(&archive);
     let subject_digest = [41; 32];
     let hard_caps_digest = hash_contract("PiglorOS.EvaluatorHardCaps.v1", &hard_caps)?;
@@ -151,9 +179,11 @@ fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>,
 
 fn fixtures(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    signing_key: &SigningKey,
     execution: [u8; 32],
     trust: [u8; 32],
     expected: &[u8],
+    invalid_release_admission: bool,
 ) -> TestResult<Vec<Value>> {
     (0_u64..=6)
         .map(|family| -> TestResult<Value> {
@@ -177,7 +207,21 @@ fn fixtures(
                 Value::Null
             };
             let release_binding = if family == 5 {
-                bytes(&[46; 32])
+                let admission = release_admission(
+                    signing_key,
+                    &case_id,
+                    execution,
+                    trust,
+                    &provider_key(2),
+                    &provider_key(1),
+                    invalid_release_admission,
+                )?;
+                let digest = hash(&admission);
+                members.insert(
+                    format!("authority/release-admissions/{case_id}.rad1"),
+                    (admission, 16),
+                );
+                bytes(&digest)
             } else {
                 Value::Null
             };
@@ -205,7 +249,10 @@ fn fixtures(
                 uint(0),
                 array(vec![uint(100); 8]),
                 array(vec![uint(1_000)]),
-                array(vec![Value::Bool(false), array(Vec::new())]),
+                array(vec![
+                    Value::Bool(false),
+                    array(vec![text("read-public-bundle")]),
+                ]),
                 trust_binding,
                 release_binding,
                 provenance(),
@@ -216,6 +263,34 @@ fn fixtures(
             Ok(array(fixture))
         })
         .collect()
+}
+
+fn release_admission(
+    signing_key: &SigningKey,
+    case_id: &str,
+    execution: [u8; 32],
+    trust: [u8; 32],
+    from: &Value,
+    to: &Value,
+    allow_fallback: bool,
+) -> TestResult<Vec<u8>> {
+    let mut fields = vec![
+        text("RAD1"),
+        uint(1),
+        uint(0),
+        text(case_id),
+        bytes(&execution),
+        bytes(&trust),
+        from.clone(),
+        to.clone(),
+        Value::Bool(allow_fallback),
+        text("test-key"),
+    ];
+    let signature = signing_key
+        .sign(&canonical(&array(fields.clone()))?)
+        .to_bytes();
+    fields.push(bytes(&signature));
+    canonical(&array(fields))
 }
 
 fn add_provider_contracts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) -> TestResult<()> {
@@ -367,6 +442,7 @@ fn archive(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     profile: [u8; 32],
     execution: [u8; 32],
+    mode: u64,
 ) -> TestResult<Vec<u8>> {
     let descriptors = members
         .iter()
@@ -397,7 +473,7 @@ fn archive(
                 text(&case_id),
                 uint(0),
                 bytes(&execution),
-                uint(0),
+                uint(mode),
                 text(&path),
                 bytes(&member_hash(members, &path)?),
             ]);
@@ -410,7 +486,7 @@ fn archive(
     let manifest = array(vec![
         text("CFB1"),
         uint(0),
-        uint(0),
+        uint(mode),
         bytes(&profile),
         array(descriptors),
         array(expected),
