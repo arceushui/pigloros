@@ -167,9 +167,7 @@ impl AuthenticatedPrincipalResultV1 {
     ///
     /// # Errors
     /// Returns a closed error for invalid text, interval, or identity fields.
-    pub fn try_from_draft(
-        draft: AuthenticatedPrincipalDraftV1,
-    ) -> Result<Self, AuthorityErrorV1> {
+    pub fn try_from_draft(draft: AuthenticatedPrincipalDraftV1) -> Result<Self, AuthorityErrorV1> {
         validate_text(&draft.adapter_id)
             .and_then(|()| validate_interval(draft.issued_at_micros, draft.expires_at_micros))
             .and_then(|()| validate_hash(draft.binding_digest))
@@ -236,31 +234,15 @@ impl AuthenticatedPrincipalResultV1 {
     /// # Errors
     /// Returns a closed validation or codec error for malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, AuthorityErrorV1> {
-        decode_array(bytes.as_slice(), 8).and_then(|fields| {
-            expect_header(&fields, AUTHENTICATED_MAGIC).and_then(|()| {
-                decode_principal_value(&fields[2]).and_then(|principal| {
-                    decode_text(&fields[3]).and_then(|adapter_id| {
-                        decode_u8(&fields[4]).and_then(|assurance| {
-                            AssuranceLevelV1::try_new(assurance).and_then(|assurance| {
-                                decode_u64(&fields[5]).and_then(|issued_at_micros| {
-                                    decode_u64(&fields[6]).and_then(|expires_at_micros| {
-                                        decode_hash(&fields[7]).and_then(|binding_digest| {
-                                            Self::try_from_draft(AuthenticatedPrincipalDraftV1 {
-                                                principal,
-                                                adapter_id,
-                                                assurance,
-                                                issued_at_micros,
-                                                expires_at_micros,
-                                                binding_digest,
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    })
-                })
-            })
+        let fields = decode_array(bytes.as_slice(), 8)?;
+        expect_header(&fields, AUTHENTICATED_MAGIC)?;
+        Self::try_from_draft(AuthenticatedPrincipalDraftV1 {
+            principal: decode_principal_value(&fields[2])?,
+            adapter_id: decode_text(&fields[3])?,
+            assurance: AssuranceLevelV1::try_new(decode_u8(&fields[4])?)?,
+            issued_at_micros: decode_u64(&fields[5])?,
+            expires_at_micros: decode_u64(&fields[6])?,
+            binding_digest: decode_hash(&fields[7])?,
         })
     }
 }
@@ -281,9 +263,11 @@ impl AuthorityGranteeV1 {
     #[must_use]
     pub const fn principal(&self) -> &PrincipalRefV1 {
         match self {
-            Self::Principal(principal) | Self::PluginInstallation { controller: principal, .. } => {
-                principal
-            }
+            Self::Principal(principal)
+            | Self::PluginInstallation {
+                controller: principal,
+                ..
+            } => principal,
         }
     }
 
@@ -332,6 +316,7 @@ impl CapabilityScopeV1 {
     /// # Errors
     /// Returns a closed error for empty required sets, invalid text, or ordering.
     pub fn try_from_draft(draft: CapabilityScopeDraftV1) -> Result<Self, AuthorityErrorV1> {
+        let usage_limits = validate_usage_limits(draft.max_uses, draft.budget);
         validate_required_text_set(&draft.resources)
             .and_then(|()| validate_required_text_set(&draft.actions))
             .and_then(|()| validate_required_text_set(&draft.purposes))
@@ -342,7 +327,7 @@ impl CapabilityScopeV1 {
             .and_then(|()| validate_entity_set(&draft.participant_ids))
             .and_then(|()| validate_optional_plugin_id(draft.plugin_id))
             .and_then(|()| validate_text_set(&draft.environment_constraints, false))
-            .and(validate_usage_limits(draft.max_uses, draft.budget))
+            .and(usage_limits)
             .map(|()| Self {
                 resources: draft.resources,
                 actions: draft.actions,
@@ -536,35 +521,65 @@ impl CapabilityGrantV1 {
     }
 
     #[must_use]
-    pub const fn grant_id(&self) -> Hash { self.grant_id }
+    pub const fn grant_id(&self) -> Hash {
+        self.grant_id
+    }
     #[must_use]
-    pub const fn grantor(&self) -> &PrincipalRefV1 { &self.grantor }
+    pub const fn grantor(&self) -> &PrincipalRefV1 {
+        &self.grantor
+    }
     #[must_use]
-    pub const fn grantee(&self) -> &AuthorityGranteeV1 { &self.grantee }
+    pub const fn grantee(&self) -> &AuthorityGranteeV1 {
+        &self.grantee
+    }
     #[must_use]
-    pub const fn scope(&self) -> &CapabilityScopeV1 { &self.scope }
+    pub const fn scope(&self) -> &CapabilityScopeV1 {
+        &self.scope
+    }
     #[must_use]
-    pub const fn valid_from_position(&self) -> u64 { self.valid_from_position }
+    pub const fn valid_from_position(&self) -> u64 {
+        self.valid_from_position
+    }
     #[must_use]
-    pub const fn valid_until_position(&self) -> u64 { self.valid_until_position }
+    pub const fn valid_until_position(&self) -> u64 {
+        self.valid_until_position
+    }
     #[must_use]
-    pub const fn parent_grant_id(&self) -> Option<Hash> { self.parent_grant_id }
+    pub const fn parent_grant_id(&self) -> Option<Hash> {
+        self.parent_grant_id
+    }
     #[must_use]
-    pub const fn delegation_depth(&self) -> u8 { self.delegation_depth }
+    pub const fn delegation_depth(&self) -> u8 {
+        self.delegation_depth
+    }
     #[must_use]
-    pub const fn max_delegation_depth(&self) -> u8 { self.max_delegation_depth }
+    pub const fn max_delegation_depth(&self) -> u8 {
+        self.max_delegation_depth
+    }
     #[must_use]
-    pub fn consent_references(&self) -> &[Hash] { &self.consent_references }
+    pub fn consent_references(&self) -> &[Hash] {
+        &self.consent_references
+    }
     #[must_use]
-    pub const fn policy_revision(&self) -> Hash { self.policy_revision }
+    pub const fn policy_revision(&self) -> Hash {
+        self.policy_revision
+    }
     #[must_use]
-    pub const fn issuance_timeline(&self) -> TimelineId { self.issuance_timeline }
+    pub const fn issuance_timeline(&self) -> TimelineId {
+        self.issuance_timeline
+    }
     #[must_use]
-    pub const fn issuance_seq(&self) -> u64 { self.issuance_seq }
+    pub const fn issuance_seq(&self) -> u64 {
+        self.issuance_seq
+    }
     #[must_use]
-    pub const fn revocation_epoch(&self) -> u64 { self.revocation_epoch }
+    pub const fn revocation_epoch(&self) -> u64 {
+        self.revocation_epoch
+    }
     #[must_use]
-    pub const fn revocation_fence(&self) -> Option<u64> { self.revocation_fence }
+    pub const fn revocation_fence(&self) -> Option<u64> {
+        self.revocation_fence
+    }
 
     /// Encode the exact deterministic-CBOR capability grant.
     ///
@@ -648,6 +663,7 @@ impl AuthorizationRequestV1 {
     /// # Errors
     /// Returns a closed error for invalid text, identity, counts, or ordering.
     pub fn try_from_draft(draft: AuthorizationRequestDraftV1) -> Result<Self, AuthorityErrorV1> {
+        let usage_limits = validate_usage_limits(draft.use_count, draft.budget);
         validate_text(&draft.resource)
             .and_then(|()| validate_text(&draft.action))
             .and_then(|()| validate_text(&draft.purpose))
@@ -659,7 +675,7 @@ impl AuthorizationRequestV1 {
             .and_then(|()| validate_optional_plugin_id(draft.plugin_id))
             .and_then(|()| validate_timeline_id(draft.authority_timeline))
             .and_then(|()| validate_text_set(&draft.environment_constraints, false))
-            .and(validate_usage_limits(draft.use_count, draft.budget))
+            .and(usage_limits)
             .and_then(|()| match draft.consent {
                 ConsentEvidenceV1::Active { reference } => validate_hash(reference),
                 _ => Ok(()),
@@ -688,43 +704,81 @@ impl AuthorizationRequestV1 {
     }
 
     #[must_use]
-    pub const fn authenticated(&self) -> &AuthenticatedPrincipalResultV1 { &self.authenticated }
+    pub const fn authenticated(&self) -> &AuthenticatedPrincipalResultV1 {
+        &self.authenticated
+    }
     #[must_use]
-    pub const fn actor_entity_id(&self) -> EntityId { self.actor_entity_id }
+    pub const fn actor_entity_id(&self) -> EntityId {
+        self.actor_entity_id
+    }
     #[must_use]
-    pub const fn subject_id(&self) -> Option<EntityId> { self.subject_id }
+    pub const fn subject_id(&self) -> Option<EntityId> {
+        self.subject_id
+    }
     #[must_use]
-    pub const fn participant_id(&self) -> Option<EntityId> { self.participant_id }
+    pub const fn participant_id(&self) -> Option<EntityId> {
+        self.participant_id
+    }
     #[must_use]
-    pub const fn plugin_id(&self) -> Option<PluginId> { self.plugin_id }
+    pub const fn plugin_id(&self) -> Option<PluginId> {
+        self.plugin_id
+    }
     #[must_use]
-    pub fn resource(&self) -> &str { &self.resource }
+    pub fn resource(&self) -> &str {
+        &self.resource
+    }
     #[must_use]
-    pub fn action(&self) -> &str { &self.action }
+    pub fn action(&self) -> &str {
+        &self.action
+    }
     #[must_use]
-    pub fn purpose(&self) -> &str { &self.purpose }
+    pub fn purpose(&self) -> &str {
+        &self.purpose
+    }
     #[must_use]
-    pub fn audience(&self) -> &str { &self.audience }
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
     #[must_use]
-    pub const fn at_time_micros(&self) -> u64 { self.at_time_micros }
+    pub const fn at_time_micros(&self) -> u64 {
+        self.at_time_micros
+    }
     #[must_use]
-    pub const fn authority_timeline(&self) -> TimelineId { self.authority_timeline }
+    pub const fn authority_timeline(&self) -> TimelineId {
+        self.authority_timeline
+    }
     #[must_use]
-    pub const fn at_position(&self) -> u64 { self.at_position }
+    pub const fn at_position(&self) -> u64 {
+        self.at_position
+    }
     #[must_use]
-    pub const fn use_count(&self) -> u64 { self.use_count }
+    pub const fn use_count(&self) -> u64 {
+        self.use_count
+    }
     #[must_use]
-    pub const fn budget(&self) -> u64 { self.budget }
+    pub const fn budget(&self) -> u64 {
+        self.budget
+    }
     #[must_use]
-    pub const fn policy_revision(&self) -> Hash { self.policy_revision }
+    pub const fn policy_revision(&self) -> Hash {
+        self.policy_revision
+    }
     #[must_use]
-    pub const fn revocation_epoch(&self) -> u64 { self.revocation_epoch }
+    pub const fn revocation_epoch(&self) -> u64 {
+        self.revocation_epoch
+    }
     #[must_use]
-    pub const fn revocation_state_current(&self) -> bool { self.revocation_state_current }
+    pub const fn revocation_state_current(&self) -> bool {
+        self.revocation_state_current
+    }
     #[must_use]
-    pub const fn consent(&self) -> ConsentEvidenceV1 { self.consent }
+    pub const fn consent(&self) -> ConsentEvidenceV1 {
+        self.consent
+    }
     #[must_use]
-    pub fn environment_constraints(&self) -> &[String] { &self.environment_constraints }
+    pub fn environment_constraints(&self) -> &[String] {
+        &self.environment_constraints
+    }
 }
 
 /// Closed authorization result categories from ADR-059.
@@ -808,25 +862,45 @@ pub struct AuthorizationDecisionV1 {
 
 impl AuthorizationDecisionV1 {
     #[must_use]
-    pub const fn principal(&self) -> &PrincipalRefV1 { &self.principal }
+    pub const fn principal(&self) -> &PrincipalRefV1 {
+        &self.principal
+    }
     #[must_use]
-    pub const fn actor_entity_id(&self) -> EntityId { self.actor_entity_id }
+    pub const fn actor_entity_id(&self) -> EntityId {
+        self.actor_entity_id
+    }
     #[must_use]
-    pub const fn grant_id(&self) -> Option<Hash> { self.grant_id }
+    pub const fn grant_id(&self) -> Option<Hash> {
+        self.grant_id
+    }
     #[must_use]
-    pub const fn policy_revision(&self) -> Hash { self.policy_revision }
+    pub const fn policy_revision(&self) -> Hash {
+        self.policy_revision
+    }
     #[must_use]
-    pub const fn authority_timeline(&self) -> TimelineId { self.authority_timeline }
+    pub const fn authority_timeline(&self) -> TimelineId {
+        self.authority_timeline
+    }
     #[must_use]
-    pub const fn at_position(&self) -> u64 { self.at_position }
+    pub const fn at_position(&self) -> u64 {
+        self.at_position
+    }
     #[must_use]
-    pub const fn outcome(&self) -> AuthorizationOutcomeV1 { self.outcome }
+    pub const fn outcome(&self) -> AuthorizationOutcomeV1 {
+        self.outcome
+    }
     #[must_use]
-    pub const fn request_digest(&self) -> Hash { self.request_digest }
+    pub const fn request_digest(&self) -> Hash {
+        self.request_digest
+    }
     #[must_use]
-    pub const fn decision_digest(&self) -> Hash { self.decision_digest }
+    pub const fn decision_digest(&self) -> Hash {
+        self.decision_digest
+    }
     #[must_use]
-    pub const fn is_allowed(&self) -> bool { self.outcome.is_allowed() }
+    pub const fn is_allowed(&self) -> bool {
+        self.outcome.is_allowed()
+    }
 
     /// Encode the exact deterministic-CBOR authorization decision.
     ///
@@ -1015,9 +1089,9 @@ fn valid_child(parent: &CapabilityGrantV1, child: &CapabilityGrantV1) -> bool {
     let depth_is_bounded = child.delegation_depth <= parent.max_delegation_depth;
     let descendants_are_bounded = child.max_delegation_depth <= parent.max_delegation_depth;
     let grantor_is_delegate = matches!(
-            &parent.grantee,
-            AuthorityGranteeV1::Principal(principal) if child.grantor == *principal
-        );
+        &parent.grantee,
+        AuthorityGranteeV1::Principal(principal) if child.grantor == *principal
+    );
     child.parent_grant_id == Some(parent.grant_id)
         && depth_is_next
         && depth_is_bounded
@@ -1048,7 +1122,9 @@ fn plugin_is_attenuated(child: Option<PluginId>, parent: Option<PluginId>) -> bo
 }
 
 fn is_subset<T: Ord>(child: &[T], parent: &[T]) -> bool {
-    child.iter().all(|value| parent.binary_search(value).is_ok())
+    child
+        .iter()
+        .all(|value| parent.binary_search(value).is_ok())
 }
 
 const fn validate_text(value: &str) -> Result<(), AuthorityErrorV1> {
@@ -1068,14 +1144,14 @@ fn validate_text_set(values: &[String], required: bool) -> Result<(), AuthorityE
         .and_then(|()| values.iter().try_for_each(|value| validate_text(value)))
 }
 
-fn validate_ordered_set<T: Ord>(
-    values: &[T],
-    required: bool,
-) -> Result<(), AuthorityErrorV1> {
+fn validate_ordered_set<T: Ord>(values: &[T], required: bool) -> Result<(), AuthorityErrorV1> {
     if values.len() > MAX_AUTHORITY_SCOPE_MEMBERS || (required && values.is_empty()) {
         return Err(AuthorityErrorV1::InvalidScope);
     }
-    if values.windows(2).all(|pair| pair[0].cmp(&pair[1]) == Ordering::Less) {
+    if values
+        .windows(2)
+        .all(|pair| pair[0].cmp(&pair[1]) == Ordering::Less)
+    {
         Ok(())
     } else {
         Err(AuthorityErrorV1::NonCanonicalOrder)
@@ -1158,9 +1234,7 @@ const fn validate_interval(start: u64, end: u64) -> Result<(), AuthorityErrorV1>
     }
 }
 
-const fn validate_delegation_depth(
-    draft: &CapabilityGrantDraftV1,
-) -> Result<(), AuthorityErrorV1> {
+const fn validate_delegation_depth(draft: &CapabilityGrantDraftV1) -> Result<(), AuthorityErrorV1> {
     if draft.max_delegation_depth > MAX_AUTHORITY_DELEGATION_DEPTH
         || draft.delegation_depth > draft.max_delegation_depth
         || (draft.delegation_depth == 0) != draft.parent_grant_id.is_none()
@@ -1183,7 +1257,10 @@ fn request_digest(request: &AuthorizationRequestV1) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"PiglorOS.AuthorizationRequest.v1\0");
     digest_part(&mut hasher, request.authenticated.principal.principal_id());
-    digest_part(&mut hasher, request.authenticated.principal.trust_domain().as_bytes());
+    digest_part(
+        &mut hasher,
+        request.authenticated.principal.trust_domain().as_bytes(),
+    );
     digest_part(&mut hasher, &entity_bytes(request.actor_entity_id));
     digest_optional_entity(&mut hasher, request.subject_id);
     digest_optional_entity(&mut hasher, request.participant_id);
@@ -1265,15 +1342,25 @@ fn digest_optional_hash(hasher: &mut blake3::Hasher, value: Option<Hash>) {
 
 fn digest_consent(hasher: &mut blake3::Hasher, consent: ConsentEvidenceV1) {
     match consent {
-        ConsentEvidenceV1::NotRequired => { hasher.update(&[0]); }
+        ConsentEvidenceV1::NotRequired => {
+            hasher.update(&[0]);
+        }
         ConsentEvidenceV1::Active { reference } => {
             hasher.update(&[1]);
             hasher.update(reference.as_bytes());
         }
-        ConsentEvidenceV1::Missing => { hasher.update(&[2]); }
-        ConsentEvidenceV1::RevokedAtFence => { hasher.update(&[3]); }
-        ConsentEvidenceV1::Expired => { hasher.update(&[4]); }
-        ConsentEvidenceV1::Indeterminate => { hasher.update(&[5]); }
+        ConsentEvidenceV1::Missing => {
+            hasher.update(&[2]);
+        }
+        ConsentEvidenceV1::RevokedAtFence => {
+            hasher.update(&[3]);
+        }
+        ConsentEvidenceV1::Expired => {
+            hasher.update(&[4]);
+        }
+        ConsentEvidenceV1::Indeterminate => {
+            hasher.update(&[5]);
+        }
     }
 }
 
@@ -1322,17 +1409,31 @@ fn decode_array(bytes: &[u8], expected_len: usize) -> Result<Vec<Value>, Authori
 
 fn expect_header(fields: &[Value], magic: [u8; 4]) -> Result<(), AuthorityErrorV1> {
     match &fields[0] {
-        Value::Bytes(value) if value.as_slice() == magic => decode_u8(&fields[1]).and_then(|version| {
-            if version == VERSION { Ok(()) } else { Err(AuthorityErrorV1::WrongVersion) }
-        }),
+        Value::Bytes(value) if value.as_slice() == magic => {
+            decode_u8(&fields[1]).and_then(|version| {
+                if version == VERSION {
+                    Ok(())
+                } else {
+                    Err(AuthorityErrorV1::WrongVersion)
+                }
+            })
+        }
         _ => Err(AuthorityErrorV1::WrongMagic),
     }
 }
 
-fn bytes(value: &[u8]) -> Value { Value::Bytes(value.to_vec()) }
-fn text(value: &str) -> Value { Value::Text(value.to_owned()) }
-fn uint<T: Into<ciborium::value::Integer>>(value: T) -> Value { Value::Integer(value.into()) }
-fn hash_value(value: Hash) -> Value { bytes(value.as_bytes()) }
+fn bytes(value: &[u8]) -> Value {
+    Value::Bytes(value.to_vec())
+}
+fn text(value: &str) -> Value {
+    Value::Text(value.to_owned())
+}
+fn uint<T: Into<ciborium::value::Integer>>(value: T) -> Value {
+    Value::Integer(value.into())
+}
+fn hash_value(value: Hash) -> Value {
+    bytes(value.as_bytes())
+}
 fn optional_hash_value(value: Option<Hash>) -> Value {
     value.map_or(Value::Null, hash_value)
 }
@@ -1355,9 +1456,8 @@ fn encode_principal(value: &PrincipalRefV1) -> Value {
 fn decode_principal(fields: &[Value]) -> Result<PrincipalRefV1, AuthorityErrorV1> {
     expect_header(fields, PRINCIPAL_MAGIC).and_then(|()| {
         decode_fixed::<16>(&fields[2]).and_then(|principal_id| {
-            decode_text(&fields[3]).and_then(|trust_domain| {
-                PrincipalRefV1::try_new(principal_id, trust_domain)
-            })
+            decode_text(&fields[3])
+                .and_then(|trust_domain| PrincipalRefV1::try_new(principal_id, trust_domain))
         })
     })
 }
@@ -1370,19 +1470,29 @@ fn decode_principal_value(value: &Value) -> Result<PrincipalRefV1, AuthorityErro
     }
 }
 
+fn exact_array(value: &Value, expected_len: usize) -> Result<&[Value], AuthorityErrorV1> {
+    match value {
+        Value::Array(fields) if fields.len() == expected_len => Ok(fields),
+        Value::Array(_) => Err(AuthorityErrorV1::WrongArrayLength),
+        _ => Err(AuthorityErrorV1::WrongFieldType),
+    }
+}
+
 fn encode_grantee(value: &AuthorityGranteeV1) -> Value {
     match value {
         AuthorityGranteeV1::Principal(principal) => {
             Value::Array(vec![uint(0u8), encode_principal(principal)])
         }
-        AuthorityGranteeV1::PluginInstallation { controller, plugin_id, installation_id } => {
-            Value::Array(vec![
-                uint(1u8),
-                encode_principal(controller),
-                bytes(&plugin_bytes(*plugin_id)),
-                bytes(installation_id),
-            ])
-        }
+        AuthorityGranteeV1::PluginInstallation {
+            controller,
+            plugin_id,
+            installation_id,
+        } => Value::Array(vec![
+            uint(1u8),
+            encode_principal(controller),
+            bytes(&plugin_bytes(*plugin_id)),
+            bytes(installation_id),
+        ]),
     }
 }
 
@@ -1402,7 +1512,11 @@ fn decode_grantee(value: &Value) -> Result<AuthorityGranteeV1, AuthorityErrorV1>
             decode_principal_value(&fields[1]).and_then(|controller| {
                 decode_plugin(&fields[2]).and_then(|plugin_id| {
                     decode_fixed::<16>(&fields[3]).map(|installation_id| {
-                        AuthorityGranteeV1::PluginInstallation { controller, plugin_id, installation_id }
+                        AuthorityGranteeV1::PluginInstallation {
+                            controller,
+                            plugin_id,
+                            installation_id,
+                        }
                     })
                 })
             })
@@ -1416,7 +1530,12 @@ fn encode_string_set(values: &[String]) -> Value {
     Value::Array(values.iter().map(|value| text(value)).collect())
 }
 fn encode_entity_set(values: &[EntityId]) -> Value {
-    Value::Array(values.iter().map(|value| bytes(&entity_bytes(*value))).collect())
+    Value::Array(
+        values
+            .iter()
+            .map(|value| bytes(&entity_bytes(*value)))
+            .collect(),
+    )
 }
 fn encode_hash_set(values: &[Hash]) -> Value {
     Value::Array(values.iter().map(|value| hash_value(*value)).collect())
@@ -1438,166 +1557,129 @@ fn encode_scope(value: &CapabilityScopeV1) -> Value {
 }
 
 fn decode_scope(value: &Value) -> Result<CapabilityScopeV1, AuthorityErrorV1> {
-    match value {
-        Value::Array(fields) if fields.len() == 10 => {
-            decode_string_set(&fields[0]).and_then(|resources| {
-                decode_string_set(&fields[1]).and_then(|actions| {
-                    decode_string_set(&fields[2]).and_then(|purposes| {
-                        decode_string_set(&fields[3]).and_then(|audiences| {
-                            decode_entity_set(&fields[4]).and_then(|actor_entity_ids| {
-                                decode_entity_set(&fields[5]).and_then(|participant_ids| {
-                                    decode_optional_plugin(&fields[6]).and_then(|plugin_id| {
-                                        decode_u64(&fields[7]).and_then(|max_uses| {
-                                            decode_u64(&fields[8]).and_then(|budget| {
-                                                decode_string_set(&fields[9]).and_then(|environment_constraints| {
-                                                    CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
-                                                        resources, actions, purposes, audiences,
-                                                        actor_entity_ids, participant_ids, plugin_id,
-                                                        max_uses, budget, environment_constraints,
-                                                    })
-                                                })
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    })
-                })
-            })
-        }
-        Value::Array(_) => Err(AuthorityErrorV1::WrongArrayLength),
-        _ => Err(AuthorityErrorV1::WrongFieldType),
-    }
+    let fields = exact_array(value, 10)?;
+    CapabilityScopeV1::try_from_draft(CapabilityScopeDraftV1 {
+        resources: decode_string_set(&fields[0])?,
+        actions: decode_string_set(&fields[1])?,
+        purposes: decode_string_set(&fields[2])?,
+        audiences: decode_string_set(&fields[3])?,
+        actor_entity_ids: decode_entity_set(&fields[4])?,
+        participant_ids: decode_entity_set(&fields[5])?,
+        plugin_id: decode_optional_plugin(&fields[6])?,
+        max_uses: decode_u64(&fields[7])?,
+        budget: decode_u64(&fields[8])?,
+        environment_constraints: decode_string_set(&fields[9])?,
+    })
 }
 
 fn encode_grant(value: &CapabilityGrantV1) -> Value {
     Value::Array(vec![
-        bytes(&GRANT_MAGIC), uint(VERSION), hash_value(value.grant_id),
-        encode_principal(&value.grantor), encode_grantee(&value.grantee), encode_scope(&value.scope),
-        uint(value.valid_from_position), uint(value.valid_until_position),
-        optional_hash_value(value.parent_grant_id), uint(value.delegation_depth),
-        uint(value.max_delegation_depth), encode_hash_set(&value.consent_references),
-        hash_value(value.policy_revision), bytes(&timeline_bytes(value.issuance_timeline)),
-        uint(value.issuance_seq), uint(value.revocation_epoch),
+        bytes(&GRANT_MAGIC),
+        uint(VERSION),
+        hash_value(value.grant_id),
+        encode_principal(&value.grantor),
+        encode_grantee(&value.grantee),
+        encode_scope(&value.scope),
+        uint(value.valid_from_position),
+        uint(value.valid_until_position),
+        optional_hash_value(value.parent_grant_id),
+        uint(value.delegation_depth),
+        uint(value.max_delegation_depth),
+        encode_hash_set(&value.consent_references),
+        hash_value(value.policy_revision),
+        bytes(&timeline_bytes(value.issuance_timeline)),
+        uint(value.issuance_seq),
+        uint(value.revocation_epoch),
         optional_u64_value(value.revocation_fence),
     ])
 }
 
 fn decode_grant(fields: &[Value]) -> Result<CapabilityGrantV1, AuthorityErrorV1> {
-    expect_header(fields, GRANT_MAGIC).and_then(|()| {
-        decode_hash(&fields[2]).and_then(|grant_id| {
-            decode_principal_value(&fields[3]).and_then(|grantor| {
-                decode_grantee(&fields[4]).and_then(|grantee| {
-                    decode_scope(&fields[5]).and_then(|scope| {
-                        decode_u64(&fields[6]).and_then(|valid_from_position| {
-                            decode_u64(&fields[7]).and_then(|valid_until_position| {
-                                decode_optional_hash(&fields[8]).and_then(|parent_grant_id| {
-                                    decode_u8(&fields[9]).and_then(|delegation_depth| {
-                                        decode_u8(&fields[10]).and_then(|max_delegation_depth| {
-                                            decode_hash_set(&fields[11]).and_then(|consent_references| {
-                                                decode_hash(&fields[12]).and_then(|policy_revision| {
-                                                    decode_timeline(&fields[13]).and_then(|issuance_timeline| {
-                                                        decode_u64(&fields[14]).and_then(|issuance_seq| {
-                                                            decode_u64(&fields[15]).and_then(|revocation_epoch| {
-                                                                decode_optional_u64(&fields[16]).and_then(|revocation_fence| {
-                                                                    CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-                                                                        grant_id, grantor, grantee, scope,
-                                                                        valid_from_position, valid_until_position,
-                                                                        parent_grant_id, delegation_depth,
-                                                                        max_delegation_depth, consent_references,
-                                                                        policy_revision, issuance_timeline, issuance_seq,
-                                                                        revocation_epoch, revocation_fence,
-                                                                    })
-                                                                })
-                                                            })
-                                                        })
-                                                    })
-                                                })
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    })
-                })
-            })
-        })
+    expect_header(fields, GRANT_MAGIC)?;
+    CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
+        grant_id: decode_hash(&fields[2])?,
+        grantor: decode_principal_value(&fields[3])?,
+        grantee: decode_grantee(&fields[4])?,
+        scope: decode_scope(&fields[5])?,
+        valid_from_position: decode_u64(&fields[6])?,
+        valid_until_position: decode_u64(&fields[7])?,
+        parent_grant_id: decode_optional_hash(&fields[8])?,
+        delegation_depth: decode_u8(&fields[9])?,
+        max_delegation_depth: decode_u8(&fields[10])?,
+        consent_references: decode_hash_set(&fields[11])?,
+        policy_revision: decode_hash(&fields[12])?,
+        issuance_timeline: decode_timeline(&fields[13])?,
+        issuance_seq: decode_u64(&fields[14])?,
+        revocation_epoch: decode_u64(&fields[15])?,
+        revocation_fence: decode_optional_u64(&fields[16])?,
     })
 }
 
 fn encode_decision(value: &AuthorizationDecisionV1) -> Value {
     Value::Array(vec![
-        bytes(&DECISION_MAGIC), uint(VERSION), encode_principal(&value.principal),
-        bytes(&entity_bytes(value.actor_entity_id)), optional_hash_value(value.grant_id),
-        hash_value(value.policy_revision), bytes(&timeline_bytes(value.authority_timeline)),
-        uint(value.at_position), uint(value.outcome.code()),
+        bytes(&DECISION_MAGIC),
+        uint(VERSION),
+        encode_principal(&value.principal),
+        bytes(&entity_bytes(value.actor_entity_id)),
+        optional_hash_value(value.grant_id),
+        hash_value(value.policy_revision),
+        bytes(&timeline_bytes(value.authority_timeline)),
+        uint(value.at_position),
+        uint(value.outcome.code()),
         hash_value(value.request_digest),
         hash_value(value.decision_digest),
     ])
 }
 
 fn decode_decision(fields: &[Value]) -> Result<AuthorizationDecisionV1, AuthorityErrorV1> {
-    expect_header(fields, DECISION_MAGIC).and_then(|()| {
-        decode_principal_value(&fields[2]).and_then(|principal| {
-            decode_entity(&fields[3]).and_then(|actor_entity_id| {
-                decode_optional_hash(&fields[4]).and_then(|grant_id| {
-                    decode_hash(&fields[5]).and_then(|policy_revision| {
-                        decode_timeline(&fields[6]).and_then(|authority_timeline| {
-                            decode_u64(&fields[7]).and_then(|at_position| {
-                                decode_u8(&fields[8]).and_then(|code| {
-                                    AuthorizationOutcomeV1::from_code(code).and_then(|outcome| {
-                                        decode_hash(&fields[9]).and_then(|request_digest| {
-                                            decode_hash(&fields[10]).and_then(|encoded_digest| {
-                                                validate_hash(policy_revision)
-                                                    .and_then(|()| validate_hash(request_digest))
-                                                    .and_then(|()| validate_hash(encoded_digest))
-                                                    .and_then(|()| {
-                                                        let decoded = AuthorizationDecisionV1 {
-                                                            principal,
-                                                            actor_entity_id,
-                                                            grant_id,
-                                                            policy_revision,
-                                                            authority_timeline,
-                                                            at_position,
-                                                            outcome,
-                                                            request_digest,
-                                                            decision_digest: encoded_digest,
-                                                        };
-                                                        if decision_digest(&decoded)
-                                                            == decoded.decision_digest
-                                                        {
-                                                            Ok(decoded)
-                                                        } else {
-                                                            Err(AuthorityErrorV1::DecisionDigestMismatch)
-                                                        }
-                                                    })
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    })
-                })
-            })
-        })
-    })
+    expect_header(fields, DECISION_MAGIC)?;
+    let decoded = AuthorizationDecisionV1 {
+        principal: decode_principal_value(&fields[2])?,
+        actor_entity_id: decode_entity(&fields[3])?,
+        grant_id: decode_optional_hash(&fields[4])?,
+        policy_revision: decode_hash(&fields[5])?,
+        authority_timeline: decode_timeline(&fields[6])?,
+        at_position: decode_u64(&fields[7])?,
+        outcome: AuthorizationOutcomeV1::from_code(decode_u8(&fields[8])?)?,
+        request_digest: decode_hash(&fields[9])?,
+        decision_digest: decode_hash(&fields[10])?,
+    };
+    validate_hash(decoded.policy_revision)?;
+    validate_hash(decoded.request_digest)?;
+    validate_hash(decoded.decision_digest)?;
+    if decision_digest(&decoded) == decoded.decision_digest {
+        Ok(decoded)
+    } else {
+        Err(AuthorityErrorV1::DecisionDigestMismatch)
+    }
 }
 
 fn decode_text(value: &Value) -> Result<String, AuthorityErrorV1> {
-    match value { Value::Text(value) => Ok(value.clone()), _ => Err(AuthorityErrorV1::WrongFieldType) }
+    match value {
+        Value::Text(value) => Ok(value.clone()),
+        _ => Err(AuthorityErrorV1::WrongFieldType),
+    }
 }
 fn decode_u8(value: &Value) -> Result<u8, AuthorityErrorV1> {
-    match value { Value::Integer(value) => u8::try_from(*value).map_err(|_| AuthorityErrorV1::WrongFieldType), _ => Err(AuthorityErrorV1::WrongFieldType) }
+    match value {
+        Value::Integer(value) => u8::try_from(*value).map_err(|_| AuthorityErrorV1::WrongFieldType),
+        _ => Err(AuthorityErrorV1::WrongFieldType),
+    }
 }
 fn decode_u64(value: &Value) -> Result<u64, AuthorityErrorV1> {
-    match value { Value::Integer(value) => u64::try_from(*value).map_err(|_| AuthorityErrorV1::WrongFieldType), _ => Err(AuthorityErrorV1::WrongFieldType) }
+    match value {
+        Value::Integer(value) => {
+            u64::try_from(*value).map_err(|_| AuthorityErrorV1::WrongFieldType)
+        }
+        _ => Err(AuthorityErrorV1::WrongFieldType),
+    }
 }
 fn decode_fixed<const N: usize>(value: &Value) -> Result<[u8; N], AuthorityErrorV1> {
     match value {
-        Value::Bytes(value) => value.as_slice().try_into().map_err(|_| AuthorityErrorV1::WrongFieldType),
+        Value::Bytes(value) => value
+            .as_slice()
+            .try_into()
+            .map_err(|_| AuthorityErrorV1::WrongFieldType),
         _ => Err(AuthorityErrorV1::WrongFieldType),
     }
 }
@@ -1605,22 +1687,34 @@ fn decode_hash(value: &Value) -> Result<Hash, AuthorityErrorV1> {
     decode_fixed::<32>(value).map(Hash::from_bytes)
 }
 fn decode_optional_hash(value: &Value) -> Result<Option<Hash>, AuthorityErrorV1> {
-    match value { Value::Null => Ok(None), _ => decode_hash(value).map(Some) }
+    match value {
+        Value::Null => Ok(None),
+        _ => decode_hash(value).map(Some),
+    }
 }
 fn decode_optional_u64(value: &Value) -> Result<Option<u64>, AuthorityErrorV1> {
-    match value { Value::Null => Ok(None), _ => decode_u64(value).map(Some) }
+    match value {
+        Value::Null => Ok(None),
+        _ => decode_u64(value).map(Some),
+    }
 }
 fn decode_entity(value: &Value) -> Result<EntityId, AuthorityErrorV1> {
-    decode_fixed::<16>(value).map(|raw| EntityId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(raw))))
+    decode_fixed::<16>(value)
+        .map(|raw| EntityId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(raw))))
 }
 fn decode_plugin(value: &Value) -> Result<PluginId, AuthorityErrorV1> {
-    decode_fixed::<16>(value).map(|raw| PluginId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(raw))))
+    decode_fixed::<16>(value)
+        .map(|raw| PluginId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(raw))))
 }
 fn decode_optional_plugin(value: &Value) -> Result<Option<PluginId>, AuthorityErrorV1> {
-    match value { Value::Null => Ok(None), _ => decode_plugin(value).map(Some) }
+    match value {
+        Value::Null => Ok(None),
+        _ => decode_plugin(value).map(Some),
+    }
 }
 fn decode_timeline(value: &Value) -> Result<TimelineId, AuthorityErrorV1> {
-    decode_fixed::<16>(value).map(|raw| TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(raw))))
+    decode_fixed::<16>(value)
+        .map(|raw| TimelineId::from_ulid(ulid::Ulid::from(u128::from_be_bytes(raw))))
 }
 fn decode_string_set(value: &Value) -> Result<Vec<String>, AuthorityErrorV1> {
     match value {
