@@ -42,7 +42,8 @@ pub use authority::{
     CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1, ConsentGrantRefV1,
     ConsentGrantStatusV1, DelegateClassV1, DelegationChainV1, PrincipalRefV1, DELEGATE_ACTION_V1,
     MAX_AUTHORITY_DELEGATION_DEPTH, MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_SELECTORS,
-    MAX_AUTHORITY_TEXT_BYTES,
+    MAX_AUTHORITY_TEXT_BYTES, MAX_CAPABILITY_RECORD_BYTES, MAX_DECISION_RECORD_BYTES,
+    MAX_PRINCIPAL_RECORD_BYTES,
 };
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,

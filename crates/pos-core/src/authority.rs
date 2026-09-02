@@ -16,9 +16,12 @@ const GRANT_MAGIC: [u8; 4] = *b"CPG1";
 const DECISION_MAGIC: [u8; 4] = *b"AUD1";
 const VERSION: u8 = 1;
 
-const MAX_PRINCIPAL_RECORD_BYTES: usize = 1_024;
-const MAX_CAPABILITY_RECORD_BYTES: usize = 64 * 1_024;
-const MAX_DECISION_RECORD_BYTES: usize = 64 * 1_024;
+/// Maximum canonical PRN1 record size.
+pub const MAX_PRINCIPAL_RECORD_BYTES: usize = 1_024;
+/// Maximum canonical CPG1 record size.
+pub const MAX_CAPABILITY_RECORD_BYTES: usize = 64 * 1_024;
+/// Maximum canonical AUD1 record size.
+pub const MAX_DECISION_RECORD_BYTES: usize = 64 * 1_024;
 
 /// Capability action required before a child grant may be issued.
 pub const DELEGATE_ACTION_V1: &str = "authority.grant.delegate";
@@ -432,6 +435,7 @@ pub enum ConsentGrantStatusV1 {
 pub struct ConsentGrantRefDraftV1 {
     pub consent_id: Hash,
     pub subject_id: EntityId,
+    pub grantee_id: EntityId,
     pub data_categories: Vec<String>,
     pub purposes: Vec<String>,
     pub audiences: Vec<String>,
@@ -442,6 +446,8 @@ pub struct ConsentGrantRefDraftV1 {
     pub policy_revision: Hash,
     pub issuer: PrincipalRefV1,
     pub issuer_evidence: Hash,
+    pub consent_timeline: TimelineId,
+    pub grant_position: Seq,
     pub status: ConsentGrantStatusV1,
     pub revocation_fence: Option<Seq>,
     pub authority_registry_digest: Hash,
@@ -452,6 +458,7 @@ pub struct ConsentGrantRefDraftV1 {
 pub struct ConsentGrantRefV1 {
     consent_id: Hash,
     subject_id: EntityId,
+    grantee_id: EntityId,
     data_categories: Vec<String>,
     purposes: Vec<String>,
     audiences: Vec<String>,
@@ -462,6 +469,8 @@ pub struct ConsentGrantRefV1 {
     policy_revision: Hash,
     issuer: PrincipalRefV1,
     issuer_evidence: Hash,
+    consent_timeline: TimelineId,
+    grant_position: Seq,
     status: ConsentGrantStatusV1,
     revocation_fence: Option<Seq>,
     authority_registry_digest: Hash,
@@ -475,6 +484,7 @@ impl ConsentGrantRefV1 {
     pub fn try_from_draft(draft: ConsentGrantRefDraftV1) -> Result<Self, AuthorityErrorV1> {
         validate_hash(draft.consent_id)
             .and_then(|()| validate_entity_id(draft.subject_id))
+            .and_then(|()| validate_entity_id(draft.grantee_id))
             .and_then(|()| validate_required_text_set(&draft.data_categories))
             .and_then(|()| validate_required_text_set(&draft.purposes))
             .and_then(|()| validate_required_text_set(&draft.audiences))
@@ -483,11 +493,15 @@ impl ConsentGrantRefV1 {
             .and_then(|()| validate_text(&draft.withdrawal_retention_policy))
             .and_then(|()| validate_hash(draft.policy_revision))
             .and_then(|()| validate_hash(draft.issuer_evidence))
+            .and_then(|()| validate_timeline_id(draft.consent_timeline))
             .and_then(|()| validate_hash(draft.authority_registry_digest))
-            .and_then(|()| validate_consent_status(draft.status, draft.revocation_fence))
+            .and_then(|()| {
+                validate_consent_status(draft.status, draft.grant_position, draft.revocation_fence)
+            })
             .map(|()| Self {
                 consent_id: draft.consent_id,
                 subject_id: draft.subject_id,
+                grantee_id: draft.grantee_id,
                 data_categories: draft.data_categories,
                 purposes: draft.purposes,
                 audiences: draft.audiences,
@@ -498,6 +512,8 @@ impl ConsentGrantRefV1 {
                 policy_revision: draft.policy_revision,
                 issuer: draft.issuer,
                 issuer_evidence: draft.issuer_evidence,
+                consent_timeline: draft.consent_timeline,
+                grant_position: draft.grant_position,
                 status: draft.status,
                 revocation_fence: draft.revocation_fence,
                 authority_registry_digest: draft.authority_registry_digest,
@@ -511,6 +527,10 @@ impl ConsentGrantRefV1 {
     #[must_use]
     pub const fn subject_id(&self) -> EntityId {
         self.subject_id
+    }
+    #[must_use]
+    pub const fn grantee_id(&self) -> EntityId {
+        self.grantee_id
     }
     #[must_use]
     pub fn data_categories(&self) -> &[String] {
@@ -551,6 +571,14 @@ impl ConsentGrantRefV1 {
     #[must_use]
     pub const fn issuer_evidence(&self) -> Hash {
         self.issuer_evidence
+    }
+    #[must_use]
+    pub const fn consent_timeline(&self) -> TimelineId {
+        self.consent_timeline
+    }
+    #[must_use]
+    pub const fn grant_position(&self) -> Seq {
+        self.grant_position
     }
     #[must_use]
     pub const fn status(&self) -> ConsentGrantStatusV1 {
@@ -835,9 +863,9 @@ impl CapabilityGrantV1 {
             .and_then(|()| validate_ordered_set(&draft.permitted_delegate_classes, false))
             .and_then(|()| {
                 if draft.issuance_seq > draft.valid_from_position
-                    || draft.revocation_fence.is_some_and(|fence| {
-                        fence < draft.valid_from_position || fence > draft.valid_until_position
-                    })
+                    || draft
+                        .revocation_fence
+                        .is_some_and(|fence| fence <= draft.issuance_seq)
                 {
                     Err(AuthorityErrorV1::FieldOutOfBounds)
                 } else {
@@ -1040,9 +1068,12 @@ pub struct AuthorizationRequestDraftV1 {
     pub at_time: WallTime,
     pub authority_timeline: TimelineId,
     pub at_position: Seq,
+    pub consent_timeline: Option<TimelineId>,
+    pub consent_at_position: Option<Seq>,
     pub use_count: u64,
     pub budget: u64,
-    pub policy_revision: Hash,
+    pub consent_policy_revision: Hash,
+    pub capability_policy_revision: Hash,
     pub revocation_epoch: u64,
     pub revocation_state_current: bool,
     pub authority_registry_digest: Hash,
@@ -1068,9 +1099,12 @@ pub struct AuthorizationRequestV1 {
     at_time: WallTime,
     authority_timeline: TimelineId,
     at_position: Seq,
+    consent_timeline: Option<TimelineId>,
+    consent_at_position: Option<Seq>,
     use_count: u64,
     budget: u64,
-    policy_revision: Hash,
+    consent_policy_revision: Hash,
+    capability_policy_revision: Hash,
     revocation_epoch: u64,
     revocation_state_current: bool,
     authority_registry_digest: Hash,
@@ -1090,13 +1124,21 @@ impl AuthorizationRequestV1 {
             .and_then(|()| validate_text(&draft.action))
             .and_then(|()| validate_text(&draft.purpose))
             .and_then(|()| validate_text(&draft.audience))
-            .and_then(|()| validate_hash(draft.policy_revision))
+            .and_then(|()| validate_hash(draft.consent_policy_revision))
+            .and_then(|()| validate_hash(draft.capability_policy_revision))
             .and_then(|()| validate_entity_id(draft.actor_entity_id))
             .and_then(|()| validate_optional_entity_id(draft.subject_id))
             .and_then(|()| validate_optional_entity_id(draft.participant_id))
             .and_then(|()| validate_optional_plugin_id(draft.plugin_id))
             .and_then(|()| validate_plugin_context(draft.plugin_id, draft.installation_id))
             .and_then(|()| validate_timeline_id(draft.authority_timeline))
+            .and_then(|()| {
+                validate_consent_coordinate(
+                    draft.subject_id,
+                    draft.consent_timeline,
+                    draft.consent_at_position,
+                )
+            })
             .and_then(|()| validate_text_set(&draft.environment_constraints, false))
             .and_then(|()| validate_consent_evidence(&draft.consent))
             .and(usage_limits)
@@ -1117,9 +1159,12 @@ impl AuthorizationRequestV1 {
                 at_time: draft.at_time,
                 authority_timeline: draft.authority_timeline,
                 at_position: draft.at_position,
+                consent_timeline: draft.consent_timeline,
+                consent_at_position: draft.consent_at_position,
                 use_count: draft.use_count,
                 budget: draft.budget,
-                policy_revision: draft.policy_revision,
+                consent_policy_revision: draft.consent_policy_revision,
+                capability_policy_revision: draft.capability_policy_revision,
                 revocation_epoch: draft.revocation_epoch,
                 revocation_state_current: draft.revocation_state_current,
                 authority_registry_digest: draft.authority_registry_digest,
@@ -1189,6 +1234,14 @@ impl AuthorizationRequestV1 {
         self.at_position
     }
     #[must_use]
+    pub const fn consent_timeline(&self) -> Option<TimelineId> {
+        self.consent_timeline
+    }
+    #[must_use]
+    pub const fn consent_at_position(&self) -> Option<Seq> {
+        self.consent_at_position
+    }
+    #[must_use]
     pub const fn use_count(&self) -> u64 {
         self.use_count
     }
@@ -1197,8 +1250,12 @@ impl AuthorizationRequestV1 {
         self.budget
     }
     #[must_use]
-    pub const fn policy_revision(&self) -> Hash {
-        self.policy_revision
+    pub const fn consent_policy_revision(&self) -> Hash {
+        self.consent_policy_revision
+    }
+    #[must_use]
+    pub const fn capability_policy_revision(&self) -> Hash {
+        self.capability_policy_revision
     }
     #[must_use]
     pub const fn revocation_epoch(&self) -> u64 {
@@ -1285,9 +1342,13 @@ pub struct AuthorizationDecisionV1 {
     originating_principal: Option<PrincipalRefV1>,
     acting_delegates: Vec<PrincipalRefV1>,
     grant_id: Option<Hash>,
-    policy_revision: Hash,
+    grant_chain_bindings: Vec<Hash>,
+    consent_policy_revision: Hash,
+    capability_policy_revision: Hash,
     authority_timeline: TimelineId,
     at_position: Seq,
+    consent_timeline: Option<TimelineId>,
+    consent_at_position: Option<Seq>,
     authority_registry_digest: Hash,
     outcome: AuthorizationOutcomeV1,
     error: Option<AuthorityErrorV1>,
@@ -1337,8 +1398,16 @@ impl AuthorizationDecisionV1 {
         self.grant_id
     }
     #[must_use]
-    pub const fn policy_revision(&self) -> Hash {
-        self.policy_revision
+    pub fn grant_chain_bindings(&self) -> &[Hash] {
+        &self.grant_chain_bindings
+    }
+    #[must_use]
+    pub const fn consent_policy_revision(&self) -> Hash {
+        self.consent_policy_revision
+    }
+    #[must_use]
+    pub const fn capability_policy_revision(&self) -> Hash {
+        self.capability_policy_revision
     }
     #[must_use]
     pub const fn authority_timeline(&self) -> TimelineId {
@@ -1347,6 +1416,14 @@ impl AuthorizationDecisionV1 {
     #[must_use]
     pub const fn at_position(&self) -> Seq {
         self.at_position
+    }
+    #[must_use]
+    pub const fn consent_timeline(&self) -> Option<TimelineId> {
+        self.consent_timeline
+    }
+    #[must_use]
+    pub const fn consent_at_position(&self) -> Option<Seq> {
+        self.consent_at_position
     }
     #[must_use]
     pub const fn authority_registry_digest(&self) -> Hash {
@@ -1390,7 +1467,7 @@ impl AuthorizationDecisionV1 {
     /// # Errors
     /// Returns a closed validation, digest, or codec error for malformed input.
     pub fn decode(bytes: &CanonicalBytes) -> Result<Self, AuthorityErrorV1> {
-        decode_bounded_array(bytes.as_slice(), MAX_DECISION_RECORD_BYTES, 20)
+        decode_bounded_array(bytes.as_slice(), MAX_DECISION_RECORD_BYTES, 24)
             .and_then(|fields| decode_decision(&fields))
     }
 }
@@ -1408,8 +1485,24 @@ impl AuthorityEvaluatorV1 {
         grant_chain: &DelegationChainV1,
         trusted_registry: &AuthorityRegistrySnapshotV1,
     ) -> AuthorizationDecisionV1 {
-        let evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
+        let mut evaluation = authorization_evaluation(request, grant_chain, trusted_registry);
         let request_digest = request_digest(request);
+        let grant_chain_bindings = if evaluation.grant_evidence_is_trusted {
+            grant_chain
+                .grants
+                .iter()
+                .map(CapabilityGrantV1::binding_digest)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|_| {
+                    evaluation = AuthorizationEvaluationV1::denied(
+                        AuthorizationOutcomeV1::IndeterminateFailClosed,
+                        Some(AuthorityErrorV1::ProvenanceMissing),
+                    );
+                    Vec::new()
+                })
+        } else {
+            Vec::new()
+        };
         let (originating_principal, acting_delegates, grant_id) =
             if evaluation.grant_evidence_is_trusted {
                 (
@@ -1420,6 +1513,7 @@ impl AuthorityEvaluatorV1 {
                     grant_chain
                         .grants
                         .iter()
+                        .take(grant_chain.grants.len().saturating_sub(1))
                         .map(|grant| grant.grantee.principal().clone())
                         .collect(),
                     grant_chain.grants.last().map(CapabilityGrantV1::grant_id),
@@ -1438,9 +1532,13 @@ impl AuthorityEvaluatorV1 {
             originating_principal,
             acting_delegates,
             grant_id,
-            policy_revision: request.policy_revision,
+            grant_chain_bindings,
+            consent_policy_revision: request.consent_policy_revision,
+            capability_policy_revision: request.capability_policy_revision,
             authority_timeline: request.authority_timeline,
             at_position: request.at_position,
+            consent_timeline: request.consent_timeline,
+            consent_at_position: request.consent_at_position,
             authority_registry_digest: request.authority_registry_digest,
             outcome: evaluation.outcome,
             error: evaluation.error,
@@ -1493,26 +1591,26 @@ fn authorization_evaluation(
     grant_chain: &DelegationChainV1,
     trusted_registry: &AuthorityRegistrySnapshotV1,
 ) -> AuthorizationEvaluationV1 {
-    if request.at_time < request.authenticated.issued_at
-        || request.at_time >= request.authenticated.expires_at
-    {
-        return AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None);
-    }
     if !trusted_registry.trusts_authentication(request) {
         return AuthorizationEvaluationV1::denied(
             AuthorizationOutcomeV1::IndeterminateFailClosed,
             Some(AuthorityErrorV1::PrincipalUnresolved),
         );
     }
-    let consent_evaluation = evaluate_consent(request);
-    if consent_evaluation.outcome != AuthorizationOutcomeV1::Active {
-        return consent_evaluation;
+    if request.at_time < request.authenticated.issued_at
+        || request.at_time >= request.authenticated.expires_at
+    {
+        return AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None);
     }
     if !trusted_registry.trusts_consent(request) {
         return AuthorizationEvaluationV1::denied(
             AuthorizationOutcomeV1::ConsentMissing,
             Some(AuthorityErrorV1::ConsentMissing),
         );
+    }
+    let consent_evaluation = evaluate_consent(request);
+    if consent_evaluation.outcome != AuthorizationOutcomeV1::Active {
+        return consent_evaluation;
     }
     let Some(leaf) = grant_chain.grants.last() else {
         return AuthorizationEvaluationV1::denied(
@@ -1561,7 +1659,7 @@ fn authorization_evaluation(
     }
     let timeline_is_current = request.authority_timeline == leaf.issuance_timeline;
     let revocation_epoch_is_current = request.revocation_epoch == leaf.revocation_epoch;
-    let policy_is_current = request.policy_revision == leaf.policy_revision;
+    let policy_is_current = request.capability_policy_revision == leaf.policy_revision;
     if !timeline_is_current || !revocation_epoch_is_current || !policy_is_current {
         return AuthorizationEvaluationV1::denied_with_trusted_grant(
             AuthorizationOutcomeV1::IndeterminateFailClosed,
@@ -1639,31 +1737,38 @@ fn evaluate_consent_grant(
     request: &AuthorizationRequestV1,
     grant: &ConsentGrantRefV1,
 ) -> AuthorizationEvaluationV1 {
-    let matches_request = Some(grant.subject_id) == request.subject_id
-        && grant
-            .data_categories
-            .binary_search(&request.data_category)
-            .is_ok()
+    let identity_matches =
+        Some(grant.subject_id) == request.subject_id && grant.grantee_id == request.actor_entity_id;
+    let coordinate_matches = Some(grant.consent_timeline) == request.consent_timeline
+        && request
+            .consent_at_position
+            .is_some_and(|position| position >= grant.grant_position);
+    let scope_matches = grant
+        .data_categories
+        .binary_search(&request.data_category)
+        .is_ok()
         && grant.purposes.binary_search(&request.purpose).is_ok()
         && grant.audiences.binary_search(&request.audience).is_ok()
-        && grant.action_classes.binary_search(&request.action).is_ok()
-        && grant.policy_revision == request.policy_revision
-        && grant.authority_registry_digest == request.authority_registry_digest;
+        && grant.action_classes.binary_search(&request.action).is_ok();
+    let policy_revision_matches = grant.policy_revision == request.consent_policy_revision;
+    let registry_matches = grant.authority_registry_digest == request.authority_registry_digest;
+    let matches_request = identity_matches
+        && coordinate_matches
+        && scope_matches
+        && policy_revision_matches
+        && registry_matches;
     if !matches_request {
         AuthorizationEvaluationV1::denied(
             AuthorizationOutcomeV1::ConsentMissing,
             Some(AuthorityErrorV1::ConsentMissing),
         )
-    } else if grant.status == ConsentGrantStatusV1::Expired
-        || request.at_time < grant.valid_from
-        || request.at_time >= grant.valid_until
-    {
+    } else if request.at_time < grant.valid_from || request.at_time >= grant.valid_until {
         AuthorizationEvaluationV1::denied(AuthorizationOutcomeV1::Expired, None)
-    } else if grant.status == ConsentGrantStatusV1::RevokedAtFence
-        || grant
-            .revocation_fence
-            .is_some_and(|fence| request.at_position >= fence)
-    {
+    } else if grant.revocation_fence.is_some_and(|fence| {
+        request
+            .consent_at_position
+            .is_some_and(|position| position >= fence)
+    }) {
         AuthorizationEvaluationV1::denied(
             AuthorizationOutcomeV1::RevokedAtFence,
             Some(AuthorityErrorV1::RevokedAtFence),
@@ -1694,9 +1799,11 @@ fn validate_chain_structure(chain: &[CapabilityGrantV1]) -> Result<(), Authority
     let mut seen_grants = Vec::with_capacity(chain.len());
     let mut seen_delegates = Vec::with_capacity(chain.len());
     let mut previous: Option<&CapabilityGrantV1> = None;
-    for grant in chain {
+    let root_grantor = chain.first().map(|grant| &grant.grantor);
+    for (index, grant) in chain.iter().enumerate() {
         if seen_grants.contains(&grant.grant_id)
             || seen_delegates.contains(grant.grantee.principal())
+            || (index > 0 && root_grantor == Some(grant.grantee.principal()))
         {
             return Err(AuthorityErrorV1::DuplicateIdentity);
         }
@@ -1721,7 +1828,7 @@ fn validate_delegation_chain(
     for (index, grant) in chain.grants.iter().enumerate() {
         let is_leaf = index + 1 == chain.grants.len();
         let parent_timeline_is_current = grant.issuance_timeline == request.authority_timeline;
-        let parent_policy_is_current = grant.policy_revision == request.policy_revision;
+        let parent_policy_is_current = grant.policy_revision == request.capability_policy_revision;
         let parent_revocation_is_current = grant.revocation_epoch == request.revocation_epoch;
         if !is_leaf
             && (!parent_timeline_is_current
@@ -1883,10 +1990,7 @@ fn validate_optional_hash(value: Option<Hash>) -> Result<(), AuthorityErrorV1> {
 }
 
 fn validate_hash_set(values: &[Hash]) -> Result<(), AuthorityErrorV1> {
-    if values.len() > MAX_AUTHORITY_SELECTORS {
-        return Err(AuthorityErrorV1::FieldOutOfBounds);
-    }
-    validate_ordered_set(values, false)
+    validate_ordered_set_with_limit(values, false, MAX_AUTHORITY_SELECTORS)
         .and_then(|()| values.iter().copied().try_for_each(validate_hash))
 }
 
@@ -1896,6 +2000,19 @@ fn validate_required_hash_set(values: &[Hash]) -> Result<(), AuthorityErrorV1> {
     } else {
         validate_hash_set(values)
     }
+}
+
+fn validate_hash_sequence(values: &[Hash], limit: usize) -> Result<(), AuthorityErrorV1> {
+    if values.len() > limit {
+        return Err(AuthorityErrorV1::FieldOutOfBounds);
+    }
+    for (index, value) in values.iter().copied().enumerate() {
+        validate_hash(value)?;
+        if values[..index].contains(&value) {
+            return Err(AuthorityErrorV1::DuplicateIdentity);
+        }
+    }
+    Ok(())
 }
 
 fn validate_consent_evidence(value: &ConsentEvidenceV1) -> Result<(), AuthorityErrorV1> {
@@ -1919,12 +2036,29 @@ fn validate_consent_evidence(value: &ConsentEvidenceV1) -> Result<(), AuthorityE
 
 const fn validate_consent_status(
     status: ConsentGrantStatusV1,
+    grant_position: Seq,
     revocation_fence: Option<Seq>,
 ) -> Result<(), AuthorityErrorV1> {
-    if matches!(status, ConsentGrantStatusV1::RevokedAtFence) && revocation_fence.is_none() {
-        Err(AuthorityErrorV1::FieldOutOfBounds)
-    } else {
-        Ok(())
+    match (status, revocation_fence) {
+        (ConsentGrantStatusV1::RevokedAtFence, Some(fence))
+            if fence.as_u64() > grant_position.as_u64() =>
+        {
+            Ok(())
+        }
+        (ConsentGrantStatusV1::Active | ConsentGrantStatusV1::Expired, None) => Ok(()),
+        _ => Err(AuthorityErrorV1::FieldOutOfBounds),
+    }
+}
+
+fn validate_consent_coordinate(
+    subject_id: Option<EntityId>,
+    timeline: Option<TimelineId>,
+    position: Option<Seq>,
+) -> Result<(), AuthorityErrorV1> {
+    match (subject_id, timeline, position) {
+        (Some(_), Some(timeline), Some(_)) => validate_timeline_id(timeline),
+        (None, None, None) => Ok(()),
+        _ => Err(AuthorityErrorV1::FieldOutOfBounds),
     }
 }
 
@@ -2058,9 +2192,18 @@ fn request_digest(request: &AuthorizationRequestV1) -> Hash {
     hasher.update(&request.at_time.as_micros().to_be_bytes());
     hasher.update(&timeline_bytes(request.authority_timeline));
     hasher.update(&request.at_position.as_u64().to_be_bytes());
+    digest_optional_fixed(&mut hasher, request.consent_timeline.map(timeline_bytes));
+    digest_optional_fixed(
+        &mut hasher,
+        request
+            .consent_at_position
+            .map(Seq::as_u64)
+            .map(u64::to_be_bytes),
+    );
     hasher.update(&request.use_count.to_be_bytes());
     hasher.update(&request.budget.to_be_bytes());
-    hasher.update(request.policy_revision.as_bytes());
+    hasher.update(request.consent_policy_revision.as_bytes());
+    hasher.update(request.capability_policy_revision.as_bytes());
     hasher.update(&request.revocation_epoch.to_be_bytes());
     hasher.update(&[u8::from(request.revocation_state_current)]);
     hasher.update(request.authority_registry_digest.as_bytes());
@@ -2089,9 +2232,22 @@ fn decision_digest(decision: &AuthorizationDecisionV1) -> Hash {
         digest_principal(&mut hasher, delegate);
     }
     digest_optional_hash(&mut hasher, decision.grant_id);
-    hasher.update(decision.policy_revision.as_bytes());
+    hasher.update(&(decision.grant_chain_bindings.len() as u64).to_be_bytes());
+    for binding in &decision.grant_chain_bindings {
+        hasher.update(binding.as_bytes());
+    }
+    hasher.update(decision.consent_policy_revision.as_bytes());
+    hasher.update(decision.capability_policy_revision.as_bytes());
     hasher.update(&timeline_bytes(decision.authority_timeline));
     hasher.update(&decision.at_position.as_u64().to_be_bytes());
+    digest_optional_fixed(&mut hasher, decision.consent_timeline.map(timeline_bytes));
+    digest_optional_fixed(
+        &mut hasher,
+        decision
+            .consent_at_position
+            .map(Seq::as_u64)
+            .map(u64::to_be_bytes),
+    );
     hasher.update(decision.authority_registry_digest.as_bytes());
     hasher.update(&[decision.outcome.code()]);
     digest_optional_error(&mut hasher, decision.error);
@@ -2190,6 +2346,7 @@ fn digest_consent(hasher: &mut blake3::Hasher, consent: &ConsentEvidenceV1) {
 fn digest_consent_grant(hasher: &mut blake3::Hasher, grant: &ConsentGrantRefV1) {
     hasher.update(grant.consent_id.as_bytes());
     hasher.update(&entity_bytes(grant.subject_id));
+    hasher.update(&entity_bytes(grant.grantee_id));
     for values in [
         &grant.data_categories,
         &grant.purposes,
@@ -2207,6 +2364,8 @@ fn digest_consent_grant(hasher: &mut blake3::Hasher, grant: &ConsentGrantRefV1) 
     hasher.update(grant.policy_revision.as_bytes());
     digest_principal(hasher, &grant.issuer);
     hasher.update(grant.issuer_evidence.as_bytes());
+    hasher.update(&timeline_bytes(grant.consent_timeline));
+    hasher.update(&grant.grant_position.as_u64().to_be_bytes());
     hasher.update(&[consent_status_code(grant.status)]);
     digest_optional_fixed(
         hasher,
@@ -2317,6 +2476,9 @@ fn optional_plugin_value(value: Option<PluginId>) -> Value {
 }
 fn optional_entity_value(value: Option<EntityId>) -> Value {
     value.map_or(Value::Null, |entity| bytes(&entity_bytes(entity)))
+}
+fn optional_timeline_value(value: Option<TimelineId>) -> Value {
+    value.map_or(Value::Null, |timeline| bytes(&timeline_bytes(timeline)))
 }
 fn optional_fixed_value<const N: usize>(value: Option<[u8; N]>) -> Value {
     value.map_or(Value::Null, |raw| bytes(&raw))
@@ -2444,6 +2606,9 @@ fn encode_entity_set(values: &[EntityId]) -> Value {
 fn encode_hash_set(values: &[Hash]) -> Value {
     Value::Array(values.iter().map(|value| hash_value(*value)).collect())
 }
+fn encode_hash_sequence(values: &[Hash]) -> Value {
+    Value::Array(values.iter().map(|value| hash_value(*value)).collect())
+}
 fn encode_role_set(values: &[AuthorityRoleV1]) -> Value {
     Value::Array(values.iter().map(|value| uint(role_code(*value))).collect())
 }
@@ -2557,9 +2722,13 @@ fn encode_decision(value: &AuthorizationDecisionV1) -> Value {
         optional_principal_value(value.originating_principal.as_ref()),
         encode_principal_set(&value.acting_delegates),
         optional_hash_value(value.grant_id),
-        hash_value(value.policy_revision),
+        encode_hash_sequence(&value.grant_chain_bindings),
+        hash_value(value.consent_policy_revision),
+        hash_value(value.capability_policy_revision),
         bytes(&timeline_bytes(value.authority_timeline)),
         uint(value.at_position.as_u64()),
+        optional_timeline_value(value.consent_timeline),
+        optional_seq_value(value.consent_at_position),
         hash_value(value.authority_registry_digest),
         uint(value.outcome.code()),
         optional_error_value(value.error),
@@ -2586,26 +2755,38 @@ fn decode_decision_fields(fields: &[Value]) -> Result<AuthorizationDecisionV1, A
         originating_principal: decode_optional_principal(&fields[9])?,
         acting_delegates: decode_principal_set(&fields[10])?,
         grant_id: decode_optional_hash(&fields[11])?,
-        policy_revision: decode_hash(&fields[12])?,
-        authority_timeline: decode_timeline(&fields[13])?,
-        at_position: Seq::from_u64(decode_u64(&fields[14])?),
-        authority_registry_digest: decode_hash(&fields[15])?,
-        outcome: AuthorizationOutcomeV1::from_code(decode_u8(&fields[16])?)?,
-        error: decode_optional_error(&fields[17])?,
-        request_digest: decode_hash(&fields[18])?,
-        decision_digest: decode_hash(&fields[19])?,
+        grant_chain_bindings: decode_hash_sequence(&fields[12])?,
+        consent_policy_revision: decode_hash(&fields[13])?,
+        capability_policy_revision: decode_hash(&fields[14])?,
+        authority_timeline: decode_timeline(&fields[15])?,
+        at_position: Seq::from_u64(decode_u64(&fields[16])?),
+        consent_timeline: decode_optional_timeline(&fields[17])?,
+        consent_at_position: decode_optional_seq(&fields[18])?,
+        authority_registry_digest: decode_hash(&fields[19])?,
+        outcome: AuthorizationOutcomeV1::from_code(decode_u8(&fields[20])?)?,
+        error: decode_optional_error(&fields[21])?,
+        request_digest: decode_hash(&fields[22])?,
+        decision_digest: decode_hash(&fields[23])?,
     })
 }
 
 fn validate_decision(
     decoded: AuthorizationDecisionV1,
 ) -> Result<AuthorizationDecisionV1, AuthorityErrorV1> {
-    validate_hash(decoded.policy_revision)
+    validate_hash(decoded.consent_policy_revision)
+        .and_then(|()| validate_hash(decoded.capability_policy_revision))
         .and_then(|()| validate_hash(decoded.request_digest))
         .and_then(|()| validate_hash(decoded.decision_digest))
         .and_then(|()| validate_hash(decoded.authority_registry_digest))
         .and_then(|()| validate_optional_hash(decoded.grant_id))
         .and_then(|()| validate_timeline_id(decoded.authority_timeline))
+        .and_then(|()| {
+            validate_consent_coordinate(
+                decoded.subject_id,
+                decoded.consent_timeline,
+                decoded.consent_at_position,
+            )
+        })
         .and_then(|()| validate_entity_id(decoded.actor_entity_id))
         .and_then(|()| validate_optional_entity_id(decoded.subject_id))
         .and_then(|()| validate_optional_entity_id(decoded.participant_id))
@@ -2632,15 +2813,25 @@ fn validate_decision_evidence(decision: &AuthorizationDecisionV1) -> Result<(), 
     {
         return Err(AuthorityErrorV1::DuplicateIdentity);
     }
+    if decision.grant_id.is_some() {
+        validate_hash_sequence(
+            &decision.grant_chain_bindings,
+            usize::from(MAX_AUTHORITY_DELEGATION_DEPTH) + 1,
+        )?;
+    }
     let complete_grant_evidence = match decision.grant_id {
         Some(_) => {
-            decision.originating_principal.is_some() && !decision.acting_delegates.is_empty()
+            decision.originating_principal.is_some()
+                && decision.grant_chain_bindings.len() == decision.acting_delegates.len() + 1
         }
-        None => decision.originating_principal.is_none() && decision.acting_delegates.is_empty(),
+        None => {
+            decision.originating_principal.is_none()
+                && decision.acting_delegates.is_empty()
+                && decision.grant_chain_bindings.is_empty()
+        }
     };
-    let active_is_complete = decision.outcome != AuthorizationOutcomeV1::Active
-        || (decision.grant_id.is_some()
-            && decision.acting_delegates.last() == Some(&decision.principal));
+    let active_is_complete =
+        decision.outcome != AuthorizationOutcomeV1::Active || decision.grant_id.is_some();
     let outcome_matches_error = match decision.outcome {
         AuthorizationOutcomeV1::Active | AuthorizationOutcomeV1::Expired => {
             decision.error.is_none()
@@ -2741,6 +2932,12 @@ fn decode_optional_plugin(value: &Value) -> Result<Option<PluginId>, AuthorityEr
         _ => decode_plugin(value).map(Some),
     }
 }
+fn decode_optional_timeline(value: &Value) -> Result<Option<TimelineId>, AuthorityErrorV1> {
+    match value {
+        Value::Null => Ok(None),
+        _ => decode_timeline(value).map(Some),
+    }
+}
 fn decode_optional_entity(value: &Value) -> Result<Option<EntityId>, AuthorityErrorV1> {
     match value {
         Value::Null => Ok(None),
@@ -2801,6 +2998,12 @@ fn decode_entity_set(value: &Value) -> Result<Vec<EntityId>, AuthorityErrorV1> {
     }
 }
 fn decode_hash_set(value: &Value) -> Result<Vec<Hash>, AuthorityErrorV1> {
+    match value {
+        Value::Array(values) => values.iter().map(decode_hash).collect(),
+        _ => Err(AuthorityErrorV1::InvalidEncoding),
+    }
+}
+fn decode_hash_sequence(value: &Value) -> Result<Vec<Hash>, AuthorityErrorV1> {
     match value {
         Value::Array(values) => values.iter().map(decode_hash).collect(),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
