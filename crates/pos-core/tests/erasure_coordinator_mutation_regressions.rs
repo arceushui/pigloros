@@ -8,13 +8,12 @@ pub mod erasure_support;
 use coordinator_support::{PublicCoordinatorPort, PublicCoordinatorPortConfig};
 use pos_core::erasure::destruction_command_reference;
 use pos_core::{
-    ErasureAtomicFreezeAdmissionV1, ErasureCasEffectV1, ErasureCasOutcomeV1,
-    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
-    ErasureCorrectionProvenanceV1, ErasureErrorV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationV1, ErasurePersistencePortV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeV1,
-    ErasureStateTransitionV1,
+    ErasureCasEffectV1, ErasureCasOutcomeV1, ErasureCoordinatorStateMachineV1,
+    ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationV1, ErasurePersistencePortV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -171,7 +170,7 @@ fn restart_recovers_a_frozen_state_and_verifies_retained_authorization(
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port.clone(), COORDINATOR);
         coordinator.submit(request.clone(), request.provenance())?;
         coordinator.authorize(request.reference(), reference(21))?;
-        coordinator.freeze_inventory(request.reference(), freeze_transition())?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
     }
     let mut restarted = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     let recovered = restarted.submit(request.clone(), request.provenance())?;
@@ -188,7 +187,7 @@ fn attempt_admission_is_coupled_to_the_raw_cas_effect() -> Result<(), ErasureErr
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     coordinator.submit(request.clone(), request.provenance())?;
     coordinator.authorize(request.reference(), reference(21))?;
-    coordinator.freeze_inventory(request.reference(), freeze_transition())?;
+    coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
     let admission = admission(request.reference(), target)?;
     coordinator.dispatch_attempt(request.reference(), &admission)?;
 

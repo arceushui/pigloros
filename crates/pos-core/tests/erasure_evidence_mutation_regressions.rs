@@ -14,10 +14,10 @@ use pos_core::{
     ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1,
     ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
     ErasureObligationV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
+    ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateV1,
 };
 
 const fn reference(value: u8) -> ErasureReferenceV1 {

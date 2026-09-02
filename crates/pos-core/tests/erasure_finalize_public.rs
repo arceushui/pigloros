@@ -11,7 +11,7 @@ use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
     ErasureArtifactTransitionV1, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
     ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureObligationInputV1, ErasureObligationV1, ErasureReceiptInputV1,
+    ErasureObligationInputV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
     ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
     ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
     ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateTransitionV1,
@@ -112,7 +112,7 @@ fn public_lifecycle_persists_raw_manifest_objects_and_attempt_index() -> Result<
     assert_eq!(authorized.lifecycle(), ErasureLifecycleV1::Authorized);
     let frozen = coordinator.freeze_inventory(
         request.reference(),
-        ErasureStateTransitionV1 {
+        &ErasureStateTransitionV1 {
             lifecycle: ErasureLifecycleV1::AccessFrozen,
             freeze_position: Some(10),
             pending_owners: Vec::new(),
@@ -125,13 +125,13 @@ fn public_lifecycle_persists_raw_manifest_objects_and_attempt_index() -> Result<
     assert_eq!(frozen.lifecycle(), ErasureLifecycleV1::AccessFrozen);
 
     let retry = admission(request.reference(), target)?;
-    let awaiting = coordinator.dispatch_destruction(request.reference(), retry.clone())?;
+    let awaiting = coordinator.dispatch_destruction(request.reference(), &retry)?;
     assert_eq!(
         awaiting.lifecycle(),
         ErasureLifecycleV1::AwaitingAcknowledgements
     );
     assert_eq!(
-        coordinator.dispatch_destruction(request.reference(), retry)?,
+        coordinator.dispatch_destruction(request.reference(), &retry)?,
         awaiting
     );
 
