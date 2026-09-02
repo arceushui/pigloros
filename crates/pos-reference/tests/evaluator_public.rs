@@ -590,7 +590,7 @@ fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> Te
         .map(ProfileMutation::RawProfileField)
         .chain(
             (0..23)
-                .filter(|index| ![13, 19, 20].contains(index))
+                .filter(|index| ![13, 19, 20, 22].contains(index))
                 .map(ProfileMutation::RawFixtureField),
         )
         .chain(
