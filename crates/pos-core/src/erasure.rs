@@ -63,16 +63,8 @@ const fn applicability_matrix_cardinality_is_valid(count: usize) -> bool {
         && count.is_multiple_of(ERASURE_INVENTORY_CATEGORY_COUNT)
 }
 
-const fn obligation_count_is_bounded(count: usize) -> bool {
-    count <= ERASURE_MAX_OBLIGATIONS
-}
-
 const fn category_obligation_count_is_bounded(count: usize) -> bool {
     count <= ERASURE_MAX_OBLIGATIONS_PER_CATEGORY
-}
-
-const fn scope_extension_count_is_bounded(count: usize) -> bool {
-    count <= ERASURE_MAX_SCOPE_EXTENSIONS
 }
 
 /// Domain tag for correction-provenance records.
