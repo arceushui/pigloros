@@ -1267,6 +1267,17 @@ impl RecoveredErasureV1 {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
 
+        self.validate_completed_attempt(port, page, &admission, &effective, predecessor_receipt)
+    }
+
+    fn validate_completed_attempt(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        page: &AttemptPageV1,
+        admission: &ErasureRetryAdmissionV1,
+        effective: &InventoryV1,
+        predecessor_receipt: Option<ErasureReferenceV1>,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
         let outcome = load(
             port,
             page.outcome,
