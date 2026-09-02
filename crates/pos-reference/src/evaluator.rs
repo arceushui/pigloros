@@ -244,7 +244,7 @@ fn evaluate_cases(
         }
         let attempt = case_attempt(bundle, fixture, bundle.mode)?;
         let observation = adapter.execute(&attempt);
-        outcomes.push(case_outcome(fixture, bundle.mode, observation)?);
+        outcomes.push(case_outcome(fixture, bundle.mode, observation));
     }
     if outcomes.is_empty() {
         Err(EvaluatorError::Profile)
@@ -294,7 +294,7 @@ fn case_outcome(
     fixture: &Fixture,
     mode: u8,
     observation: Result<SubjectObservation, AdapterError>,
-) -> Result<CaseOutcome, EvaluatorError> {
+) -> CaseOutcome {
     let mut outcome = CaseOutcome {
         case_id: fixture.case_id.clone(),
         fixture_digest: fixture.fixture_digest,
@@ -314,7 +314,7 @@ fn case_outcome(
     match &fixture.oracle {
         StrictOracle::Output(expected) => outcome.expected_digest = Some(expected.digest),
         StrictOracle::Failure(expected) => {
-            outcome.expected_digest = Some(failure_digest(expected)?);
+            outcome.expected_digest = Some(failure_digest(expected));
         }
         StrictOracle::Divergence {
             classification,
@@ -323,20 +323,20 @@ fn case_outcome(
             outcome.expected_digest = Some(expected_divergence_digest(
                 *classification,
                 first_coordinate,
-            )?);
+            ));
         }
     }
     if outcome.redaction_state >= 2 {
         outcome.expected_digest = None;
-        return Ok(outcome);
+        return outcome;
     }
     let Ok(observation) = observation else {
-        return Ok(outcome);
+        return outcome;
     };
     if observation.usage.exceeds(fixture.deterministic_budget) {
         outcome.outcome = CaseStatus::Fail;
         outcome.actual_error = Some(13);
-        return Ok(outcome);
+        return outcome;
     }
     match (&fixture.oracle, observation.result) {
         (StrictOracle::Output(expected), SubjectResult::Output(actual)) => {
@@ -351,7 +351,7 @@ fn case_outcome(
             };
         }
         (StrictOracle::Failure(expected), SubjectResult::Failure(actual)) => {
-            let actual_digest = failure_digest(&actual)?;
+            let actual_digest = failure_digest(&actual);
             outcome.actual_digest = Some(actual_digest);
             outcome.outcome = if expected == &actual {
                 CaseStatus::Pass
@@ -373,7 +373,7 @@ fn case_outcome(
             outcome.actual_digest = Some(actual_divergence_digest(
                 actual_classification,
                 &actual_coordinate,
-            )?);
+            ));
             outcome.outcome = if *classification == actual_classification
                 && first_coordinate == &actual_coordinate
             {
@@ -385,23 +385,20 @@ fn case_outcome(
         (_, SubjectResult::Unavailable) => {}
         _ => outcome.outcome = CaseStatus::Fail,
     }
-    Ok(outcome)
+    outcome
 }
 
-fn failure_digest(value: &NamespacedFailure) -> Result<[u8; 32], EvaluatorError> {
+fn failure_digest(value: &NamespacedFailure) -> [u8; 32] {
     let mut bytes = b"PiglorOS.NamespacedFailure.v1\0".to_vec();
     for field in [&value.owner_id, &value.contract_version, &value.code_id] {
         let length = field.len() as u64;
         bytes.extend_from_slice(&length.to_be_bytes());
         bytes.extend_from_slice(field.as_bytes());
     }
-    Ok(*blake3::hash(&bytes).as_bytes())
+    *blake3::hash(&bytes).as_bytes()
 }
 
-fn expected_divergence_digest(
-    classification: u8,
-    coordinate: &[u8],
-) -> Result<[u8; 32], EvaluatorError> {
+fn expected_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32] {
     divergence_digest(
         b"PiglorOS.ExpectedDivergence.v1\0",
         classification,
@@ -409,10 +406,7 @@ fn expected_divergence_digest(
     )
 }
 
-fn actual_divergence_digest(
-    classification: u8,
-    coordinate: &[u8],
-) -> Result<[u8; 32], EvaluatorError> {
+fn actual_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32] {
     divergence_digest(
         b"PiglorOS.ActualDivergence.v1\0",
         classification,
@@ -420,17 +414,13 @@ fn actual_divergence_digest(
     )
 }
 
-fn divergence_digest(
-    domain: &[u8],
-    classification: u8,
-    coordinate: &[u8],
-) -> Result<[u8; 32], EvaluatorError> {
+fn divergence_digest(domain: &[u8], classification: u8, coordinate: &[u8]) -> [u8; 32] {
     let mut bytes = domain.to_vec();
     bytes.push(classification);
     let length = coordinate.len() as u64;
     bytes.extend_from_slice(&length.to_be_bytes());
     bytes.extend_from_slice(coordinate);
-    Ok(*blake3::hash(&bytes).as_bytes())
+    *blake3::hash(&bytes).as_bytes()
 }
 
 fn compare_case_outcomes(left: &CaseOutcome, right: &CaseOutcome) -> Ordering {

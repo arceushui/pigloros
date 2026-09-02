@@ -42,6 +42,34 @@ const fn usage() -> ResourceUsage {
     }
 }
 
+fn observation_shapes() -> [SubjectObservation; 4] {
+    [
+        SubjectObservation {
+            result: SubjectResult::Output(vec![1]),
+            usage: usage(),
+        },
+        SubjectObservation {
+            result: SubjectResult::Failure(NamespacedFailure {
+                owner_id: "owner".to_owned(),
+                contract_version: "1.0.0".to_owned(),
+                code_id: "failure".to_owned(),
+            }),
+            usage: usage(),
+        },
+        SubjectObservation {
+            result: SubjectResult::Divergence {
+                classification: 1,
+                first_coordinate: vec![1],
+            },
+            usage: usage(),
+        },
+        SubjectObservation {
+            result: SubjectResult::Unavailable,
+            usage: usage(),
+        },
+    ]
+}
+
 #[test]
 fn transport_errors_preserve_public_protocol_failure_classes() {
     assert_eq!(
@@ -440,32 +468,19 @@ fn observation_transport_rejects_versions_codes_and_field_types() -> TestResult 
 
 #[test]
 fn observation_transport_rejects_wrong_types_at_every_public_field() -> TestResult {
-    let observations = [
-        SubjectObservation {
-            result: SubjectResult::Output(vec![1]),
-            usage: usage(),
-        },
-        SubjectObservation {
-            result: SubjectResult::Failure(NamespacedFailure {
-                owner_id: "owner".to_owned(),
-                contract_version: "1.0.0".to_owned(),
-                code_id: "failure".to_owned(),
-            }),
-            usage: usage(),
-        },
-        SubjectObservation {
-            result: SubjectResult::Divergence {
-                classification: 1,
-                first_coordinate: vec![1],
-            },
-            usage: usage(),
-        },
-    ];
-
-    for observation in observations {
+    for observation in observation_shapes() {
+        let result_field = match &observation.result {
+            SubjectResult::Output(_) => Some(3),
+            SubjectResult::Failure(_) => Some(4),
+            SubjectResult::Divergence { .. } => Some(5),
+            SubjectResult::Unavailable => None,
+        };
         let encoded = encode_observation(&observation)?;
         let valid: Value = ciborium::from_reader(encoded.as_slice())?;
-        for index in 0..7 {
+        for index in [Some(0), Some(1), Some(2), result_field, Some(6)]
+            .into_iter()
+            .flatten()
+        {
             let mut changed = valid.clone();
             replace_field(&mut changed, index, Value::Null)?;
             assert!(decode_observation(&canonical(&changed)?).is_err());

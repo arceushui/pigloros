@@ -140,10 +140,10 @@ impl EvaluationRequest {
     /// # Errors
     /// Returns an encoding failure if the in-memory value cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], ProtocolError> {
-        domain_digest(
+        Ok(domain_digest(
             b"PiglorOS.EvaluatorRequest.v1",
             &encode(&request_value(self, false))?,
-        )
+        ))
     }
 
     /// Derive the capability identity from every selected authority.
@@ -162,7 +162,10 @@ impl EvaluationRequest {
             bytes(&self.evaluator_protocol_digest),
             bytes(&self.evaluator_hard_caps_digest),
         ]);
-        domain_digest(b"PiglorOS.EvaluatorOutputCapability.v1", &encode(&value)?)
+        Ok(domain_digest(
+            b"PiglorOS.EvaluatorOutputCapability.v1",
+            &encode(&value)?,
+        ))
     }
 
     fn validate(&self) -> Result<(), ProtocolError> {
@@ -307,10 +310,10 @@ impl ConformanceReport {
     /// # Errors
     /// Returns an encoding failure if the report fields cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], ProtocolError> {
-        domain_digest(
+        Ok(domain_digest(
             b"PiglorOS.ConformanceReport.v1",
             &encode(&report_value(self, false))?,
-        )
+        ))
     }
 
     fn validate(&self) -> Result<(), ProtocolError> {
@@ -848,12 +851,12 @@ pub(crate) fn encode_with_limit(
     }
 }
 
-pub(crate) fn domain_digest(domain: &[u8], bytes: &[u8]) -> Result<[u8; 32], ProtocolError> {
+pub(crate) fn domain_digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     let mut input = Vec::new();
     input.extend_from_slice(domain);
     input.push(0);
     input.extend_from_slice(bytes);
-    Ok(*blake3::hash(&input).as_bytes())
+    *blake3::hash(&input).as_bytes()
 }
 
 pub(crate) fn contract_digest(domain: &[u8], value: &Value) -> Result<[u8; 32], ProtocolError> {
