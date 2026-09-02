@@ -374,13 +374,18 @@ fn process_adapter_requires_an_absolute_subject_executable() {
 #[cfg(unix)]
 #[test]
 fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestResult {
+    let mut operational_attempt = attempt();
+    operational_attempt.watchdog_ms = 1_000;
     let mut crashed = ProcessAdapter::new(
         SubjectAdapterKind::ExportedArtifact,
         [1; 32],
         "/bin/false",
         Vec::new(),
     )?;
-    assert_eq!(crashed.execute(&attempt()), Err(AdapterError::Unavailable));
+    assert_eq!(
+        crashed.execute(&operational_attempt),
+        Err(AdapterError::Unavailable)
+    );
 
     let mut timed_out = ProcessAdapter::new(
         SubjectAdapterKind::ExportedArtifact,
@@ -400,7 +405,7 @@ fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestRe
         Vec::new(),
     )?;
     assert_eq!(
-        malformed.execute(&attempt()),
+        malformed.execute(&operational_attempt),
         Err(AdapterError::ProtocolFailure)
     );
     Ok(())
