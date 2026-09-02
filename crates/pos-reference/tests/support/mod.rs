@@ -18,6 +18,13 @@ pub struct Corpus {
 
 pub type TestResult<T> = Result<T, Box<dyn Error>>;
 
+struct FixtureExpectation {
+    auxiliary: Value,
+    oracle: Value,
+    expected_outcome: Value,
+    expected_error: Value,
+}
+
 /// Build a complete independently signed public evaluator corpus.
 ///
 /// # Errors
@@ -237,48 +244,8 @@ fn fixtures(
             } else {
                 Value::Null
             };
-            let (auxiliary, oracle, expected_outcome, expected_error) =
-                match (mixed_oracles, family) {
-                    (true, 1) => (
-                        array(vec![
-                            descriptor(members, &evidence_path)?,
-                            descriptor(members, &output_path)?,
-                        ]),
-                        array(vec![
-                            uint(1),
-                            Value::Null,
-                            array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
-                            Value::Null,
-                        ]),
-                        uint(2),
-                        array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
-                    ),
-                    (true, 2) => (
-                        array(vec![
-                            descriptor(members, &evidence_path)?,
-                            descriptor(members, &output_path)?,
-                        ]),
-                        array(vec![
-                            uint(2),
-                            Value::Null,
-                            Value::Null,
-                            array(vec![uint(2), bytes(&[1, 2])]),
-                        ]),
-                        uint(1),
-                        Value::Null,
-                    ),
-                    _ => (
-                        array(vec![descriptor(members, &evidence_path)?]),
-                        array(vec![
-                            uint(0),
-                            descriptor(members, &output_path)?,
-                            Value::Null,
-                            Value::Null,
-                        ]),
-                        uint(0),
-                        Value::Null,
-                    ),
-                };
+            let expectation =
+                fixture_expectation(members, &evidence_path, &output_path, mixed_oracles, family)?;
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
@@ -290,10 +257,10 @@ fn fixtures(
                 array(vec![uint(0), uint(1)]),
                 descriptor(members, &schema_path)?,
                 descriptor(members, &payload_path)?,
-                auxiliary,
-                oracle,
-                expected_outcome,
-                expected_error,
+                expectation.auxiliary,
+                expectation.oracle,
+                expectation.expected_outcome,
+                expectation.expected_error,
                 uint(0),
                 uint(0),
                 array(vec![uint(100); 8]),
@@ -312,6 +279,56 @@ fn fixtures(
             Ok(array(fixture))
         })
         .collect()
+}
+
+fn fixture_expectation(
+    members: &BTreeMap<String, (Vec<u8>, u8)>,
+    evidence_path: &str,
+    output_path: &str,
+    mixed_oracles: bool,
+    family: u64,
+) -> TestResult<FixtureExpectation> {
+    let output_and_evidence = || -> TestResult<Value> {
+        Ok(array(vec![
+            descriptor(members, evidence_path)?,
+            descriptor(members, output_path)?,
+        ]))
+    };
+    Ok(match (mixed_oracles, family) {
+        (true, 1) => FixtureExpectation {
+            auxiliary: output_and_evidence()?,
+            oracle: array(vec![
+                uint(1),
+                Value::Null,
+                array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
+                Value::Null,
+            ]),
+            expected_outcome: uint(2),
+            expected_error: array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
+        },
+        (true, 2) => FixtureExpectation {
+            auxiliary: output_and_evidence()?,
+            oracle: array(vec![
+                uint(2),
+                Value::Null,
+                Value::Null,
+                array(vec![uint(2), bytes(&[1, 2])]),
+            ]),
+            expected_outcome: uint(1),
+            expected_error: Value::Null,
+        },
+        _ => FixtureExpectation {
+            auxiliary: array(vec![descriptor(members, evidence_path)?]),
+            oracle: array(vec![
+                uint(0),
+                descriptor(members, output_path)?,
+                Value::Null,
+                Value::Null,
+            ]),
+            expected_outcome: uint(0),
+            expected_error: Value::Null,
+        },
+    })
 }
 
 fn release_admission(
