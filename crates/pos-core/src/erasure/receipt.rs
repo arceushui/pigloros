@@ -148,22 +148,9 @@ impl ErasureStateV1 {
         &self,
         mut change: ErasureStateTransitionV1,
     ) -> Result<Self, ErasureErrorV1> {
-        if !self.lifecycle.permits(change.lifecycle)
-            || !freeze_is_monotonic(self.freeze_position, change.freeze_position)
-            || !self.replay_claim.preserves_or_weakens(change.replay_claim)
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if change.lifecycle == ErasureLifecycleV1::Complete
-            && change.acknowledged_targets.is_empty()
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
         change.pending_owners.sort_unstable();
         change.failed_owners.sort_unstable();
-        if invalid_owner_sets(&change.pending_owners, &change.failed_owners) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
+        self.validate_transition(&change)?;
         Self {
             request: self.request,
             lifecycle: change.lifecycle,
@@ -177,6 +164,24 @@ impl ErasureStateV1 {
             state_digest: reference_zero(),
         }
         .with_digest()
+    }
+
+    fn validate_transition(&self, change: &ErasureStateTransitionV1) -> Result<(), ErasureErrorV1> {
+        if !self.lifecycle.permits(change.lifecycle)
+            || !freeze_is_monotonic(self.freeze_position, change.freeze_position)
+            || !self.replay_claim.preserves_or_weakens(change.replay_claim)
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if change.lifecycle == ErasureLifecycleV1::Complete
+            && change.acknowledged_targets.is_empty()
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        if invalid_owner_sets(&change.pending_owners, &change.failed_owners) {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        Ok(())
     }
     /// Encode exact-length deterministic ERS1.
     ///

@@ -1364,6 +1364,14 @@ pub(super) fn decode_limited(
     maximum: usize,
     maximum_array: usize,
 ) -> Result<Value, ErasureErrorV1> {
+    decode_limited_value(bytes, maximum, maximum_array)
+}
+
+fn decode_limited_value(
+    bytes: &[u8],
+    maximum: usize,
+    maximum_array: usize,
+) -> Result<Value, ErasureErrorV1> {
     if bytes.len() > maximum {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
@@ -1468,9 +1476,15 @@ pub(super) fn cbor_argument_bytes(
 }
 pub(super) fn array(value: &Value, maximum: usize) -> Result<&[Value], ErasureErrorV1> {
     match value {
-        Value::Array(values) if values.len() <= maximum => Ok(values),
-        Value::Array(_) => Err(ErasureErrorV1::ScopeInvalid),
+        Value::Array(values) => bounded_array(values, maximum),
         _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
+}
+fn bounded_array(values: &[Value], maximum: usize) -> Result<&[Value], ErasureErrorV1> {
+    if values.len() <= maximum {
+        Ok(values)
+    } else {
+        Err(ErasureErrorV1::ScopeInvalid)
     }
 }
 pub(super) fn exact_array(value: &Value, expected: usize) -> Result<&[Value], ErasureErrorV1> {

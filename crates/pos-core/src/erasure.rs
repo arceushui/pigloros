@@ -320,9 +320,12 @@ impl ErasureLifecycleV1 {
             Self::AccessFrozen => matches!(next, Self::DestructionDispatched),
             Self::DestructionDispatched => matches!(next, Self::AwaitingAcknowledgements),
             Self::AwaitingAcknowledgements => matches!(next, Self::Complete | Self::PartialFailure),
-            Self::PartialFailure => matches!(next, Self::PartialFailure | Self::Complete),
+            Self::PartialFailure => Self::permits_after_partial_failure(next),
             Self::Complete | Self::Rejected => false,
         }
+    }
+    const fn permits_after_partial_failure(next: Self) -> bool {
+        matches!(next, Self::PartialFailure | Self::Complete)
     }
     /// Report whether the request itself has reached a terminal outcome.
     #[must_use]

@@ -585,14 +585,18 @@ impl SqliteStore {
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
-        if initialize_schema {
-            store.init_schema()?;
-        } else {
-            store.validate_erasure_schema()?;
-        }
+        store.prepare_schema(initialize_schema)?;
         store.validate_event_signature_schema()?;
         store.validate_event_sequence_invariant()?;
         Ok(store)
+    }
+
+    fn prepare_schema(&self, initialize: bool) -> Result<(), CoreError> {
+        if initialize {
+            self.init_schema()
+        } else {
+            self.validate_erasure_schema()
+        }
     }
 
     /// Open a `SQLite` store with a trusted admission clock.
@@ -670,8 +674,12 @@ impl SqliteStore {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn init_schema(&self) -> Result<(), CoreError> {
+        self.create_schema()
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn create_schema(&self) -> Result<(), CoreError> {
         self.conn
             .execute_batch(
                 "PRAGMA journal_mode=WAL;

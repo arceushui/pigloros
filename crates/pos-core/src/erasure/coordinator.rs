@@ -89,10 +89,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         expected: Option<ErasureReferenceV1>,
         include_request: bool,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let mut objects = Vec::new();
-        if include_request {
-            objects.push(next.request_object()?);
-        }
+        let objects = Self::commit_objects(&next, include_request)?;
         self.commit_delta(
             next,
             expected,
@@ -100,6 +97,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             Vec::new(),
             ErasureCasEffectV1::None,
         )
+    }
+
+    fn commit_objects(
+        next: &RecoveredErasureV1,
+        include_request: bool,
+    ) -> Result<Vec<ErasurePersistenceObjectV1>, ErasureErrorV1> {
+        let mut objects = Vec::new();
+        if include_request {
+            objects.push(next.request_object()?);
+        }
+        Ok(objects)
     }
 
     fn commit_delta(
@@ -305,7 +313,16 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         request: ErasureReferenceV1,
         transition: &ErasureStateTransitionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let mut record = self.record(request)?;
+        let record = self.record(request)?;
+        self.freeze_record(record, request, transition)
+    }
+
+    fn freeze_record(
+        &mut self,
+        mut record: RecoveredErasureV1,
+        request: ErasureReferenceV1,
+        transition: &ErasureStateTransitionV1,
+    ) -> Result<ErasureStateV1, ErasureErrorV1> {
         if record.state.lifecycle() == ErasureLifecycleV1::Rejected
             && record.freeze_failure.is_some()
         {
