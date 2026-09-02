@@ -42,9 +42,9 @@ use pos_core::{
         SeqRange,
     },
     timeline::{Timeline, TimelineMeta},
-    ConsentAppendPermit, ErasureCasEffectV1, ErasureCasOutcomeV1, ErasureErrorV1,
-    ErasureIndexInsertV1, ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1,
-    KeyRegistryStateV1, PreparedErasureCasV1, StoredErasureManifestV1, GEOGRAPHIC_EVENT_TYPE,
+    ConsentAppendPermit, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
+    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
+    PreparedErasureCasV1, StoredErasureManifestV1, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -166,7 +166,7 @@ pub struct MemoryStore {
     erasure_attempt_pages: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_scope_nodes: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_administrative_resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
-    erasure_effects: BTreeMap<ErasureReferenceV1, ErasureCasEffectV1>,
+    erasure_effects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -1235,7 +1235,9 @@ impl ErasurePersistencePortV1 for MemoryStore {
                 *digest == next.digest() && bytes.as_slice() == next.canonical_cbor()
             })
         {
-            return Ok(ErasureCasOutcomeV1::ExactRetry);
+            return memory_mutation_is_exact(self, &mutation)
+                .then_some(ErasureCasOutcomeV1::ExactRetry)
+                .ok_or(ErasureErrorV1::PolicyConflict);
         }
         if self.erasure_records.get(&request).map(|value| value.0)
             != mutation.expected_manifest_digest()
@@ -1283,9 +1285,43 @@ impl ErasurePersistencePortV1 for MemoryStore {
         self.erasure_scope_nodes = scopes;
         self.erasure_administrative_resolutions = resolutions;
         self.erasure_effects
-            .insert(next.digest(), mutation.effect().clone());
+            .insert(next.digest(), mutation.effect().identity());
         Ok(ErasureCasOutcomeV1::Applied)
     }
+}
+
+fn memory_mutation_is_exact(store: &MemoryStore, mutation: &PreparedErasureCasV1) -> bool {
+    mutation.new_objects().iter().all(|object| {
+        store
+            .erasure_evidence
+            .get(&object.reference())
+            .map(Vec::as_slice)
+            == Some(object.canonical_cbor())
+    }) && mutation.new_states().iter().all(|state| {
+        store
+            .erasure_states
+            .get(&state.reference())
+            .map(Vec::as_slice)
+            == Some(state.canonical_cbor())
+    }) && mutation.index_inserts().iter().all(|index| {
+        let (map, ordinal, reference) = match *index {
+            ErasureIndexInsertV1::AttemptPage { ordinal, reference } => {
+                (&store.erasure_attempt_pages, ordinal, reference)
+            }
+            ErasureIndexInsertV1::ScopeNode { ordinal, reference } => {
+                (&store.erasure_scope_nodes, ordinal, reference)
+            }
+            ErasureIndexInsertV1::AdministrativeResolution { ordinal, reference } => (
+                &store.erasure_administrative_resolutions,
+                ordinal,
+                reference,
+            ),
+        };
+        map.get(&(mutation.request(), ordinal)) == Some(&reference)
+    }) && store
+        .erasure_effects
+        .get(&mutation.next_manifest().digest())
+        == Some(&mutation.effect().identity())
 }
 
 fn insert_exact(
