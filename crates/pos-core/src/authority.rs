@@ -1218,33 +1218,39 @@ fn digest_part(hasher: &mut blake3::Hasher, value: &[u8]) {
 }
 
 fn digest_optional_entity(hasher: &mut blake3::Hasher, value: Option<EntityId>) {
-    value.map_or_else(
-        || { hasher.update(&[0]); },
-        |entity| {
+    match value {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(entity) => {
             hasher.update(&[1]);
             hasher.update(&entity_bytes(entity));
-        },
-    );
+        }
+    }
 }
 
 fn digest_optional_plugin(hasher: &mut blake3::Hasher, value: Option<PluginId>) {
-    value.map_or_else(
-        || { hasher.update(&[0]); },
-        |plugin| {
+    match value {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(plugin) => {
             hasher.update(&[1]);
             hasher.update(&plugin_bytes(plugin));
-        },
-    );
+        }
+    }
 }
 
 fn digest_optional_hash(hasher: &mut blake3::Hasher, value: Option<Hash>) {
-    value.map_or_else(
-        || { hasher.update(&[0]); },
-        |hash| {
+    match value {
+        None => {
+            hasher.update(&[0]);
+        }
+        Some(hash) => {
             hasher.update(&[1]);
             hasher.update(hash.as_bytes());
-        },
-    );
+        }
+    }
 }
 
 fn digest_consent(hasher: &mut blake3::Hasher, consent: ConsentEvidenceV1) {
