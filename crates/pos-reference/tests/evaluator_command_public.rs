@@ -7,7 +7,7 @@ use std::process::Command;
 
 use pos_reference::evaluator_protocol::ConformanceReport;
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 fn evaluator() -> Command {
     Command::new(env!("CARGO_BIN_EXE_pos-reference-evaluator"))
