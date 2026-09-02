@@ -20,6 +20,8 @@ bash "$ROOT/scripts/check-world-client-wasm.sh"
 echo "==> pinned dependency policy"
 bash "$ROOT/scripts/check-pinned-dependencies.sh"
 bash "$ROOT/scripts/test-check-pinned-dependencies.sh"
+echo "==> Rust scope filter policy"
+python3 "$ROOT/scripts/test_rust_scope_policy.py"
 
 echo "==> ASan CI policy"
 bash "$ROOT/scripts/check-asan-ci-policy.sh"
