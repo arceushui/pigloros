@@ -982,6 +982,89 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         .get_mut(fixture_index)
         .ok_or_else(|| io::Error::other("test fixture is missing"))?;
     let fields = array_fields_mut(fixture)?;
+    if !mutate_raw_fixture_field(fields, mutation)? {
+        match mutation {
+            ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
+            ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
+            ProfileMutation::FixtureModeOutOfRange => fields[7] = array(vec![uint(4)]),
+            ProfileMutation::FixtureAdapter => fields[5] = uint(9),
+            ProfileMutation::FixtureProvider => {
+                array_fields_mut(&mut fields[4])?[0] = text("Invalid");
+            }
+            ProfileMutation::FixtureCaseId => fields[0] = text("Invalid"),
+            ProfileMutation::FixtureExecutionDigest => fields[6] = bytes(&[0; 32]),
+            ProfileMutation::FixtureClaimLayer => fields[2] = uint(7),
+            ProfileMutation::FixtureFamily => fields[3] = uint(7),
+            ProfileMutation::FixtureOutcome => fields[12] = uint(6),
+            ProfileMutation::FixtureReplay => fields[14] = uint(5),
+            ProfileMutation::FixtureRedaction => fields[15] = uint(4),
+            ProfileMutation::FixtureBudget => {
+                array_fields_mut(&mut fields[16])?[0] = uint(0);
+            }
+            ProfileMutation::FixtureBudgetAboveCap => {
+                array_fields_mut(&mut fields[16])?[0] = uint(101);
+            }
+            ProfileMutation::FixtureWatchdog => fields[17] = array(vec![uint(0)]),
+            ProfileMutation::FixtureNetworkPlugin => {
+                fields[5] = uint(2);
+                array_fields_mut(&mut fields[18])?[0] = Value::Bool(true);
+            }
+            ProfileMutation::FixtureNetworkAirGapped => {
+                array_fields_mut(&mut fields[18])?[0] = Value::Bool(true);
+            }
+            ProfileMutation::FixtureCapabilities => {
+                array_fields_mut(&mut fields[18])?[1] = excessive_capabilities();
+            }
+            ProfileMutation::FixtureCapabilitiesUnsorted => {
+                array_fields_mut(&mut fields[18])?[1] = array(vec![text("z"), text("a")]);
+            }
+            ProfileMutation::FixtureAuxiliaryTooMany => {
+                let auxiliary = array_fields_mut(&mut fields[10])?;
+                *auxiliary = vec![auxiliary[0].clone(); 65];
+            }
+            ProfileMutation::FixtureDuplicatePath => {
+                let schema = fields[8].clone();
+                array_fields_mut(&mut fields[10])?[0] = schema;
+            }
+            ProfileMutation::FixtureDescriptor => {
+                fields[8] = invalid_descriptor("../schema", "application/json");
+            }
+            ProfileMutation::FixturePayloadDescriptor => {
+                fields[9] = invalid_descriptor("fixtures//payload", "application/octet-stream");
+            }
+            ProfileMutation::FixtureOracle => {
+                fields[11] = array(vec![uint(9), Value::Null, Value::Null, Value::Null]);
+            }
+            ProfileMutation::FixtureOracleOutputMissing => {
+                fields[11] = array(vec![uint(0), Value::Null, Value::Null, Value::Null]);
+            }
+            ProfileMutation::FixtureOracleDivergenceCoordinate => {
+                fields[11] = divergence_oracle(&[]);
+            }
+            ProfileMutation::FixtureUnexpectedVerificationError => {
+                fields[13] = array(vec![text("pigloros.core"), text("1.0.0"), text("failure")]);
+            }
+            ProfileMutation::FixtureClaimMismatch => {
+                fields[14] = uint(0);
+                fields[15] = uint(1);
+            }
+            ProfileMutation::FixtureProvenance => fields[21] = invalid_provenance(),
+            ProfileMutation::FixtureDowngradeBinding => fields[19] = bytes(&[1; 32]),
+            ProfileMutation::FixtureDigest => fields[23] = bytes(&[99; 32]),
+            _ => return Ok(()),
+        }
+    }
+    if mutation != ProfileMutation::FixtureDigest {
+        let digest = hash_contract(
+            "PiglorOS.Conformance.Fixture.v1",
+            &array(fields[..23].to_vec()),
+        )?;
+        fields[23] = bytes(&digest);
+    }
+    Ok(())
+}
+
+fn mutate_raw_fixture_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
     match mutation {
         ProfileMutation::RawFixtureField(index) => {
             fields[usize::from(index)] = Value::Null;
@@ -1017,93 +1100,9 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         ProfileMutation::RawFixtureTransitionField(index) => {
             array_fields_mut(&mut fields[22])?[usize::from(index)] = Value::Null;
         }
-        ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
-        ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
-        ProfileMutation::FixtureModeOutOfRange => fields[7] = array(vec![uint(4)]),
-        ProfileMutation::FixtureAdapter => fields[5] = uint(9),
-        ProfileMutation::FixtureProvider => {
-            array_fields_mut(&mut fields[4])?[0] = text("Invalid");
-        }
-        ProfileMutation::FixtureCaseId => fields[0] = text("Invalid"),
-        ProfileMutation::FixtureExecutionDigest => fields[6] = bytes(&[0; 32]),
-        ProfileMutation::FixtureClaimLayer => fields[2] = uint(7),
-        ProfileMutation::FixtureFamily => fields[3] = uint(7),
-        ProfileMutation::FixtureOutcome => fields[12] = uint(6),
-        ProfileMutation::FixtureReplay => fields[14] = uint(5),
-        ProfileMutation::FixtureRedaction => fields[15] = uint(4),
-        ProfileMutation::FixtureBudget => {
-            array_fields_mut(&mut fields[16])?[0] = uint(0);
-        }
-        ProfileMutation::FixtureBudgetAboveCap => {
-            array_fields_mut(&mut fields[16])?[0] = uint(101);
-        }
-        ProfileMutation::FixtureWatchdog => fields[17] = array(vec![uint(0)]),
-        ProfileMutation::FixtureNetworkPlugin => {
-            fields[5] = uint(2);
-            array_fields_mut(&mut fields[18])?[0] = Value::Bool(true);
-        }
-        ProfileMutation::FixtureNetworkAirGapped => {
-            array_fields_mut(&mut fields[18])?[0] = Value::Bool(true);
-        }
-        ProfileMutation::FixtureCapabilities => {
-            array_fields_mut(&mut fields[18])?[1] = excessive_capabilities();
-        }
-        ProfileMutation::FixtureCapabilitiesUnsorted => {
-            array_fields_mut(&mut fields[18])?[1] = array(vec![text("z"), text("a")]);
-        }
-        ProfileMutation::FixtureAuxiliaryTooMany => {
-            let auxiliary = array_fields_mut(&mut fields[10])?;
-            *auxiliary = vec![auxiliary[0].clone(); 65];
-        }
-        ProfileMutation::FixtureDuplicatePath => {
-            let schema = fields[8].clone();
-            array_fields_mut(&mut fields[10])?[0] = schema;
-        }
-        ProfileMutation::FixtureDescriptor => {
-            fields[8] = invalid_descriptor("../schema", "application/json");
-        }
-        ProfileMutation::FixturePayloadDescriptor => {
-            fields[9] = invalid_descriptor("fixtures//payload", "application/octet-stream");
-        }
-        ProfileMutation::FixtureOracle => {
-            fields[11] = array(vec![uint(9), Value::Null, Value::Null, Value::Null]);
-        }
-        ProfileMutation::FixtureOracleOutputMissing => {
-            fields[11] = array(vec![uint(0), Value::Null, Value::Null, Value::Null]);
-        }
-        ProfileMutation::FixtureOracleDivergenceCoordinate => {
-            fields[11] = divergence_oracle(&[]);
-        }
-        ProfileMutation::FixtureUnexpectedVerificationError => {
-            fields[13] = array(vec![text("pigloros.core"), text("1.0.0"), text("failure")]);
-        }
-        ProfileMutation::FixtureClaimMismatch => {
-            fields[14] = uint(0);
-            fields[15] = uint(1);
-        }
-        ProfileMutation::FixtureProvenance => {
-            fields[21] = array(vec![
-                text("Apache-2.0"),
-                bytes(&[0; 32]),
-                bytes(&[1; 32]),
-                bytes(&[1; 32]),
-                bytes(&[1; 32]),
-                bytes(&[1; 32]),
-                bytes(&[1; 32]),
-            ]);
-        }
-        ProfileMutation::FixtureDowngradeBinding => fields[19] = bytes(&[1; 32]),
-        ProfileMutation::FixtureDigest => fields[23] = bytes(&[99; 32]),
-        _ => return Ok(()),
+        _ => return Ok(false),
     }
-    if mutation != ProfileMutation::FixtureDigest {
-        let digest = hash_contract(
-            "PiglorOS.Conformance.Fixture.v1",
-            &array(fields[..23].to_vec()),
-        )?;
-        fields[23] = bytes(&digest);
-    }
-    Ok(())
+    Ok(true)
 }
 
 fn excessive_capabilities() -> Value {
@@ -1116,6 +1115,18 @@ fn excessive_capabilities() -> Value {
 
 fn invalid_descriptor(path: &str, media_type: &str) -> Value {
     array(vec![text(path), text(media_type), uint(1), bytes(&[1; 32])])
+}
+
+fn invalid_provenance() -> Value {
+    array(vec![
+        text("Apache-2.0"),
+        bytes(&[0; 32]),
+        bytes(&[1; 32]),
+        bytes(&[1; 32]),
+        bytes(&[1; 32]),
+        bytes(&[1; 32]),
+        bytes(&[1; 32]),
+    ])
 }
 
 fn divergence_oracle(coordinate: &[u8]) -> Value {
