@@ -3,8 +3,8 @@ mod support;
 use std::error::Error;
 
 use pos_reference::evaluator::{
-    evaluate, AdapterError, CaseAttempt, EvaluatorIdentity, ResourceUsage, SubjectAdapter,
-    SubjectObservation, SubjectResult,
+    evaluate, AdapterError, CaseAttempt, EvaluatorError, EvaluatorIdentity, ResourceUsage,
+    SubjectAdapter, SubjectObservation, SubjectResult,
 };
 use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, IndependenceEvidence, SubjectAdapterKind,
@@ -87,5 +87,34 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
         ConformanceReport::from_canonical_cbor(&first.report_bytes),
         Ok(first.report)
     );
+    Ok(())
+}
+
+#[test]
+fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult {
+    let cbor_secret = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x61, b'x'];
+    let secrets = [
+        br#"{"password":"x"}"#.as_slice(),
+        cbor_secret.as_slice(),
+        b"-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----".as_slice(),
+        b"prefix ghp_abcdefghijklmnop suffix".as_slice(),
+    ];
+    for secret in secrets {
+        let corpus = support::corpus_with_secret(secret)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
+    }
     Ok(())
 }

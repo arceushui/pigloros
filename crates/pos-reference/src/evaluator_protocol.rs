@@ -716,7 +716,7 @@ pub(crate) fn decode_canonical_with_limit(
     if bytes.is_empty() || bytes.len() > maximum_bytes {
         return Err(ProtocolError::FieldOutOfBounds);
     }
-    preflight_cbor(bytes, maximum_bytes)?;
+    preflight_cbor(bytes, maximum_bytes, false)?;
     let mut cursor = Cursor::new(bytes);
     let value: Value =
         ciborium::from_reader(&mut cursor).map_err(|_| ProtocolError::InvalidEncoding)?;
@@ -732,7 +732,11 @@ pub(crate) fn decode_canonical_with_limit(
     Ok(value)
 }
 
-fn preflight_cbor(bytes: &[u8], maximum_bytes: usize) -> Result<(), ProtocolError> {
+pub(crate) fn preflight_cbor(
+    bytes: &[u8],
+    maximum_bytes: usize,
+    allow_maps_and_tags: bool,
+) -> Result<(), ProtocolError> {
     fn read_length(bytes: &[u8], index: &mut usize, additional: u8) -> Result<u64, ProtocolError> {
         let width = match additional {
             value @ 0..=23 => return Ok(u64::from(value)),
@@ -759,6 +763,7 @@ fn preflight_cbor(bytes: &[u8], maximum_bytes: usize) -> Result<(), ProtocolErro
         index: &mut usize,
         depth: usize,
         maximum_bytes: usize,
+        allow_maps_and_tags: bool,
     ) -> Result<(), ProtocolError> {
         if depth > MAX_NESTING {
             return Err(ProtocolError::FieldOutOfBounds);
@@ -796,7 +801,24 @@ fn preflight_cbor(bytes: &[u8], maximum_bytes: usize) -> Result<(), ProtocolErro
                 if item_count > MAX_CASES {
                     return Err(ProtocolError::FieldOutOfBounds);
                 }
-                (0..item_count).try_for_each(|_| item(bytes, index, depth + 1, maximum_bytes))
+                (0..item_count).try_for_each(|_| {
+                    item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
+                })
+            }
+            5 if allow_maps_and_tags => {
+                let item_count = usize::try_from(length)
+                    .map_err(|_| ProtocolError::FieldOutOfBounds)?
+                    .checked_mul(2)
+                    .ok_or(ProtocolError::FieldOutOfBounds)?;
+                if item_count > MAX_CASES {
+                    return Err(ProtocolError::FieldOutOfBounds);
+                }
+                (0..item_count).try_for_each(|_| {
+                    item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
+                })
+            }
+            6 if allow_maps_and_tags => {
+                item(bytes, index, depth + 1, maximum_bytes, allow_maps_and_tags)
             }
             7 if matches!(additional, 20..=22) => Ok(()),
             _ => Err(ProtocolError::InvalidEncoding),
@@ -804,7 +826,7 @@ fn preflight_cbor(bytes: &[u8], maximum_bytes: usize) -> Result<(), ProtocolErro
     }
 
     let mut index = 0;
-    item(bytes, &mut index, 0, maximum_bytes)?;
+    item(bytes, &mut index, 0, maximum_bytes, allow_maps_and_tags)?;
     if index == bytes.len() {
         Ok(())
     } else {
