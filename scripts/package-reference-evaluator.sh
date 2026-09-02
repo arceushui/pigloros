@@ -9,8 +9,13 @@ if [[ $# -ne 1 || -z $1 ]]; then
 fi
 
 output_directory=$1
-if [[ -e ${output_directory} ]]; then
+output_parent=$(dirname -- "${output_directory}")
+if [[ -e ${output_directory} || -L ${output_directory} ]]; then
   printf '%s\n' 'evaluator package output must not already exist' >&2
+  exit 2
+fi
+if [[ ! -d ${output_parent} || -L ${output_parent} ]]; then
+  printf '%s\n' 'evaluator package output parent must be a trusted directory' >&2
   exit 2
 fi
 
@@ -44,11 +49,15 @@ git archive --format=tar HEAD | gzip -n >"${package_directory}/source/pigloros-s
 install -m 0644 -- Cargo.lock "${package_directory}/Cargo.lock"
 
 metadata=${work_directory}/cargo-metadata.json
-cargo metadata --format-version 1 --locked >"${metadata}"
+target=$(rustc -vV | sed -n 's/^host: //p')
+cargo metadata --format-version 1 --locked --filter-platform "${target}" >"${metadata}"
 
 jq --sort-keys '
   (.packages | map({ key: .id, value: . }) | from_entries) as $packages
-  | (.resolve.nodes | map({ key: .id, value: [.deps[].pkg] }) | from_entries) as $edges
+  | (.resolve.nodes | map({
+      key: .id,
+      value: [.deps[] | select(any(.dep_kinds[]; .kind != "dev")) | .pkg]
+    }) | from_entries) as $edges
   | ($packages | to_entries[] | select(.value.name == "pos-reference") | .key) as $root
   | def closure($id): [$id] + [($edges[$id] // [])[] | closure(.)[]];
     (closure($root) | unique) as $ids
@@ -88,7 +97,10 @@ jq --sort-keys '
 
 jq --sort-keys '
   (.packages | map({ key: .id, value: . }) | from_entries) as $packages
-  | (.resolve.nodes | map({ key: .id, value: [.deps[].pkg] }) | from_entries) as $edges
+  | (.resolve.nodes | map({
+      key: .id,
+      value: [.deps[] | select(any(.dep_kinds[]; .kind != "dev")) | .pkg]
+    }) | from_entries) as $edges
   | ($packages | to_entries[] | select(.value.name == "pos-reference") | .key) as $root
   | def closure($id): [$id] + [($edges[$id] // [])[] | closure(.)[]];
     (closure($root) | unique) as $ids
@@ -108,7 +120,6 @@ lock_digest=$(b3sum "${package_directory}/Cargo.lock" | cut -d ' ' -f 1)
 sbom_digest=$(b3sum "${package_directory}/sbom.cdx.json" | cut -d ' ' -f 1)
 licences_digest=$(b3sum "${package_directory}/licences.json" | cut -d ' ' -f 1)
 commit=$(git rev-parse HEAD)
-target=$(rustc -vV | sed -n 's/^host: //p')
 toolchain=$(rustc --version)
 
 jq -n --sort-keys \
