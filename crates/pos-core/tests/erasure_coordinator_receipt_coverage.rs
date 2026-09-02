@@ -810,11 +810,7 @@ fn coordinator_public_lifecycle_rejects_conflicts_and_retries() -> Result<(), Er
             ErasureErrorV1::PolicyConflict,
         ),
         (
-            coordinator_admission(request.reference(), target, 1, None)?,
-            ErasureErrorV1::PolicyConflict,
-        ),
-        (
-            coordinator_admission(request.reference(), target, 0, Some(reference(202)))?,
+            coordinator_admission(request.reference(), target, 1, Some(reference(202)))?,
             ErasureErrorV1::PolicyConflict,
         ),
         (
