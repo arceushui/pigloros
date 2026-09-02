@@ -112,6 +112,12 @@ impl PublicCoordinatorPort {
         }
     }
 
+    /// Replace one raw manifest field while retaining a valid content address.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or provenance error when the stored manifest
+    /// is absent, malformed, or does not contain `index`.
     pub fn replace_manifest_field(
         &self,
         request: ErasureReferenceV1,
