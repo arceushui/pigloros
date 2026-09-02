@@ -148,6 +148,62 @@ pub enum ProfileMutation {
     PackageDigest,
 }
 
+const MEMBER_CLOSURE_PATHS: [&str; 45] = [
+    "authority/fixture-provider-registry.cbor",
+    "authority/execution-profiles/test-profile.epf1",
+    "providers/test-provider/package.cbor",
+    "support/normative-requirements.md",
+    "authority/execution-matrix.json",
+    "support/fixture-family-contract.json",
+    "support/limitations.md",
+    "support/publication-review.json",
+    "support/evaluator-protocol-v1.json",
+    "support/evaluator-request-v1.cddl",
+    "support/evaluator-report-v1.cddl",
+    "providers/test-provider/LICENSE",
+    "providers/test-provider/NOTICE",
+    "providers/test-provider/sbom.json",
+    "providers/test-provider/provenance.json",
+    "providers/test-provider/limitations.md",
+    "providers/test-provider/schema-0.json",
+    "providers/test-provider/schema-1.json",
+    "providers/test-provider/schema-2.json",
+    "providers/test-provider/schema-3.json",
+    "providers/test-provider/schema-4.json",
+    "providers/test-provider/schema-5.json",
+    "providers/test-provider/schema-6.json",
+    "fixtures/case-0.input",
+    "fixtures/case-0.evidence",
+    "fixtures/case-0.expected",
+    "fixtures/case-1.input",
+    "fixtures/case-1.evidence",
+    "fixtures/case-1.expected",
+    "fixtures/case-2.input",
+    "fixtures/case-2.evidence",
+    "fixtures/case-2.expected",
+    "fixtures/case-3.input",
+    "fixtures/case-3.evidence",
+    "fixtures/case-3.expected",
+    "fixtures/case-4.input",
+    "fixtures/case-4.evidence",
+    "fixtures/case-4.expected",
+    "fixtures/case-5.input",
+    "fixtures/case-5.evidence",
+    "fixtures/case-5.expected",
+    "fixtures/case-6.input",
+    "fixtures/case-6.evidence",
+    "fixtures/case-6.expected",
+    "authority/release-admissions/case-5.rad1",
+];
+
+pub const MEMBER_CLOSURE_BOUNDARY_COUNT: u8 = 93;
+
+pub fn member_closure_breaks_archive(index: u8) -> bool {
+    MEMBER_CLOSURE_PATHS
+        .get(usize::from(index))
+        .is_some_and(|path| path.ends_with(".expected"))
+}
+
 #[derive(Clone, Copy)]
 pub enum BundleMutation {
     PathBoundary(u8),
@@ -348,6 +404,7 @@ fn corpus_for_mode(
     let trust_digest = hash(&trust_policy);
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
+    let evaluator_protocol_digest = member_hash(&members, "support/evaluator-protocol-v1.json")?;
     add_provider_contracts(&mut members, profile_mutation)?;
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
@@ -385,6 +442,7 @@ fn corpus_for_mode(
         &members,
         profile_digest,
         execution_digest,
+        hash(&expected_output),
         mode,
         bundle_mutation,
     )?;
@@ -412,7 +470,7 @@ fn corpus_for_mode(
             report_bytes_limit: 1024 * 1024,
             diagnostic_bytes_limit: 1024 * 1024,
         },
-        evaluator_protocol_digest: member_hash(&members, "support/evaluator-protocol-v1.json")?,
+        evaluator_protocol_digest,
         evaluator_hard_caps_digest: hard_caps_digest,
         request_digest: [1; 32],
     };
@@ -485,40 +543,33 @@ fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>,
 }
 
 fn mutate_member_closure(members: &mut BTreeMap<String, (Vec<u8>, u8)>, index: u8) {
-    const PATHS: [&str; 8] = [
-        "authority/fixture-provider-registry.cbor",
-        "providers/test-provider/schema-0.json",
-        "fixtures/case-0.input",
-        "fixtures/case-0.evidence",
-        "authority/execution-profiles/test-profile.epf1",
-        "providers/test-provider/package.cbor",
-        "support/normative-requirements.md",
-        "providers/test-provider/LICENSE",
-    ];
-    match index {
-        0..=7 => {
-            members.remove(PATHS[usize::from(index)]);
+    let index = usize::from(index);
+    if index < MEMBER_CLOSURE_PATHS.len() {
+        members.remove(MEMBER_CLOSURE_PATHS[index]);
+    } else if index < MEMBER_CLOSURE_PATHS.len() * 2 {
+        if let Some((_, role)) =
+            members.get_mut(MEMBER_CLOSURE_PATHS[index - MEMBER_CLOSURE_PATHS.len()])
+        {
+            *role = if *role == 0 { 4 } else { 0 };
         }
-        8..=15 => {
-            if let Some((_, role)) = members.get_mut(PATHS[usize::from(index - 8)]) {
-                *role = if *role == 0 { 4 } else { 0 };
+    } else {
+        match index - MEMBER_CLOSURE_PATHS.len() * 2 {
+            0 => {
+                if let Some((bytes, _)) = members.get_mut("fixtures/case-0.expected") {
+                    *bytes = b"changed".to_vec();
+                }
             }
-        }
-        16 => {
-            if let Some((bytes, _)) = members.get_mut("fixtures/case-0.expected") {
-                *bytes = b"changed".to_vec();
+            1 => {
+                if let Some((bytes, _)) =
+                    members.get_mut("authority/execution-profiles/test-profile.epf1")
+                {
+                    *bytes = vec![0xff];
+                }
             }
-        }
-        17 => {
-            if let Some((bytes, _)) =
-                members.get_mut("authority/execution-profiles/test-profile.epf1")
-            {
-                *bytes = vec![0xff];
-            }
-        }
-        _ => {
-            if let Some((bytes, _)) = members.get_mut("providers/test-provider/package.cbor") {
-                *bytes = vec![0xff];
+            _ => {
+                if let Some((bytes, _)) = members.get_mut("providers/test-provider/package.cbor") {
+                    *bytes = vec![0xff];
+                }
             }
         }
     }
@@ -1412,6 +1463,7 @@ fn archive(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     profile: [u8; 32],
     execution: [u8; 32],
+    expected_output_digest: [u8; 32],
     mode: u64,
     mutation: Option<BundleMutation>,
 ) -> TestResult<Vec<u8>> {
@@ -1446,7 +1498,11 @@ fn archive(
                 bytes(&execution),
                 uint(mode),
                 text(&path),
-                bytes(&member_hash(members, &path)?),
+                bytes(
+                    &members
+                        .get(&path)
+                        .map_or(expected_output_digest, |(member, _)| hash(member)),
+                ),
             ]);
             Ok((canonical(&value)?, value))
         })
