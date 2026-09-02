@@ -131,6 +131,8 @@ fn resolution(
 fn retry_admission(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
+    attempt_ordinal: u64,
+    source_receipt: Option<ErasureReferenceV1>,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
     let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
         category: ErasureInventoryCategoryV1::Artifact,
@@ -140,14 +142,14 @@ fn retry_admission(
     })?;
     ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
         request,
-        attempt_ordinal: 0,
-        source_receipt: None,
+        attempt_ordinal,
+        source_receipt,
         unresolved_obligations: vec![obligation.reference()],
         command_identities: vec![obligation.command_identity()],
         policy: reference(6),
         trust: reference(8),
-        admitted_position: 11,
-        deadline_position: 20,
+        admitted_position: 11 + attempt_ordinal,
+        deadline_position: 20 + attempt_ordinal,
         authorization_provenance: reference(44),
     })
 }
@@ -155,6 +157,8 @@ fn retry_admission(
 fn acknowledgement(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
+    evidence: ErasureReferenceV1,
+    outcome: ErasureAcknowledgementOutcomeV1,
 ) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
     let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
         category: ErasureInventoryCategoryV1::Artifact,
@@ -166,12 +170,12 @@ fn acknowledgement(
         obligation: obligation.reference(),
         target,
         owner: target.replica_id,
-        evidence: reference(45),
-        outcome: ErasureAcknowledgementOutcomeV1::Acknowledged,
+        evidence,
+        outcome,
     })
 }
 
-fn receipt_input(target: ErasureRequiredTargetV1) -> ErasureReceiptInputV1 {
+fn receipt_input(target: ErasureRequiredTargetV1, issue_position: u64) -> ErasureReceiptInputV1 {
     ErasureReceiptInputV1 {
         request: reference(0),
         terminal_state: reference(0),
@@ -204,7 +208,7 @@ fn receipt_input(target: ErasureRequiredTargetV1) -> ErasureReceiptInputV1 {
         policy: reference(0),
         trust: reference(0),
         provenance: reference(0),
-        issue_position: 21,
+        issue_position,
         signature: reference(50),
         receipt_digest: reference(0),
     }
@@ -556,7 +560,7 @@ where
         pos_core::ErasureLifecycleV1::AccessFrozen
     );
 
-    let admission = retry_admission(request.reference(), target)?;
+    let admission = retry_admission(request.reference(), target, 0, None)?;
     let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
     assert_eq!(
         coordinator.dispatch_attempt(request.reference(), &admission)?,
@@ -565,7 +569,12 @@ where
     let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
     let acknowledged = coordinator.acknowledge(
         request.reference(),
-        acknowledgement(request.reference(), target)?,
+        acknowledgement(
+            request.reference(),
+            target,
+            reference(45),
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )?,
     )?;
     assert_eq!(
         acknowledged.lifecycle(),
@@ -575,15 +584,20 @@ where
     assert_eq!(
         coordinator.acknowledge(
             request.reference(),
-            acknowledgement(request.reference(), target)?,
+            acknowledgement(
+                request.reference(),
+                target,
+                reference(45),
+                ErasureAcknowledgementOutcomeV1::Acknowledged,
+            )?,
         )?,
         acknowledged
     );
-    let receipt = coordinator.finalize(request.reference(), receipt_input(target))?;
+    let receipt = coordinator.finalize(request.reference(), receipt_input(target, 21))?;
     assert_eq!(receipt.lifecycle(), ErasureLifecycleV1::Complete);
     let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
     assert_eq!(
-        coordinator.finalize(request.reference(), receipt_input(target))?,
+        coordinator.finalize(request.reference(), receipt_input(target, 21))?,
         receipt
     );
 
@@ -624,10 +638,70 @@ where
     Ok(())
 }
 
+fn exercise_partial_retry_recovery<S>(store: S) -> Result<(), Box<dyn std::error::Error>>
+where
+    S: ErasurePersistencePortV1,
+{
+    let shared = Rc::new(RefCell::new(store));
+    let request = request()?;
+    let target = target();
+    let lineage_rule = reference(40);
+    let mut coordinator = exact_coordinator(&shared, target, lineage_rule);
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(43))?;
+    coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+
+    let first_admission = retry_admission(request.reference(), target, 0, None)?;
+    exact_coordinator(&shared, target, lineage_rule)
+        .dispatch_attempt(request.reference(), &first_admission)?;
+    exact_coordinator(&shared, target, lineage_rule).acknowledge(
+        request.reference(),
+        acknowledgement(
+            request.reference(),
+            target,
+            reference(51),
+            ErasureAcknowledgementOutcomeV1::Negative,
+        )?,
+    )?;
+    let partial = exact_coordinator(&shared, target, lineage_rule)
+        .finalize(request.reference(), receipt_input(target, 20))?;
+    assert_eq!(partial.lifecycle(), ErasureLifecycleV1::PartialFailure);
+
+    let retry = retry_admission(
+        request.reference(),
+        target,
+        1,
+        Some(partial.receipt_digest()),
+    )?;
+    let retry_state = exact_coordinator(&shared, target, lineage_rule)
+        .dispatch_attempt(request.reference(), &retry)?;
+    assert_eq!(retry_state.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    exact_coordinator(&shared, target, lineage_rule).acknowledge(
+        request.reference(),
+        acknowledgement(
+            request.reference(),
+            target,
+            reference(52),
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )?,
+    )?;
+    let complete = exact_coordinator(&shared, target, lineage_rule)
+        .finalize(request.reference(), receipt_input(target, 30))?;
+    assert_eq!(complete.lifecycle(), ErasureLifecycleV1::Complete);
+    assert_eq!(shared.borrow().attempt_index_count(request.reference())?, 2);
+    Ok(())
+}
+
 #[test]
 fn memory_public_scope_and_resolution_indexes_are_idempotent(
 ) -> Result<(), Box<dyn std::error::Error>> {
     exercise_scope_and_resolution(MemoryStore::new())
+}
+
+#[test]
+fn memory_public_attempt_history_recovers_across_partial_retry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    exercise_partial_retry_recovery(MemoryStore::new())
 }
 
 #[cfg(feature = "sqlite")]
@@ -641,6 +715,18 @@ fn sqlite_public_scope_and_resolution_indexes_are_idempotent(
         .ok_or(ErasureErrorV1::InvalidEncoding)?
         .to_owned();
     exercise_scope_and_resolution(SqliteStore::open(&path)?)
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_public_attempt_history_recovers_across_partial_retry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    exercise_partial_retry_recovery(SqliteStore::open(path)?)
 }
 
 #[cfg(feature = "sqlite")]
