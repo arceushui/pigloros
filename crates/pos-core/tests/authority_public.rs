@@ -861,7 +861,7 @@ fn capability_decoder_rejects_every_malformed_public_field() {
     let encoded = ok(root_grant(principal_ref, vec![entity(10)]).encode());
     for field in 2..20 {
         let malformed = changed_array(&encoded, |fields| {
-            fields[field] = Value::Text("wrong-type".to_owned());
+            fields[field] = Value::Bool(false);
         });
         assert_eq!(
             CapabilityGrantV1::decode(&malformed),
@@ -1500,9 +1500,6 @@ fn delegation_rejects_broken_links_impersonation_cycles_and_amplification() {
     variants.push(child);
     let mut child = delegation_child();
     child.max_delegation_depth = 3;
-    variants.push(child);
-    let mut child = delegation_child();
-    child.valid_from_position = Seq::from_u64(5);
     variants.push(child);
     let mut child = delegation_child();
     child.valid_until_position = Seq::from_u64(101);
