@@ -45,6 +45,21 @@ struct Options {
     adapter_arguments: Vec<OsString>,
 }
 
+#[derive(Default)]
+struct OptionsBuilder {
+    request: Option<PathBuf>,
+    archive: Option<PathBuf>,
+    trust_policy: Option<PathBuf>,
+    source_digest: Option<[u8; 32]>,
+    declaration_digest: Option<[u8; 32]>,
+    shared_code_audit_digest: Option<[u8; 32]>,
+    reviewer_ids: Vec<String>,
+    authorship_independent: bool,
+    organizational_independent: bool,
+    adapter: Option<PathBuf>,
+    adapter_arguments: Vec<OsString>,
+}
+
 fn main() -> Result<(), CommandError> {
     run()
 }
@@ -100,61 +115,72 @@ fn run() -> Result<(), CommandError> {
 
 fn parse_options(arguments: impl Iterator<Item = OsString>) -> Result<Options, CommandError> {
     let mut arguments = arguments.skip(1);
-    let mut request = None;
-    let mut archive = None;
-    let mut trust_policy = None;
-    let mut source_digest = None;
-    let mut declaration_digest = None;
-    let mut shared_code_audit_digest = None;
-    let mut reviewer_ids = Vec::new();
-    let mut authorship_independent = false;
-    let mut organizational_independent = false;
-    let mut adapter = None;
-    let mut adapter_arguments = Vec::new();
+    let mut builder = OptionsBuilder::default();
     while let Some(argument) = arguments.next() {
-        match argument.to_str().ok_or(CommandError::Arguments)? {
-            "--request" => set_once(&mut request, next_path(&mut arguments)?)?,
-            "--bundle" => set_once(&mut archive, next_path(&mut arguments)?)?,
-            "--trust-policy" => set_once(&mut trust_policy, next_path(&mut arguments)?)?,
-            "--source-digest" => set_once(&mut source_digest, next_digest(&mut arguments)?)?,
-            "--declaration-digest" => {
-                set_once(&mut declaration_digest, next_digest(&mut arguments)?)?;
-            }
-            "--shared-code-audit-digest" => {
-                set_once(&mut shared_code_audit_digest, next_digest(&mut arguments)?)?;
-            }
-            "--reviewer" => reviewer_ids.push(next_text(&mut arguments)?),
-            "--authorship-independent" if !authorship_independent => {
-                authorship_independent = true;
-            }
-            "--organizational-independent" if !organizational_independent => {
-                organizational_independent = true;
-            }
-            "--adapter" => set_once(&mut adapter, next_path(&mut arguments)?)?,
-            "--adapter-arg" => adapter_arguments.push(next_argument(&mut arguments)?),
-            _ => return Err(CommandError::Arguments),
+        parse_option(&mut builder, &mut arguments, &argument)?;
+    }
+    builder.finish()
+}
+
+fn parse_option(
+    builder: &mut OptionsBuilder,
+    arguments: &mut impl Iterator<Item = OsString>,
+    argument: &OsString,
+) -> Result<(), CommandError> {
+    match argument.to_str().ok_or(CommandError::Arguments)? {
+        "--request" => set_once(&mut builder.request, next_path(arguments)?)?,
+        "--bundle" => set_once(&mut builder.archive, next_path(arguments)?)?,
+        "--trust-policy" => set_once(&mut builder.trust_policy, next_path(arguments)?)?,
+        "--source-digest" => set_once(&mut builder.source_digest, next_digest(arguments)?)?,
+        "--declaration-digest" => {
+            set_once(&mut builder.declaration_digest, next_digest(arguments)?)?;
         }
+        "--shared-code-audit-digest" => {
+            set_once(
+                &mut builder.shared_code_audit_digest,
+                next_digest(arguments)?,
+            )?;
+        }
+        "--reviewer" => builder.reviewer_ids.push(next_text(arguments)?),
+        "--authorship-independent" if !builder.authorship_independent => {
+            builder.authorship_independent = true;
+        }
+        "--organizational-independent" if !builder.organizational_independent => {
+            builder.organizational_independent = true;
+        }
+        "--adapter" => set_once(&mut builder.adapter, next_path(arguments)?)?,
+        "--adapter-arg" => builder.adapter_arguments.push(next_argument(arguments)?),
+        _ => return Err(CommandError::Arguments),
     }
-    if reviewer_ids.is_empty()
-        || reviewer_ids
-            .windows(2)
-            .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
-    {
-        return Err(CommandError::Identity);
+    Ok(())
+}
+
+impl OptionsBuilder {
+    fn finish(self) -> Result<Options, CommandError> {
+        if self.reviewer_ids.is_empty()
+            || self
+                .reviewer_ids
+                .windows(2)
+                .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+        {
+            return Err(CommandError::Identity);
+        }
+        Ok(Options {
+            request: self.request.ok_or(CommandError::Arguments)?,
+            archive: self.archive.ok_or(CommandError::Arguments)?,
+            trust_policy: self.trust_policy.ok_or(CommandError::Arguments)?,
+            source_digest: self.source_digest.ok_or(CommandError::Arguments)?,
+            declaration_digest: self.declaration_digest.ok_or(CommandError::Arguments)?,
+            shared_code_audit_digest: self
+                .shared_code_audit_digest
+                .ok_or(CommandError::Arguments)?,
+            reviewer_ids: self.reviewer_ids,
+            authorship_independent: self.authorship_independent,
+            organizational_independent: self.organizational_independent,
+            adapter: self.adapter.ok_or(CommandError::Arguments)?,
+            adapter_arguments: self.adapter_arguments,
+        })
     }
-    Ok(Options {
-        request: request.ok_or(CommandError::Arguments)?,
-        archive: archive.ok_or(CommandError::Arguments)?,
-        trust_policy: trust_policy.ok_or(CommandError::Arguments)?,
-        source_digest: source_digest.ok_or(CommandError::Arguments)?,
-        declaration_digest: declaration_digest.ok_or(CommandError::Arguments)?,
-        shared_code_audit_digest: shared_code_audit_digest.ok_or(CommandError::Arguments)?,
-        reviewer_ids,
-        authorship_independent,
-        organizational_independent,
-        adapter: adapter.ok_or(CommandError::Arguments)?,
-        adapter_arguments,
-    })
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), CommandError> {
