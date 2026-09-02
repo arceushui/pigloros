@@ -1,6 +1,6 @@
 //! Independent CFB1 closure and signature validation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ciborium::value::Value;
 use ed25519_dalek::Verifier;
@@ -113,9 +113,27 @@ struct ExpectedResult {
     digest: [u8; 32],
 }
 
-struct TrustedAuthority {
+struct TrustRoot {
     key_id: String,
     public_key: [u8; 32],
+}
+
+struct TrustPolicy {
+    roots: Vec<TrustRoot>,
+    revoked_key_ids: BTreeSet<String>,
+    revoked_artifact_digests: BTreeSet<[u8; 32]>,
+}
+
+impl TrustPolicy {
+    fn authority_for(&self, public_key: [u8; 32]) -> Option<&TrustRoot> {
+        self.roots.iter().find(|root| {
+            root.public_key == public_key && !self.revoked_key_ids.contains(&root.key_id)
+        })
+    }
+
+    fn artifact_is_revoked(&self, digest: &[u8; 32]) -> bool {
+        self.revoked_artifact_digests.contains(digest)
+    }
 }
 
 /// Verify exact CFB1 bytes against an externally selected, immutable TPS1
@@ -136,10 +154,13 @@ pub fn verify_signed_bundle(
     if trust_digest != request.trust_policy_snapshot_digest {
         return Err(BundleError::TrustPolicyMismatch);
     }
-    let trusted_authority = decode_trusted_authority(trust_policy_bytes)?;
+    let trust_policy = decode_trust_policy(trust_policy_bytes)?;
     let archive_digest = *blake3::hash(archive_bytes).as_bytes();
     if archive_digest != request.fixture_bundle_digest {
         return Err(BundleError::DigestMismatch);
+    }
+    if trust_policy.artifact_is_revoked(&archive_digest) {
+        return Err(BundleError::TrustPolicyMismatch);
     }
 
     let root = decode_canonical_with_limit(archive_bytes, MAX_ARCHIVE_BYTES)?;
@@ -161,12 +182,19 @@ pub fn verify_signed_bundle(
     let expected = decode_expected_results(&manifest[5])?;
     let members = decode_members(&archive[1])?;
     validate_closure(&descriptors, &members, &expected)?;
+    if trust_policy.artifact_is_revoked(&profile_digest)
+        || members
+            .values()
+            .any(|member| trust_policy.artifact_is_revoked(&member.digest))
+    {
+        return Err(BundleError::TrustPolicyMismatch);
+    }
 
     let signer_key: [u8; 32] = fixed_bytes(&archive[2])?;
     let signature: [u8; 64] = fixed_bytes(&archive[3])?;
-    if signer_key != trusted_authority.public_key {
-        return Err(BundleError::SignatureInvalid);
-    }
+    let trusted_authority = trust_policy
+        .authority_for(signer_key)
+        .ok_or(BundleError::SignatureInvalid)?;
     let manifest_bytes = encode(&archive[0])?;
     let key = ed25519_dalek::VerifyingKey::from_bytes(&signer_key)
         .map_err(|_| BundleError::SignatureInvalid)?;
@@ -315,7 +343,7 @@ fn prohibited_secret_material(bytes: &[u8]) -> bool {
     })
 }
 
-fn decode_trusted_authority(bytes: &[u8]) -> Result<TrustedAuthority, BundleError> {
+fn decode_trust_policy(bytes: &[u8]) -> Result<TrustPolicy, BundleError> {
     let value = decode_canonical(bytes)?;
     let fields = array(&value, 12)?;
     if text(&fields[0])? != "TPS1" || uint(&fields[1])? != 1 {
@@ -325,41 +353,110 @@ fn decode_trusted_authority(bytes: &[u8]) -> Result<TrustedAuthority, BundleErro
         return Err(BundleError::TrustPolicyMismatch);
     }
     uint(&fields[4])?;
-    let roots = array_values(&fields[5])?;
-    if roots.len() != 1
-        || !array_values(&fields[6])?.is_empty()
-        || !array_values(&fields[7])?.is_empty()
-    {
-        return Err(BundleError::TrustPolicyMismatch);
-    }
-    let root = array(&roots[0], 4)?;
-    let key_id = text(&root[0])?;
-    if !valid_identifier(key_id)
-        || uint(&root[1])? == 0
-        || text(&root[2])? != "Ed25519"
-        || !valid_minimum_versions(&fields[8])?
+    let roots = decode_trust_roots(&fields[5])?;
+    let revoked_key_ids = decode_revoked_key_ids(&fields[6])?;
+    let revoked_artifact_digests = decode_revoked_artifact_digests(&fields[7])?;
+    if !valid_minimum_versions(&fields[8])?
         || !valid_expiry(text(&fields[9])?)
-        || fields[10] != Value::Null
+        || !nullable_digest(&fields[10])?
     {
         return Err(BundleError::TrustPolicyMismatch);
     }
-    let key: [u8; 32] = fixed_bytes(&root[3])?;
     let signature: [u8; 64] = fixed_bytes(&fields[11])?;
     let unsigned = encode(&Value::Array(fields[..11].to_vec()))?;
-    let verifier = ed25519_dalek::VerifyingKey::from_bytes(&key)
-        .map_err(|_| BundleError::TrustPolicyMismatch)?;
-    verifier
-        .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
-        .map_err(|_| BundleError::TrustPolicyMismatch)?;
-    Ok(TrustedAuthority {
-        key_id: key_id.to_owned(),
-        public_key: key,
+    let signature = ed25519_dalek::Signature::from_bytes(&signature);
+    let signed_by_active_root = roots.iter().any(|root| {
+        !revoked_key_ids.contains(&root.key_id)
+            && ed25519_dalek::VerifyingKey::from_bytes(&root.public_key)
+                .is_ok_and(|key| key.verify(&unsigned, &signature).is_ok())
+    });
+    if !signed_by_active_root {
+        return Err(BundleError::TrustPolicyMismatch);
+    }
+    Ok(TrustPolicy {
+        roots,
+        revoked_key_ids,
+        revoked_artifact_digests,
     })
+}
+
+fn decode_trust_roots(value: &Value) -> Result<Vec<TrustRoot>, BundleError> {
+    let values = array_values(value)?;
+    if values.is_empty() || values.len() > 64 {
+        return Err(BundleError::TrustPolicyMismatch);
+    }
+    let mut roots = Vec::with_capacity(values.len());
+    let mut public_keys = BTreeSet::new();
+    let mut previous: Option<&str> = None;
+    for value in values {
+        let fields = array(value, 4)?;
+        let key_id = text(&fields[0])?;
+        let public_key = fixed_bytes(&fields[3])?;
+        if !valid_identifier(key_id)
+            || previous.is_some_and(|old| old.as_bytes() >= key_id.as_bytes())
+            || uint(&fields[1])? == 0
+            || text(&fields[2])? != "Ed25519"
+            || !public_keys.insert(public_key)
+        {
+            return Err(BundleError::TrustPolicyMismatch);
+        }
+        roots.push(TrustRoot {
+            key_id: key_id.to_owned(),
+            public_key,
+        });
+        previous = Some(key_id);
+    }
+    Ok(roots)
+}
+
+fn decode_revoked_key_ids(value: &Value) -> Result<BTreeSet<String>, BundleError> {
+    let values = array_values(value)?;
+    if values.len() > 4_096 {
+        return Err(BundleError::TrustPolicyMismatch);
+    }
+    let mut ids = BTreeSet::new();
+    let mut previous: Option<&str> = None;
+    for value in values {
+        let key_id = text(value)?;
+        if !valid_identifier(key_id)
+            || previous.is_some_and(|old| old.as_bytes() >= key_id.as_bytes())
+        {
+            return Err(BundleError::TrustPolicyMismatch);
+        }
+        ids.insert(key_id.to_owned());
+        previous = Some(key_id);
+    }
+    Ok(ids)
+}
+
+fn decode_revoked_artifact_digests(value: &Value) -> Result<BTreeSet<[u8; 32]>, BundleError> {
+    let values = array_values(value)?;
+    if values.len() > 4_096 {
+        return Err(BundleError::TrustPolicyMismatch);
+    }
+    let mut digests = BTreeSet::new();
+    let mut previous: Option<[u8; 32]> = None;
+    for value in values {
+        let digest = fixed_bytes(value)?;
+        if previous.is_some_and(|old| old >= digest) {
+            return Err(BundleError::TrustPolicyMismatch);
+        }
+        digests.insert(digest);
+        previous = Some(digest);
+    }
+    Ok(digests)
+}
+
+fn nullable_digest(value: &Value) -> Result<bool, BundleError> {
+    match value {
+        Value::Null => Ok(true),
+        _ => fixed_bytes::<32>(value).map(|_| true),
+    }
 }
 
 fn valid_minimum_versions(value: &Value) -> Result<bool, BundleError> {
     let values = array_values(value)?;
-    if values.is_empty() || values.len() > 64 {
+    if values.len() > 256 {
         return Ok(false);
     }
     let mut previous: Option<&str> = None;
@@ -380,7 +477,7 @@ fn valid_minimum_versions(value: &Value) -> Result<bool, BundleError> {
 
 fn valid_expiry(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 128
+        && value.len() <= 64
         && value.is_ascii()
         && value
             .bytes()
