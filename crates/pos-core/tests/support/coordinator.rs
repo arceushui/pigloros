@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use ciborium::value::Value;
 use pos_core::erasure::{target_closure_digest, ErasureAuthorizationDecisionV1};
 use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
@@ -109,6 +110,61 @@ impl PublicCoordinatorPort {
         if let Some(manifest) = storage.effect_subjects.remove(&subject) {
             storage.effects.remove(&manifest);
         }
+    }
+
+    pub fn replace_manifest_field(
+        &self,
+        request: ErasureReferenceV1,
+        index: usize,
+        replacement: Value,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let (_, bytes) = storage
+            .manifests
+            .get(&request)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let mut value: Value =
+            ciborium::from_reader(bytes.as_slice()).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        let Value::Array(fields) = &mut value else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        *fields
+            .get_mut(index)
+            .ok_or(ErasureErrorV1::InvalidEncoding)? = replacement;
+        let mut changed = Vec::new();
+        ciborium::into_writer(&value, &mut changed).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        let mut addressed = b"ERCRP1\0".to_vec();
+        addressed.extend_from_slice(&changed);
+        let digest = ErasureReferenceV1::from_digest(*blake3::hash(&addressed).as_bytes());
+        storage.manifests.insert(request, (digest, changed));
+        Ok(())
+    }
+
+    pub fn remove_object(&self, reference: ErasureReferenceV1) {
+        self.storage.borrow_mut().objects.remove(&reference);
+    }
+
+    pub fn remove_state(&self, reference: ErasureReferenceV1) {
+        self.storage.borrow_mut().states.remove(&reference);
+    }
+
+    pub fn remove_attempt_page(&self, request: ErasureReferenceV1, ordinal: u64) {
+        self.storage
+            .borrow_mut()
+            .attempts
+            .remove(&(request, ordinal));
+    }
+
+    pub fn remove_scope_node(&self, request: ErasureReferenceV1, ordinal: u64) {
+        self.storage.borrow_mut().scopes.remove(&(request, ordinal));
+    }
+
+    pub fn remove_resolution(&self, request: ErasureReferenceV1, ordinal: u64) {
+        self.storage
+            .borrow_mut()
+            .resolutions
+            .remove(&(request, ordinal));
     }
 
     fn verify_delta_exists(
