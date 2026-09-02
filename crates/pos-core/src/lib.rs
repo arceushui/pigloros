@@ -11,6 +11,7 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod clock;
+pub mod authority;
 pub mod consent;
 pub mod crypto;
 pub mod entity;
@@ -35,6 +36,14 @@ pub mod world_transform;
 // Re-export commonly used types at the crate root.
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
+};
+pub use authority::{
+    AssuranceLevelV1, AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1,
+    AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorizationDecisionV1,
+    AuthorizationOutcomeV1, AuthorizationRequestDraftV1, AuthorizationRequestV1,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    ConsentEvidenceV1, PrincipalRefV1, DELEGATE_ACTION_V1, MAX_AUTHORITY_DELEGATION_DEPTH,
+    MAX_AUTHORITY_SCOPE_MEMBERS, MAX_AUTHORITY_TEXT_BYTES,
 };
 pub use consent::{
     is_consent_event_type, required_modality_for_event, ConsentAppendPermit, ConsentAuthority,
