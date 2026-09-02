@@ -40,7 +40,7 @@ use pos_core::{
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, StoredErasureManifestV1,
-    ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERC1,
 };
 
 use coordinator_support::{
@@ -1885,16 +1885,81 @@ fn coordinator_recovery_rejects_each_incomplete_freeze_graph() -> Result<(), Era
 
 #[test]
 fn coordinator_recovery_rejects_readdressed_outcome_conflicts() -> Result<(), ErasureErrorV1> {
-    assert_graph_mutation_rejected(|graph| {
-        graph.adapter.replace_attempt_component_field(
-            graph.request.reference(),
-            0,
-            7,
-            ERASURE_ATTEMPT_OUTCOME_TAG_V1,
-            2,
-            Value::Bytes(reference(210).digest().to_vec()),
-        )
-    })
+    for (field, replacement) in [
+        (2, Value::Bytes(reference(210).digest().to_vec())),
+        (3, Value::Bytes(reference(211).digest().to_vec())),
+        (4, Value::Bytes(reference(212).digest().to_vec())),
+        (5, Value::Integer(6.into())),
+        (6, Value::Bytes(reference(213).digest().to_vec())),
+        (7, Value::Bytes(reference(214).digest().to_vec())),
+        (8, Value::Integer(31.into())),
+        (9, Value::Bytes(reference(215).digest().to_vec())),
+        (10, Value::Bytes(reference(216).digest().to_vec())),
+    ] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                7,
+                ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+                field,
+                replacement,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_receipt_provenance_conflicts(
+) -> Result<(), ErasureErrorV1> {
+    for (field, replacement) in [
+        (2, Value::Bytes(reference(210).digest().to_vec())),
+        (3, Value::Bytes(reference(211).digest().to_vec())),
+        (6, Value::Bytes(reference(212).digest().to_vec())),
+        (7, Value::Bytes(reference(213).digest().to_vec())),
+        (8, Value::Bytes(reference(214).digest().to_vec())),
+        (9, Value::Bytes(reference(215).digest().to_vec())),
+        (10, Value::Integer(31.into())),
+    ] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                9,
+                ERASURE_RECEIPT_PROVENANCE_TAG_V1,
+                field,
+                replacement,
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn coordinator_recovery_rejects_readdressed_receipt_conflicts() -> Result<(), ErasureErrorV1> {
+    for (field, replacement) in [
+        (2, Value::Bytes(reference(210).digest().to_vec())),
+        (3, Value::Bytes(reference(211).digest().to_vec())),
+        (12, Value::Bytes(reference(212).digest().to_vec())),
+        (13, Value::Bytes(reference(213).digest().to_vec())),
+        (14, Value::Bytes(reference(214).digest().to_vec())),
+        (15, Value::Integer(31.into())),
+        (17, Value::Bytes(reference(215).digest().to_vec())),
+        (18, Value::Bytes(reference(216).digest().to_vec())),
+    ] {
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                8,
+                ERC1,
+                field,
+                replacement,
+            )
+        })?;
+    }
+    Ok(())
 }
 
 #[test]
