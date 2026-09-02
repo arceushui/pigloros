@@ -12,7 +12,8 @@ use std::{
 const VERSION: u64 = 1;
 const ERQ1: &str = "ERQ1";
 const ERS1: &str = "ERS1";
-const ERC1: &str = "ERC1";
+/// Domain tag for terminal erasure receipts.
+pub const ERASURE_RECEIPT_TAG_V1: &str = "ERC1";
 const ERCRP1: &str = "ERCRP1";
 const ERASURE_INVENTORY_CATEGORY_COUNT: usize = ErasureInventoryCategoryV1::CANONICAL.len();
 

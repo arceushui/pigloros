@@ -27,8 +27,8 @@ use super::{
     ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS,
     ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
     ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1,
-    ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERC1, ERQ1, ERS1, VERSION,
+    ERASURE_RECEIPT_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -820,7 +820,7 @@ pub(super) fn state_provenance(
 }
 pub(super) fn receipt_fields(input: &ErasureReceiptInputV1) -> Vec<Value> {
     vec![
-        text(ERC1),
+        text(ERASURE_RECEIPT_TAG_V1),
         uint(VERSION),
         digest(input.request),
         digest(input.terminal_state),
@@ -866,7 +866,7 @@ pub(super) fn acknowledgement_value(ack: ErasureAcknowledgementV1) -> Value {
     ])
 }
 pub(super) fn receipt_from_fields(fields: &[Value]) -> Result<ErasureReceiptV1, ErasureErrorV1> {
-    header(fields, ERC1)?;
+    header(fields, ERASURE_RECEIPT_TAG_V1)?;
     let request = bytes32(&fields[2])?;
     let terminal_state = bytes32(&fields[3])?;
     let lifecycle = ErasureLifecycleV1::from_code(unsigned(&fields[4])?)?;

@@ -11,7 +11,7 @@ use super::{
     ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequiredTargetV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, Ordering, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
     ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_RECEIPT_MAX_BYTES,
-    ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERC1, ERS1,
+    ERASURE_RECEIPT_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERS1,
 };
 
 impl ErasureStateV1 {
@@ -527,7 +527,8 @@ impl ErasureReceiptV1 {
     }
     pub(super) fn with_digest(mut self) -> Result<Self, ErasureErrorV1> {
         encode_limited(&receipt_core_value(&self.0), ERASURE_RECEIPT_MAX_BYTES).map(|bytes| {
-            self.0.receipt_digest = ErasureReferenceV1::from_digest(domain_digest(ERC1, &bytes));
+            self.0.receipt_digest =
+                ErasureReferenceV1::from_digest(domain_digest(ERASURE_RECEIPT_TAG_V1, &bytes));
             self
         })
     }

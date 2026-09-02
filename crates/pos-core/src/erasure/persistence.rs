@@ -27,9 +27,9 @@ use super::{
     ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
     ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
     ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
-    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERC1, ERCRP1, VERSION,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, VERSION,
 };
 use ciborium::value::Value;
 
@@ -1137,7 +1137,11 @@ impl RecoveredErasureV1 {
                 receipt_provenance.reference(),
                 receipt_provenance.to_canonical_cbor()?,
             ),
-            persistence_object(ERC1, receipt.receipt_digest(), receipt.to_canonical_cbor()?),
+            persistence_object(
+                ERASURE_RECEIPT_TAG_V1,
+                receipt.receipt_digest(),
+                receipt.to_canonical_cbor()?,
+            ),
             persistence_object(ERASURE_ATTEMPT_HISTORY_TAG_V1, page_reference, page_bytes),
         ];
         self.manifest.active = None;

@@ -40,7 +40,7 @@ use pos_core::{
     ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
     ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1, StoredErasureManifestV1,
-    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERC1,
+    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1,
 };
 
 use coordinator_support::{
@@ -1953,7 +1953,7 @@ fn coordinator_recovery_rejects_readdressed_receipt_conflicts() -> Result<(), Er
                 graph.request.reference(),
                 0,
                 8,
-                ERC1,
+                ERASURE_RECEIPT_TAG_V1,
                 field,
                 replacement,
             )
