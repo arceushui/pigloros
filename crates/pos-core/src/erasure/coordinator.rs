@@ -89,14 +89,15 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         expected: Option<ErasureReferenceV1>,
         include_request: bool,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        let objects = Self::commit_objects(&next, include_request)?;
-        self.commit_delta(
-            next,
-            expected,
-            objects,
-            Vec::new(),
-            ErasureCasEffectV1::None,
-        )
+        Self::commit_objects(&next, include_request).and_then(|objects| {
+            self.commit_delta(
+                next,
+                expected,
+                objects,
+                Vec::new(),
+                ErasureCasEffectV1::None,
+            )
+        })
     }
 
     fn commit_objects(

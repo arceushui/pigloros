@@ -150,20 +150,21 @@ impl ErasureStateV1 {
     ) -> Result<Self, ErasureErrorV1> {
         change.pending_owners.sort_unstable();
         change.failed_owners.sort_unstable();
-        self.validate_transition(&change)?;
-        Self {
-            request: self.request,
-            lifecycle: change.lifecycle,
-            freeze_position: change.freeze_position,
-            coordinator: self.coordinator,
-            pending_owners: change.pending_owners,
-            failed_owners: change.failed_owners,
-            replay_claim: change.replay_claim,
-            previous_state: Some(self.state_digest),
-            provenance: change.provenance,
-            state_digest: reference_zero(),
-        }
-        .with_digest()
+        self.validate_transition(&change).and_then(|()| {
+            Self {
+                request: self.request,
+                lifecycle: change.lifecycle,
+                freeze_position: change.freeze_position,
+                coordinator: self.coordinator,
+                pending_owners: change.pending_owners,
+                failed_owners: change.failed_owners,
+                replay_claim: change.replay_claim,
+                previous_state: Some(self.state_digest),
+                provenance: change.provenance,
+                state_digest: reference_zero(),
+            }
+            .with_digest()
+        })
     }
 
     fn validate_transition(&self, change: &ErasureStateTransitionV1) -> Result<(), ErasureErrorV1> {
