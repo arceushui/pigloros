@@ -1,1088 +1,1112 @@
-use super::{
-    acknowledgement_provenance_ordering_key, acknowledgements_are_closure_subset, decode_limited,
-    derived_outcome_owners_for_obligations, destruction_command_reference, encode_limited,
-    exact_array, has_duplicate_acknowledgement_identity, persistence_manifest_value,
-    record_from_fields, record_from_persistence_manifest, record_value, strictly_increasing,
-    target_closure_digest, target_count_is_bounded, validate_applicability_obligations, BTreeMap,
-    BTreeSet, ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
-    ErasureAdministrativeResolutionV1, ErasureAtomicFreezeAdmissionV1, ErasureAttemptOutcomeV1,
-    ErasureAuthorizationRejectionV1, ErasureCoordinatorRecordPartsV1, ErasureCoordinatorRecordV1,
-    ErasureErrorV1, ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1,
-    ErasureFreezeProvenanceV1, ErasureLifecycleV1, ErasurePersistenceEvidenceV1,
-    ErasureReceiptInputV1, ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionLedgerV1, ErasureScopeExtensionV1, ErasureStateV1,
-    ErasureSupportingRecordsV1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+//! Bounded, core-owned ERCRP1 persistence graph.
+
+use super::codec::{
+    bytes32, digest, optional_bytes32, optional_digest, references_value, target_from_value,
+    target_value, text, uint, unordered_references_from_value, unsigned,
 };
+use super::{
+    decode_limited, domain_digest, encode_limited, exact_array, verify_predecessor_chain, BTreeMap,
+    BTreeSet, ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceV1,
+    ErasureAdministrativeResolutionV1, ErasureAttemptOutcomeV1, ErasureAuthorizationRejectionV1,
+    ErasureCasEffectV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
+    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceV1,
+    ErasureIndexInsertV1, ErasureObligationSetV1, ErasureObligationV1, ErasurePersistedStateV1,
+    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReceiptProvenanceV1,
+    ErasureReceiptV1, ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateV1,
+    PreparedErasureCasV1, StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
+    ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
+    ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
+    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
+    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS,
+    ERASURE_MAX_ATTEMPT_OUTCOMES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
+    ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, ERASURE_SCOPE_EXTENSION_TAG_V1,
+    ERASURE_TARGET_CLOSURE_TAG_V1, ERCRP1, ERQ1, VERSION,
+};
+use ciborium::value::Value;
 
-impl ErasurePersistenceEvidenceV1 {
-    /// Return the content address used by persistence adapters.
-    #[must_use]
-    pub const fn reference(&self) -> ErasureReferenceV1 {
-        self.reference
-    }
+const INVENTORY_ADMITTED: u64 = 0;
+const INVENTORY_EFFECTIVE: u64 = 1;
 
-    /// Return the canonical bytes for this independently bounded object.
-    #[must_use]
-    pub fn canonical_cbor(&self) -> &[u8] {
-        &self.canonical_cbor
-    }
-}
-
-/// Normalized durable coordinator representation.
-///
-/// The bounded manifest contains ERQ1/ERS1 and references to supporting
-/// evidence. Each evidence object is stored independently so the permitted
-/// receipt history cannot be rejected by an unrelated aggregate byte limit.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ErasurePersistenceBundleV1 {
-    manifest_cbor: Vec<u8>,
-    evidence: Vec<ErasurePersistenceEvidenceV1>,
+struct ManifestV1 {
+    request: ErasureReferenceV1,
+    state: ErasureReferenceV1,
+    target_closure: Option<ErasureReferenceV1>,
+    correction: Option<ErasureReferenceV1>,
+    rejection: Option<ErasureReferenceV1>,
+    scope: Option<ErasureReferenceV1>,
+    freeze_admission: Option<ErasureReferenceV1>,
+    freeze_authorization: Option<ErasureReferenceV1>,
+    freeze_provenance: Option<ErasureReferenceV1>,
+    freeze_failure: Option<ErasureReferenceV1>,
+    obligation_set: Option<ErasureReferenceV1>,
+    scope_extension_head: Option<ErasureReferenceV1>,
+    active: Option<ActiveAttemptRefV1>,
+    attempt_history_head: Option<ErasureReferenceV1>,
+    completed_attempt_count: u64,
+    latest_receipt: Option<ErasureReferenceV1>,
+    administrative_resolution_head: Option<ErasureReferenceV1>,
+    authorize_provenance: Option<ErasureReferenceV1>,
+    dispatch_provenance: Option<ErasureReferenceV1>,
 }
 
-impl ErasurePersistenceBundleV1 {
-    /// Return the bounded canonical coordinator manifest.
-    #[must_use]
-    pub fn manifest_cbor(&self) -> &[u8] {
-        &self.manifest_cbor
-    }
-
-    /// Return independently bounded content-addressed evidence objects.
-    #[must_use]
-    pub fn evidence(&self) -> &[ErasurePersistenceEvidenceV1] {
-        &self.evidence
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveAttemptRefV1 {
+    ordinal: u64,
+    admission: ErasureReferenceV1,
+    acknowledgements: Vec<ErasureReferenceV1>,
 }
 
-impl ErasureCoordinatorRecordV1 {
-    /// Reconstruct a durable coordinator record from host storage.
-    ///
-    /// Hosts may persist the returned public fields in any representation and
-    /// must validate the complete record again when rehydrating it.  This
-    /// constructor is the only supported boundary for records loaded by an
-    /// [`ErasurePersistencePortV1`].
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed error when the persisted record is inconsistent with
-    /// the coordinator, lifecycle, closure, provenance, or terminal receipt.
-    pub fn from_parts(
-        parts: ErasureCoordinatorRecordPartsV1,
-        coordinator: ErasureReferenceV1,
-    ) -> Result<Self, ErasureErrorV1> {
-        let record = Self {
-            request: parts.request,
-            state: parts.state,
-            targets: parts.targets,
-            acknowledgements: parts.acknowledgements,
-            receipt: parts.receipt,
-            receipt_input: parts.receipt_input,
-            authorize_provenance: parts.authorize_provenance,
-            freeze_provenance: parts.freeze_provenance,
-            dispatch_provenance: parts.dispatch_provenance,
-            scope_extension_ledger: parts.scope_extension_ledger,
-            administrative_resolution_head: parts.administrative_resolution_head,
-            supporting_records: parts.supporting_records,
-        };
-        record.validate(coordinator).map(|()| record)
-    }
-
-    /// Encode the complete durable coordinator record as canonical CBOR.
-    ///
-    /// The record embeds the canonical ERQ1, ERS1, and (when terminal) ERC1
-    /// values. The terminal receipt is also the normalized receipt input, so
-    /// it is stored once and reconstructed on load.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed error when the record is invalid or exceeds the V1
-    /// durable-record bound.
-    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
-        self.validate(self.state.coordinator()).and_then(|()| {
-            encode_limited(&record_value(self), ERASURE_COORDINATOR_RECORD_MAX_BYTES)
-        })
-    }
-
-    /// Decode and validate one complete durable coordinator record.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed error for malformed, noncanonical, oversized, or
-    /// internally inconsistent persisted bytes.
-    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+impl ManifestV1 {
+    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
         decode_limited(
             bytes,
             ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+            ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
         )
-        .and_then(|value| exact_array(&value, 13).and_then(record_from_fields))
+        .and_then(|value| {
+            let fields = exact_array(&value, 21)?;
+            super::header(fields, ERCRP1)?;
+            let active = match &fields[14] {
+                Value::Null => None,
+                value => {
+                    let fields = exact_array(value, 3)?;
+                    Some(ActiveAttemptRefV1 {
+                        ordinal: unsigned(&fields[0])?,
+                        admission: bytes32(&fields[1])?,
+                        acknowledgements: unordered_references_from_value(
+                            &fields[2],
+                            ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+                        )?,
+                    })
+                }
+            };
+            let manifest = Self {
+                request: bytes32(&fields[2])?,
+                state: bytes32(&fields[3])?,
+                target_closure: optional_bytes32(&fields[4])?,
+                correction: optional_bytes32(&fields[5])?,
+                rejection: optional_bytes32(&fields[6])?,
+                scope: optional_bytes32(&fields[7])?,
+                freeze_admission: optional_bytes32(&fields[8])?,
+                freeze_authorization: optional_bytes32(&fields[9])?,
+                freeze_provenance: optional_bytes32(&fields[10])?,
+                freeze_failure: optional_bytes32(&fields[11])?,
+                obligation_set: optional_bytes32(&fields[12])?,
+                scope_extension_head: optional_bytes32(&fields[13])?,
+                active,
+                attempt_history_head: optional_bytes32(&fields[15])?,
+                completed_attempt_count: unsigned(&fields[16])?,
+                latest_receipt: optional_bytes32(&fields[17])?,
+                administrative_resolution_head: optional_bytes32(&fields[18])?,
+                authorize_provenance: optional_bytes32(&fields[19])?,
+                dispatch_provenance: optional_bytes32(&fields[20])?,
+            };
+            manifest.validate_shape()?;
+            Ok(manifest)
+        })
     }
 
-    /// Split this record into a bounded manifest and independently bounded
-    /// content-addressed supporting objects for durable adapters.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed validation or encoding error for invalid evidence.
-    pub fn to_persistence_bundle(&self) -> Result<ErasurePersistenceBundleV1, ErasureErrorV1> {
-        self.validate(self.state.coordinator()).and_then(|()| {
-            let manifest_cbor = encode_limited(
-                &persistence_manifest_value(self),
-                ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+    fn validate_shape(&self) -> Result<(), ErasureErrorV1> {
+        if self.completed_attempt_count > ERASURE_MAX_ATTEMPT_OUTCOMES as u64
+            || (self.completed_attempt_count == 0) != self.attempt_history_head.is_none()
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.ordinal != self.completed_attempt_count)
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        Ok(())
+    }
+
+    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        let active = self.active.as_ref().map_or(Value::Null, |active| {
+            Value::Array(vec![
+                uint(active.ordinal),
+                digest(active.admission),
+                references_value(&active.acknowledgements),
+            ])
+        });
+        encode_limited(
+            &Value::Array(vec![
+                text(ERCRP1),
+                uint(VERSION),
+                digest(self.request),
+                digest(self.state),
+                optional_digest(self.target_closure),
+                optional_digest(self.correction),
+                optional_digest(self.rejection),
+                optional_digest(self.scope),
+                optional_digest(self.freeze_admission),
+                optional_digest(self.freeze_authorization),
+                optional_digest(self.freeze_provenance),
+                optional_digest(self.freeze_failure),
+                optional_digest(self.obligation_set),
+                optional_digest(self.scope_extension_head),
+                active,
+                optional_digest(self.attempt_history_head),
+                uint(self.completed_attempt_count),
+                optional_digest(self.latest_receipt),
+                optional_digest(self.administrative_resolution_head),
+                optional_digest(self.authorize_provenance),
+                optional_digest(self.dispatch_provenance),
+            ]),
+            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TargetClosureV1 {
+    request: ErasureReferenceV1,
+    targets: Vec<ErasureRequiredTargetV1>,
+    reference: ErasureReferenceV1,
+}
+
+impl TargetClosureV1 {
+    fn new(
+        request: ErasureReferenceV1,
+        targets: Vec<ErasureRequiredTargetV1>,
+    ) -> Result<Self, ErasureErrorV1> {
+        if targets.len() > ERASURE_MAX_TARGETS || targets.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let mut value = Self {
+            request,
+            targets,
+            reference: super::reference_zero(),
+        };
+        let bytes = value.canonical_cbor()?;
+        value.reference = addressed(ERASURE_TARGET_CLOSURE_TAG_V1, &bytes);
+        Ok(value)
+    }
+
+    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &Value::Array(vec![
+                text(ERASURE_TARGET_CLOSURE_TAG_V1),
+                uint(VERSION),
+                digest(self.request),
+                Value::Array(self.targets.iter().map(target_value).collect()),
+            ]),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_TARGETS,
+        )
+        .and_then(|value| {
+            let fields = exact_array(&value, 4)?;
+            super::header(fields, ERASURE_TARGET_CLOSURE_TAG_V1)?;
+            let values = exact_bounded_array(&fields[3], ERASURE_MAX_TARGETS)?;
+            let targets = values
+                .iter()
+                .map(target_from_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            let closure = Self::new(bytes32(&fields[2])?, targets)?;
+            (closure.canonical_cbor()?.as_slice() == bytes)
+                .then_some(closure)
+                .ok_or(ErasureErrorV1::InvalidEncoding)
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InventoryV1 {
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    kind: u64,
+    references: Vec<ErasureReferenceV1>,
+    reference: ErasureReferenceV1,
+}
+
+impl InventoryV1 {
+    fn new(
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        kind: u64,
+        references: Vec<ErasureReferenceV1>,
+    ) -> Result<Self, ErasureErrorV1> {
+        if kind > INVENTORY_EFFECTIVE || references.len() > ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT
+        {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        let mut value = Self {
+            request,
+            ordinal,
+            kind,
+            references,
+            reference: super::reference_zero(),
+        };
+        let bytes = value.canonical_cbor()?;
+        value.reference = addressed(ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, &bytes);
+        Ok(value)
+    }
+
+    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &Value::Array(vec![
+                text(ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1),
+                uint(VERSION),
+                digest(self.request),
+                uint(self.ordinal),
+                uint(self.kind),
+                references_value(&self.references),
+            ]),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(
+            bytes,
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+            ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+        )
+        .and_then(|value| {
+            let fields = exact_array(&value, 6)?;
+            super::header(fields, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1)?;
+            let inventory = Self::new(
+                bytes32(&fields[2])?,
+                unsigned(&fields[3])?,
+                unsigned(&fields[4])?,
+                unordered_references_from_value(
+                    &fields[5],
+                    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+                )?,
             )?;
-            let mut evidence = BTreeMap::new();
-            self.supporting_records
-                .persistence_evidence()?
-                .into_iter()
-                .try_for_each(|(reference, canonical_cbor)| {
-                    match evidence.entry(reference) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(canonical_cbor);
-                        }
-                        std::collections::btree_map::Entry::Occupied(entry) => {
-                            if entry.get() != &canonical_cbor {
-                                return Err(ErasureErrorV1::ProvenanceMissing);
-                            }
-                        }
-                    }
-                    Ok(())
-                })?;
-            Ok(ErasurePersistenceBundleV1 {
-                manifest_cbor,
-                evidence: evidence
-                    .into_iter()
-                    .map(|(reference, canonical_cbor)| ErasurePersistenceEvidenceV1 {
-                        reference,
-                        canonical_cbor,
-                    })
-                    .collect(),
+            (inventory.canonical_cbor()?.as_slice() == bytes)
+                .then_some(inventory)
+                .ok_or(ErasureErrorV1::InvalidEncoding)
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AttemptPageV1 {
+    request: ErasureReferenceV1,
+    ordinal: u64,
+    retry_admission: ErasureReferenceV1,
+    admitted_inventory: ErasureReferenceV1,
+    effective_inventory: ErasureReferenceV1,
+    outcome: ErasureReferenceV1,
+    receipt: ErasureReferenceV1,
+    receipt_provenance: ErasureReferenceV1,
+    terminal_state: ErasureReferenceV1,
+    predecessor: Option<ErasureReferenceV1>,
+    reference: ErasureReferenceV1,
+}
+
+impl AttemptPageV1 {
+    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &Value::Array(vec![
+                text(ERASURE_ATTEMPT_HISTORY_TAG_V1),
+                uint(VERSION),
+                digest(self.request),
+                uint(self.ordinal),
+                digest(self.retry_admission),
+                digest(self.admitted_inventory),
+                digest(self.effective_inventory),
+                digest(self.outcome),
+                digest(self.receipt),
+                digest(self.receipt_provenance),
+                digest(self.terminal_state),
+                optional_digest(self.predecessor),
+            ]),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 12).and_then(|value| {
+            let fields = exact_array(&value, 12)?;
+            super::header(fields, ERASURE_ATTEMPT_HISTORY_TAG_V1)?;
+            Ok(Self {
+                request: bytes32(&fields[2])?,
+                ordinal: unsigned(&fields[3])?,
+                retry_admission: bytes32(&fields[4])?,
+                admitted_inventory: bytes32(&fields[5])?,
+                effective_inventory: bytes32(&fields[6])?,
+                outcome: bytes32(&fields[7])?,
+                receipt: bytes32(&fields[8])?,
+                receipt_provenance: bytes32(&fields[9])?,
+                terminal_state: bytes32(&fields[10])?,
+                predecessor: optional_bytes32(&fields[11])?,
+                reference: addressed(ERASURE_ATTEMPT_HISTORY_TAG_V1, bytes),
             })
         })
     }
+}
 
-    /// Rehydrate a normalized durable record through a content-addressed
-    /// evidence resolver.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed encoding or provenance error when the manifest is
-    /// malformed, an object is unavailable, or bytes do not match their
-    /// expected content address.
-    pub fn from_persistence_manifest(
-        manifest_cbor: &[u8],
-        evidence: &mut dyn FnMut(ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1>,
-    ) -> Result<Self, ErasureErrorV1> {
-        decode_limited(
-            manifest_cbor,
-            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
-            ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ScopeNodeV1 {
+    request: ErasureReferenceV1,
+    scope: ErasureReferenceV1,
+    extension: ErasureReferenceV1,
+    ordinal: u64,
+    predecessor: Option<ErasureReferenceV1>,
+    reference: ErasureReferenceV1,
+}
+
+impl ScopeNodeV1 {
+    fn canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &Value::Array(vec![
+                text(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1),
+                uint(VERSION),
+                digest(self.request),
+                digest(self.scope),
+                digest(self.extension),
+                uint(self.ordinal),
+                optional_digest(self.predecessor),
+            ]),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
         )
-        .and_then(|value| {
-            exact_array(&value, 13)
-                .and_then(|fields| record_from_persistence_manifest(fields, evidence))
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 7).and_then(|value| {
+            let fields = exact_array(&value, 7)?;
+            super::header(fields, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1)?;
+            Ok(Self {
+                request: bytes32(&fields[2])?,
+                scope: bytes32(&fields[3])?,
+                extension: bytes32(&fields[4])?,
+                ordinal: unsigned(&fields[5])?,
+                predecessor: optional_bytes32(&fields[6])?,
+                reference: addressed(ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1, bytes),
+            })
         })
     }
+}
 
-    /// Verify retained host authorization before a recovered record is returned.
-    ///
-    /// Pre-freeze records carry neither ERFA1 nor ERFAA1 evidence. Every
-    /// frozen-or-later record carries both and must pass the supplied host
-    /// verifier; a partial pair fails closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed provenance or host-verification error.
-    pub fn verify_recovered_freeze_authorization(
-        &self,
+fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
+    ErasureReferenceV1::from_digest(domain_digest(tag, bytes))
+}
+
+fn exact_bounded_array(value: &Value, maximum: usize) -> Result<&[Value], ErasureErrorV1> {
+    match value {
+        Value::Array(values) if values.len() <= maximum => Ok(values),
+        _ => Err(ErasureErrorV1::InvalidEncoding),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveredScopeHeadV1 {
+    pub(crate) node: ErasureReferenceV1,
+    pub(crate) extension: ErasureReferenceV1,
+    pub(crate) ordinal: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveredAttemptV1 {
+    pub(crate) ordinal: u64,
+    pub(crate) admission: ErasureRetryAdmissionV1,
+    pub(crate) admitted:
+        BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ErasureAcknowledgementProvenanceV1>,
+}
+
+/// Bounded working state returned only after the complete persistence graph verifies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecoveredErasureV1 {
+    manifest: ManifestV1,
+    pub(crate) manifest_digest: ErasureReferenceV1,
+    pub(crate) request: ErasureRequestV1,
+    pub(crate) state: ErasureStateV1,
+    pub(crate) targets: Vec<ErasureRequiredTargetV1>,
+    pub(crate) correction: Option<ErasureCorrectionProvenanceV1>,
+    pub(crate) rejection: Option<ErasureAuthorizationRejectionV1>,
+    pub(crate) scope: Option<ErasureScopeCommitmentV1>,
+    pub(crate) freeze_admission: Option<ErasureFreezeAdmissionEvidenceV1>,
+    pub(crate) freeze_authorization: Option<ErasureFreezeAuthorizationEvidenceV1>,
+    pub(crate) freeze_provenance: Option<ErasureFreezeProvenanceV1>,
+    pub(crate) freeze_failure: Option<ErasureFreezeFailureV1>,
+    pub(crate) obligation_set: Option<ErasureObligationSetV1>,
+    pub(crate) obligations: Vec<ErasureObligationV1>,
+    pub(crate) active: Option<RecoveredAttemptV1>,
+    pub(crate) effective:
+        BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ErasureAcknowledgementProvenanceV1>,
+    pub(crate) attempt_history_head: Option<ErasureReferenceV1>,
+    pub(crate) completed_attempt_count: u64,
+    pub(crate) latest_receipt: Option<ErasureReferenceV1>,
+    pub(crate) scope_head: Option<RecoveredScopeHeadV1>,
+    pub(crate) administrative_resolution_head: Option<ErasureReferenceV1>,
+    pub(crate) administrative_resolution_count: u64,
+    pub(crate) authorize_provenance: Option<ErasureReferenceV1>,
+    pub(crate) dispatch_provenance: Option<ErasureReferenceV1>,
+}
+
+fn load<T>(
+    port: &dyn ErasurePersistencePortV1,
+    reference: ErasureReferenceV1,
+    decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1>,
+    address: impl FnOnce(&T) -> ErasureReferenceV1,
+) -> Result<T, ErasureErrorV1> {
+    port.read_object(reference).and_then(|bytes| {
+        decode(&bytes).and_then(|value| {
+            (address(&value) == reference)
+                .then_some(value)
+                .ok_or(ErasureErrorV1::ProvenanceMissing)
+        })
+    })
+}
+
+fn optional<T>(
+    port: &dyn ErasurePersistencePortV1,
+    reference: Option<ErasureReferenceV1>,
+    decode: impl FnOnce(&[u8]) -> Result<T, ErasureErrorV1> + Copy,
+    address: impl FnOnce(&T) -> ErasureReferenceV1 + Copy,
+) -> Result<Option<T>, ErasureErrorV1> {
+    reference.map_or(Ok(None), |reference| {
+        load(port, reference, decode, address).map(Some)
+    })
+}
+
+impl RecoveredErasureV1 {
+    pub(crate) fn initial(request: ErasureRequestV1, state: ErasureStateV1) -> Self {
+        let manifest = ManifestV1 {
+            request: request.reference(),
+            state: state.state_digest(),
+            target_closure: None,
+            correction: None,
+            rejection: None,
+            scope: None,
+            freeze_admission: None,
+            freeze_authorization: None,
+            freeze_provenance: None,
+            freeze_failure: None,
+            obligation_set: None,
+            scope_extension_head: None,
+            active: None,
+            attempt_history_head: None,
+            completed_attempt_count: 0,
+            latest_receipt: None,
+            administrative_resolution_head: None,
+            authorize_provenance: None,
+            dispatch_provenance: None,
+        };
+        Self {
+            manifest,
+            manifest_digest: super::reference_zero(),
+            request,
+            state,
+            targets: Vec::new(),
+            correction: None,
+            rejection: None,
+            scope: None,
+            freeze_admission: None,
+            freeze_authorization: None,
+            freeze_provenance: None,
+            freeze_failure: None,
+            obligation_set: None,
+            obligations: Vec::new(),
+            active: None,
+            effective: BTreeMap::new(),
+            attempt_history_head: None,
+            completed_attempt_count: 0,
+            latest_receipt: None,
+            scope_head: None,
+            administrative_resolution_head: None,
+            administrative_resolution_count: 0,
+            authorize_provenance: None,
+            dispatch_provenance: None,
+        }
+    }
+
+    pub(crate) fn recover(
+        port: &dyn ErasurePersistencePortV1,
         verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
-    ) -> Result<(), ErasureErrorV1> {
-        match (
-            self.supporting_records.freeze_admission_evidence(),
-            self.supporting_records.freeze_authorization_evidence(),
-        ) {
-            (Some(admission), Some(authorization)) => {
-                verifier.validate_freeze_authorization(admission, authorization)
-            }
-            (None, None) => Ok(()),
-            _ => Err(ErasureErrorV1::ProvenanceMissing),
+        requested: ErasureReferenceV1,
+        stored: StoredErasureManifestV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        let manifest = ManifestV1::decode(stored.canonical_cbor())?;
+        if manifest.request != requested {
+            return Err(ErasureErrorV1::ProvenanceMissing);
         }
-    }
+        let request = load(
+            port,
+            requested,
+            ErasureRequestV1::from_canonical_cbor,
+            ErasureRequestV1::reference,
+        )?;
+        let state = port
+            .resolve_state(manifest.state)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if request.reference() != requested || state.request() != requested {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        verify_predecessor_chain(state.clone(), port)?;
 
-    pub(super) fn retain_authorization_rejection(
-        &mut self,
-        state: ErasureStateV1,
-        rejection: ErasureAuthorizationRejectionV1,
-    ) {
-        self.state = state;
-        self.supporting_records.authorization_rejection = Some(rejection);
-    }
-
-    pub(super) fn retain_atomic_freeze(
-        &mut self,
-        state: ErasureStateV1,
-        admission: &ErasureAtomicFreezeAdmissionV1,
-        scope: ErasureScopeCommitmentV1,
-        freeze: ErasureFreezeProvenanceV1,
-        ledger: Option<ErasureScopeExtensionLedgerV1>,
-    ) {
-        self.state = state;
-        self.targets = admission.targets().to_vec();
-        self.freeze_provenance = Some(freeze.reference());
-        self.scope_extension_ledger = ledger
+        let closure = optional(
+            port,
+            manifest.target_closure,
+            TargetClosureV1::decode,
+            |value| value.reference,
+        )?;
+        if closure
             .as_ref()
-            .map(ErasureScopeExtensionLedgerV1::reference);
-        self.supporting_records.scope_commitment = Some(scope);
-        self.supporting_records.freeze_admission_evidence =
-            Some(admission.freeze_admission_evidence().clone());
-        self.supporting_records.freeze_authorization_evidence =
-            Some(admission.freeze_authorization_evidence().clone());
-        self.supporting_records.freeze_provenance = Some(freeze);
-        self.supporting_records.obligations = admission.obligations().to_vec();
-        self.supporting_records.obligation_set = Some(admission.obligation_set().clone());
-        self.supporting_records.scope_extension_ledgers = ledger.into_iter().collect();
-    }
-
-    pub(super) fn retain_freeze_failure(
-        &mut self,
-        state: ErasureStateV1,
-        failure: ErasureFreezeFailureV1,
-    ) {
-        self.state = state;
-        self.supporting_records.freeze_failure = Some(failure);
-    }
-
-    pub(super) fn retain_acknowledgement(
-        &mut self,
-        admission: &ErasureRetryAdmissionV1,
-        provenance: &ErasureAcknowledgementProvenanceV1,
-    ) {
-        self.supporting_records
-            .acknowledgement_provenance
-            .push(*provenance);
-        self.supporting_records
-            .acknowledgement_provenance
-            .sort_unstable_by_key(acknowledgement_provenance_ordering_key);
-        self.acknowledgements = self
-            .supporting_records
-            .effective_acknowledgements(admission);
-    }
-
-    pub(super) fn retain_terminal_receipt(
-        &mut self,
-        input: ErasureReceiptInputV1,
-        outcome: &ErasureAttemptOutcomeV1,
-        receipt: ErasureReceiptV1,
-        provenance: &ErasureReceiptProvenanceV1,
-    ) {
-        self.receipt_input = Some(input);
-        self.receipt = Some(receipt.clone());
-        self.supporting_records.attempt_outcomes.push(*outcome);
-        self.supporting_records.receipts.push(receipt);
-        self.supporting_records.receipt_provenance.push(*provenance);
-    }
-
-    pub(super) fn retain_scope_extension(
-        &mut self,
-        extension: ErasureScopeExtensionV1,
-        successor: ErasureScopeExtensionLedgerV1,
-    ) {
-        self.scope_extension_ledger = Some(successor.reference());
-        self.supporting_records.scope_extensions.push(extension);
-        self.supporting_records
-            .scope_extension_ledgers
-            .push(successor);
-    }
-
-    pub(super) fn retain_administrative_resolution(
-        &mut self,
-        resolution: ErasureAdministrativeResolutionV1,
-    ) {
-        self.administrative_resolution_head = Some(resolution.reference());
-        self.supporting_records
-            .administrative_resolutions
-            .push(resolution);
-    }
-
-    /// Validate a replacement against the currently persisted record.
-    ///
-    /// Same-byte retries are idempotent. The only same-state extensions are
-    /// admitted acknowledgement evidence, scope-ledger successors, and
-    /// administrative-resolution successors; all lifecycle changes require a
-    /// new ERS1 predecessor link.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ErasureErrorV1::PolicyConflict`] when the replacement is not
-    /// a permitted monotonic update.
-    pub fn validate_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
-        let coordinator = self.state.coordinator();
-        self.validate(coordinator)
-            .and_then(|()| next.validate(coordinator))
-            .and_then(|()| self.validate_replacement_fields(next))
-    }
-
-    fn validate_replacement_fields(&self, next: &Self) -> Result<(), ErasureErrorV1> {
-        if self.request != next.request {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if !self
-            .supporting_records
-            .is_prefix_of(&next.supporting_records)
+            .is_some_and(|value| value.request != requested)
         {
-            return Err(ErasureErrorV1::PolicyConflict);
+            return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if self == next {
-            return Ok(());
-        }
-        if self.state.state_digest() == next.state.state_digest() {
-            return self.validate_same_state_replacement(next);
-        }
-        self.validate_advanced_replacement(next)
+        let targets = closure.map_or_else(Vec::new, |value| value.targets);
+        let correction = optional(
+            port,
+            manifest.correction,
+            ErasureCorrectionProvenanceV1::from_canonical_cbor,
+            ErasureCorrectionProvenanceV1::reference,
+        )?;
+        let rejection = optional(
+            port,
+            manifest.rejection,
+            ErasureAuthorizationRejectionV1::from_canonical_cbor,
+            ErasureAuthorizationRejectionV1::reference,
+        )?;
+        let scope = optional(
+            port,
+            manifest.scope,
+            ErasureScopeCommitmentV1::from_canonical_cbor,
+            ErasureScopeCommitmentV1::reference,
+        )?;
+        let freeze_admission = optional(
+            port,
+            manifest.freeze_admission,
+            ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor,
+            ErasureFreezeAdmissionEvidenceV1::reference,
+        )?;
+        let freeze_authorization = optional(
+            port,
+            manifest.freeze_authorization,
+            ErasureFreezeAuthorizationEvidenceV1::from_canonical_cbor,
+            ErasureFreezeAuthorizationEvidenceV1::reference,
+        )?;
+        let freeze_provenance = optional(
+            port,
+            manifest.freeze_provenance,
+            ErasureFreezeProvenanceV1::from_canonical_cbor,
+            ErasureFreezeProvenanceV1::reference,
+        )?;
+        let freeze_failure = optional(
+            port,
+            manifest.freeze_failure,
+            ErasureFreezeFailureV1::from_canonical_cbor,
+            ErasureFreezeFailureV1::reference,
+        )?;
+        let obligation_set = optional(
+            port,
+            manifest.obligation_set,
+            ErasureObligationSetV1::from_canonical_cbor,
+            ErasureObligationSetV1::reference,
+        )?;
+        let obligations = obligation_set.as_ref().map_or(Ok(Vec::new()), |set| {
+            set.obligations()
+                .iter()
+                .copied()
+                .map(|reference| {
+                    load(
+                        port,
+                        reference,
+                        ErasureObligationV1::from_canonical_cbor,
+                        ErasureObligationV1::reference,
+                    )
+                })
+                .collect()
+        })?;
+        validate_fixed_graph(
+            requested,
+            &request,
+            &targets,
+            rejection.as_ref(),
+            scope.as_ref(),
+            freeze_admission.as_ref(),
+            freeze_authorization.as_ref(),
+            freeze_provenance.as_ref(),
+            freeze_failure.as_ref(),
+            obligation_set.as_ref(),
+            &obligations,
+            verifier,
+        )?;
+
+        let mut recovered = Self {
+            manifest: manifest.clone(),
+            manifest_digest: stored.digest(),
+            request,
+            state,
+            targets,
+            correction,
+            rejection,
+            scope,
+            freeze_admission,
+            freeze_authorization,
+            freeze_provenance,
+            freeze_failure,
+            obligation_set,
+            obligations,
+            active: None,
+            effective: BTreeMap::new(),
+            attempt_history_head: manifest.attempt_history_head,
+            completed_attempt_count: manifest.completed_attempt_count,
+            latest_receipt: manifest.latest_receipt,
+            scope_head: None,
+            administrative_resolution_head: manifest.administrative_resolution_head,
+            administrative_resolution_count: 0,
+            authorize_provenance: manifest.authorize_provenance,
+            dispatch_provenance: manifest.dispatch_provenance,
+        };
+        recovered.recover_attempts(port)?;
+        recovered.recover_scope(port)?;
+        recovered.recover_administrative_resolutions(port)?;
+        Ok(recovered)
     }
 
-    pub(super) fn validate_same_state_replacement(
-        &self,
-        next: &Self,
-    ) -> Result<(), ErasureErrorV1> {
-        if (
-            &self.request,
-            &self.targets,
-            &self.receipt,
-            &self.receipt_input,
-            self.authorize_provenance,
-            self.freeze_provenance,
-        ) != (
-            &next.request,
-            &next.targets,
-            &next.receipt,
-            &next.receipt_input,
-            next.authorize_provenance,
-            next.freeze_provenance,
-        ) {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let lifecycle = self.state.lifecycle();
-        let frozen = matches!(
-            lifecycle,
-            ErasureLifecycleV1::AccessFrozen
-                | ErasureLifecycleV1::DestructionDispatched
-                | ErasureLifecycleV1::AwaitingAcknowledgements
-                | ErasureLifecycleV1::Complete
-                | ErasureLifecycleV1::PartialFailure
-        );
-        if self.dispatch_provenance != next.dispatch_provenance
-            && !matches!(
-                (
-                    lifecycle,
-                    self.dispatch_provenance,
-                    next.dispatch_provenance
-                ),
-                (ErasureLifecycleV1::AccessFrozen, None, Some(_))
-            )
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if (self.scope_extension_ledger != next.scope_extension_ledger
-            || self.administrative_resolution_head != next.administrative_resolution_head)
-            && !frozen
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if self.acknowledgements != next.acknowledgements
-            && !matches!(
-                lifecycle,
-                ErasureLifecycleV1::AwaitingAcknowledgements | ErasureLifecycleV1::PartialFailure
-            )
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        Ok(())
-    }
-
-    pub(super) fn validate_advanced_replacement(&self, next: &Self) -> Result<(), ErasureErrorV1> {
-        if next.state.validate_predecessor(&self.state).is_err() {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let targets_continue = next.targets == self.targets
-            || (self.state.lifecycle() == ErasureLifecycleV1::Authorized
-                && next.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
-                && !next.targets.is_empty());
-        if !targets_continue {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        let initializes_scope_extension_ledger = self.state.lifecycle()
-            == ErasureLifecycleV1::Authorized
-            && next.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
-            && self.scope_extension_ledger.is_none()
-            && next.scope_extension_ledger.is_some();
-        if (next.scope_extension_ledger != self.scope_extension_ledger
-            && !initializes_scope_extension_ledger)
-            || next.administrative_resolution_head != self.administrative_resolution_head
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if ![
-            (self.authorize_provenance, next.authorize_provenance),
-            (self.freeze_provenance, next.freeze_provenance),
-            (self.dispatch_provenance, next.dispatch_provenance),
-        ]
-        .into_iter()
-        .all(|(current, replacement)| current.is_none() || current == replacement)
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        Ok(())
-    }
-
-    /// Return the authenticated ERQ1 request.
-    #[must_use]
-    pub const fn request(&self) -> &ErasureRequestV1 {
-        &self.request
-    }
-
-    /// Return the latest digest-linked ERS1 state.
-    #[must_use]
-    pub const fn state(&self) -> &ErasureStateV1 {
+    pub(crate) const fn state(&self) -> &ErasureStateV1 {
         &self.state
     }
 
-    /// Return the frozen required-target closure.
-    #[must_use]
-    pub fn targets(&self) -> &[ErasureRequiredTargetV1] {
-        &self.targets
-    }
-
-    /// Return acknowledgements accepted for the frozen closure.
-    #[must_use]
-    pub fn acknowledgements(&self) -> &[ErasureAcknowledgementV1] {
-        &self.acknowledgements
-    }
-
-    /// Return the committed terminal receipt, if any.
-    #[must_use]
-    pub const fn receipt(&self) -> Option<&ErasureReceiptV1> {
-        self.receipt.as_ref()
-    }
-
-    /// Return the exact terminal input admitted for idempotent retries.
-    #[must_use]
-    pub const fn receipt_input(&self) -> Option<&ErasureReceiptInputV1> {
-        self.receipt_input.as_ref()
-    }
-
-    /// Return the authenticated authorization provenance, if present.
-    #[must_use]
-    pub const fn authorize_provenance(&self) -> Option<ErasureReferenceV1> {
-        self.authorize_provenance
-    }
-
-    /// Return the host-authenticated freeze provenance, if present.
-    #[must_use]
-    pub const fn freeze_provenance(&self) -> Option<ErasureReferenceV1> {
-        self.freeze_provenance
-    }
-
-    /// Return the host-authenticated dispatch provenance, if present.
-    #[must_use]
-    pub const fn dispatch_provenance(&self) -> Option<ErasureReferenceV1> {
-        self.dispatch_provenance
-    }
-
-    /// Return the immutable scope-extension ledger reference, when future-Fork
-    /// semantics were admitted at freeze.
-    #[must_use]
-    pub const fn scope_extension_ledger(&self) -> Option<ErasureReferenceV1> {
-        self.scope_extension_ledger
-    }
-
-    /// Return the durable administrative-resolution chain head, if present.
-    #[must_use]
-    pub const fn administrative_resolution_head(&self) -> Option<ErasureReferenceV1> {
-        self.administrative_resolution_head
-    }
-
-    /// Return immutable supporting records recovered with this coordinator state.
-    #[must_use]
-    pub const fn supporting_records(&self) -> &ErasureSupportingRecordsV1 {
-        &self.supporting_records
-    }
-
-    /// Validate the rejected predecessor named by correction provenance.
-    ///
-    /// # Errors
-    ///
-    /// Returns provenance missing unless the predecessor is the exact rejected
-    /// ERQ1/terminal ERS1 pair named by this record.
-    pub fn validate_correction_predecessor(
+    pub(crate) fn prepare(
         &self,
-        predecessor: &Self,
-    ) -> Result<(), ErasureErrorV1> {
-        self.supporting_records
-            .correction_provenance()
-            .ok_or(ErasureErrorV1::ProvenanceMissing)
-            .and_then(|correction| {
-                let predecessor_matches = (
-                    predecessor.request.reference(),
-                    predecessor.state.lifecycle(),
-                    predecessor.state.state_digest(),
-                ) == (
-                    correction.rejected_request(),
-                    ErasureLifecycleV1::Rejected,
-                    correction.rejected_terminal_state(),
-                );
-                predecessor_matches
-                    .then_some(())
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
-            .and_then(|()| predecessor.validate(predecessor.state.coordinator()))
-            .and_then(|()| {
-                let rejection_matches = predecessor
-                    .supporting_records
-                    .freeze_failure()
-                    .is_some_and(|failure| failure.reference() == predecessor.state.provenance())
-                    || predecessor
-                        .supporting_records
-                        .authorization_rejection()
-                        .is_some_and(|rejection| {
-                            rejection.reference() == predecessor.state.provenance()
-                        });
-                rejection_matches
-                    .then_some(())
-                    .ok_or(ErasureErrorV1::ProvenanceMissing)
-            })
+        expected_manifest_digest: Option<ErasureReferenceV1>,
+        new_objects: Vec<ErasurePersistenceObjectV1>,
+        new_states: Vec<ErasurePersistedStateV1>,
+        index_inserts: Vec<ErasureIndexInsertV1>,
+        effect: ErasureCasEffectV1,
+    ) -> Result<PreparedErasureCasV1, ErasureErrorV1> {
+        self.manifest.validate_shape()?;
+        let bytes = self.manifest.canonical_cbor()?;
+        let digest = addressed(ERCRP1, &bytes);
+        let next_manifest = StoredErasureManifestV1::new(digest, bytes)?;
+        Ok(PreparedErasureCasV1::new(
+            self.request.reference(),
+            expected_manifest_digest,
+            next_manifest,
+            new_objects,
+            new_states,
+            index_inserts,
+            effect,
+        ))
     }
 
-    fn validate_scope(&self) -> Result<(), ErasureErrorV1> {
-        if !target_count_is_bounded(self.targets.len()) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if !strictly_increasing(&self.targets) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if has_duplicate_acknowledgement_identity(&self.acknowledgements) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if !strictly_increasing(&self.acknowledgements) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        if !acknowledgements_are_closure_subset(&self.targets, &self.acknowledgements) {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-        let obligation_identities = self
-            .supporting_records
-            .obligations()
-            .iter()
-            .map(|obligation| {
-                (
-                    obligation.reference(),
-                    obligation.target(),
-                    obligation.owner(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        if !self.acknowledgements.iter().all(|acknowledgement| {
-            obligation_identities.contains(&(
-                acknowledgement.obligation,
-                acknowledgement.target,
-                acknowledgement.owner,
-            ))
-        }) {
+    pub(crate) fn request_object(&self) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+        self.request
+            .to_canonical_cbor()
+            .map(|bytes| ErasurePersistenceObjectV1::new(ERQ1, self.request.reference(), bytes))
+    }
+
+    pub(crate) fn state_object(&self) -> Result<ErasurePersistedStateV1, ErasureErrorV1> {
+        self.state
+            .to_canonical_cbor()
+            .map(|bytes| ErasurePersistedStateV1::new(self.state.clone(), bytes))
+    }
+
+    pub(crate) fn replace_state(&mut self, state: ErasureStateV1) {
+        self.manifest.state = state.state_digest();
+        self.state = state;
+    }
+
+    pub(crate) fn set_authorize_provenance(&mut self, provenance: ErasureReferenceV1) {
+        self.manifest.authorize_provenance = Some(provenance);
+        self.authorize_provenance = Some(provenance);
+    }
+
+    pub(crate) fn set_authorization_rejection(
+        &mut self,
+        rejection: ErasureAuthorizationRejectionV1,
+    ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+        let bytes = rejection.to_canonical_cbor()?;
+        self.manifest.rejection = Some(rejection.reference());
+        self.rejection = Some(rejection);
+        Ok(ErasurePersistenceObjectV1::new(
+            ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
+            self.rejection
+                .as_ref()
+                .map(ErasureAuthorizationRejectionV1::reference)
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+            bytes,
+        ))
+    }
+
+    pub(crate) fn set_correction(
+        &mut self,
+        correction: ErasureCorrectionProvenanceV1,
+    ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+        let bytes = correction.to_canonical_cbor()?;
+        self.manifest.correction = Some(correction.reference());
+        self.correction = Some(correction);
+        Ok(ErasurePersistenceObjectV1::new(
+            ERASURE_CORRECTION_PROVENANCE_TAG_V1,
+            self.correction
+                .as_ref()
+                .map(ErasureCorrectionProvenanceV1::reference)
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?,
+            bytes,
+        ))
+    }
+
+    fn recover_attempts(
+        &mut self,
+        port: &dyn ErasurePersistencePortV1,
+    ) -> Result<(), ErasureErrorV1> {
+        if port.attempt_index_count(self.request.reference())? != self.completed_attempt_count {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if let Some(admission) = self.supporting_records.retry_admissions().last() {
-            let expected = self
-                .supporting_records
-                .effective_acknowledgements(admission);
-            if expected.as_slice() != self.acknowledgements.as_slice() {
+        let mut predecessor = None;
+        let mut predecessor_receipt = None;
+        for ordinal in 0..self.completed_attempt_count {
+            let reference = port
+                .attempt_page_ref(self.request.reference(), ordinal)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let page = load(port, reference, AttemptPageV1::decode, |value| {
+                value.reference
+            })?;
+            if (page.request, page.ordinal, page.predecessor)
+                != (self.request.reference(), ordinal, predecessor)
+            {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
-        } else if !self.acknowledgements.is_empty() {
+            predecessor_receipt = Some(self.replay_page(port, page, predecessor_receipt)?);
+            predecessor = Some(reference);
+        }
+        if predecessor != self.attempt_history_head || predecessor_receipt != self.latest_receipt {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        Ok(())
-    }
-
-    pub(super) fn validate_lifecycle_shape(
-        &self,
-        lifecycle: ErasureLifecycleV1,
-    ) -> Result<(), ErasureErrorV1> {
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Rejected
-        ) && (!self.targets.is_empty()
-            || !self.acknowledgements.is_empty()
-            || self.receipt.is_some()
-            || self.receipt_input.is_some()
-            || self.scope_extension_ledger.is_some()
-            || self.administrative_resolution_head.is_some())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if lifecycle == ErasureLifecycleV1::Authorized
-            && (!self.targets.is_empty()
-                || !self.acknowledgements.is_empty()
-                || self.receipt.is_some()
-                || self.receipt_input.is_some()
-                || self.scope_extension_ledger.is_some()
-                || self.administrative_resolution_head.is_some())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if lifecycle == ErasureLifecycleV1::AccessFrozen
-            && (self.targets.is_empty()
-                || !self.acknowledgements.is_empty()
-                || self.receipt.is_some()
-                || self.receipt_input.is_some())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::DestructionDispatched
-                | ErasureLifecycleV1::AwaitingAcknowledgements
-        ) && (self.targets.is_empty() || self.receipt.is_some() || self.receipt_input.is_some())
-        {
-            return Err(ErasureErrorV1::PolicyConflict);
-        }
-        Ok(())
-    }
-
-    pub(super) fn validate_frozen_evidence(
-        &self,
-        lifecycle: ErasureLifecycleV1,
-    ) -> Result<(), ErasureErrorV1> {
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::AccessFrozen
-                | ErasureLifecycleV1::DestructionDispatched
-                | ErasureLifecycleV1::AwaitingAcknowledgements
-                | ErasureLifecycleV1::Complete
-                | ErasureLifecycleV1::PartialFailure
-        ) {
-            let (Some(scope), Some(freeze), Some(obligation_set), Some(admission)) = (
-                self.supporting_records.scope_commitment(),
-                self.supporting_records.freeze_provenance(),
-                self.supporting_records.obligation_set(),
-                self.supporting_records.freeze_admission_evidence(),
-            ) else {
+        if let Some(active) = self.manifest.active.clone() {
+            let admission = load(
+                port,
+                active.admission,
+                ErasureRetryAdmissionV1::from_canonical_cbor,
+                ErasureRetryAdmissionV1::reference,
+            )?;
+            if admission.request() != self.request.reference()
+                || admission.attempt_ordinal() != active.ordinal
+                || admission.source_receipt() != self.latest_receipt
+            {
                 return Err(ErasureErrorV1::ProvenanceMissing);
-            };
-            let expected_state_provenance =
-                (lifecycle == ErasureLifecycleV1::AccessFrozen).then_some(freeze.reference());
-            let actual_state_provenance =
-                (lifecycle == ErasureLifecycleV1::AccessFrozen).then_some(self.state.provenance());
-            if (
-                scope.target_closure(),
-                obligation_set.request(),
-                obligation_set.policy(),
-                freeze.request(),
-                freeze.scope_commitment(),
-                freeze.obligation_set(),
-                freeze.host_evidence(),
-                self.freeze_provenance,
-                self.state.freeze_position(),
-                freeze.freeze_position(),
-                actual_state_provenance,
-            ) != (
-                target_closure_digest(&self.targets),
-                self.request.reference(),
-                self.request.policy(),
-                self.request.reference(),
-                scope.reference(),
-                obligation_set.reference(),
-                admission.reference(),
-                Some(freeze.reference()),
-                Some(freeze.freeze_position()),
-                freeze.freeze_position(),
-                expected_state_provenance,
-            ) {
-                return Err(ErasureErrorV1::PolicyConflict);
             }
-            for obligation in self.supporting_records.obligations() {
-                if self.targets.binary_search(&obligation.target()).is_err()
-                    || obligation.command_identity()
-                        != destruction_command_reference(
-                            self.request.reference(),
-                            obligation.target(),
-                        )
-                {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                }
-            }
-            return validate_applicability_obligations(
-                admission.applicability_matrix(),
-                &self.targets,
-                self.supporting_records.obligations(),
-            )
-            .and_then(|()| {
-                let expected_ledger = scope.lineage_rule().and_then(|_| {
-                    self.supporting_records
-                        .scope_extension_ledgers()
-                        .last()
-                        .map(ErasureScopeExtensionLedgerV1::reference)
-                });
-                if self.scope_extension_ledger == expected_ledger {
-                    Ok(())
-                } else {
-                    Err(ErasureErrorV1::ProvenanceMissing)
-                }
+            self.effective.retain(|_, value| {
+                value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged
+            });
+            let admitted =
+                self.load_acknowledgements(port, &admission, &active.acknowledgements)?;
+            self.apply_acknowledgements(admitted.clone());
+            self.active = Some(RecoveredAttemptV1 {
+                ordinal: active.ordinal,
+                admission,
+                admitted,
             });
         }
         Ok(())
     }
 
-    pub(super) fn validate_provenance(
-        &self,
-        lifecycle: ErasureLifecycleV1,
-    ) -> Result<(), ErasureErrorV1> {
-        // Validate the exact provenance shape, not only its cardinality. A
-        // malformed record must not substitute dispatch evidence for the
-        // authorization or freeze evidence which precedes it.
-        let expected = match lifecycle {
-            ErasureLifecycleV1::Submitted => (false, false, false),
-            ErasureLifecycleV1::Rejected => (
-                self.supporting_records.freeze_failure().is_some(),
-                false,
-                false,
-            ),
-            ErasureLifecycleV1::Authorized => (true, false, false),
-            // An AccessFrozen record may carry a durable dispatch intent while
-            // the host operation is being retried. It is not yet a lifecycle
-            // transition, but its identity must survive restart.
-            ErasureLifecycleV1::AccessFrozen => (true, true, self.dispatch_provenance.is_some()),
-            ErasureLifecycleV1::DestructionDispatched
-            | ErasureLifecycleV1::AwaitingAcknowledgements
-            | ErasureLifecycleV1::Complete
-            | ErasureLifecycleV1::PartialFailure => (true, true, true),
-        };
-        let actual = (
-            self.authorize_provenance.is_some(),
-            self.freeze_provenance.is_some(),
-            self.dispatch_provenance.is_some(),
-        );
-        let rejected_before_authorization = lifecycle == ErasureLifecycleV1::Rejected
-            && self.supporting_records.authorization_rejection().is_some();
-        if (!rejected_before_authorization && actual != expected)
-            || (rejected_before_authorization && actual != (false, false, false))
+    fn replay_page(
+        &mut self,
+        port: &dyn ErasurePersistencePortV1,
+        page: AttemptPageV1,
+        predecessor_receipt: Option<ErasureReferenceV1>,
+    ) -> Result<ErasureReferenceV1, ErasureErrorV1> {
+        let admission = load(
+            port,
+            page.retry_admission,
+            ErasureRetryAdmissionV1::from_canonical_cbor,
+            ErasureRetryAdmissionV1::reference,
+        )?;
+        let admitted = load(
+            port,
+            page.admitted_inventory,
+            InventoryV1::decode,
+            |value| value.reference,
+        )?;
+        let effective = load(
+            port,
+            page.effective_inventory,
+            InventoryV1::decode,
+            |value| value.reference,
+        )?;
+        if admission.request() != self.request.reference()
+            || admission.attempt_ordinal() != page.ordinal
+            || admission.source_receipt() != predecessor_receipt
+            || (admitted.request, admitted.ordinal, admitted.kind)
+                != (self.request.reference(), page.ordinal, INVENTORY_ADMITTED)
+            || (effective.request, effective.ordinal, effective.kind)
+                != (self.request.reference(), page.ordinal, INVENTORY_EFFECTIVE)
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        Ok(())
-    }
-
-    pub(super) fn validate_administrative_resolution_head(&self) -> Result<(), ErasureErrorV1> {
-        let resolutions = self.supporting_records.administrative_resolutions();
-        let expected_head = resolutions
-            .last()
-            .map(ErasureAdministrativeResolutionV1::reference);
-        if self.administrative_resolution_head != expected_head {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        if resolutions.is_empty() {
-            return Ok(());
-        }
-        let (Some(scope), Some(obligation_set)) = (
-            self.supporting_records.scope_commitment(),
-            self.supporting_records.obligation_set(),
-        ) else {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        };
-        if resolutions.iter().any(|resolution| {
-            (
-                resolution.request(),
-                resolution.scope_commitment(),
-                resolution.policy(),
-                resolution.trust(),
-            ) != (
-                self.request.reference(),
-                scope.reference(),
-                self.request.policy(),
-                obligation_set.trust(),
-            )
-        }) {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        }
-        Ok(())
-    }
-
-    pub(super) fn validate_terminal(
-        &self,
-        lifecycle: ErasureLifecycleV1,
-        coordinator: ErasureReferenceV1,
-    ) -> Result<(), ErasureErrorV1> {
-        if !matches!(
-            lifecycle,
-            ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
-        ) {
-            return Ok(());
-        }
-        let (Some(receipt), Some(receipt_input)) =
-            (self.receipt.as_ref(), self.receipt_input.as_ref())
-        else {
-            return Err(ErasureErrorV1::ProvenanceMissing);
-        };
-        let mut acknowledgements = self.acknowledgements.clone();
-        acknowledgements.sort_unstable();
-        ErasureReceiptV1::new(receipt_input.clone())
-            .and_then(|reconstructed| {
-                if (
-                    receipt,
-                    receipt.terminal_state(),
-                    receipt.lifecycle(),
-                    receipt.coordinator(),
-                    receipt.replay_claim(),
-                    receipt.0.request,
-                    receipt.frozen_targets(),
-                ) != (
-                    &reconstructed,
-                    self.state.state_digest(),
-                    lifecycle,
-                    coordinator,
-                    self.state.replay_claim(),
-                    self.request.reference(),
-                    self.targets.as_slice(),
-                ) {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
-                if receipt.acknowledgements().ne(acknowledgements.as_slice()) {
-                    let active_retry = self.supporting_records.retry_admissions.len()
-                        == self
-                            .supporting_records
-                            .attempt_outcomes
-                            .len()
-                            .saturating_add(1);
-                    if !active_retry {
-                        return Err(ErasureErrorV1::PolicyConflict);
-                    }
-                }
-                receipt.validate_frozen_obligations(self.supporting_records.obligations())
-            })
-            .and_then(|()| {
-                let (pending, failed) = derived_outcome_owners_for_obligations(
-                    self.supporting_records.obligations(),
-                    receipt.acknowledgements(),
-                );
-                if (self.state.pending_owners(), self.state.failed_owners())
-                    != (pending.as_slice(), failed.as_slice())
-                {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
-                let (Some(outcome), Some(provenance)) = (
-                    self.supporting_records.attempt_outcomes().last(),
-                    self.supporting_records.receipt_provenance().last(),
-                ) else {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                };
-                if (
-                    self.state.provenance(),
-                    receipt.provenance(),
-                    provenance.terminal_state(),
-                ) != (
-                    outcome.reference(),
-                    provenance.reference(),
-                    self.state.state_digest(),
-                ) {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                }
-                Ok(())
-            })
-    }
-
-    pub(super) fn validate(&self, coordinator: ErasureReferenceV1) -> Result<(), ErasureErrorV1> {
-        if (self.request.reference(), self.state.coordinator())
-            != (self.state.request(), coordinator)
+        self.effective
+            .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
+        let admitted_values = self.load_acknowledgements(port, &admission, &admitted.references)?;
+        self.apply_acknowledgements(admitted_values);
+        if canonical_acknowledgement_references(self.effective.values().copied())
+            != effective.references
         {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        let lifecycle = self.state.lifecycle();
-        self.supporting_records
-            .validate()
-            .and_then(|()| {
-                self.supporting_records
-                    .validates_request(self.request.reference())
-            })
-            .and_then(|()| {
-                if self
-                    .supporting_records
-                    .correction_provenance()
-                    .is_some_and(|correction| self.request.provenance() != correction.reference())
-                {
-                    Err(ErasureErrorV1::ProvenanceMissing)
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|()| self.validate_supporting_lifecycle(lifecycle))
-            .and_then(|()| self.validate_scope())
-            .and_then(|()| self.validate_lifecycle_shape(lifecycle))
-            .and_then(|()| self.validate_frozen_evidence(lifecycle))
-            .and_then(|()| self.validate_provenance(lifecycle))
-            .and_then(|()| self.validate_administrative_resolution_head())
-            .and_then(|()| self.validate_terminal(lifecycle, coordinator))
-    }
 
-    fn validate_supporting_lifecycle(
-        &self,
-        lifecycle: ErasureLifecycleV1,
-    ) -> Result<(), ErasureErrorV1> {
-        self.validate_supporting_evidence_shape(lifecycle)
-            .and_then(|()| self.validate_attempt_evidence_shape(lifecycle))
-            .and_then(|()| {
-                if matches!(
-                    lifecycle,
-                    ErasureLifecycleV1::Complete | ErasureLifecycleV1::PartialFailure
-                ) && self.supporting_records.receipts().last() != self.receipt.as_ref()
-                {
-                    Err(ErasureErrorV1::ProvenanceMissing)
-                } else {
-                    Ok(())
-                }
-            })
-    }
-
-    pub(super) fn validate_supporting_evidence_shape(
-        &self,
-        lifecycle: ErasureLifecycleV1,
-    ) -> Result<(), ErasureErrorV1> {
-        let scope = self.supporting_records.scope_commitment();
-        let admission = self.supporting_records.freeze_admission_evidence();
-        let freeze_authorization = self.supporting_records.freeze_authorization_evidence();
-        let freeze = self.supporting_records.freeze_provenance();
-        let failure = self.supporting_records.freeze_failure();
-        let authorization_rejection = self.supporting_records.authorization_rejection();
-        let obligation_set = self.supporting_records.obligation_set();
-        match lifecycle {
-            ErasureLifecycleV1::Submitted | ErasureLifecycleV1::Authorized => {
-                if (
-                    scope.is_some(),
-                    admission.is_some(),
-                    freeze_authorization.is_some(),
-                    freeze.is_some(),
-                    failure.is_some(),
-                    authorization_rejection.is_some(),
-                    obligation_set.is_some(),
-                ) != (false, false, false, false, false, false, false)
-                {
-                    return Err(ErasureErrorV1::PolicyConflict);
-                }
-            }
-            ErasureLifecycleV1::Rejected => {
-                if let Some(failure) = failure {
-                    let Some(authorization) = self.authorize_provenance else {
-                        return Err(ErasureErrorV1::ProvenanceMissing);
-                    };
-                    if (
-                        scope.is_some(),
-                        admission.is_some(),
-                        freeze_authorization.is_some(),
-                        freeze.is_some(),
-                        failure.authorization_provenance(),
-                        self.state.provenance(),
-                    ) != (
-                        false,
-                        false,
-                        false,
-                        false,
-                        authorization,
-                        failure.reference(),
-                    ) || authorization_rejection.is_some()
-                        || obligation_set.is_some()
-                    {
-                        return Err(ErasureErrorV1::ProvenanceMissing);
-                    }
-                } else if let Some(rejection) = authorization_rejection {
-                    if (
-                        scope.is_some(),
-                        admission.is_some(),
-                        freeze_authorization.is_some(),
-                        freeze.is_some(),
-                        obligation_set.is_some(),
-                        self.authorize_provenance,
-                        rejection.request(),
-                        self.state.provenance(),
-                    ) != (
-                        false,
-                        false,
-                        false,
-                        false,
-                        false,
-                        None,
-                        self.request.reference(),
-                        rejection.reference(),
-                    ) {
-                        return Err(ErasureErrorV1::ProvenanceMissing);
-                    }
-                } else {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                }
-            }
-            ErasureLifecycleV1::AccessFrozen
-            | ErasureLifecycleV1::DestructionDispatched
-            | ErasureLifecycleV1::AwaitingAcknowledgements
-            | ErasureLifecycleV1::Complete
-            | ErasureLifecycleV1::PartialFailure => {
-                if (
-                    scope.is_some(),
-                    admission.is_some(),
-                    freeze_authorization.is_some(),
-                    freeze.is_some(),
-                    failure.is_some(),
-                    authorization_rejection.is_some(),
-                    obligation_set.is_some(),
-                ) != (true, true, true, true, false, false, true)
-                {
-                    return Err(ErasureErrorV1::ProvenanceMissing);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn validate_attempt_evidence_shape(
-        &self,
-        lifecycle: ErasureLifecycleV1,
-    ) -> Result<(), ErasureErrorV1> {
-        let has_attempt_evidence = !self.supporting_records.retry_admissions().is_empty();
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::Submitted
-                | ErasureLifecycleV1::Authorized
-                | ErasureLifecycleV1::Rejected
-        ) && has_attempt_evidence
+        let outcome = load(
+            port,
+            page.outcome,
+            ErasureAttemptOutcomeV1::from_canonical_cbor,
+            ErasureAttemptOutcomeV1::reference,
+        )?;
+        let receipt = load(
+            port,
+            page.receipt,
+            ErasureReceiptV1::from_canonical_cbor,
+            ErasureReceiptV1::receipt_digest,
+        )?;
+        let provenance = load(
+            port,
+            page.receipt_provenance,
+            ErasureReceiptProvenanceV1::from_canonical_cbor,
+            ErasureReceiptProvenanceV1::reference,
+        )?;
+        let terminal = port
+            .resolve_state(page.terminal_state)?
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if terminal.request() != self.request.reference()
+            || outcome.request() != self.request.reference()
+            || outcome.attempt() != admission.reference()
+            || outcome.source_receipt() != predecessor_receipt
+            || outcome.acknowledgement_inventory() != effective.reference
+            || outcome.lifecycle() != terminal.lifecycle()
+            || provenance.request() != self.request.reference()
+            || provenance.attempt() != admission.reference()
+            || provenance.attempt_ordinal() != page.ordinal
+            || provenance.predecessor_receipt() != predecessor_receipt
+            || provenance.terminal_state() != page.terminal_state
+            || receipt.request() != self.request.reference()
+            || receipt.receipt_digest() != page.receipt
+            || receipt.terminal_state() != page.terminal_state
+            || receipt.provenance() != page.receipt_provenance
+            || receipt.lifecycle() != terminal.lifecycle()
         {
-            return Err(ErasureErrorV1::PolicyConflict);
+            return Err(ErasureErrorV1::ProvenanceMissing);
         }
-        if lifecycle == ErasureLifecycleV1::AccessFrozen {
-            let admissions = self.supporting_records.retry_admissions();
-            let dispatch_intent_matches = match (self.dispatch_provenance, admissions) {
-                (None, []) => true,
-                (Some(provenance), [admission]) => provenance == admission.reference(),
-                _ => false,
-            };
-            if !dispatch_intent_matches
-                || !self
-                    .supporting_records
-                    .acknowledgement_provenance()
-                    .is_empty()
-                || !self.supporting_records.attempt_outcomes().is_empty()
-            {
-                return Err(ErasureErrorV1::PolicyConflict);
-            }
-        }
-        if matches!(
-            lifecycle,
-            ErasureLifecycleV1::DestructionDispatched
-                | ErasureLifecycleV1::AwaitingAcknowledgements
-        ) {
-            let Some(admission) = self.supporting_records.retry_admissions().last() else {
-                return Err(ErasureErrorV1::ProvenanceMissing);
-            };
-            if self.state.provenance() != admission.reference()
-                || self.dispatch_provenance != Some(admission.reference())
+        receipt.validate_frozen_obligations(&self.obligations)?;
+        Ok(receipt.receipt_digest())
+    }
+
+    fn load_acknowledgements(
+        &self,
+        port: &dyn ErasurePersistencePortV1,
+        admission: &ErasureRetryAdmissionV1,
+        references: &[ErasureReferenceV1],
+    ) -> Result<
+        BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ErasureAcknowledgementProvenanceV1>,
+        ErasureErrorV1,
+    > {
+        let mut values = BTreeMap::new();
+        for reference in references {
+            let acknowledgement = load(
+                port,
+                *reference,
+                ErasureAcknowledgementProvenanceV1::from_canonical_cbor,
+                ErasureAcknowledgementProvenanceV1::reference,
+            )?;
+            let key = (acknowledgement.obligation(), acknowledgement.owner());
+            if acknowledgement.request() != self.request.reference()
+                || acknowledgement.attempt() != admission.reference()
+                || values.insert(key, acknowledgement).is_some()
             {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
         }
+        Ok(values)
+    }
+
+    fn apply_acknowledgements(
+        &mut self,
+        values: BTreeMap<
+            (ErasureReferenceV1, ErasureReferenceV1),
+            ErasureAcknowledgementProvenanceV1,
+        >,
+    ) {
+        for (key, acknowledgement) in values {
+            if acknowledgement.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged
+                || !self.effective.contains_key(&key)
+            {
+                self.effective.insert(key, acknowledgement);
+            }
+        }
+    }
+
+    fn recover_scope(&mut self, port: &dyn ErasurePersistencePortV1) -> Result<(), ErasureErrorV1> {
+        let count = port.scope_index_count(self.request.reference())?;
+        if count > ERASURE_MAX_SCOPE_EXTENSIONS as u64
+            || (count == 0) != self.manifest.scope_extension_head.is_none()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let mut predecessor_node = None;
+        let mut predecessor_extension = None;
+        let mut forks = BTreeSet::new();
+        for ordinal in 0..count {
+            let reference = port
+                .scope_node_ref(self.request.reference(), ordinal)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let node = load(port, reference, ScopeNodeV1::decode, |value| {
+                value.reference
+            })?;
+            let extension = load(
+                port,
+                node.extension,
+                ErasureScopeExtensionV1::from_canonical_cbor,
+                ErasureScopeExtensionV1::reference,
+            )?;
+            if node.request != self.request.reference()
+                || Some(node.scope) != self.manifest.scope
+                || node.ordinal != ordinal
+                || node.predecessor != predecessor_node
+                || extension.request() != self.request.reference()
+                || extension.scope_commitment() != node.scope
+                || extension.predecessor_extension() != predecessor_extension
+                || !forks.insert(extension.fork())
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            predecessor_node = Some(reference);
+            predecessor_extension = Some(extension.reference());
+            self.scope_head = Some(RecoveredScopeHeadV1 {
+                node: reference,
+                extension: extension.reference(),
+                ordinal,
+            });
+        }
+        if predecessor_node != self.manifest.scope_extension_head {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         Ok(())
     }
+
+    fn recover_administrative_resolutions(
+        &mut self,
+        port: &dyn ErasurePersistencePortV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let count = port.administrative_resolution_index_count(self.request.reference())?;
+        if count > ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS as u64
+            || (count == 0) != self.administrative_resolution_head.is_none()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let mut predecessor = None;
+        for ordinal in 0..count {
+            let reference = port
+                .administrative_resolution_ref(self.request.reference(), ordinal)?
+                .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+            let resolution = load(
+                port,
+                reference,
+                ErasureAdministrativeResolutionV1::from_canonical_cbor,
+                ErasureAdministrativeResolutionV1::reference,
+            )?;
+            if resolution.request() != self.request.reference()
+                || resolution.predecessor_resolution() != predecessor
+            {
+                return Err(ErasureErrorV1::ProvenanceMissing);
+            }
+            predecessor = Some(reference);
+        }
+        if predecessor != self.administrative_resolution_head {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        self.administrative_resolution_count = count;
+        Ok(())
+    }
+}
+
+fn canonical_acknowledgement_references(
+    values: impl Iterator<Item = ErasureAcknowledgementProvenanceV1>,
+) -> Vec<ErasureReferenceV1> {
+    let mut values = values.collect::<Vec<_>>();
+    values.sort_unstable_by_key(|value| {
+        (
+            value.obligation(),
+            value.owner(),
+            value.command(),
+            value.attempt(),
+            value.evidence(),
+            match value.outcome() {
+                ErasureAcknowledgementOutcomeV1::Acknowledged => 0_u8,
+                ErasureAcknowledgementOutcomeV1::Negative => 1,
+                ErasureAcknowledgementOutcomeV1::Stale => 2,
+            },
+        )
+    });
+    values.into_iter().map(|value| value.reference()).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_fixed_graph(
+    request: ErasureReferenceV1,
+    erq: &ErasureRequestV1,
+    targets: &[ErasureRequiredTargetV1],
+    rejection: Option<&ErasureAuthorizationRejectionV1>,
+    scope: Option<&ErasureScopeCommitmentV1>,
+    admission: Option<&ErasureFreezeAdmissionEvidenceV1>,
+    authorization: Option<&ErasureFreezeAuthorizationEvidenceV1>,
+    freeze: Option<&ErasureFreezeProvenanceV1>,
+    failure: Option<&ErasureFreezeFailureV1>,
+    obligation_set: Option<&ErasureObligationSetV1>,
+    obligations: &[ErasureObligationV1],
+    verifier: &dyn ErasureFreezeAuthorizationVerifierV1,
+) -> Result<(), ErasureErrorV1> {
+    if erq.reference() != request
+        || rejection.is_some_and(|value| value.request() != request)
+        || failure.is_some_and(|value| value.request() != request)
+        || scope.is_some_and(|value| value.request() != request)
+        || admission.is_some_and(|value| value.request() != request)
+        || obligation_set.is_some_and(|value| value.request() != request)
+        || freeze.is_some_and(|value| value.request() != request)
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    match (admission, authorization) {
+        (Some(admission), Some(authorization)) => {
+            verifier.validate_freeze_authorization(admission, authorization)?;
+        }
+        (None, None) => {}
+        _ => return Err(ErasureErrorV1::ProvenanceMissing),
+    }
+    if let (Some(scope), Some(admission), Some(freeze), Some(set)) =
+        (scope, admission, freeze, obligation_set)
+    {
+        if admission.scope_commitment() != scope.reference()
+            || admission.obligation_set() != set.reference()
+            || freeze.scope_commitment() != scope.reference()
+            || freeze.obligation_set() != set.reference()
+            || freeze.host_evidence() != admission.reference()
+            || set.policy() != erq.policy()
+            || obligations.len() != set.obligations().len()
+            || obligations
+                .iter()
+                .zip(set.obligations())
+                .any(|(object, reference)| object.reference() != *reference)
+            || obligations
+                .iter()
+                .any(|obligation| !targets.contains(&obligation.target()))
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+    } else if scope.is_some()
+        || admission.is_some()
+        || freeze.is_some()
+        || obligation_set.is_some()
+        || !targets.is_empty()
+        || !obligations.is_empty()
+    {
+        return Err(ErasureErrorV1::ProvenanceMissing);
+    }
+    Ok(())
 }
