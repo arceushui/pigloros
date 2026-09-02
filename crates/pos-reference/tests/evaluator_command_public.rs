@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use pos_reference::evaluator_protocol::ConformanceReport;
+use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -277,12 +277,13 @@ fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
     );
 
     let directory = tempfile::tempdir()?;
-    assert!(
-        !complete_command_with_adapter(directory.path(), "/bin/false")?
-            .output()?
-            .status
-            .success()
-    );
+    let unavailable = complete_command_with_adapter(directory.path(), "/bin/false")?.output()?;
+    assert!(unavailable.status.success());
+    let report = ConformanceReport::from_canonical_cbor(&unavailable.stdout)?;
+    assert!(report
+        .cases
+        .iter()
+        .all(|case| case.outcome == CaseStatus::Unavailable));
 
     let directory = tempfile::tempdir()?;
     let mut malformed_bundle = complete_command(directory.path())?;
