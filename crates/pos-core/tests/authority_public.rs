@@ -305,8 +305,8 @@ fn one_principal_can_act_through_multiple_explicit_entity_contexts() {
 
 #[test]
 fn consent_is_evaluated_before_capability_and_fails_closed() {
-    let principal = principal(1);
-    let grant = root_grant(principal.clone(), vec![entity(10)]);
+    let principal_ref = principal(1);
+    let grant = root_grant(principal_ref.clone(), vec![entity(10)]);
     let cases = [
         (
             ConsentEvidenceV1::Missing,
@@ -330,13 +330,13 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
         ),
     ];
     for (consent, expected) in cases {
-        let mut draft = request_draft(authenticated(principal.clone()), entity(99));
+        let mut draft = request_draft(authenticated(principal_ref.clone()), entity(99));
         draft.consent = consent;
         let request = ok(AuthorizationRequestV1::try_from_draft(draft));
         assert_eq!(decision_for(&request, &[]).outcome(), expected);
     }
 
-    let mut no_subject = request_draft(authenticated(principal.clone()), entity(10));
+    let mut no_subject = request_draft(authenticated(principal_ref.clone()), entity(10));
     no_subject.subject_id = None;
     no_subject.consent = ConsentEvidenceV1::NotRequired;
     assert!(decision_for(
@@ -345,7 +345,7 @@ fn consent_is_evaluated_before_capability_and_fails_closed() {
     )
     .is_allowed());
 
-    let mut indeterminate = request_draft(authenticated(principal), entity(10));
+    let mut indeterminate = request_draft(authenticated(principal_ref), entity(10));
     indeterminate.subject_id = None;
     indeterminate.consent = ConsentEvidenceV1::Indeterminate;
     assert_eq!(
@@ -476,8 +476,8 @@ fn authenticated_result_decoder_rejects_every_malformed_public_field() {
 
 #[test]
 fn capability_decoder_rejects_every_malformed_public_field() {
-    let principal = principal(1);
-    let encoded = ok(root_grant(principal, vec![entity(10)]).encode());
+    let principal_ref = principal(1);
+    let encoded = ok(root_grant(principal_ref, vec![entity(10)]).encode());
     for field in 2..17 {
         let malformed = changed_array(&encoded, |fields| {
             fields[field] = Value::Text("wrong-type".to_owned());
