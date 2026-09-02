@@ -903,7 +903,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     pub fn resolve_administratively(
         &mut self,
         request: ErasureReferenceV1,
-        resolution: ErasureAdministrativeResolutionV1,
+        resolution: &ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
         let mut record = self.record(request)?;
         if record.administrative_resolution_head == Some(resolution.reference()) {
@@ -932,8 +932,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        self.port.admit_administrative_resolution(&resolution)?;
-        let (object, index) = record.append_administrative_resolution(&resolution)?;
+        self.port.admit_administrative_resolution(resolution)?;
+        let (object, index) = record.append_administrative_resolution(resolution)?;
         self.commit_delta(
             record.clone(),
             Some(record.manifest_digest),
@@ -1009,6 +1009,6 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinator for ErasureCoordinatorState
         request: ErasureReferenceV1,
         resolution: ErasureAdministrativeResolutionV1,
     ) -> Result<ErasureStateV1, ErasureErrorV1> {
-        Self::resolve_administratively(self, request, resolution)
+        Self::resolve_administratively(self, request, &resolution)
     }
 }

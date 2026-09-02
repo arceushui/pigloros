@@ -352,7 +352,7 @@ fn complete<S: ErasurePersistencePortV1>(
     );
     coordinator.submit(request.clone(), request.provenance())?;
     coordinator.authorize(request.reference(), reference(31))?;
-    coordinator.freeze_inventory(request.reference(), transition())?;
+    coordinator.freeze_inventory(request.reference(), &transition())?;
     coordinator.dispatch_attempt(
         request.reference(),
         &admission(request.reference(), target)?,

@@ -1438,7 +1438,7 @@ impl RecoveredErasureV1 {
     }
 }
 
-fn persistence_object(
+const fn persistence_object(
     tag: &'static str,
     reference: ErasureReferenceV1,
     canonical_cbor: Vec<u8>,
