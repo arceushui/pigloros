@@ -766,14 +766,14 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     })?;
     let corrected = ErasureRequestV1::new(ErasureRequestInputV1 {
         request: reference(50),
-        subject: original.subject(),
-        scope: original.scope(),
-        selectors: original.selectors().to_vec(),
-        requester: original.requester(),
-        authorization: original.authorization(),
-        policy: original.policy(),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
         request_position: 11,
-        horizon_position: original.horizon_position(),
+        horizon_position: 20,
         provenance: correction.reference(),
     })?;
     let corrected_state = coordinator.submit_corrected(corrected.clone(), correction.clone())?;
@@ -784,14 +784,14 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     );
     let wrong_request = ErasureRequestV1::new(ErasureRequestInputV1 {
         request: reference(51),
-        subject: corrected.subject(),
-        scope: corrected.scope(),
-        selectors: corrected.selectors().to_vec(),
-        requester: corrected.requester(),
-        authorization: corrected.authorization(),
-        policy: corrected.policy(),
+        subject: reference(2),
+        scope: ErasureScopeV1::PrivateSubjectData,
+        selectors: vec![reference(20)],
+        requester: reference(3),
+        authorization: reference(4),
+        policy: reference(5),
         request_position: 12,
-        horizon_position: corrected.horizon_position(),
+        horizon_position: 20,
         provenance: reference(52),
     })?;
     assert_eq!(
