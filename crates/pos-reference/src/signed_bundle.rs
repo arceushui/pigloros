@@ -589,9 +589,7 @@ fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, Bun
             _ => return Err(BundleError::InvalidEncoding),
         };
         let role = u8::try_from(uint(&fields[2])?).map_err(|_| BundleError::InvalidEncoding)?;
-        total = total
-            .checked_add(raw.len())
-            .ok_or(BundleError::FieldOutOfBounds)?;
+        total += raw.len();
         if raw.len() > MAX_MEMBER_BYTES || total > MAX_ARCHIVE_BYTES || role > 19 {
             return Err(BundleError::FieldOutOfBounds);
         }
@@ -601,9 +599,7 @@ fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, Bun
             bytes: raw,
         };
         previous_path = Some(path.clone());
-        if members.insert(path, member).is_some() {
-            return Err(BundleError::NonCanonicalOrder);
-        }
+        members.insert(path, member);
     }
     Ok(members)
 }

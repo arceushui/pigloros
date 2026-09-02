@@ -25,6 +25,8 @@ pub enum ProfileMutation {
     FixtureSemanticBoundary(u8),
     ProvenanceBoundary(u8),
     DescriptorValueBoundary(u8),
+    RelationshipBoundary(u8),
+    ProviderContractBoundary(u8),
     MemberClosureBoundary(u8),
     IdentifierBoundary(u8),
     SemanticVersionBoundary(u8),
@@ -90,6 +92,7 @@ pub enum ProfileMutation {
     FixtureModesEmpty,
     FixtureModesUnsorted,
     FixtureModeOutOfRange,
+    FixtureModeOverflow,
     FixtureAdapter,
     FixtureProvider,
     FixtureCaseId,
@@ -113,8 +116,11 @@ pub enum ProfileMutation {
     FixtureOracle,
     FixtureOracleOutputMissing,
     FixtureOracleDivergenceCoordinate,
+    FixtureDivergenceCoordinateType,
     FixtureUnexpectedVerificationError,
+    FixtureFailureVersion,
     FixtureClaimMismatch,
+    FixtureClaimState(u8),
     FixtureProvenance,
     FixtureDowngradeBinding,
     FixtureDigest,
@@ -196,8 +202,9 @@ const MEMBER_CLOSURE_PATHS: [&str; 45] = [
     "authority/release-admissions/case-5.rad1",
 ];
 
-pub const MEMBER_CLOSURE_BOUNDARY_COUNT: u8 = 93;
+pub const MEMBER_CLOSURE_BOUNDARY_COUNT: u8 = 94;
 
+#[must_use]
 pub fn member_closure_breaks_archive(index: u8) -> bool {
     MEMBER_CLOSURE_PATHS
         .get(usize::from(index))
@@ -219,6 +226,10 @@ pub enum BundleMutation {
     ExpectedModeAbove,
     ExpectedMissingPath,
     ExpectedDigest,
+    ProfileExpectedCount,
+    ProfileExpectedCase,
+    ProfileExpectedMode,
+    ProfileExpectedBinding,
     RawManifestField(u8),
     RawDescriptorField(u8),
     RawMemberField(u8),
@@ -308,12 +319,50 @@ struct FixtureExpectation {
     expected_error: Value,
 }
 
+#[derive(Clone, Copy)]
+struct CorpusOptions<'a> {
+    mode: u64,
+    subject_adapter: SubjectAdapterKind,
+    extra: Option<&'a [u8]>,
+    release_mutation: Option<ReleaseMutation>,
+    mixed_oracles: bool,
+    profile_mutation: Option<ProfileMutation>,
+    bundle_mutation: Option<BundleMutation>,
+    trust_mutation: Option<TrustMutation>,
+}
+
+impl Default for CorpusOptions<'_> {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            subject_adapter: SubjectAdapterKind::ExportedArtifact,
+            extra: None,
+            release_mutation: None,
+            mixed_oracles: false,
+            profile_mutation: None,
+            bundle_mutation: None,
+            trust_mutation: None,
+        }
+    }
+}
+
 /// Build a complete independently signed public evaluator corpus.
 ///
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, None, false, None, None, None)
+    corpus_for_options(CorpusOptions::default())
+}
+
+/// Build a complete corpus for one public subject adapter protocol.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_for_adapter(adapter: SubjectAdapterKind) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        subject_adapter: adapter,
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a signed corpus containing additional bytes for secret-scan tests.
@@ -321,7 +370,10 @@ pub fn corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
-    corpus_for_mode(0, Some(secret), None, false, None, None, None)
+    corpus_for_options(CorpusOptions {
+        extra: Some(secret),
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a complete Air-Gapped corpus with non-network capabilities.
@@ -329,7 +381,10 @@ pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn air_gapped_corpus() -> TestResult<Corpus> {
-    corpus_for_mode(1, None, None, false, None, None, None)
+    corpus_for_options(CorpusOptions {
+        mode: 1,
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a signed corpus whose downgrade admission enables fallback.
@@ -337,15 +392,10 @@ pub fn air_gapped_corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
-    corpus_for_mode(
-        0,
-        None,
-        Some(ReleaseMutation::AllowFallback),
-        false,
-        None,
-        None,
-        None,
-    )
+    corpus_for_options(CorpusOptions {
+        release_mutation: Some(ReleaseMutation::AllowFallback),
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a signed corpus containing output, typed-failure, and divergence oracles.
@@ -353,7 +403,10 @@ pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
-    corpus_for_mode(0, None, None, true, None, None, None)
+    corpus_for_options(CorpusOptions {
+        mixed_oracles: true,
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a cryptographically bound corpus with one invalid CPF1 contract field.
@@ -361,7 +414,10 @@ pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Corpus> {
-    corpus_for_mode(0, None, None, false, Some(mutation), None, None)
+    corpus_for_options(CorpusOptions {
+        profile_mutation: Some(mutation),
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a request-bound corpus containing one signed CFB1 attack shape.
@@ -369,7 +425,10 @@ pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Cor
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_bundle_mutation(mutation: BundleMutation) -> TestResult<Corpus> {
-    corpus_for_mode(0, None, None, false, None, Some(mutation), None)
+    corpus_for_options(CorpusOptions {
+        bundle_mutation: Some(mutation),
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a request-bound corpus containing one invalid TPS1 authority contract.
@@ -377,7 +436,10 @@ pub fn corpus_with_bundle_mutation(mutation: BundleMutation) -> TestResult<Corpu
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_trust_mutation(mutation: TrustMutation) -> TestResult<Corpus> {
-    corpus_for_mode(0, None, None, false, None, None, Some(mutation))
+    corpus_for_options(CorpusOptions {
+        trust_mutation: Some(mutation),
+        ..CorpusOptions::default()
+    })
 }
 
 /// Build a signed corpus containing one invalid RAD1 admission contract.
@@ -385,18 +447,23 @@ pub fn corpus_with_trust_mutation(mutation: TrustMutation) -> TestResult<Corpus>
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Corpus> {
-    corpus_for_mode(0, None, Some(mutation), false, None, None, None)
+    corpus_for_options(CorpusOptions {
+        release_mutation: Some(mutation),
+        ..CorpusOptions::default()
+    })
 }
 
-fn corpus_for_mode(
-    mode: u64,
-    extra: Option<&[u8]>,
-    release_mutation: Option<ReleaseMutation>,
-    mixed_oracles: bool,
-    profile_mutation: Option<ProfileMutation>,
-    bundle_mutation: Option<BundleMutation>,
-    trust_mutation: Option<TrustMutation>,
-) -> TestResult<Corpus> {
+fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
+    let CorpusOptions {
+        mode,
+        subject_adapter,
+        extra,
+        release_mutation,
+        mixed_oracles,
+        profile_mutation,
+        bundle_mutation,
+        trust_mutation,
+    } = options;
     let signing_key = SigningKey::from_bytes(&[9; 32]);
     let execution_profile = execution_profile(profile_mutation)?;
     let execution_digest = hash(&execution_profile);
@@ -405,7 +472,7 @@ fn corpus_for_mode(
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
     let evaluator_protocol_digest = member_hash(&members, "support/evaluator-protocol-v1.json")?;
-    add_provider_contracts(&mut members, profile_mutation)?;
+    add_provider_contracts(&mut members, profile_mutation, subject_adapter)?;
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
     }
@@ -421,6 +488,7 @@ fn corpus_for_mode(
         &expected_output,
         release_mutation,
         mixed_oracles,
+        subject_adapter,
     )?;
     let mut profile = profile(
         &members,
@@ -453,7 +521,7 @@ fn corpus_for_mode(
         request_id: [1; 16],
         profile_digest,
         fixture_bundle_digest: archive_digest,
-        subject_adapter: SubjectAdapterKind::ExportedArtifact,
+        subject_adapter,
         subject_artifact_digest: subject_digest,
         implementation: ImplementationIdentity {
             implementation_id: "public-subject".to_owned(),
@@ -566,10 +634,16 @@ fn mutate_member_closure(members: &mut BTreeMap<String, (Vec<u8>, u8)>, index: u
                     *bytes = vec![0xff];
                 }
             }
-            _ => {
+            2 => {
                 if let Some((bytes, _)) = members.get_mut("providers/test-provider/package.cbor") {
                     *bytes = vec![0xff];
                 }
+            }
+            _ => {
+                members.insert(
+                    "providers/undeclared/package.cbor".to_owned(),
+                    (b"undeclared".to_vec(), 13),
+                );
             }
         }
     }
@@ -583,6 +657,7 @@ fn fixtures(
     expected: &[u8],
     release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
+    subject_adapter: SubjectAdapterKind,
 ) -> TestResult<Vec<Value>> {
     (0_u64..=6)
         .map(|family| -> TestResult<Value> {
@@ -644,7 +719,7 @@ fn fixtures(
                 uint(0),
                 uint(family),
                 provider,
-                uint(0),
+                uint(adapter_code(subject_adapter)),
                 bytes(&execution),
                 array(vec![uint(0), uint(1)]),
                 descriptor(members, &schema_path)?,
@@ -776,6 +851,7 @@ fn release_admission(
 fn add_provider_contracts(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     mutation: Option<ProfileMutation>,
+    subject_adapter: SubjectAdapterKind,
 ) -> TestResult<()> {
     add_provider_artifacts(members);
     let schemas = provider_schemas(members)?;
@@ -784,7 +860,7 @@ fn add_provider_contracts(
         uint(1),
         provider_key(1),
         uint(0),
-        uint(0),
+        uint(adapter_code(subject_adapter)),
         array(schemas),
         descriptor(members, "providers/test-provider/LICENSE")?,
         descriptor(members, "providers/test-provider/NOTICE")?,
@@ -812,7 +888,7 @@ fn add_provider_contracts(
         (canonical(&array(package_fields))?, 13),
     );
 
-    add_provider_registry(members, package_path, mutation)
+    add_provider_registry(members, package_path, mutation, subject_adapter)
 }
 
 fn add_provider_artifacts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) {
@@ -868,6 +944,7 @@ fn add_provider_registry(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     package_path: &str,
     mutation: Option<ProfileMutation>,
+    subject_adapter: SubjectAdapterKind,
 ) -> TestResult<()> {
     let mut registry_fields = vec![
         text("FPR1"),
@@ -878,7 +955,7 @@ fn add_provider_registry(
             uint(1),
             uint(1),
             uint(0),
-            uint(0),
+            uint(adapter_code(subject_adapter)),
             descriptor_with_media(members, package_path, "application/cbor")?,
         ])]),
     ];
@@ -901,6 +978,14 @@ fn add_provider_registry(
         (canonical(&array(registry_fields))?, 12),
     );
     Ok(())
+}
+
+const fn adapter_code(adapter: SubjectAdapterKind) -> u64 {
+    match adapter {
+        SubjectAdapterKind::ExportedArtifact => 0,
+        SubjectAdapterKind::PublicGatewayProtocol => 1,
+        SubjectAdapterKind::PublicPluginProtocol => 2,
+    }
 }
 
 fn mutate_provider_package(
@@ -927,10 +1012,31 @@ fn mutate_provider_package(
         ProfileMutation::RawPackageSupportDescriptorField(index) => {
             array_fields_mut(&mut fields[6])?[usize::from(index)] = Value::Null;
         }
+        ProfileMutation::ProviderContractBoundary(0) => fields[3] = uint(7),
+        ProfileMutation::ProviderContractBoundary(2) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut schemas[0])?[0] = uint(1);
+        }
+        ProfileMutation::ProviderContractBoundary(3) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            let first_descriptor = array_fields_mut(&mut schemas[0])?[1].clone();
+            array_fields_mut(&mut schemas[1])?[1] = first_descriptor;
+        }
+        ProfileMutation::ProviderContractBoundary(4) => fields[4] = uint(1),
+        ProfileMutation::ProviderContractBoundary(5) | ProfileMutation::PackageClaimLayer => {
+            fields[3] = uint(1);
+        }
+        ProfileMutation::ProviderContractBoundary(6) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            let first = array_fields_mut(&mut schemas[0])?[1].clone();
+            let second = array_fields_mut(&mut schemas[1])?[1].clone();
+            array_fields_mut(&mut schemas[0])?[1] = second;
+            array_fields_mut(&mut schemas[1])?[1] = first;
+        }
+        ProfileMutation::ProviderContractBoundary(7) => fields[4] = uint(3),
         ProfileMutation::PackageMagic => fields[0] = text("FPP0"),
         ProfileMutation::PackageVersion => fields[1] = uint(2),
         ProfileMutation::PackageProvider => fields[2] = provider_key(2),
-        ProfileMutation::PackageClaimLayer => fields[3] = uint(1),
         ProfileMutation::PackageAdapter => fields[4] = uint(2),
         ProfileMutation::PackageSchemas => fields[5] = array(Vec::new()),
         ProfileMutation::PackageSupportRole => {
@@ -954,6 +1060,31 @@ fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) {
                 return;
             };
             record[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::ProviderContractBoundary(index) => {
+            let Value::Array(providers) = &mut fields[2] else {
+                return;
+            };
+            if index == 8 {
+                providers.push(providers[0].clone());
+                return;
+            }
+            let Value::Array(record) = &mut providers[0] else {
+                return;
+            };
+            match index {
+                0 => record[4] = uint(7),
+                1 => {
+                    let Value::Array(descriptor) = &mut record[6] else {
+                        return;
+                    };
+                    descriptor[1] = text("application/json");
+                }
+                4 => record[5] = uint(1),
+                5 => record[4] = uint(1),
+                7 => record[5] = uint(3),
+                _ => {}
+            }
         }
         ProfileMutation::RegistryMagic => fields[0] = text("FPR0"),
         ProfileMutation::RegistryVersion => fields[1] = uint(2),
@@ -1064,6 +1195,10 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             let binding = array_fields_mut(&mut profile_fields[8])?;
             binding[1] = array(vec![provider_key(1), provider_key(1)]);
         }
+        ProfileMutation::RelationshipBoundary(3) => {
+            let binding = array_fields_mut(&mut profile_fields[8])?;
+            binding[1] = array(vec![provider_key(1), provider_key(2)]);
+        }
         ProfileMutation::FixturesEmpty => profile_fields[9] = array(Vec::new()),
         ProfileMutation::FixturesUnsorted => {
             array_fields_mut(&mut profile_fields[9])?.swap(0, 1);
@@ -1145,11 +1280,15 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         .get_mut(fixture_index)
         .ok_or_else(|| io::Error::other("test fixture is missing"))?;
     let fields = array_fields_mut(fixture)?;
-    if !mutate_raw_fixture_field(fields, mutation)? && !mutate_fixture_boundary(fields, mutation)? {
+    if !mutate_raw_fixture_field(fields, mutation)?
+        && !mutate_fixture_boundary(fields, mutation)?
+        && !mutate_fixture_relationship(fields, mutation)?
+    {
         match mutation {
             ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
             ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
             ProfileMutation::FixtureModeOutOfRange => fields[7] = array(vec![uint(4)]),
+            ProfileMutation::FixtureModeOverflow => fields[7] = array(vec![uint(256)]),
             ProfileMutation::FixtureAdapter => fields[5] = uint(9),
             ProfileMutation::FixtureProvider => {
                 array_fields_mut(&mut fields[4])?[0] = text("Invalid");
@@ -1201,16 +1340,6 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
             ProfileMutation::FixtureOracleOutputMissing => {
                 fields[11] = array(vec![uint(0), Value::Null, Value::Null, Value::Null]);
             }
-            ProfileMutation::FixtureOracleDivergenceCoordinate => {
-                fields[11] = divergence_oracle(&[]);
-            }
-            ProfileMutation::FixtureUnexpectedVerificationError => {
-                fields[13] = array(vec![text("pigloros.core"), text("1.0.0"), text("failure")]);
-            }
-            ProfileMutation::FixtureClaimMismatch => {
-                fields[14] = uint(0);
-                fields[15] = uint(1);
-            }
             ProfileMutation::FixtureProvenance => fields[21] = invalid_provenance(),
             ProfileMutation::FixtureDowngradeBinding => fields[19] = bytes(&[1; 32]),
             ProfileMutation::FixtureDigest => fields[23] = bytes(&[99; 32]),
@@ -1225,6 +1354,54 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         fields[23] = bytes(&digest);
     }
     Ok(())
+}
+
+fn mutate_fixture_relationship(
+    fields: &mut [Value],
+    mutation: ProfileMutation,
+) -> TestResult<bool> {
+    match mutation {
+        ProfileMutation::FixtureOracleDivergenceCoordinate => {
+            fields[11] = divergence_oracle(&[]);
+        }
+        ProfileMutation::FixtureDivergenceCoordinateType => {
+            fields[11] = array(vec![
+                uint(2),
+                Value::Null,
+                Value::Null,
+                array(vec![uint(0), text("coordinate")]),
+            ]);
+        }
+        ProfileMutation::FixtureUnexpectedVerificationError => {
+            fields[13] = array(vec![text("pigloros.core"), text("1.0.0"), text("failure")]);
+        }
+        ProfileMutation::FixtureFailureVersion => {
+            fields[13] = array(vec![text("pigloros.core"), text("01.0.0"), text("failure")]);
+        }
+        ProfileMutation::FixtureClaimMismatch => {
+            fields[14] = uint(0);
+            fields[15] = uint(1);
+        }
+        ProfileMutation::FixtureClaimState(state) => {
+            fields[14] = uint(u64::from(state));
+            fields[15] = uint(u64::from(state));
+        }
+        ProfileMutation::RelationshipBoundary(index) => match index {
+            0 => fields[3] = uint(1),
+            1 => {
+                fields[11] = divergence_oracle(&[9]);
+                fields[12] = uint(1);
+            }
+            2 => fields[7] = array(vec![uint(0)]),
+            4 => {
+                let evidence = array_fields_mut(&mut fields[10])?[0].clone();
+                fields[11] = array(vec![uint(0), evidence, Value::Null, Value::Null]);
+            }
+            _ => {}
+        },
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn mutate_fixture_boundary(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
@@ -1536,6 +1713,9 @@ fn archive(
 
 fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult<()> {
     let fields = array_fields_mut(manifest)?;
+    if mutate_profile_expected_result(fields, mutation)? {
+        return Ok(());
+    }
     match mutation {
         BundleMutation::PathBoundary(index) => {
             let descriptors = array_fields_mut(&mut fields[4])?;
@@ -1622,9 +1802,45 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         | BundleMutation::MemberBytes
         | BundleMutation::Signer
         | BundleMutation::Signature
-        | BundleMutation::ArchiveShape => {}
+        | BundleMutation::ArchiveShape
+        | BundleMutation::ProfileExpectedCount
+        | BundleMutation::ProfileExpectedCase
+        | BundleMutation::ProfileExpectedMode
+        | BundleMutation::ProfileExpectedBinding => {}
     }
     Ok(())
+}
+
+fn mutate_profile_expected_result(
+    fields: &mut [Value],
+    mutation: BundleMutation,
+) -> TestResult<bool> {
+    match mutation {
+        BundleMutation::ProfileExpectedCount => {
+            array_fields_mut(&mut fields[5])?
+                .pop()
+                .ok_or_else(|| io::Error::other("test expected result is missing"))?;
+        }
+        BundleMutation::ProfileExpectedCase => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            let last = expected
+                .last_mut()
+                .ok_or_else(|| io::Error::other("test expected result is missing"))?;
+            array_fields_mut(last)?[0] = text("case-7");
+        }
+        BundleMutation::ProfileExpectedMode => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[3] = uint(1);
+        }
+        BundleMutation::ProfileExpectedBinding => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            let result = array_fields_mut(&mut expected[0])?;
+            result[4] = text("fixtures/case-0.evidence");
+            result[5] = bytes(&hash(b"draft"));
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn mutate_archive_root(root: &mut Value, mutation: BundleMutation) -> TestResult<()> {

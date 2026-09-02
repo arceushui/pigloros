@@ -9,12 +9,20 @@ use pos_reference::evaluator::{
 use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
 };
-use pos_reference::profile::NamespacedFailure;
+use pos_reference::profile::{
+    DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, ProfileError,
+};
 use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
 struct PublicAdapter {
+    subject_digest: [u8; 32],
+    output: Vec<u8>,
+}
+
+struct KindAdapter {
+    kind: SubjectAdapterKind,
     subject_digest: [u8; 32],
     output: Vec<u8>,
 }
@@ -51,6 +59,23 @@ struct AdverseAdapter {
 impl SubjectAdapter for PublicAdapter {
     fn kind(&self) -> SubjectAdapterKind {
         SubjectAdapterKind::ExportedArtifact
+    }
+
+    fn subject_artifact_digest(&self) -> [u8; 32] {
+        self.subject_digest
+    }
+
+    fn execute(&mut self, _: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
+        Ok(SubjectObservation {
+            result: SubjectResult::Output(self.output.clone()),
+            usage: ResourceUsage::default(),
+        })
+    }
+}
+
+impl SubjectAdapter for KindAdapter {
+    fn kind(&self) -> SubjectAdapterKind {
+        self.kind
     }
 
     fn subject_artifact_digest(&self) -> [u8; 32] {
@@ -261,6 +286,80 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
 }
 
 #[test]
+fn public_gateway_and_plugin_protocols_execute_complete_profiles() -> TestResult {
+    for kind in [
+        SubjectAdapterKind::PublicGatewayProtocol,
+        SubjectAdapterKind::PublicPluginProtocol,
+    ] {
+        let corpus = support::corpus_for_adapter(kind)?;
+        let mut adapter = KindAdapter {
+            kind,
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        let output = evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        )?;
+        assert!(output
+            .report
+            .cases
+            .iter()
+            .all(|case| case.outcome == CaseStatus::Pass));
+    }
+    Ok(())
+}
+
+#[test]
+fn public_hard_caps_reject_zero_and_excessive_fixture_budgets() {
+    let caps = EvaluatorHardCaps { values: [100; 18] };
+    let budget = |memory_bytes| DeterministicBudget {
+        memory_bytes,
+        cpu_fuel: 1,
+        host_calls: 1,
+        event_count: 1,
+        output_bytes: 1,
+        storage_bytes: 1,
+        execution_steps: 1,
+        simulation_time_ns: 1,
+    };
+    assert_eq!(caps.admits(budget(0)), Err(ProfileError::FieldOutOfBounds));
+    assert_eq!(
+        caps.admits(budget(101)),
+        Err(ProfileError::FieldOutOfBounds)
+    );
+}
+
+#[test]
+fn replay_claims_accept_each_matching_redaction_state() -> TestResult {
+    for state in 1..=3 {
+        let corpus =
+            support::corpus_with_profile_mutation(ProfileMutation::FixtureClaimState(state))?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        let output = evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        )?;
+        assert!(output
+            .report
+            .cases
+            .iter()
+            .all(|case| case.outcome == CaseStatus::Pass));
+        assert_eq!(output.report.cases[0].redaction_state, state);
+    }
+    Ok(())
+}
+
+#[test]
 fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult {
     let cbor_secret = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x61, b'x'];
     let cbor_array_secret = [
@@ -323,9 +422,11 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
 #[test]
 fn signed_bundle_allows_empty_secret_slots_and_noncredential_text() -> TestResult {
     let empty_cbor_secret = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x60];
+    let empty_cbor_secret_bytes = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x40];
     for public_data in [
         br#"{"password":null,"token":"","ordinary":"secret"}"#.as_slice(),
         empty_cbor_secret.as_slice(),
+        empty_cbor_secret_bytes.as_slice(),
         b"short bearer value and short ghp_token".as_slice(),
     ] {
         let corpus = support::corpus_with_secret(public_data)?;
@@ -345,6 +446,34 @@ fn signed_bundle_allows_empty_secret_slots_and_noncredential_text() -> TestResul
             .cases
             .iter()
             .all(|case| case.outcome == CaseStatus::Pass));
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_empty_archives_and_mismatched_trust_snapshots() -> TestResult {
+    let corpus = support::corpus()?;
+    let mismatched_request = request_with(&corpus.request, |request| {
+        request.trust_policy_snapshot_digest = [90; 32];
+    })?;
+    for (request, archive) in [
+        (corpus.request.as_slice(), &[][..]),
+        (mismatched_request.as_slice(), corpus.archive.as_slice()),
+    ] {
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output.clone(),
+        };
+        assert_eq!(
+            evaluate(
+                request,
+                archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
     }
     Ok(())
 }
@@ -564,6 +693,7 @@ const PROFILE_MUTATIONS: &[ProfileMutation] = &[
     ProfileMutation::FixtureModesEmpty,
     ProfileMutation::FixtureModesUnsorted,
     ProfileMutation::FixtureModeOutOfRange,
+    ProfileMutation::FixtureModeOverflow,
     ProfileMutation::FixtureAdapter,
     ProfileMutation::FixtureProvider,
     ProfileMutation::FixtureCaseId,
@@ -587,7 +717,9 @@ const PROFILE_MUTATIONS: &[ProfileMutation] = &[
     ProfileMutation::FixtureOracle,
     ProfileMutation::FixtureOracleOutputMissing,
     ProfileMutation::FixtureOracleDivergenceCoordinate,
+    ProfileMutation::FixtureDivergenceCoordinateType,
     ProfileMutation::FixtureUnexpectedVerificationError,
+    ProfileMutation::FixtureFailureVersion,
     ProfileMutation::FixtureClaimMismatch,
     ProfileMutation::FixtureProvenance,
     ProfileMutation::FixtureDowngradeBinding,
@@ -740,6 +872,8 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
         .chain((0..9).map(ProfileMutation::FixtureSemanticBoundary))
         .chain((0..8).map(ProfileMutation::ProvenanceBoundary))
         .chain((0..3).map(ProfileMutation::DescriptorValueBoundary))
+        .chain((0..5).map(ProfileMutation::RelationshipBoundary))
+        .chain((0..9).map(ProfileMutation::ProviderContractBoundary))
         .chain(
             (0..support::MEMBER_CLOSURE_BOUNDARY_COUNT).map(ProfileMutation::MemberClosureBoundary),
         );
@@ -850,6 +984,33 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_profile_inconsistent_expected_result_records() -> TestResult {
+    for mutation in [
+        BundleMutation::ProfileExpectedCount,
+        BundleMutation::ProfileExpectedCase,
+        BundleMutation::ProfileExpectedMode,
+        BundleMutation::ProfileExpectedBinding,
+    ] {
+        let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
         );
     }
     Ok(())
