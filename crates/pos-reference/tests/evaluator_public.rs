@@ -349,12 +349,25 @@ fn replay_claims_accept_each_matching_redaction_state() -> TestResult {
             &evaluator_identity(),
             &mut adapter,
         )?;
+        let affected = output
+            .report
+            .cases
+            .iter()
+            .find(|case| case.redaction_state == state)
+            .ok_or("mutated redaction case is absent")?;
+        assert_eq!(affected.replay_claim, state);
+        if state == 1 {
+            assert_eq!(affected.outcome, CaseStatus::Pass);
+        } else {
+            assert_eq!(affected.outcome, CaseStatus::Unavailable);
+            assert_eq!(affected.expected_digest, None);
+            assert_eq!(affected.actual_digest, None);
+        }
         assert!(output
             .report
             .cases
             .iter()
-            .all(|case| case.outcome == CaseStatus::Pass));
-        assert_eq!(output.report.cases[0].redaction_state, state);
+            .all(|case| { case.redaction_state == state || case.outcome == CaseStatus::Pass }));
     }
     Ok(())
 }
