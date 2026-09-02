@@ -228,11 +228,42 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
 #[test]
 fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult {
     let cbor_secret = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x61, b'x'];
+    let cbor_array_secret = [
+        0x81, 0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x61, b'x',
+    ];
+    let cbor_tag_secret = [
+        0xc0, 0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x61, b'x',
+    ];
     let secrets = [
         br#"{"password":"x"}"#.as_slice(),
+        br#"{"api-key":"x"}"#.as_slice(),
+        br#"{"credential":"x"}"#.as_slice(),
+        br#"{"access_token_digest":"00"}"#.as_slice(),
+        br#"[{"client_secret":"x"}]"#.as_slice(),
         cbor_secret.as_slice(),
+        cbor_array_secret.as_slice(),
+        cbor_tag_secret.as_slice(),
         b"-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----".as_slice(),
+        b"prefix bearer abcdefghijklmnop suffix".as_slice(),
+        b"prefix basic abcdefghijklmnop suffix".as_slice(),
+        b"prefix AKIAabcdefghijklmnop suffix".as_slice(),
+        b"prefix ASIAabcdefghijklmnop suffix".as_slice(),
         b"prefix ghp_abcdefghijklmnop suffix".as_slice(),
+        b"prefix gho_abcdefghijklmnop suffix".as_slice(),
+        b"prefix ghu_abcdefghijklmnop suffix".as_slice(),
+        b"prefix ghs_abcdefghijklmnop suffix".as_slice(),
+        b"prefix ghr_abcdefghijklmnop suffix".as_slice(),
+        b"prefix github_pat_abcdefghijklmnop suffix".as_slice(),
+        b"prefix glpat-abcdefghijklmnop suffix".as_slice(),
+        b"prefix xoxb-abcdefghijklmnop suffix".as_slice(),
+        b"prefix xoxa-abcdefghijklmnop suffix".as_slice(),
+        b"prefix xoxp-abcdefghijklmnop suffix".as_slice(),
+        b"prefix xoxr-abcdefghijklmnop suffix".as_slice(),
+        b"prefix xoxs-abcdefghijklmnop suffix".as_slice(),
+        b"prefix sk_live_abcdefghijklmnop suffix".as_slice(),
+        b"prefix sk_test_abcdefghijklmnop suffix".as_slice(),
+        b"prefix AIzaabcdefghijklmnop suffix".as_slice(),
+        b"prefix eyJabcdefghijklmnopqrst suffix".as_slice(),
     ];
     for secret in secrets {
         let corpus = support::corpus_with_secret(secret)?;
@@ -250,6 +281,32 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
             ),
             Err(EvaluatorError::Bundle)
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn signed_bundle_allows_empty_secret_slots_and_noncredential_text() -> TestResult {
+    let empty_cbor_secret = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x60];
+    for public_data in [
+        br#"{"password":null,"token":"","ordinary":"secret"}"#.as_slice(),
+        empty_cbor_secret.as_slice(),
+        b"short bearer value and short ghp_token".as_slice(),
+    ] {
+        let corpus = support::corpus_with_secret(public_data)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert!(evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        )?
+        .report
+        .is_passing());
     }
     Ok(())
 }
@@ -524,7 +581,7 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
 
 #[test]
 fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestResult {
-    let corpus = support::valid_corpus()?;
+    let corpus = support::corpus()?;
     for request in [
         request_with(&corpus.request, |request| {
             request.execution_profile_digest = [90; 32];
@@ -663,7 +720,7 @@ fn evaluator_accepts_supported_trust_policy_evolution() -> TestResult {
             &evaluator_identity(),
             &mut adapter,
         )?;
-        assert!(report.is_passing());
+        assert!(report.report.is_passing());
     }
     Ok(())
 }

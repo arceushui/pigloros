@@ -1029,7 +1029,7 @@ fn divergence_oracle(coordinate: &[u8]) -> Value {
         uint(2),
         Value::Null,
         Value::Null,
-        array(vec![uint(1), bytes(coordinate)]),
+        array(vec![uint(1), Value::Bytes(coordinate.to_vec())]),
     ])
 }
 
