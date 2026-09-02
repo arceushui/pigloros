@@ -643,6 +643,34 @@ fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> Te
 }
 
 #[test]
+fn evaluator_rejects_each_profile_textual_contract_boundary() -> TestResult {
+    let mutations = (0..5)
+        .map(ProfileMutation::IdentifierBoundary)
+        .chain((0..17).map(ProfileMutation::SemanticVersionBoundary))
+        .chain((0..12).map(ProfileMutation::MemberPathBoundary))
+        .chain((0..9).map(ProfileMutation::MediaTypeBoundary))
+        .chain((0..4).map(ProfileMutation::ExecutionListBoundary));
+    for mutation in mutations {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestResult {
     let corpus = support::corpus()?;
     for request in [
@@ -744,6 +772,31 @@ fn evaluator_rejects_wrong_types_at_each_required_archive_field() -> TestResult 
 }
 
 #[test]
+fn evaluator_rejects_each_archive_textual_contract_boundary() -> TestResult {
+    let mutations = (0..8)
+        .map(BundleMutation::PathBoundary)
+        .chain((0..2).map(BundleMutation::ExpectedCaseBoundary));
+    for mutation in mutations {
+        let corpus = support::corpus_with_bundle_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
     let mutations = [
         TrustMutation::Magic,
@@ -797,6 +850,32 @@ fn evaluator_rejects_wrong_types_at_each_required_trust_policy_field() -> TestRe
         .map(TrustMutation::RawField)
         .chain((0..4).map(TrustMutation::RawRootField))
         .chain((0..2).map(TrustMutation::RawMinimumVersionField));
+    for mutation in mutations {
+        let corpus = support::corpus_with_trust_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Bundle)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_each_trust_policy_textual_contract_boundary() -> TestResult {
+    let mutations = (0..5)
+        .map(TrustMutation::IdentifierBoundary)
+        .chain((0..16).map(TrustMutation::SemanticVersionBoundary))
+        .chain((0..4).map(TrustMutation::ExpiryBoundary));
     for mutation in mutations {
         let corpus = support::corpus_with_trust_mutation(mutation)?;
         let mut adapter = PublicAdapter {

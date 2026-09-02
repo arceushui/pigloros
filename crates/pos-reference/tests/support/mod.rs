@@ -18,6 +18,11 @@ pub struct Corpus {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {
+    IdentifierBoundary(u8),
+    SemanticVersionBoundary(u8),
+    MemberPathBoundary(u8),
+    MediaTypeBoundary(u8),
+    ExecutionListBoundary(u8),
     RawProfileField(u8),
     RawFixtureField(u8),
     RawProviderBindingField(u8),
@@ -137,6 +142,8 @@ pub enum ProfileMutation {
 
 #[derive(Clone, Copy)]
 pub enum BundleMutation {
+    PathBoundary(u8),
+    ExpectedCaseBoundary(u8),
     RawManifestField(u8),
     RawDescriptorField(u8),
     RawMemberField(u8),
@@ -163,6 +170,9 @@ pub enum BundleMutation {
 
 #[derive(Clone, Copy)]
 pub enum TrustMutation {
+    IdentifierBoundary(u8),
+    SemanticVersionBoundary(u8),
+    ExpiryBoundary(u8),
     RawField(u8),
     RawRootField(u8),
     RawMinimumVersionField(u8),
@@ -885,6 +895,12 @@ fn profile(
 fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<()> {
     let profile_fields = array_fields_mut(profile)?;
     match mutation {
+        ProfileMutation::IdentifierBoundary(index) => {
+            profile_fields[2] = text(&identifier_boundary(index));
+        }
+        ProfileMutation::SemanticVersionBoundary(index) => {
+            profile_fields[3] = text(&semantic_version_boundary(index));
+        }
         ProfileMutation::RawProfileField(index) => profile_fields[usize::from(index)] = Value::Null,
         ProfileMutation::RawProviderBindingField(index) => {
             array_fields_mut(&mut profile_fields[8])?[usize::from(index)] = Value::Null;
@@ -1066,6 +1082,12 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
 
 fn mutate_raw_fixture_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
     match mutation {
+        ProfileMutation::MemberPathBoundary(index) => {
+            array_fields_mut(&mut fields[8])?[0] = text(&member_path_boundary(index));
+        }
+        ProfileMutation::MediaTypeBoundary(index) => {
+            array_fields_mut(&mut fields[8])?[1] = text(&media_type_boundary(index));
+        }
         ProfileMutation::RawFixtureField(index) => {
             fields[usize::from(index)] = Value::Null;
         }
@@ -1111,6 +1133,112 @@ fn excessive_capabilities() -> Value {
             .map(|index| text(&format!("capability-{index:03}")))
             .collect(),
     )
+}
+
+fn identifier_boundary(index: u8) -> String {
+    match index {
+        0 => String::new(),
+        1 => "a".repeat(129),
+        2 => "café".to_owned(),
+        3 => "Invalid".to_owned(),
+        _ => "invalid@identifier".to_owned(),
+    }
+}
+
+fn semantic_version_boundary(index: u8) -> String {
+    match index {
+        0 => String::new(),
+        1 => "a".repeat(65),
+        2 => "1.0.é".to_owned(),
+        3 => "1.0.0+".to_owned(),
+        4 => "1.0.0+a+b".to_owned(),
+        5 => "1.0.0-".to_owned(),
+        6 => "1.0".to_owned(),
+        7 => "1.0.0.0".to_owned(),
+        8 => ".0.0".to_owned(),
+        9 => "01.0.0".to_owned(),
+        10 => "a.0.0".to_owned(),
+        11 => "1.0.0-alpha..one".to_owned(),
+        12 => "1.0.0-alpha_".to_owned(),
+        13 => "1.0.0-01".to_owned(),
+        14 => "1.0.0+build..one".to_owned(),
+        15 => "1.0.0+build_".to_owned(),
+        _ => "12345678901.0.0".to_owned(),
+    }
+}
+
+fn member_path_boundary(index: u8) -> String {
+    match index {
+        0 => String::new(),
+        1 => "a".repeat(513),
+        2 => "fixtures/café".to_owned(),
+        3 => "/fixtures/value".to_owned(),
+        4 => "fixtures/value/".to_owned(),
+        5 => "fixtures\\value".to_owned(),
+        6 => "fixtures/\0value".to_owned(),
+        7 => (0..17).map(|_| "a").collect::<Vec<_>>().join("/"),
+        8 => "fixtures//value".to_owned(),
+        9 => "fixtures/./value".to_owned(),
+        10 => "fixtures/../value".to_owned(),
+        _ => format!("fixtures/{}", "a".repeat(129)),
+    }
+}
+
+fn archive_path_boundary(index: u8) -> String {
+    match index {
+        0 => String::new(),
+        1 => "a".repeat(513),
+        2 => "fixtures/café".to_owned(),
+        3 => "/fixtures/value".to_owned(),
+        4 => "fixtures/value/".to_owned(),
+        5 => "fixtures//value".to_owned(),
+        6 => "fixtures/./value".to_owned(),
+        _ => "fixtures/../value".to_owned(),
+    }
+}
+
+fn media_type_boundary(index: u8) -> String {
+    match index {
+        0 => "a/".to_owned(),
+        1 => format!("a/{}", "b".repeat(126)),
+        2 => "application/café".to_owned(),
+        3 => "application-json".to_owned(),
+        4 => "application/json/value".to_owned(),
+        5 => "/json".to_owned(),
+        6 => "application/".to_owned(),
+        7 => "Application/json".to_owned(),
+        _ => "application/j@son".to_owned(),
+    }
+}
+
+fn execution_list_boundary(index: u8) -> Value {
+    match index {
+        0 => array(Vec::new()),
+        1 => array(
+            (0..257)
+                .map(|value| text(&format!("item-{value}")))
+                .collect(),
+        ),
+        2 => array(vec![text("duplicate"), text("duplicate")]),
+        _ => array(vec![text("Invalid")]),
+    }
+}
+
+fn expiry_boundary(index: u8) -> String {
+    match index {
+        0 => String::new(),
+        1 => "2".repeat(65),
+        2 => "2099-01-01T00:00:00é".to_owned(),
+        _ => "2099-01-01T00:00:00Z!".to_owned(),
+    }
+}
+
+fn expected_case_boundary(index: u8) -> String {
+    if index == 0 {
+        String::new()
+    } else {
+        "a".repeat(129)
+    }
 }
 
 fn invalid_descriptor(path: &str, media_type: &str) -> Value {
@@ -1219,6 +1347,14 @@ fn archive(
 fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult<()> {
     let fields = array_fields_mut(manifest)?;
     match mutation {
+        BundleMutation::PathBoundary(index) => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[0] = text(&archive_path_boundary(index));
+        }
+        BundleMutation::ExpectedCaseBoundary(index) => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[0] = text(&expected_case_boundary(index));
+        }
         BundleMutation::RawManifestField(index) => fields[usize::from(index)] = Value::Null,
         BundleMutation::RawDescriptorField(index) => {
             let descriptors = array_fields_mut(&mut fields[4])?;
@@ -1336,6 +1472,16 @@ fn mutate_trust_policy(
     revoked_artifact: [u8; 32],
 ) -> TestResult<()> {
     match mutation {
+        TrustMutation::IdentifierBoundary(index) => {
+            fields[2] = text(&identifier_boundary(index));
+        }
+        TrustMutation::SemanticVersionBoundary(index) => {
+            let versions = array_fields_mut(&mut fields[8])?;
+            array_fields_mut(&mut versions[0])?[1] = text(&semantic_version_boundary(index));
+        }
+        TrustMutation::ExpiryBoundary(index) => {
+            fields[9] = text(&expiry_boundary(index));
+        }
         TrustMutation::RawField(index) => fields[usize::from(index)] = Value::Null,
         TrustMutation::RawRootField(index) => {
             let roots = array_fields_mut(&mut fields[5])?;
@@ -1513,6 +1659,9 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
 
 fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
     match mutation {
+        ProfileMutation::ExecutionListBoundary(index) => {
+            fields[5] = execution_list_boundary(index);
+        }
         ProfileMutation::RawExecutionField(index) => {
             fields[usize::from(index)] = Value::Null;
         }
