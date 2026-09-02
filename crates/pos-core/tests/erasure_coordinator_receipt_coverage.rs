@@ -779,7 +779,7 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     let corrected_state = coordinator.submit_corrected(corrected.clone(), correction.clone())?;
     assert_eq!(corrected_state.lifecycle(), ErasureLifecycleV1::Submitted);
     assert_eq!(
-        coordinator.submit_corrected(corrected.clone(), correction.clone())?,
+        coordinator.submit_corrected(corrected, correction.clone())?,
         corrected_state
     );
     let wrong_request = ErasureRequestV1::new(ErasureRequestInputV1 {
