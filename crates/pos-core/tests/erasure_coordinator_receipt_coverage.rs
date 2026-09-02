@@ -2612,6 +2612,15 @@ fn atomic_freeze_admission_rejects_inconsistent_public_commitments() -> Result<(
         ErasureErrorV1::ScopeInvalid,
     );
 
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(
+            vec![frozen_target, target(12)],
+            vec![valid_obligation],
+            applicable.clone(),
+        )?,
+        ErasureErrorV1::ScopeInvalid,
+    );
+
     let duplicate_target = ErasureObligationV1::new(ErasureObligationInputV1 {
         category: ErasureInventoryCategoryV1::Artifact,
         target: frozen_target,

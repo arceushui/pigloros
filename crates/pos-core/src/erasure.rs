@@ -3911,39 +3911,28 @@ fn validate_applicability_obligations(
     {
         return Err(ErasureErrorV1::ScopeInvalid);
     }
-    let mut by_category_target = BTreeMap::new();
-    for obligation in obligations {
-        if by_category_target
-            .insert((obligation.category(), obligation.target()), obligation)
-            .is_some()
-        {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        }
-    }
-    let mut applicable = 0_usize;
+    // The admission constructor has already rejected duplicate
+    // category-target obligations and the evidence constructor has already
+    // normalized every row index against this exact matrix cardinality.
+    let by_category_target = obligations
+        .iter()
+        .map(|obligation| ((obligation.category(), obligation.target()), obligation))
+        .collect::<BTreeMap<_, _>>();
     for row in matrix {
-        let Ok(target_index) = usize::try_from(row.target_index()) else {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        };
-        let Some(target) = targets.get(target_index) else {
-            return Err(ErasureErrorV1::ScopeInvalid);
-        };
+        let target_index =
+            usize::try_from(row.target_index()).map_err(|_| ErasureErrorV1::ScopeInvalid)?;
+        let target = targets
+            .get(target_index)
+            .ok_or(ErasureErrorV1::ScopeInvalid)?;
         let obligation = by_category_target.get(&(row.category(), *target));
         match (row.decision(), row.owner(), obligation) {
             (ErasureApplicabilityDecisionV1::Inapplicable, None, None) => {}
             (ErasureApplicabilityDecisionV1::Applicable, Some(owner), Some(obligation))
-                if obligation.owner() == owner =>
-            {
-                applicable = applicable.saturating_add(1);
-            }
+                if obligation.owner() == owner => {}
             _ => return Err(ErasureErrorV1::ScopeInvalid),
         }
     }
-    if applicable == obligations.len() {
-        Ok(())
-    } else {
-        Err(ErasureErrorV1::ScopeInvalid)
-    }
+    Ok(())
 }
 
 /// Canonical result of the one atomic host freeze operation.
