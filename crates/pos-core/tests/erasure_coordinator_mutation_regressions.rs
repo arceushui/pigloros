@@ -69,6 +69,7 @@ const fn config(
         lineage_rule: None,
         freeze_rejection: None,
         operation_fault: None,
+        attempt_reservation_admission: None,
     }
 }
 

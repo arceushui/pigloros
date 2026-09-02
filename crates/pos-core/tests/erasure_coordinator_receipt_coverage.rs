@@ -124,6 +124,32 @@ fn replace_path(
     encode_value(&value)
 }
 
+fn duplicate_array_item(
+    bytes: &[u8],
+    path: &[usize],
+    index: usize,
+) -> Result<Vec<u8>, ErasureErrorV1> {
+    let mut value = decode_value(bytes)?;
+    let mut current = &mut value;
+    for path_index in path {
+        current = match current {
+            Value::Array(values) => values
+                .get_mut(*path_index)
+                .ok_or(ErasureErrorV1::InvalidEncoding)?,
+            _ => return Err(ErasureErrorV1::InvalidEncoding),
+        };
+    }
+    let Value::Array(values) = current else {
+        return Err(ErasureErrorV1::InvalidEncoding);
+    };
+    let duplicate = values
+        .get(index)
+        .cloned()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    values.push(duplicate);
+    encode_value(&value)
+}
+
 fn reject_each_top_level_field<T>(
     bytes: &[u8],
     decode: impl Fn(&[u8]) -> Result<T, ErasureErrorV1>,
@@ -453,6 +479,7 @@ fn coordinator_port(
         lineage_rule,
         freeze_rejection: None,
         operation_fault: None,
+        attempt_reservation_admission: None,
     })
 }
 
@@ -1274,6 +1301,7 @@ fn coordinator_persists_typed_freeze_rejection_and_rejects_wrong_provenance(
             lineage_rule: None,
             freeze_rejection: Some((ErasureErrorV1::ScopeInvalid, authorization)),
             operation_fault: None,
+            attempt_reservation_admission: None,
         });
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
         coordinator.submit(request.clone(), request.provenance())?;
@@ -1307,12 +1335,31 @@ fn coordinator_rejects_freeze_admission_for_another_policy() -> Result<(), Erasu
         lineage_rule: None,
         freeze_rejection: None,
         operation_fault: None,
+        attempt_reservation_admission: None,
     });
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
     coordinator.submit(request.clone(), request.provenance())?;
     coordinator.authorize(request.reference(), reference(21))?;
     assert_eq!(
         coordinator.freeze_inventory(request.reference(), &coordinator_freeze_transition()),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    Ok(())
+}
+
+#[test]
+fn coordinator_rejects_reservation_for_another_admission() -> Result<(), ErasureErrorV1> {
+    let request = coordinator_request()?;
+    let target = target(10);
+    let port =
+        coordinator_port(vec![target], None).with_attempt_reservation_admission(reference(240));
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    submit_authorize_and_freeze(&mut coordinator, &request)?;
+    assert_eq!(
+        coordinator.dispatch_attempt(
+            request.reference(),
+            &coordinator_admission(request.reference(), target, 0, None)?,
+        ),
         Err(ErasureErrorV1::PolicyConflict)
     );
     Ok(())
@@ -3131,6 +3178,14 @@ fn portable_decoders_reject_wrong_types_in_every_foundation_field() -> Result<()
     reject_each_top_level_field(&request.to_canonical_cbor()?, |bytes| {
         ErasureRequestV1::from_canonical_cbor(bytes)
     })?;
+    assert_eq!(
+        ErasureRequestV1::from_canonical_cbor(&replace_path(
+            &request.to_canonical_cbor()?,
+            &[5],
+            Value::Array(vec![Value::Null; 4_097]),
+        )?),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     let correction = ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
         rejected_request: reference(1),
         rejected_terminal_state: reference(2),
@@ -3429,7 +3484,7 @@ fn public_request_codec_rejects_every_bounded_cbor_shape_family() {
 }
 
 #[test]
-fn state_and_freeze_codecs_reject_wrong_shapes() -> Result<(), ErasureErrorV1> {
+fn state_codec_rejects_wrong_shapes() -> Result<(), ErasureErrorV1> {
     let state = ErasureStateV1::submitted(reference(1), reference(2), reference(3))?;
     let state_bytes = state.to_canonical_cbor()?;
     let changed_state = |changes: &[(usize, Value)]| {
@@ -3513,7 +3568,11 @@ fn state_and_freeze_codecs_reject_wrong_shapes() -> Result<(), ErasureErrorV1> {
         )?),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    Ok(())
+}
 
+#[test]
+fn freeze_and_obligation_codecs_reject_wrong_shapes() -> Result<(), ErasureErrorV1> {
     let (admission, _) = freeze_evidence_pair()?;
     let admission_bytes = admission.to_canonical_cbor()?;
     assert_eq!(
@@ -3569,6 +3628,12 @@ fn receipt_codec_rejects_wrong_shapes_and_digest() -> Result<(), ErasureErrorV1>
     let (receipt_input, _) = complete_receipt_input()?;
     let receipt = ErasureReceiptV1::new(receipt_input)?;
     let receipt_bytes = receipt.to_canonical_cbor()?;
+    for path in [&[6_usize][..], &[7][..], &[10, 0][..]] {
+        assert_eq!(
+            ErasureReceiptV1::from_canonical_cbor(&duplicate_array_item(&receipt_bytes, path, 0,)?),
+            Err(ErasureErrorV1::ScopeInvalid)
+        );
+    }
     assert_eq!(
         ErasureReceiptV1::from_canonical_cbor(&replace_path(
             &receipt_bytes,

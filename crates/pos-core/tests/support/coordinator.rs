@@ -38,6 +38,7 @@ pub struct PublicCoordinatorPortConfig {
     pub lineage_rule: Option<ErasureReferenceV1>,
     pub freeze_rejection: Option<(ErasureErrorV1, ErasureReferenceV1)>,
     pub operation_fault: Option<PublicCoordinatorFault>,
+    pub attempt_reservation_admission: Option<ErasureReferenceV1>,
 }
 
 /// One coordinator dependency operation selected for deterministic failure.
@@ -237,6 +238,12 @@ impl PublicCoordinatorPort {
     pub fn with_operation_fault(mut self, fault: PublicCoordinatorFault) -> Self {
         self.config.operation_fault = Some(fault);
         self.operation_fault_hits.set(0);
+        self
+    }
+
+    #[must_use]
+    pub fn with_attempt_reservation_admission(mut self, admission: ErasureReferenceV1) -> Self {
+        self.config.attempt_reservation_admission = Some(admission);
         self
     }
 
@@ -1040,7 +1047,9 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
         self.maybe_fail(PublicCoordinatorOperation::AdmitAttempt)?;
         *self.attempt_admissions.borrow_mut() += 1;
         Ok(ErasureAttemptQuotaReservationV1::new(
-            admission.reference(),
+            self.config
+                .attempt_reservation_admission
+                .unwrap_or(admission.reference()),
             admission.reference(),
         ))
     }
