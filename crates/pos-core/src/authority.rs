@@ -1532,21 +1532,7 @@ fn authorization_evaluation(
             Some(AuthorityErrorV1::PrincipalUnresolved),
         );
     }
-    let grantee_context_matches = match &leaf.grantee {
-        AuthorityGranteeV1::Principal(_) => {
-            request.plugin_id.is_none() && request.installation_id.is_none()
-        }
-        AuthorityGranteeV1::PluginInstallation {
-            plugin_id,
-            installation_id,
-            ..
-        } => {
-            request.plugin_id == Some(*plugin_id)
-                && request.installation_id == Some(*installation_id)
-                && leaf.scope.plugin_id == Some(*plugin_id)
-        }
-    };
-    if !grantee_context_matches {
+    if !grantee_context_matches(request, leaf) {
         return AuthorizationEvaluationV1::denied_with_trusted_grant(
             AuthorizationOutcomeV1::IndeterminateFailClosed,
             Some(AuthorityErrorV1::CapabilityMissing),
@@ -1596,6 +1582,23 @@ fn authorization_evaluation(
             AuthorizationOutcomeV1::ParentInvalid,
             Some(AuthorityErrorV1::DelegationInvalid),
         ),
+    }
+}
+
+fn grantee_context_matches(request: &AuthorizationRequestV1, grant: &CapabilityGrantV1) -> bool {
+    match &grant.grantee {
+        AuthorityGranteeV1::Principal(_) => {
+            request.plugin_id.is_none() && request.installation_id.is_none()
+        }
+        AuthorityGranteeV1::PluginInstallation {
+            plugin_id,
+            installation_id,
+            ..
+        } => {
+            request.plugin_id == Some(*plugin_id)
+                && request.installation_id == Some(*installation_id)
+                && grant.scope.plugin_id == Some(*plugin_id)
+        }
     }
 }
 
@@ -1775,9 +1778,9 @@ fn valid_child(parent: &CapabilityGrantV1, child: &CapabilityGrantV1) -> bool {
         .permitted_delegate_classes
         .binary_search(&DelegateClassV1::Principal)
         .is_ok();
-    let issuance_is_ordered = child.issuance_timeline == parent.issuance_timeline
-        && child.issuance_seq > parent.issuance_seq
-        && child.issuance_seq >= parent.valid_from_position
+    let issuance_follows_parent = child.issuance_timeline == parent.issuance_timeline
+        && child.issuance_seq > parent.issuance_seq;
+    let issuance_is_within_parent_authority = child.issuance_seq >= parent.valid_from_position
         && parent
             .revocation_fence
             .is_none_or(|fence| child.issuance_seq < fence);
@@ -1787,7 +1790,8 @@ fn valid_child(parent: &CapabilityGrantV1, child: &CapabilityGrantV1) -> bool {
         && descendants_are_bounded
         && grantor_is_delegate
         && delegate_class_is_permitted
-        && issuance_is_ordered
+        && issuance_follows_parent
+        && issuance_is_within_parent_authority
         && parent
             .scope
             .actions
