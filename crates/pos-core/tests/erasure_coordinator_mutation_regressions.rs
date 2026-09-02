@@ -3,7 +3,7 @@
 #[path = "support/coordinator.rs"]
 mod coordinator_support;
 #[path = "support/erasure.rs"]
-mod erasure_support;
+pub(crate) mod erasure_support;
 
 use coordinator_support::{PublicCoordinatorPort, PublicCoordinatorPortConfig};
 use pos_core::erasure::destruction_command_reference;
