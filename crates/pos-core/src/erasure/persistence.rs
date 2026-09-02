@@ -1198,10 +1198,14 @@ impl RecoveredErasureV1 {
                 ErasureRetryAdmissionV1::from_canonical_cbor,
                 ErasureRetryAdmissionV1::reference,
             )?;
-            if admission.request() != self.request.reference()
-                || admission.attempt_ordinal() != active.ordinal
-                || admission.source_receipt() != self.latest_receipt
-            {
+            let active_admission_matches = [
+                admission.request() == self.request.reference(),
+                admission.attempt_ordinal() == active.ordinal,
+                admission.source_receipt() == self.latest_receipt,
+            ]
+            .into_iter()
+            .all(|matches| matches);
+            if !active_admission_matches {
                 return Err(ErasureErrorV1::ProvenanceMissing);
             }
             if active.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
@@ -1247,14 +1251,18 @@ impl RecoveredErasureV1 {
             InventoryV1::decode,
             |value| value.reference,
         )?;
-        if admission.request() != self.request.reference()
-            || admission.attempt_ordinal() != page.ordinal
-            || admission.source_receipt() != predecessor_receipt
-            || (admitted.request, admitted.ordinal, admitted.kind)
-                != (self.request.reference(), page.ordinal, INVENTORY_ADMITTED)
-            || (effective.request, effective.ordinal, effective.kind)
-                != (self.request.reference(), page.ordinal, INVENTORY_EFFECTIVE)
-        {
+        let page_admission_matches = [
+            admission.request() == self.request.reference(),
+            admission.attempt_ordinal() == page.ordinal,
+            admission.source_receipt() == predecessor_receipt,
+            (admitted.request, admitted.ordinal, admitted.kind)
+                == (self.request.reference(), page.ordinal, INVENTORY_ADMITTED),
+            (effective.request, effective.ordinal, effective.kind)
+                == (self.request.reference(), page.ordinal, INVENTORY_EFFECTIVE),
+        ]
+        .into_iter()
+        .all(|matches| matches);
+        if !page_admission_matches {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         if page.ordinal == 0 && self.dispatch_provenance != Some(admission.reference()) {
@@ -1303,36 +1311,40 @@ impl RecoveredErasureV1 {
         let terminal = port
             .resolve_state(page.terminal_state)?
             .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-        if terminal.request() != self.request.reference()
-            || outcome.request() != self.request.reference()
-            || outcome.attempt() != admission.reference()
-            || outcome.source_receipt() != predecessor_receipt
-            || outcome.selected_obligations()
-                != selected_obligations_reference(admission.unresolved_obligations())
-            || outcome.acknowledgement_inventory()
-                != acknowledgement_inventory_reference(&effective.references)
-            || outcome.lifecycle() != terminal.lifecycle()
-            || outcome.terminal_position() != provenance.issue_position()
-            || outcome.policy() != admission.policy()
-            || outcome.trust() != admission.trust()
-            || provenance.request() != self.request.reference()
-            || provenance.attempt() != admission.reference()
-            || provenance.attempt_ordinal() != page.ordinal
-            || provenance.predecessor_receipt() != predecessor_receipt
-            || provenance.terminal_state() != page.terminal_state
-            || provenance.evidence_set() != erasure_evidence_set_reference(&effective.references)
-            || provenance.policy() != admission.policy()
-            || provenance.trust() != admission.trust()
-            || receipt.request() != self.request.reference()
-            || receipt.receipt_digest() != page.receipt
-            || receipt.terminal_state() != page.terminal_state
-            || receipt.provenance() != page.receipt_provenance
-            || receipt.lifecycle() != terminal.lifecycle()
-            || receipt.coordinator() != terminal.coordinator()
-            || receipt.policy() != admission.policy()
-            || receipt.trust() != admission.trust()
-            || receipt.issue_position() != provenance.issue_position()
-        {
+        let terminal_bindings_match = [
+            terminal.request() == self.request.reference(),
+            outcome.request() == self.request.reference(),
+            outcome.attempt() == admission.reference(),
+            outcome.source_receipt() == predecessor_receipt,
+            outcome.selected_obligations()
+                == selected_obligations_reference(admission.unresolved_obligations()),
+            outcome.acknowledgement_inventory()
+                == acknowledgement_inventory_reference(&effective.references),
+            outcome.lifecycle() == terminal.lifecycle(),
+            outcome.terminal_position() == provenance.issue_position(),
+            outcome.policy() == admission.policy(),
+            outcome.trust() == admission.trust(),
+            provenance.request() == self.request.reference(),
+            provenance.attempt() == admission.reference(),
+            provenance.attempt_ordinal() == page.ordinal,
+            provenance.predecessor_receipt() == predecessor_receipt,
+            provenance.terminal_state() == page.terminal_state,
+            provenance.evidence_set() == erasure_evidence_set_reference(&effective.references),
+            provenance.policy() == admission.policy(),
+            provenance.trust() == admission.trust(),
+            receipt.request() == self.request.reference(),
+            receipt.receipt_digest() == page.receipt,
+            receipt.terminal_state() == page.terminal_state,
+            receipt.provenance() == page.receipt_provenance,
+            receipt.lifecycle() == terminal.lifecycle(),
+            receipt.coordinator() == terminal.coordinator(),
+            receipt.policy() == admission.policy(),
+            receipt.trust() == admission.trust(),
+            receipt.issue_position() == provenance.issue_position(),
+        ]
+        .into_iter()
+        .all(|matches| matches);
+        if !terminal_bindings_match {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
         Self::validate_effect_subject(
@@ -1635,30 +1647,34 @@ struct FixedGraphV1<'a> {
 }
 
 fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> {
-    if graph.erq.reference() != graph.requested
-        || graph.state.request() != graph.requested
-        || graph
+    let fixed_bindings_match = [
+        graph.erq.reference() == graph.requested,
+        graph.state.request() == graph.requested,
+        graph
             .correction
-            .is_some_and(|value| graph.erq.provenance() != value.reference())
-        || graph
+            .is_none_or(|value| graph.erq.provenance() == value.reference()),
+        graph
             .rejection
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_none_or(|value| value.request() == graph.requested),
+        graph
             .failure
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_none_or(|value| value.request() == graph.requested),
+        graph
             .scope
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_none_or(|value| value.request() == graph.requested),
+        graph
             .admission
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_none_or(|value| value.request() == graph.requested),
+        graph
             .obligation_set
-            .is_some_and(|value| value.request() != graph.requested)
-        || graph
+            .is_none_or(|value| value.request() == graph.requested),
+        graph
             .freeze
-            .is_some_and(|value| value.request() != graph.requested)
-    {
+            .is_none_or(|value| value.request() == graph.requested),
+    ]
+    .into_iter()
+    .all(|matches| matches);
+    if !fixed_bindings_match {
         return Err(ErasureErrorV1::ProvenanceMissing);
     }
     match (graph.admission, graph.authorization) {
@@ -1692,28 +1708,32 @@ fn validate_fixed_graph(graph: &FixedGraphV1<'_>) -> Result<(), ErasureErrorV1> 
                 freeze_admission_evidence: admission.clone(),
                 freeze_authorization_evidence: authorization.clone(),
             })?;
-        if reconstructed.targets() != graph.targets
-            || scope.target_closure() != target_closure_digest(graph.targets)
-            || freeze.scope_commitment() != scope.reference()
-            || freeze.obligation_set() != set.reference()
-            || freeze.host_evidence() != admission.reference()
-            || freeze.freeze_position() != admission.freeze_position()
-            || graph.state.freeze_position() != Some(admission.freeze_position())
-            || set.policy() != graph.erq.policy()
-            || graph.authorize_provenance.is_none()
-            || graph.rejection.is_some()
-            || graph.failure.is_some()
-            || !matches!(
+        let frozen_bindings_match = [
+            reconstructed.targets() == graph.targets,
+            scope.target_closure() == target_closure_digest(graph.targets),
+            freeze.scope_commitment() == scope.reference(),
+            freeze.obligation_set() == set.reference(),
+            freeze.host_evidence() == admission.reference(),
+            freeze.freeze_position() == admission.freeze_position(),
+            graph.state.freeze_position() == Some(admission.freeze_position()),
+            set.policy() == graph.erq.policy(),
+            graph.authorize_provenance.is_some(),
+            graph.rejection.is_none(),
+            graph.failure.is_none(),
+            matches!(
                 graph.state.lifecycle(),
                 ErasureLifecycleV1::AccessFrozen
                     | ErasureLifecycleV1::DestructionDispatched
                     | ErasureLifecycleV1::AwaitingAcknowledgements
                     | ErasureLifecycleV1::PartialFailure
                     | ErasureLifecycleV1::Complete
-            )
-            || (graph.state.lifecycle() == ErasureLifecycleV1::AccessFrozen
-                && graph.state.provenance() != freeze.reference())
-        {
+            ),
+            graph.state.lifecycle() != ErasureLifecycleV1::AccessFrozen
+                || graph.state.provenance() == freeze.reference(),
+        ]
+        .into_iter()
+        .all(|matches| matches);
+        if !frozen_bindings_match {
             return Err(ErasureErrorV1::ProvenanceMissing);
         }
     } else if graph.scope.is_some()
