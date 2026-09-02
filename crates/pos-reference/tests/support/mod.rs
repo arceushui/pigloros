@@ -18,6 +18,13 @@ pub struct Corpus {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {
+    ProviderKeyNumericBoundary(u8),
+    DivergenceCoordinateLong,
+    SelectedCapBoundary(u8),
+    ExecutionContractBoundary(u8),
+    FixtureSemanticBoundary(u8),
+    ProvenanceBoundary(u8),
+    DescriptorValueBoundary(u8),
     IdentifierBoundary(u8),
     SemanticVersionBoundary(u8),
     MemberPathBoundary(u8),
@@ -333,7 +340,10 @@ fn corpus_for_mode(
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
     }
-    let hard_caps = hard_caps();
+    let mut hard_caps = hard_caps();
+    if let Some(ProfileMutation::SelectedCapBoundary(index)) = profile_mutation {
+        select_hard_cap_boundary(&mut hard_caps, index)?;
+    }
     let fixtures = fixtures(
         &mut members,
         &signing_key,
@@ -894,13 +904,10 @@ fn profile(
 
 fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<()> {
     let profile_fields = array_fields_mut(profile)?;
+    if mutate_profile_boundary(profile_fields, mutation)? {
+        return Ok(());
+    }
     match mutation {
-        ProfileMutation::IdentifierBoundary(index) => {
-            profile_fields[2] = text(&identifier_boundary(index));
-        }
-        ProfileMutation::SemanticVersionBoundary(index) => {
-            profile_fields[3] = text(&semantic_version_boundary(index));
-        }
         ProfileMutation::RawProfileField(index) => profile_fields[usize::from(index)] = Value::Null,
         ProfileMutation::RawProviderBindingField(index) => {
             array_fields_mut(&mut profile_fields[8])?[usize::from(index)] = Value::Null;
@@ -987,6 +994,31 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
     Ok(())
 }
 
+fn mutate_profile_boundary(
+    profile_fields: &mut [Value],
+    mutation: ProfileMutation,
+) -> TestResult<bool> {
+    match mutation {
+        ProfileMutation::IdentifierBoundary(index) => {
+            profile_fields[2] = text(&identifier_boundary(index));
+        }
+        ProfileMutation::SemanticVersionBoundary(index) => {
+            profile_fields[3] = text(&semantic_version_boundary(index));
+        }
+        ProfileMutation::ProviderKeyNumericBoundary(index) => {
+            let binding = array_fields_mut(&mut profile_fields[8])?;
+            let providers = array_fields_mut(&mut binding[1])?;
+            array_fields_mut(&mut providers[0])?[usize::from(index) + 2] = uint(65_536);
+        }
+        ProfileMutation::DivergenceCoordinateLong => {
+            profile_fields[10] = array(vec![array(vec![uint(1), bytes(&[1; 129])])]);
+        }
+        ProfileMutation::SelectedCapBoundary(_) => {}
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
     let fixtures = array_fields_mut(&mut profile_fields[9])?;
     let fixture_index = if matches!(mutation, ProfileMutation::RawFixtureTransitionField(_)) {
@@ -998,7 +1030,7 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         .get_mut(fixture_index)
         .ok_or_else(|| io::Error::other("test fixture is missing"))?;
     let fields = array_fields_mut(fixture)?;
-    if !mutate_raw_fixture_field(fields, mutation)? {
+    if !mutate_raw_fixture_field(fields, mutation)? && !mutate_fixture_boundary(fields, mutation)? {
         match mutation {
             ProfileMutation::FixtureModesEmpty => fields[7] = array(Vec::new()),
             ProfileMutation::FixtureModesUnsorted => fields[7] = array(vec![uint(1), uint(0)]),
@@ -1078,6 +1110,44 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         fields[23] = bytes(&digest);
     }
     Ok(())
+}
+
+fn mutate_fixture_boundary(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
+    match mutation {
+        ProfileMutation::FixtureSemanticBoundary(index) => match index {
+            0 => fields[2] = uint(1),
+            1 => array_fields_mut(&mut fields[4])?[0] = text("a-provider"),
+            2 => fields[6] = bytes(&[8; 32]),
+            3 => fields[12] = uint(1),
+            4 => {
+                fields[13] = array(vec![text("pigloros.core"), text("1.0.0"), text("failure")]);
+            }
+            5 => array_fields_mut(&mut fields[18])?[0] = Value::Bool(true),
+            6 => fields[19] = bytes(&[8; 32]),
+            7 => fields[20] = bytes(&[8; 32]),
+            _ => fields[22] = array(vec![provider_key(0), provider_key(1)]),
+        },
+        ProfileMutation::ProvenanceBoundary(index) => {
+            let provenance = array_fields_mut(&mut fields[21])?;
+            if index == 0 {
+                provenance[0] = text("");
+            } else if index == 1 {
+                provenance[0] = text(&"a".repeat(129));
+            } else {
+                provenance[usize::from(index - 1)] = bytes(&[0; 32]);
+            }
+        }
+        ProfileMutation::DescriptorValueBoundary(index) => {
+            let descriptor = array_fields_mut(&mut fields[8])?;
+            match index {
+                0 => descriptor[2] = uint(0),
+                1 => descriptor[2] = uint(64 * 1024 * 1024 + 1),
+                _ => descriptor[3] = bytes(&[0; 32]),
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn mutate_raw_fixture_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
@@ -1659,6 +1729,20 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
 
 fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
     match mutation {
+        ProfileMutation::ExecutionContractBoundary(index) => match index {
+            0 => fields[2] = text("alternate-profile"),
+            1 => fields[5] = array(Vec::new()),
+            2 => fields[6] = array(Vec::new()),
+            3 => fields[7] = array(Vec::new()),
+            4 => fields[9] = array(Vec::new()),
+            5 => fields[10] = array(Vec::new()),
+            6 => fields[13] = array(vec![text("same"), text("same")]),
+            7 => {
+                array_fields_mut(&mut fields[11])?[1] = array(vec![text("same"), text("same")]);
+            }
+            8 => array_fields_mut(&mut fields[14])?[0] = text("invalid"),
+            _ => array_fields_mut(&mut fields[14])?[1] = text("invalid"),
+        },
         ProfileMutation::ExecutionListBoundary(index) => {
             fields[5] = execution_list_boundary(index);
         }
@@ -1721,6 +1805,20 @@ fn hard_caps() -> Value {
         uint(1_000_000_000),
         uint(86_400_000_000_000),
     ])
+}
+
+fn select_hard_cap_boundary(hard_caps: &mut Value, index: u8) -> TestResult<()> {
+    let cap_index = match index {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        4 => 5,
+        5 => 7,
+        _ => 9,
+    };
+    array_fields_mut(hard_caps)?[cap_index] = uint(if cap_index == 9 { 0 } else { 1 });
+    Ok(())
 }
 
 fn descriptor(members: &BTreeMap<String, (Vec<u8>, u8)>, path: &str) -> TestResult<Value> {
