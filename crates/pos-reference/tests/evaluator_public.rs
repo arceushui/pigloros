@@ -298,15 +298,18 @@ fn signed_bundle_allows_empty_secret_slots_and_noncredential_text() -> TestResul
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,
         };
-        assert!(evaluate(
+        let artifacts = evaluate(
             &corpus.request,
             &corpus.archive,
             &corpus.trust_policy,
             &evaluator_identity(),
             &mut adapter,
-        )?
-        .report
-        .is_passing());
+        )?;
+        assert!(artifacts
+            .report
+            .cases
+            .iter()
+            .all(|case| case.outcome == CaseStatus::Pass));
     }
     Ok(())
 }
@@ -720,7 +723,11 @@ fn evaluator_accepts_supported_trust_policy_evolution() -> TestResult {
             &evaluator_identity(),
             &mut adapter,
         )?;
-        assert!(report.report.is_passing());
+        assert!(report
+            .report
+            .cases
+            .iter()
+            .all(|case| case.outcome == CaseStatus::Pass));
     }
     Ok(())
 }
