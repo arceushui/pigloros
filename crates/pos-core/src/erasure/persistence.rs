@@ -938,6 +938,8 @@ impl RecoveredErasureV1 {
         let bytes = admission.to_canonical_cbor()?;
         let reference = admission.reference();
         let ordinal = admission.attempt_ordinal();
+        self.effective
+            .retain(|_, value| value.outcome() == ErasureAcknowledgementOutcomeV1::Acknowledged);
         self.manifest.active = Some(ActiveAttemptRefV1 {
             ordinal,
             admission: reference,
@@ -1452,10 +1454,10 @@ fn canonical_acknowledgement_references(
     let mut values = values.collect::<Vec<_>>();
     values.sort_unstable_by_key(|value| {
         (
-            value.obligation(),
-            value.owner(),
             value.command(),
             value.attempt(),
+            value.owner(),
+            value.obligation(),
             value.evidence(),
             match value.outcome() {
                 ErasureAcknowledgementOutcomeV1::Acknowledged => 0_u8,

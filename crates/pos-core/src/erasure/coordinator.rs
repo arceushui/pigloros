@@ -524,6 +524,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         {
             return Ok(record.state);
         }
+        if record.active.is_some() {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
         if !matches!(
             record.state.lifecycle(),
             ErasureLifecycleV1::AccessFrozen | ErasureLifecycleV1::PartialFailure
@@ -668,6 +671,12 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .any(|existing| existing == &provenance)
         {
             return Ok(record.state);
+        }
+        if active
+            .admitted
+            .contains_key(&(provenance.obligation(), provenance.owner()))
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
         }
         self.port.admit_acknowledgement(&provenance)?;
         let object = record.retain_acknowledgement(&provenance)?;

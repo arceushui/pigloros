@@ -53,6 +53,7 @@ struct RawStorage {
 pub struct PublicCoordinatorPort {
     storage: Rc<RefCell<RawStorage>>,
     last_mutation: Rc<RefCell<Option<pos_core::PreparedErasureCasV1>>>,
+    attempt_admissions: Rc<RefCell<u64>>,
     config: PublicCoordinatorPortConfig,
 }
 
@@ -62,6 +63,7 @@ impl PublicCoordinatorPort {
         Self {
             storage: Rc::new(RefCell::new(RawStorage::default())),
             last_mutation: Rc::new(RefCell::new(None)),
+            attempt_admissions: Rc::new(RefCell::new(0)),
             config,
         }
     }
@@ -88,6 +90,11 @@ impl PublicCoordinatorPort {
     #[must_use]
     pub fn effect(&self, manifest: ErasureReferenceV1) -> Option<ErasureReferenceV1> {
         self.storage.borrow().effects.get(&manifest).copied()
+    }
+
+    #[must_use]
+    pub fn attempt_admission_count(&self) -> u64 {
+        *self.attempt_admissions.borrow()
     }
 
     fn verify_delta_exists(
@@ -470,6 +477,7 @@ impl ErasureCoordinatorPortV1 for PublicCoordinatorPort {
         &self,
         admission: &ErasureRetryAdmissionV1,
     ) -> Result<ErasureAttemptQuotaReservationV1, ErasureErrorV1> {
+        *self.attempt_admissions.borrow_mut() += 1;
         Ok(ErasureAttemptQuotaReservationV1::new(
             admission.reference(),
             admission.reference(),

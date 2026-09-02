@@ -86,6 +86,14 @@ fn admission(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
+    admission_with_provenance(request, target, reference(12))
+}
+
+fn admission_with_provenance(
+    request: ErasureReferenceV1,
+    target: ErasureRequiredTargetV1,
+    authorization_provenance: ErasureReferenceV1,
+) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
     let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
         category: ErasureInventoryCategoryV1::Artifact,
         target,
@@ -102,8 +110,33 @@ fn admission(
         trust: reference(8),
         admitted_position: 11,
         deadline_position: 20,
-        authorization_provenance: reference(12),
+        authorization_provenance,
     })
+}
+
+#[test]
+fn conflicting_active_attempt_is_rejected_before_host_admission() -> Result<(), ErasureErrorV1> {
+    let target = target();
+    let port = PublicCoordinatorPort::new(config(vec![target], false));
+    let observer = port.clone();
+    let request = request()?;
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(21))?;
+    coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    coordinator.dispatch_attempt(
+        request.reference(),
+        &admission(request.reference(), target)?,
+    )?;
+    assert_eq!(observer.attempt_admission_count(), 1);
+
+    let conflict = admission_with_provenance(request.reference(), target, reference(13))?;
+    assert_eq!(
+        coordinator.dispatch_attempt(request.reference(), &conflict),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
+    assert_eq!(observer.attempt_admission_count(), 1);
+    Ok(())
 }
 
 #[test]
