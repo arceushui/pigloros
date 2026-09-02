@@ -5,9 +5,9 @@
 //! malformed nested values without depending on private implementation seams.
 
 #[path = "support/coordinator.rs"]
-mod coordinator_support;
+pub mod coordinator_support;
 #[path = "support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use ciborium::value::Value;
 use pos_core::erasure::{target_closure_digest, ERASURE_CAS_EFFECT_TAG_V1};

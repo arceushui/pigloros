@@ -596,7 +596,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
 }
 
 fn assert_empty_backend<S: ErasurePersistencePortV1>(
-    store: S,
+    store: &S,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let missing = reference(250);
     assert_eq!(store.read_manifest(missing)?, None);
@@ -632,7 +632,7 @@ fn memory_manifest_cas_rejects_a_stale_head() -> Result<(), Box<dyn std::error::
 #[test]
 fn memory_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn std::error::Error>>
 {
-    assert_empty_backend(MemoryStore::new())
+    assert_empty_backend(&MemoryStore::new())
 }
 
 #[test]
@@ -659,7 +659,7 @@ fn sqlite_manifest_cas_rejects_a_stale_head() -> Result<(), Box<dyn std::error::
 #[test]
 fn sqlite_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn std::error::Error>>
 {
-    assert_empty_backend(SqliteStore::open_in_memory()?)
+    assert_empty_backend(&SqliteStore::open_in_memory()?)
 }
 
 #[cfg(feature = "sqlite")]
