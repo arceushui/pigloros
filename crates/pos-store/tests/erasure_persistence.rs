@@ -1,7 +1,7 @@
 //! Backend parity for the raw ERCRP1 manifest/CAS persistence port.
 
 #[path = "../../pos-core/tests/support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use std::cell::RefCell;
 use std::rc::Rc;
