@@ -842,6 +842,75 @@ impl RecoveredErasureV1 {
         ))
     }
 
+    pub(crate) fn begin_attempt(
+        &mut self,
+        admission: ErasureRetryAdmissionV1,
+    ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+        if self.active.is_some()
+            || admission.request() != self.request.reference()
+            || admission.attempt_ordinal() != self.completed_attempt_count
+            || admission.source_receipt() != self.latest_receipt
+        {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let bytes = admission.to_canonical_cbor()?;
+        let reference = admission.reference();
+        let ordinal = admission.attempt_ordinal();
+        self.manifest.active = Some(ActiveAttemptRefV1 {
+            ordinal,
+            admission: reference,
+            acknowledgements: Vec::new(),
+        });
+        if ordinal == 0 {
+            self.manifest.dispatch_provenance = Some(reference);
+            self.dispatch_provenance = Some(reference);
+        }
+        self.active = Some(RecoveredAttemptV1 {
+            ordinal,
+            admission,
+            admitted: BTreeMap::new(),
+        });
+        Ok(persistence_object(
+            ERASURE_RETRY_ADMISSION_TAG_V1,
+            reference,
+            bytes,
+        ))
+    }
+
+    pub(crate) fn retain_acknowledgement(
+        &mut self,
+        acknowledgement: ErasureAcknowledgementProvenanceV1,
+    ) -> Result<ErasurePersistenceObjectV1, ErasureErrorV1> {
+        let active = self
+            .active
+            .as_mut()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        if acknowledgement.request() != self.request.reference()
+            || acknowledgement.attempt() != active.admission.reference()
+        {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
+        let identity = (acknowledgement.obligation(), acknowledgement.owner());
+        if active.admitted.contains_key(&identity) {
+            return Err(ErasureErrorV1::PolicyConflict);
+        }
+        let bytes = acknowledgement.to_canonical_cbor()?;
+        let reference = acknowledgement.reference();
+        active.admitted.insert(identity, acknowledgement.clone());
+        self.effective.insert(identity, acknowledgement);
+        self.manifest
+            .active
+            .as_mut()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .acknowledgements
+            .push(reference);
+        Ok(persistence_object(
+            super::ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+            reference,
+            bytes,
+        ))
+    }
+
     fn recover_attempts(
         &mut self,
         port: &dyn ErasurePersistencePortV1,
