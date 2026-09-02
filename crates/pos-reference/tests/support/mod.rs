@@ -8,7 +8,7 @@ use pos_reference::evaluator_protocol::{
     EvaluationRequest, ImplementationIdentity, OutputCapability, SubjectAdapterKind,
 };
 
-pub(super) struct Corpus {
+pub struct Corpus {
     pub request: Vec<u8>,
     pub archive: Vec<u8>,
     pub trust_policy: Vec<u8>,
@@ -16,13 +16,13 @@ pub(super) struct Corpus {
     pub expected_output: Vec<u8>,
 }
 
-type TestResult<T> = Result<T, Box<dyn Error>>;
+pub type TestResult<T> = Result<T, Box<dyn Error>>;
 
-pub(super) fn corpus() -> TestResult<Corpus> {
+pub fn corpus() -> TestResult<Corpus> {
     corpus_with_extra(None)
 }
 
-pub(super) fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
+pub fn corpus_with_secret(secret: &[u8]) -> TestResult<Corpus> {
     corpus_with_extra(Some(secret))
 }
 
