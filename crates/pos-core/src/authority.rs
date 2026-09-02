@@ -1980,7 +1980,6 @@ fn decode_array(bytes: &[u8], expected_len: usize) -> Result<Vec<Value>, Authori
                 }
                 match value {
                     Value::Array(fields) if fields.len() == expected_len => Ok(fields),
-                    Value::Array(_) => Err(AuthorityErrorV1::InvalidEncoding),
                     _ => Err(AuthorityErrorV1::InvalidEncoding),
                 }
             })
@@ -2068,7 +2067,6 @@ fn decode_principal(fields: &[Value]) -> Result<PrincipalRefV1, AuthorityErrorV1
 fn decode_principal_value(value: &Value) -> Result<PrincipalRefV1, AuthorityErrorV1> {
     match value {
         Value::Array(fields) if fields.len() == 4 => decode_principal(fields),
-        Value::Array(_) => Err(AuthorityErrorV1::InvalidEncoding),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
     }
 }
@@ -2076,7 +2074,6 @@ fn decode_principal_value(value: &Value) -> Result<PrincipalRefV1, AuthorityErro
 fn exact_array(value: &Value, expected_len: usize) -> Result<&[Value], AuthorityErrorV1> {
     match value {
         Value::Array(fields) if fields.len() == expected_len => Ok(fields),
-        Value::Array(_) => Err(AuthorityErrorV1::InvalidEncoding),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
     }
 }
@@ -2124,7 +2121,6 @@ fn decode_grantee(value: &Value) -> Result<AuthorityGranteeV1, AuthorityErrorV1>
                 })
             })
         }),
-        Value::Array(_) => Err(AuthorityErrorV1::InvalidEncoding),
         _ => Err(AuthorityErrorV1::InvalidEncoding),
     }
 }

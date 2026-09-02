@@ -251,9 +251,10 @@ fn decision_for(
         .collect();
     capability_bindings.sort_unstable();
     let consent_bindings = match request.consent() {
-        ConsentEvidenceV1::Active { grants } => {
-            grants.iter().map(ConsentGrantRefV1::binding_digest).collect()
-        }
+        ConsentEvidenceV1::Active { grants } => grants
+            .iter()
+            .map(ConsentGrantRefV1::binding_digest)
+            .collect(),
         _ => Vec::new(),
     };
     let trusted_registry = ok(AuthorityRegistrySnapshotV1::try_new(
@@ -1225,7 +1226,7 @@ fn malformed_grants_are_rejected_before_evaluation() {
 fn malformed_requests_are_rejected_before_evaluation() {
     let principal = principal(1);
     let actor = entity(10);
-    let base = request_draft(authenticated(principal), actor);
+    let base = request_draft(authenticated(principal.clone()), actor);
     let mut invalid = base.clone();
     invalid.resource.clear();
     assert_eq!(
@@ -1263,7 +1264,7 @@ fn malformed_requests_are_rejected_before_evaluation() {
         Err(AuthorityErrorV1::FieldOutOfBounds)
     );
 
-    let mut invalid = request_draft(authenticated(principal(1)), actor);
+    let mut invalid = request_draft(authenticated(principal), actor);
     invalid.consent = ConsentEvidenceV1::Active {
         grants: vec![consent_grant_with_id(9), consent_grant_with_id(8)],
     };
