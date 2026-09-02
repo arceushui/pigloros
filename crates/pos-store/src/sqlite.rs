@@ -674,12 +674,8 @@ impl SqliteStore {
         }
     }
 
-    fn init_schema(&self) -> Result<(), CoreError> {
-        self.create_schema()
-    }
-
     #[allow(clippy::too_many_lines)]
-    fn create_schema(&self) -> Result<(), CoreError> {
+    fn init_schema(&self) -> Result<(), CoreError> {
         self.conn
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
@@ -849,8 +845,8 @@ impl SqliteStore {
                  PRIMARY KEY (consent_record_id, consent_revision)
              );",
             )
-            .map_err(|error| Self::storage_error(&error))?;
-        self.validate_erasure_schema()
+            .map_err(|error| Self::storage_error(&error))
+            .and_then(|()| self.validate_erasure_schema())
     }
 
     fn validate_erasure_schema(&self) -> Result<(), CoreError> {
