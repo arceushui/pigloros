@@ -3914,7 +3914,7 @@ pub enum ErasureAtomicFreezeResultV1 {
 }
 
 mod persistence;
-pub(crate) use persistence::RecoveredErasureV1;
+use persistence::RecoveredErasureV1;
 /// Core-owned, idempotent ERQ1/ERS1/ERC1 state machine; adapters cannot bypass it.
 pub struct ErasureCoordinatorStateMachineV1<P> {
     port: P,
