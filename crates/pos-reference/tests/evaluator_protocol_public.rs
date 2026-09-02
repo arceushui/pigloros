@@ -356,7 +356,7 @@ fn request_decoder_rejects_protocol_shapes_codes_and_noncanonical_bytes() -> Tes
 }
 
 #[test]
-fn public_decoders_reject_each_canonical_cbor_framing_boundary() -> TestResult {
+fn public_decoders_reject_each_canonical_cbor_framing_boundary() {
     let mut excessive_depth = vec![0x81; 66];
     excessive_depth.push(0x00);
     let malformed = [
@@ -377,7 +377,6 @@ fn public_decoders_reject_each_canonical_cbor_framing_boundary() -> TestResult {
         assert!(EvaluationRequest::from_canonical_cbor(&bytes).is_err());
         assert!(ConformanceReport::from_canonical_cbor(&bytes).is_err());
     }
-    Ok(())
 }
 
 #[test]

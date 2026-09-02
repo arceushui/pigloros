@@ -954,7 +954,7 @@ fn validate_selected_caps(
     }
 }
 
-fn validate_artifact_caps(
+const fn validate_artifact_caps(
     artifact: &ArtifactDescriptor,
     caps: EvaluatorHardCaps,
     member_count: &mut u64,
