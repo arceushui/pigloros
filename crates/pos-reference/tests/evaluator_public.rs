@@ -10,7 +10,7 @@ use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
 };
 use pos_reference::profile::NamespacedFailure;
-use support::{BundleMutation, ProfileMutation, TrustMutation};
+use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -435,6 +435,34 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
         ProfileMutation::FixtureProvenance,
         ProfileMutation::FixtureDowngradeBinding,
         ProfileMutation::FixtureDigest,
+        ProfileMutation::ExecutionMagic,
+        ProfileMutation::ExecutionVersion,
+        ProfileMutation::ExecutionId,
+        ProfileMutation::ExecutionSemver,
+        ProfileMutation::ExecutionModes,
+        ProfileMutation::ExecutionArchitecture,
+        ProfileMutation::ExecutionNumerics,
+        ProfileMutation::ExecutionDriverOrder,
+        ProfileMutation::ExecutionTickPolicy,
+        ProfileMutation::ExecutionSchemas,
+        ProfileMutation::ExecutionArtifacts,
+        ProfileMutation::ExecutionNetwork,
+        ProfileMutation::ExecutionBudget,
+        ProfileMutation::ExecutionCompatibility,
+        ProfileMutation::ExecutionPrevious,
+        ProfileMutation::ExecutionDigest,
+        ProfileMutation::RegistryMagic,
+        ProfileMutation::RegistryVersion,
+        ProfileMutation::RegistryProviders,
+        ProfileMutation::RegistryDigest,
+        ProfileMutation::PackageMagic,
+        ProfileMutation::PackageVersion,
+        ProfileMutation::PackageProvider,
+        ProfileMutation::PackageClaimLayer,
+        ProfileMutation::PackageAdapter,
+        ProfileMutation::PackageSchemas,
+        ProfileMutation::PackageSupportRole,
+        ProfileMutation::PackageDigest,
     ];
     for mutation in mutations {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
@@ -533,6 +561,44 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
                 &mut adapter,
             ),
             Err(EvaluatorError::Bundle)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_each_signed_release_admission_attack() -> TestResult {
+    let mutations = [
+        ReleaseMutation::Magic,
+        ReleaseMutation::Version,
+        ReleaseMutation::Lifecycle,
+        ReleaseMutation::CaseId,
+        ReleaseMutation::ExecutionDigest,
+        ReleaseMutation::TrustDigest,
+        ReleaseMutation::FromProvider,
+        ReleaseMutation::ToProvider,
+        ReleaseMutation::AllowFallback,
+        ReleaseMutation::SignerId,
+        ReleaseMutation::Signature,
+        ReleaseMutation::MissingMember,
+        ReleaseMutation::ExtraMember,
+        ReleaseMutation::MissingBinding,
+    ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_release_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
         );
     }
     Ok(())

@@ -285,6 +285,57 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() -> TestResu
         encode_observation(&invalid_failure),
         Err(TransportError::FieldOutOfBounds)
     );
+
+    let oversized_output = SubjectObservation {
+        result: SubjectResult::Output(vec![0; 64 * 1024 * 1024 + 1]),
+        usage: usage(),
+    };
+    assert_eq!(
+        encode_observation(&oversized_output),
+        Err(TransportError::FieldOutOfBounds)
+    );
+
+    let invalid_divergence = SubjectObservation {
+        result: SubjectResult::Divergence {
+            classification: 9,
+            first_coordinate: vec![1],
+        },
+        usage: usage(),
+    };
+    assert_eq!(
+        encode_observation(&invalid_divergence),
+        Err(TransportError::FieldOutOfBounds)
+    );
+    Ok(())
+}
+
+#[test]
+fn observation_transport_rejects_versions_codes_and_field_types() -> TestResult {
+    let encoded = encode_observation(&SubjectObservation {
+        result: SubjectResult::Output(vec![1]),
+        usage: usage(),
+    })?;
+    let mut value: Value = ciborium::from_reader(encoded.as_slice())?;
+
+    replace_field(&mut value, 0, Value::Text("EAO0".to_owned()))?;
+    assert_eq!(
+        decode_observation(&canonical(&value)?),
+        Err(TransportError::UnsupportedVersion)
+    );
+
+    replace_field(&mut value, 0, Value::Text("EAO1".to_owned()))?;
+    replace_field(&mut value, 2, Value::Integer(9_u64.into()))?;
+    assert_eq!(
+        decode_observation(&canonical(&value)?),
+        Err(TransportError::InvalidEncoding)
+    );
+
+    replace_field(&mut value, 2, Value::Integer(0_u64.into()))?;
+    replace_field(&mut value, 3, Value::Null)?;
+    assert_eq!(
+        decode_observation(&canonical(&value)?),
+        Err(TransportError::InvalidEncoding)
+    );
     Ok(())
 }
 
