@@ -508,8 +508,7 @@ fn load<T>(
     let bytes = port
         .read_object(reference)
         .map_err(|error| RecoveryFailureV1::new(error, reference))?;
-    let value = decode(&bytes)
-        .map_err(|error| RecoveryFailureV1::new(error, reference))?;
+    let value = decode(&bytes).map_err(|error| RecoveryFailureV1::new(error, reference))?;
     (address(&value) == reference)
         .then_some(value)
         .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, reference))
@@ -540,9 +539,7 @@ fn recover_foundation(
     let state = port
         .resolve_state(manifest.state)
         .map_err(RecoveryFailureV1::from)?
-        .ok_or_else(|| {
-            RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, manifest.state)
-        })?;
+        .ok_or_else(|| RecoveryFailureV1::new(ErasureErrorV1::ProvenanceMissing, manifest.state))?;
     if request.reference() != requested || state.request() != requested {
         return Err(RecoveryFailureV1::from(ErasureErrorV1::ProvenanceMissing));
     }

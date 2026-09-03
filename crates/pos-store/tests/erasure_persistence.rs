@@ -295,7 +295,9 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
         request: ErasureReferenceV1,
         object: pos_core::ErasurePersistenceObjectV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.store.borrow_mut().append_recovery_error(request, object)
+        self.store
+            .borrow_mut()
+            .append_recovery_error(request, object)
     }
 
     fn compare_and_swap(
@@ -793,8 +795,7 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_recovery_errors_survive_file_backed_reopen(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_recovery_errors_survive_file_backed_reopen() -> Result<(), Box<dyn std::error::Error>> {
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()
@@ -853,8 +854,8 @@ fn sqlite_recovery_errors_survive_file_backed_reopen(
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn sqlite_recovery_error_reads_reject_an_over_bound_index(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn sqlite_recovery_error_reads_reject_an_over_bound_index() -> Result<(), Box<dyn std::error::Error>>
+{
     let database = tempfile::NamedTempFile::new()?;
     let path = database
         .path()
