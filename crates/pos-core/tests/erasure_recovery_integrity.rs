@@ -333,7 +333,10 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
     assert_eq!(scope.request(), request.reference());
     assert_eq!(scope.scope_members(), &[reference(7)]);
     assert_eq!(verified.scope_extensions(), &[extension_record]);
-    assert_eq!(verified.scope_forks().collect::<Vec<_>>(), vec![reference(160)]);
+    assert_eq!(
+        verified.scope_forks().collect::<Vec<_>>(),
+        vec![reference(160)]
+    );
     assert_eq!(
         verified.manifest_digest(),
         observer
