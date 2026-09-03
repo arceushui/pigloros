@@ -90,9 +90,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         match RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, &stored) {
             Ok(record) => Ok(Some(record)),
             Err(failure) => {
-                let failure_subject = (failure.subject() == reference_zero())
-                    .then_some(stored.digest())
-                    .unwrap_or(failure.subject());
+                let failure_subject = if failure.subject() == reference_zero() {
+                    stored.digest()
+                } else {
+                    failure.subject()
+                };
                 self.retain_recovery_error(
                     request,
                     Some(stored.digest()),
