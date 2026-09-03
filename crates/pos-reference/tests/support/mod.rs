@@ -1607,26 +1607,10 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
     if mutate_profile_boundary(profile_fields, mutation)? {
         return Ok(());
     }
+    if mutate_raw_profile_field(profile_fields, mutation)? {
+        return Ok(());
+    }
     match mutation {
-        ProfileMutation::RawProfileField(index) => profile_fields[usize::from(index)] = Value::Null,
-        ProfileMutation::RawProviderBindingField(index) => {
-            array_fields_mut(&mut profile_fields[8])?[usize::from(index)] = Value::Null;
-        }
-        ProfileMutation::RawRequiredProviderField(index) => {
-            let binding = array_fields_mut(&mut profile_fields[8])?;
-            let providers = array_fields_mut(&mut binding[1])?;
-            array_fields_mut(&mut providers[0])?[usize::from(index)] = Value::Null;
-        }
-        ProfileMutation::RawProtocolField(index) => {
-            array_fields_mut(&mut profile_fields[11])?[usize::from(index)] = Value::Null;
-        }
-        ProfileMutation::RawHardCapField(index) => {
-            let protocol = array_fields_mut(&mut profile_fields[11])?;
-            array_fields_mut(&mut protocol[4])?[usize::from(index)] = Value::Null;
-        }
-        ProfileMutation::RawRequirementField(index) => {
-            array_fields_mut(&mut profile_fields[12])?[usize::from(index)] = Value::Null;
-        }
         ProfileMutation::Magic => profile_fields[0] = text("CPF0"),
         ProfileMutation::Version => profile_fields[1] = uint(2),
         ProfileMutation::ProfileId => profile_fields[2] = text("Invalid"),
@@ -1701,6 +1685,32 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         remaining => mutate_fixture(profile_fields, remaining)?,
     }
     Ok(())
+}
+
+fn mutate_raw_profile_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
+    match mutation {
+        ProfileMutation::RawProfileField(index) => fields[usize::from(index)] = Value::Null,
+        ProfileMutation::RawProviderBindingField(index) => {
+            array_fields_mut(&mut fields[8])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawRequiredProviderField(index) => {
+            let binding = array_fields_mut(&mut fields[8])?;
+            let providers = array_fields_mut(&mut binding[1])?;
+            array_fields_mut(&mut providers[0])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawProtocolField(index) => {
+            array_fields_mut(&mut fields[11])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawHardCapField(index) => {
+            let protocol = array_fields_mut(&mut fields[11])?;
+            array_fields_mut(&mut protocol[4])?[usize::from(index)] = Value::Null;
+        }
+        ProfileMutation::RawRequirementField(index) => {
+            array_fields_mut(&mut fields[12])?[usize::from(index)] = Value::Null;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn mutate_record_shape(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
@@ -2213,15 +2223,10 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
     {
         return Ok(());
     }
+    if mutate_manifest_boundary(fields, mutation)? {
+        return Ok(());
+    }
     match mutation {
-        BundleMutation::PathBoundary(index) => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            array_fields_mut(&mut descriptors[0])?[0] = text(&archive_path_boundary(index));
-        }
-        BundleMutation::ExpectedCaseBoundary(index) => {
-            let expected = array_fields_mut(&mut fields[5])?;
-            array_fields_mut(&mut expected[0])?[0] = text(&expected_case_boundary(index));
-        }
         BundleMutation::DescriptorEmpty => fields[4] = array(Vec::new()),
         BundleMutation::DescriptorRoleOverflow => {
             let descriptors = array_fields_mut(&mut fields[4])?;
@@ -2311,6 +2316,21 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         | BundleMutation::ProfileExpectedBinding => {}
     }
     Ok(())
+}
+
+fn mutate_manifest_boundary(fields: &mut [Value], mutation: BundleMutation) -> TestResult<bool> {
+    match mutation {
+        BundleMutation::PathBoundary(index) => {
+            let descriptors = array_fields_mut(&mut fields[4])?;
+            array_fields_mut(&mut descriptors[0])?[0] = text(&archive_path_boundary(index));
+        }
+        BundleMutation::ExpectedCaseBoundary(index) => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[0] = text(&expected_case_boundary(index));
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn mutate_archive_record(fields: &mut [Value], mutation: BundleMutation) -> TestResult<bool> {
