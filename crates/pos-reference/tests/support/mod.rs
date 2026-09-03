@@ -18,6 +18,9 @@ pub struct Corpus {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {
+    ArtifactEncoding(u8),
+    ArtifactShape(u8),
+    RecordShape(u8),
     ProviderKeyNumericBoundary(u8),
     DivergenceCoordinateLong,
     SelectedCapBoundary(u8),
@@ -216,6 +219,11 @@ pub fn member_closure_breaks_archive(index: u8) -> bool {
 
 #[derive(Clone, Copy)]
 pub enum BundleMutation {
+    Encoding,
+    ManifestShape,
+    DescriptorRecordShape,
+    MemberRecordShape,
+    ExpectedRecordShape,
     PathBoundary(u8),
     ExpectedCaseBoundary(u8),
     DescriptorEmpty,
@@ -259,6 +267,10 @@ pub enum BundleMutation {
 
 #[derive(Clone, Copy)]
 pub enum TrustMutation {
+    Encoding,
+    Shape,
+    RootRecordShape,
+    MinimumVersionRecordShape,
     IdentifierBoundary(u8),
     SemanticVersionBoundary(u8),
     ExpiryBoundary(u8),
@@ -967,9 +979,14 @@ fn insert_profile_member(
     profile_fields: Vec<Value>,
     mutation: Option<ProfileMutation>,
 ) -> TestResult<()> {
+    let profile_bytes = match mutation {
+        Some(ProfileMutation::ArtifactEncoding(0)) => vec![0xff],
+        Some(ProfileMutation::ArtifactShape(0)) => canonical(&Value::Null)?,
+        _ => canonical(&array(profile_fields))?,
+    };
     members.insert(
         "profile/CPF1.cbor".to_owned(),
-        (canonical(&array(profile_fields))?, 2),
+        (profile_bytes, 2),
     );
     if let Some(ProfileMutation::MemberClosureBoundary(index)) = mutation {
         mutate_member_closure(members, index);
@@ -1306,9 +1323,14 @@ fn add_provider_contracts(
         },
     );
     let package_path = "providers/test-provider/package.cbor";
+    let package_bytes = match mutation {
+        Some(ProfileMutation::ArtifactEncoding(3)) => vec![0xff],
+        Some(ProfileMutation::ArtifactShape(3)) => canonical(&Value::Null)?,
+        _ => canonical(&array(package_fields))?,
+    };
     members.insert(
         package_path.to_owned(),
-        (canonical(&array(package_fields))?, 13),
+        (package_bytes, 13),
     );
 
     add_provider_registry(
@@ -1403,9 +1425,14 @@ fn add_provider_registry(
             bytes(&registry_digest)
         },
     );
+    let registry_bytes = match mutation {
+        Some(ProfileMutation::ArtifactEncoding(2)) => vec![0xff],
+        Some(ProfileMutation::ArtifactShape(2)) => canonical(&Value::Null)?,
+        _ => canonical(&array(registry_fields))?,
+    };
     members.insert(
         "authority/fixture-provider-registry.cbor".to_owned(),
-        (canonical(&array(registry_fields))?, 12),
+        (registry_bytes, 12),
     );
     Ok(())
 }
@@ -1580,6 +1607,9 @@ fn profile(
 
 fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<()> {
     let profile_fields = array_fields_mut(profile)?;
+    if mutate_record_shape(profile_fields, mutation)? {
+        return Ok(());
+    }
     if mutate_profile_boundary(profile_fields, mutation)? {
         return Ok(());
     }
@@ -1672,9 +1702,29 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             let index = usize::from(mutation == ProfileMutation::RequirementDeclaration) + 3;
             array_fields_mut(&mut profile_fields[12])?[index] = bytes(&[0; 32]);
         }
+        ProfileMutation::ArtifactEncoding(_) | ProfileMutation::ArtifactShape(_) => {}
         remaining => mutate_fixture(profile_fields, remaining)?,
     }
     Ok(())
+}
+
+fn mutate_record_shape(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
+    let ProfileMutation::RecordShape(index) = mutation else {
+        return Ok(false);
+    };
+    match index {
+        0 => fields[8] = Value::Null,
+        1 => array_fields_mut(&mut fields[8])?[1] = array(vec![Value::Null]),
+        2 => fields[11] = Value::Null,
+        3 => array_fields_mut(&mut fields[11])?[4] = Value::Null,
+        4 => fields[12] = Value::Null,
+        5 => array_fields_mut(&mut fields[9])?[0] = Value::Null,
+        16 => fields[10] = array(vec![Value::Null]),
+        _ => {
+            mutate_fixture(fields, mutation)?;
+        }
+    }
+    Ok(true)
 }
 
 fn mutate_profile_boundary(
@@ -1877,6 +1927,19 @@ fn mutate_fixture_boundary(fields: &mut [Value], mutation: ProfileMutation) -> T
 
 fn mutate_raw_fixture_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
     match mutation {
+        ProfileMutation::RecordShape(index) => match index {
+            6 => fields[4] = Value::Null,
+            7 => fields[8] = Value::Null,
+            8 => fields[9] = Value::Null,
+            9 => fields[10] = array(vec![Value::Null]),
+            10 => fields[11] = Value::Null,
+            11 => fields[16] = Value::Null,
+            12 => fields[17] = Value::Null,
+            13 => fields[18] = Value::Null,
+            14 => fields[21] = Value::Null,
+            15 => fields[22] = Value::Bool(false),
+            _ => return Ok(false),
+        },
         ProfileMutation::MemberPathBoundary(index) => {
             array_fields_mut(&mut fields[8])?[0] = text(&member_path_boundary(index));
         }
@@ -2142,7 +2205,11 @@ fn archive(
     if let Some(mutation) = mutation {
         mutate_archive_root(&mut root, mutation)?;
     }
-    canonical(&root)
+    if matches!(mutation, Some(BundleMutation::Encoding)) {
+        Ok(vec![0xff])
+    } else {
+        canonical(&root)
+    }
 }
 
 fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult<()> {
@@ -2201,6 +2268,12 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[usize::from(index)] = Value::Null;
         }
+        BundleMutation::DescriptorRecordShape => {
+            array_fields_mut(&mut fields[4])?[0] = Value::Null;
+        }
+        BundleMutation::ExpectedRecordShape => {
+            array_fields_mut(&mut fields[5])?[0] = Value::Null;
+        }
         BundleMutation::Magic => fields[0] = text("CFB0"),
         BundleMutation::Version => fields[1] = uint(1),
         BundleMutation::Mode => fields[2] = uint(2),
@@ -2229,6 +2302,9 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         }
         BundleMutation::RawMemberField(_)
         | BundleMutation::RawArchiveField(_)
+        | BundleMutation::Encoding
+        | BundleMutation::ManifestShape
+        | BundleMutation::MemberRecordShape
         | BundleMutation::MemberEmpty
         | BundleMutation::MemberRoleOverflow
         | BundleMutation::MemberOrder
@@ -2281,6 +2357,10 @@ fn mutate_archive_root(root: &mut Value, mutation: BundleMutation) -> TestResult
     let fields = array_fields_mut(root)?;
     match mutation {
         BundleMutation::RawArchiveField(index) => fields[usize::from(index)] = Value::Null,
+        BundleMutation::ManifestShape => fields[0] = Value::Null,
+        BundleMutation::MemberRecordShape => {
+            array_fields_mut(&mut fields[1])?[0] = Value::Null;
+        }
         BundleMutation::RawMemberField(index) => {
             let members = array_fields_mut(&mut fields[1])?;
             array_fields_mut(&mut members[0])?[usize::from(index)] = Value::Null;
@@ -2343,7 +2423,11 @@ fn trust_policy(
     } else {
         bytes(&signature)
     });
-    canonical(&array(fields))
+    match mutation {
+        Some(TrustMutation::Encoding) => Ok(vec![0xff]),
+        Some(TrustMutation::Shape) => canonical(&Value::Null),
+        _ => canonical(&array(fields)),
+    }
 }
 
 fn mutate_trust_policy(
@@ -2352,6 +2436,12 @@ fn mutate_trust_policy(
     revoked_artifact: [u8; 32],
 ) -> TestResult<()> {
     match mutation {
+        TrustMutation::RootRecordShape => {
+            array_fields_mut(&mut fields[5])?[0] = Value::Null;
+        }
+        TrustMutation::MinimumVersionRecordShape => {
+            array_fields_mut(&mut fields[8])?[0] = Value::Null;
+        }
         TrustMutation::IdentifierBoundary(index) => {
             fields[2] = text(&identifier_boundary(index));
         }
@@ -2427,7 +2517,7 @@ fn mutate_trust_policy(
         TrustMutation::Expiry => fields[9] = text("invalid expiry!"),
         TrustMutation::Previous => fields[10] = bytes(&[1; 32]),
         TrustMutation::PreviousInvalid => fields[10] = bytes(&[1; 31]),
-        TrustMutation::Signature => {}
+        TrustMutation::Encoding | TrustMutation::Shape | TrustMutation::Signature => {}
     }
     Ok(())
 }
@@ -2534,7 +2624,11 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
             bytes(&digest)
         },
     );
-    canonical(&array(fields))
+    match mutation {
+        Some(ProfileMutation::ArtifactEncoding(1)) => Ok(vec![0xff]),
+        Some(ProfileMutation::ArtifactShape(1)) => canonical(&Value::Null),
+        _ => canonical(&array(fields)),
+    }
 }
 
 fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {

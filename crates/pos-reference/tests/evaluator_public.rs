@@ -368,7 +368,26 @@ fn public_gateway_and_plugin_protocols_execute_complete_profiles() -> TestResult
 
 #[test]
 fn public_hard_caps_reject_zero_and_excessive_fixture_budgets() {
-    let caps = EvaluatorHardCaps { values: [100; 18] };
+    let caps = EvaluatorHardCaps {
+        max_profile_bytes: 100,
+        max_cases: 100,
+        max_bundle_members: 100,
+        max_member_path_bytes: 100,
+        max_member_bytes: 100,
+        max_total_bundle_bytes: 100,
+        max_compression_expansion: 100,
+        max_structural_nesting: 100,
+        max_coordinate_bytes: 100,
+        max_diagnostic_bytes: 100,
+        max_deterministic_memory_bytes: 100,
+        max_deterministic_cpu_fuel: 100,
+        max_deterministic_host_calls: 100,
+        max_deterministic_event_count: 100,
+        max_deterministic_output_bytes: 100,
+        max_deterministic_storage_bytes: 100,
+        max_deterministic_execution_steps: 100,
+        max_deterministic_simulation_time_ns: 100,
+    };
     let budget = |memory_bytes| DeterministicBudget {
         memory_bytes,
         cpu_fuel: 1,
@@ -974,6 +993,36 @@ fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> Te
 }
 
 #[test]
+fn evaluator_rejects_malformed_profile_contract_containers() -> TestResult {
+    let mutations = (0..4)
+        .flat_map(|index| {
+            [
+                ProfileMutation::ArtifactEncoding(index),
+                ProfileMutation::ArtifactShape(index),
+            ]
+        })
+        .chain((0..17).map(ProfileMutation::RecordShape));
+    for mutation in mutations {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_each_profile_textual_contract_boundary() -> TestResult {
     let mutations = (0..5)
         .map(ProfileMutation::IdentifierBoundary)
@@ -1079,6 +1128,11 @@ fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestRes
 #[test]
 fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
     let mutations = [
+        BundleMutation::Encoding,
+        BundleMutation::ManifestShape,
+        BundleMutation::DescriptorRecordShape,
+        BundleMutation::MemberRecordShape,
+        BundleMutation::ExpectedRecordShape,
         BundleMutation::Magic,
         BundleMutation::Version,
         BundleMutation::Mode,
@@ -1211,6 +1265,10 @@ fn evaluator_rejects_each_archive_textual_contract_boundary() -> TestResult {
 #[test]
 fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
     let mutations = [
+        TrustMutation::Encoding,
+        TrustMutation::Shape,
+        TrustMutation::RootRecordShape,
+        TrustMutation::MinimumVersionRecordShape,
         TrustMutation::Magic,
         TrustMutation::Version,
         TrustMutation::PolicyId,

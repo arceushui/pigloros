@@ -680,3 +680,38 @@ fn process_adapter_watchdog_terminates_descendants_holding_transport_open() -> T
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn process_adapter_bounds_deadline_and_blocked_request_transport() -> TestResult {
+    let mut impossible_deadline = attempt();
+    impossible_deadline.watchdog_ms = u64::MAX;
+    let mut adapter = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/true",
+        Vec::new(),
+    )?;
+    assert_eq!(
+        adapter.execute(&impossible_deadline),
+        Err(AdapterError::ProtocolFailure)
+    );
+
+    let mut blocked_request = attempt();
+    blocked_request.watchdog_ms = 100;
+    blocked_request.payload = vec![0; 1024 * 1024];
+    let mut adapter = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/sh",
+        vec![
+            OsString::from("-c"),
+            OsString::from("sleep 30 <&0 & exit 0"),
+        ],
+    )?;
+    assert_eq!(
+        adapter.execute(&blocked_request),
+        Err(AdapterError::WatchdogExpired)
+    );
+    Ok(())
+}

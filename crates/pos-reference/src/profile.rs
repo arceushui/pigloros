@@ -17,12 +17,13 @@ const MAX_CAPABILITIES: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_PROVIDERS: usize = 4_096;
 
+/// Exact public fixture-provider identity carried by CPF1.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ProviderKey {
-    provider_id: String,
-    contract_version: String,
-    abi_major: u16,
-    abi_minor: u16,
+pub struct ProviderKey {
+    pub provider_id: String,
+    pub contract_version: String,
+    pub abi_major: u16,
+    pub abi_minor: u16,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -101,7 +102,24 @@ impl DeterministicBudget {
 /// Compiled evaluator maxima selected by CPF1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EvaluatorHardCaps {
-    pub values: [u64; 18],
+    pub max_profile_bytes: u64,
+    pub max_cases: u64,
+    pub max_bundle_members: u64,
+    pub max_member_path_bytes: u64,
+    pub max_member_bytes: u64,
+    pub max_total_bundle_bytes: u64,
+    pub max_compression_expansion: u64,
+    pub max_structural_nesting: u64,
+    pub max_coordinate_bytes: u64,
+    pub max_diagnostic_bytes: u64,
+    pub max_deterministic_memory_bytes: u64,
+    pub max_deterministic_cpu_fuel: u64,
+    pub max_deterministic_host_calls: u64,
+    pub max_deterministic_event_count: u64,
+    pub max_deterministic_output_bytes: u64,
+    pub max_deterministic_storage_bytes: u64,
+    pub max_deterministic_execution_steps: u64,
+    pub max_deterministic_simulation_time_ns: u64,
 }
 
 /// Independence properties required by one CPF1 profile.
@@ -114,13 +132,36 @@ pub struct IndependenceRequirements {
 }
 
 impl EvaluatorHardCaps {
+    const fn values(self) -> [u64; 18] {
+        [
+            self.max_profile_bytes,
+            self.max_cases,
+            self.max_bundle_members,
+            self.max_member_path_bytes,
+            self.max_member_bytes,
+            self.max_total_bundle_bytes,
+            self.max_compression_expansion,
+            self.max_structural_nesting,
+            self.max_coordinate_bytes,
+            self.max_diagnostic_bytes,
+            self.max_deterministic_memory_bytes,
+            self.max_deterministic_cpu_fuel,
+            self.max_deterministic_host_calls,
+            self.max_deterministic_event_count,
+            self.max_deterministic_output_bytes,
+            self.max_deterministic_storage_bytes,
+            self.max_deterministic_execution_steps,
+            self.max_deterministic_simulation_time_ns,
+        ]
+    }
+
     /// Canonical digest of the exact eighteen-field hard-cap record.
     ///
     /// # Errors
     /// Returns an encoding failure if the selected record cannot be encoded.
     pub fn digest(&self) -> Result<[u8; 32], ProfileError> {
         let value = Value::Array(
-            self.values
+            self.values()
                 .iter()
                 .copied()
                 .map(|value| Value::Integer(value.into()))
@@ -147,7 +188,7 @@ impl EvaluatorHardCaps {
         ];
         if requested
             .iter()
-            .zip(&self.values[10..])
+            .zip(&self.values()[10..])
             .any(|(request, maximum)| *request == 0 || request > maximum)
         {
             Err(ProfileError::FieldOutOfBounds)
@@ -164,10 +205,7 @@ pub struct Fixture {
     pub mandatory: bool,
     pub claim_layer: u8,
     pub family: u8,
-    pub provider_id: String,
-    pub provider_contract_version: String,
-    pub provider_abi_major: u16,
-    pub provider_abi_minor: u16,
+    pub provider: ProviderKey,
     pub subject_adapter: SubjectAdapterKind,
     pub execution_profile_digest: [u8; 32],
     pub modes: Vec<u8>,
@@ -185,8 +223,6 @@ pub struct Fixture {
     pub capability_ids: Vec<String>,
     pub provenance_digest: [u8; 32],
     pub fixture_digest: [u8; 32],
-
-    provider: ProviderKey,
     trust_policy_snapshot_digest: Option<[u8; 32]>,
     release_admission_digest: Option<[u8; 32]>,
     transition: Option<ProviderTransition>,
@@ -380,8 +416,10 @@ impl Profile {
             || self.evaluator_hard_caps.digest()? != request.evaluator_hard_caps_digest
             || self.trust_policy_snapshot_digest != request.trust_policy_snapshot_digest
             || self.selected_fixtures(request).is_empty()
-            || request.output_capability.report_bytes_limit > self.evaluator_hard_caps.values[0]
-            || request.output_capability.diagnostic_bytes_limit > self.evaluator_hard_caps.values[9]
+            || request.output_capability.report_bytes_limit
+                > self.evaluator_hard_caps.max_profile_bytes
+            || request.output_capability.diagnostic_bytes_limit
+                > self.evaluator_hard_caps.max_diagnostic_bytes
         {
             return Err(ProfileError::DigestMismatch);
         }
@@ -534,10 +572,7 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
         mandatory: header.mandatory,
         claim_layer: header.claim_layer,
         family: header.family,
-        provider_id: header.provider.provider_id.clone(),
-        provider_contract_version: header.provider.contract_version.clone(),
-        provider_abi_major: header.provider.abi_major,
-        provider_abi_minor: header.provider.abi_minor,
+        provider: header.provider,
         subject_adapter: header.subject_adapter,
         execution_profile_digest: header.execution_profile_digest,
         modes: header.modes,
@@ -555,7 +590,6 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
         capability_ids: policy.capability_ids,
         provenance_digest: policy.provenance_digest,
         fixture_digest,
-        provider: header.provider,
         trust_policy_snapshot_digest: policy.trust_policy_snapshot_digest,
         release_admission_digest: policy.release_admission_digest,
         transition: policy.transition,
@@ -915,8 +949,8 @@ fn validate_outcome_relationship(fixture: &Fixture) -> Result<(), ProfileError> 
             !matches!(fixture.expected_verification_outcome, 0 | 1)
                 && fixture.expected_verification_error.as_ref() == Some(expected)
                 && (expected.owner_id == "pigloros.core"
-                    || expected.owner_id == fixture.provider_id
-                        && expected.contract_version == fixture.provider_contract_version)
+                    || expected.owner_id == fixture.provider.provider_id
+                        && expected.contract_version == fixture.provider.contract_version)
         }
         StrictOracle::Divergence { .. } => {
             fixture.expected_verification_outcome == 1
@@ -1018,9 +1052,9 @@ fn validate_selected_caps(
     allowed: &[AllowedDivergence],
     caps: EvaluatorHardCaps,
 ) -> Result<(), ProfileError> {
-    if encoded_len as u64 > caps.values[0]
-        || value_depth(value) as u64 > caps.values[7]
-        || fixtures.len() as u64 > caps.values[1]
+    if encoded_len as u64 > caps.max_profile_bytes
+        || value_depth(value) as u64 > caps.max_structural_nesting
+        || fixtures.len() as u64 > caps.max_cases
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
@@ -1038,11 +1072,11 @@ fn validate_selected_caps(
             validate_artifact_caps(output, caps, &mut member_count, &mut total_bytes, true)?;
         }
     }
-    if member_count > caps.values[2]
-        || total_bytes > caps.values[5]
+    if member_count > caps.max_bundle_members
+        || total_bytes > caps.max_total_bundle_bytes
         || allowed
             .iter()
-            .any(|item| item.first_coordinate.len() as u64 > caps.values[8])
+            .any(|item| item.first_coordinate.len() as u64 > caps.max_coordinate_bytes)
     {
         Err(ProfileError::FieldOutOfBounds)
     } else {
@@ -1065,7 +1099,9 @@ const fn validate_artifact_caps(
     } else {
         *total_bytes
     };
-    if artifact.member_path.len() as u64 > caps.values[3] || artifact.byte_length > caps.values[4] {
+    if artifact.member_path.len() as u64 > caps.max_member_path_bytes
+        || artifact.byte_length > caps.max_member_bytes
+    {
         Err(ProfileError::FieldOutOfBounds)
     } else {
         Ok(())
@@ -1689,7 +1725,46 @@ fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCaps, ProfileError> {
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
-    Ok(EvaluatorHardCaps { values })
+    let [
+        max_profile_bytes,
+        max_cases,
+        max_bundle_members,
+        max_member_path_bytes,
+        max_member_bytes,
+        max_total_bundle_bytes,
+        max_compression_expansion,
+        max_structural_nesting,
+        max_coordinate_bytes,
+        max_diagnostic_bytes,
+        max_deterministic_memory_bytes,
+        max_deterministic_cpu_fuel,
+        max_deterministic_host_calls,
+        max_deterministic_event_count,
+        max_deterministic_output_bytes,
+        max_deterministic_storage_bytes,
+        max_deterministic_execution_steps,
+        max_deterministic_simulation_time_ns,
+    ] = values;
+    Ok(EvaluatorHardCaps {
+        max_profile_bytes,
+        max_cases,
+        max_bundle_members,
+        max_member_path_bytes,
+        max_member_bytes,
+        max_total_bundle_bytes,
+        max_compression_expansion,
+        max_structural_nesting,
+        max_coordinate_bytes,
+        max_diagnostic_bytes,
+        max_deterministic_memory_bytes,
+        max_deterministic_cpu_fuel,
+        max_deterministic_host_calls,
+        max_deterministic_event_count,
+        max_deterministic_output_bytes,
+        max_deterministic_storage_bytes,
+        max_deterministic_execution_steps,
+        max_deterministic_simulation_time_ns,
+    })
 }
 
 fn validate_descriptor(
@@ -1959,10 +2034,10 @@ type FixtureKey<'a> = (
 fn fixture_key(value: &Fixture) -> FixtureKey<'_> {
     (
         (
-            value.provider_id.as_bytes(),
-            value.provider_contract_version.as_bytes(),
-            value.provider_abi_major,
-            value.provider_abi_minor,
+            value.provider.provider_id.as_bytes(),
+            value.provider.contract_version.as_bytes(),
+            value.provider.abi_major,
+            value.provider.abi_minor,
         ),
         value.family,
         value.case_id.as_bytes(),
