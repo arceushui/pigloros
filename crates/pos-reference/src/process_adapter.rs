@@ -18,8 +18,9 @@ use crate::evaluator::{AdapterError, CaseAttempt, SubjectAdapter, SubjectObserva
 use crate::evaluator_protocol::SubjectAdapterKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const TRANSPORT_OVERHEAD_BYTES: usize = 64 * 1024;
+const TRANSPORT_OVERHEAD_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_RESPONSE_BYTES_U64: u64 = 128 * 1024 * 1024;
 
 /// Out-of-process public adapter identity and executable invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,8 +61,10 @@ impl ProcessAdapter {
         let mut child = command(&self.program, &self.arguments)
             .spawn()
             .map_err(|_| AdapterError::Unavailable)?;
-        let stdin = child.stdin.take().ok_or(AdapterError::ProtocolFailure)?;
-        let stdout = child.stdout.take().ok_or(AdapterError::ProtocolFailure)?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            terminate(&mut child);
+            return Err(AdapterError::ProtocolFailure);
+        };
         let (writer_tx, writer_rx) = mpsc::sync_channel(1);
         let (reader_tx, reader_rx) = mpsc::sync_channel(1);
         let _writer = thread::spawn(move || drop(writer_tx.send(write_request(stdin, &request))));
@@ -153,12 +156,12 @@ fn terminate(child: &mut std::process::Child) {
 }
 
 fn response_limit(attempt: &CaseAttempt) -> Result<usize, AdapterError> {
-    let output =
-        usize::try_from(attempt.budget.output_bytes).map_err(|_| AdapterError::ProtocolFailure)?;
-    output
-        .checked_add(TRANSPORT_OVERHEAD_BYTES)
-        .map(|value| value.min(MAX_RESPONSE_BYTES))
-        .ok_or(AdapterError::ProtocolFailure)
+    let requested = attempt
+        .budget
+        .output_bytes
+        .saturating_add(TRANSPORT_OVERHEAD_BYTES)
+        .min(MAX_RESPONSE_BYTES_U64);
+    usize::try_from(requested).map_err(|_| AdapterError::ProtocolFailure)
 }
 
 fn write_request(mut stdin: std::process::ChildStdin, request: &[u8]) -> std::io::Result<()> {

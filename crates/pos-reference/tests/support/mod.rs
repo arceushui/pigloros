@@ -64,6 +64,7 @@ pub enum ProfileMutation {
     RawPackageSchemaBindingField(u8),
     RawPackageSchemaDescriptorField(u8),
     RawPackageSupportDescriptorField(u8),
+    DeepTypeBoundary(u8),
     Magic,
     Version,
     ProfileId,
@@ -237,6 +238,8 @@ pub enum BundleMutation {
     ExpectedModeAbove,
     ExpectedMissingPath,
     ExpectedDigest,
+    ExpectedEmpty,
+    ExpectedPathType,
     ProfileExpectedCount,
     ProfileExpectedCase,
     ProfileExpectedMode,
@@ -249,6 +252,7 @@ pub enum BundleMutation {
     Magic,
     Version,
     Mode,
+    ModeOverflow,
     ProfileDigest,
     DescriptorOrder,
     DescriptorDuplicate,
@@ -287,6 +291,7 @@ pub enum TrustMutation {
     AdditionalRoot,
     DuplicateRootKey,
     Revocations,
+    RevocationKeyType,
     RevocationsTooMany,
     RevocationsOrder,
     NonMatchingRevocations,
@@ -305,10 +310,16 @@ pub enum TrustMutation {
     Previous,
     PreviousInvalid,
     Signature,
+    SignatureType,
 }
 
 #[derive(Clone, Copy)]
 pub enum ReleaseMutation {
+    Encoding,
+    Shape,
+    RawField(u8),
+    RawFromProviderField(u8),
+    RawToProviderField(u8),
     Magic,
     Version,
     Lifecycle,
@@ -976,9 +987,14 @@ fn json_array_mut<'a>(
 
 fn insert_profile_member(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
-    profile_fields: Vec<Value>,
+    mut profile_fields: Vec<Value>,
     mutation: Option<ProfileMutation>,
 ) -> TestResult<()> {
+    match mutation {
+        Some(ProfileMutation::DeepTypeBoundary(0)) => profile_fields[17] = Value::Null,
+        Some(ProfileMutation::DeepTypeBoundary(1)) => profile_fields[17] = bytes(&[99; 32]),
+        _ => {}
+    }
     let profile_bytes = match mutation {
         Some(ProfileMutation::ArtifactEncoding(0)) => vec![0xff],
         Some(ProfileMutation::ArtifactShape(0)) => canonical(&Value::Null)?,
@@ -1257,6 +1273,15 @@ fn release_admission(
     ];
     if let Some(mutation) = mutation {
         match mutation {
+            ReleaseMutation::RawField(index) if index < 10 => {
+                fields[usize::from(index)] = Value::Null;
+            }
+            ReleaseMutation::RawFromProviderField(index) => {
+                array_fields_mut(&mut fields[6])?[usize::from(index)] = Value::Null;
+            }
+            ReleaseMutation::RawToProviderField(index) => {
+                array_fields_mut(&mut fields[7])?[usize::from(index)] = Value::Null;
+            }
             ReleaseMutation::Magic => fields[0] = text("RAD0"),
             ReleaseMutation::Version => fields[1] = uint(2),
             ReleaseMutation::Lifecycle => fields[2] = uint(1),
@@ -1268,6 +1293,9 @@ fn release_admission(
             ReleaseMutation::AllowFallback => fields[8] = Value::Bool(true),
             ReleaseMutation::SignerId => fields[9] = text("different-key"),
             ReleaseMutation::Signature
+            | ReleaseMutation::Encoding
+            | ReleaseMutation::Shape
+            | ReleaseMutation::RawField(_)
             | ReleaseMutation::MissingMember
             | ReleaseMutation::ExtraMember
             | ReleaseMutation::MissingBinding => {}
@@ -1278,10 +1306,16 @@ fn release_admission(
         .to_bytes();
     fields.push(if matches!(mutation, Some(ReleaseMutation::Signature)) {
         bytes(&[0; 64])
+    } else if matches!(mutation, Some(ReleaseMutation::RawField(10))) {
+        Value::Null
     } else {
         bytes(&signature)
     });
-    canonical(&array(fields))
+    match mutation {
+        Some(ReleaseMutation::Encoding) => Ok(vec![0xff]),
+        Some(ReleaseMutation::Shape) => canonical(&Value::Null),
+        _ => canonical(&array(fields)),
+    }
 }
 
 fn add_provider_contracts(
@@ -1315,6 +1349,8 @@ fn add_provider_contracts(
     package_fields.push(
         if matches!(mutation, Some(ProfileMutation::PackageDigest)) {
             bytes(&[99; 32])
+        } else if matches!(mutation, Some(ProfileMutation::DeepTypeBoundary(36))) {
+            Value::Null
         } else {
             bytes(&package_digest)
         },
@@ -1415,6 +1451,8 @@ fn add_provider_registry(
     registry_fields.push(
         if matches!(mutation, Some(ProfileMutation::RegistryDigest)) {
             bytes(&[99; 32])
+        } else if matches!(mutation, Some(ProfileMutation::DeepTypeBoundary(37))) {
+            Value::Null
         } else {
             bytes(&registry_digest)
         },
@@ -1445,6 +1483,17 @@ fn mutate_provider_package(
     mutation: ProfileMutation,
 ) -> TestResult<()> {
     match mutation {
+        ProfileMutation::DeepTypeBoundary(28) => fields[5] = array(vec![Value::Null]),
+        ProfileMutation::DeepTypeBoundary(29) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut schemas[0])?[0] = Value::Null;
+        }
+        ProfileMutation::DeepTypeBoundary(30) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut schemas[0])?[1] = Value::Null;
+        }
+        ProfileMutation::DeepTypeBoundary(31) => fields[6] = Value::Null,
+        ProfileMutation::DeepTypeBoundary(34) => fields[3] = Value::Null,
         ProfileMutation::RawPackageField(index) => {
             fields[usize::from(index)] = Value::Null;
         }
@@ -1500,6 +1549,16 @@ fn mutate_provider_package(
 
 fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) {
     match mutation {
+        ProfileMutation::DeepTypeBoundary(32) => fields[2] = array(vec![Value::Null]),
+        ProfileMutation::DeepTypeBoundary(33) => {
+            let Value::Array(providers) = &mut fields[2] else {
+                return;
+            };
+            let Value::Array(record) = &mut providers[0] else {
+                return;
+            };
+            record[4] = Value::Null;
+        }
         ProfileMutation::RawRegistryField(index) => {
             fields[usize::from(index)] = Value::Null;
         }
@@ -1610,6 +1669,9 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
     if mutate_raw_profile_field(profile_fields, mutation)? {
         return Ok(());
     }
+    if mutate_deep_profile_field(profile_fields, mutation)? {
+        return Ok(());
+    }
     match mutation {
         ProfileMutation::Magic => profile_fields[0] = text("CPF0"),
         ProfileMutation::Version => profile_fields[1] = uint(2),
@@ -1687,6 +1749,35 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
     Ok(())
 }
 
+fn mutate_deep_profile_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
+    let ProfileMutation::DeepTypeBoundary(index) = mutation else {
+        return Ok(false);
+    };
+    match index {
+        6 => {
+            fields[10] = array(vec![array(vec![Value::Null, bytes(&[1])])]);
+        }
+        7 => {
+            fields[10] = array(vec![array(vec![uint(1), Value::Null])]);
+        }
+        18 => {
+            fields[7] = array(vec![Value::Null]);
+        }
+        22 => fields[16] = Value::Bool(false),
+        26 => {
+            let binding = array_fields_mut(&mut fields[8])?;
+            array_fields_mut(&mut binding[0])?[2] = Value::Null;
+        }
+        27 => {
+            let binding = array_fields_mut(&mut fields[8])?;
+            let providers = array_fields_mut(&mut binding[1])?;
+            array_fields_mut(&mut providers[0])?[2] = Value::Null;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn mutate_raw_profile_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
     match mutation {
         ProfileMutation::RawProfileField(index) => fields[usize::from(index)] = Value::Null,
@@ -1759,7 +1850,10 @@ fn mutate_profile_boundary(
 
 fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
     let fixtures = array_fields_mut(&mut profile_fields[9])?;
-    let fixture_index = if matches!(mutation, ProfileMutation::RawFixtureTransitionField(_)) {
+    let fixture_index = if matches!(
+        mutation,
+        ProfileMutation::RawFixtureTransitionField(_) | ProfileMutation::DeepTypeBoundary(5)
+    ) {
         5
     } else {
         0
@@ -1769,6 +1863,7 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         .ok_or_else(|| io::Error::other("test fixture is missing"))?;
     let fields = array_fields_mut(fixture)?;
     if !mutate_raw_fixture_field(fields, mutation)?
+        && !mutate_deep_fixture_field(fields, mutation)?
         && !mutate_fixture_boundary(fields, mutation)?
         && !mutate_fixture_relationship(fields, mutation)?
     {
@@ -1841,7 +1936,59 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
         )?;
         fields[23] = bytes(&digest);
     }
+    if matches!(mutation, ProfileMutation::DeepTypeBoundary(2)) {
+        fields[23] = Value::Null;
+    }
     Ok(())
+}
+
+fn mutate_deep_fixture_field(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<bool> {
+    let ProfileMutation::DeepTypeBoundary(index) = mutation else {
+        return Ok(false);
+    };
+    match index {
+        0..=2 | 6 | 7 | 18 | 22..=37 => {}
+        3 => array_fields_mut(&mut fields[7])?[0] = Value::Null,
+        4 => fields[19] = Value::Bool(false),
+        5 => fields[20] = Value::Bool(false),
+        8 => {
+            fields[11] = array(vec![uint(0), Value::Bool(false), Value::Null, Value::Null]);
+        }
+        9 => {
+            fields[11] = array(vec![uint(1), Value::Null, Value::Bool(false), Value::Null]);
+        }
+        10 => {
+            fields[11] = array(vec![uint(2), Value::Null, Value::Null, Value::Null]);
+        }
+        11 => {
+            fields[11] = array(vec![
+                uint(2),
+                Value::Null,
+                Value::Null,
+                array(vec![Value::Null, bytes(&[1])]),
+            ]);
+        }
+        12 => array_fields_mut(&mut fields[8])?[2] = Value::Null,
+        13 => array_fields_mut(&mut fields[8])?[3] = Value::Null,
+        14 => fields[13] = Value::Bool(false),
+        15 => {
+            fields[13] = array(vec![Value::Null, text("1.0.0"), text("failure")]);
+        }
+        16 => {
+            fields[13] = array(vec![text("owner"), Value::Null, text("failure")]);
+        }
+        17 => {
+            fields[13] = array(vec![text("owner"), text("1.0.0"), Value::Null]);
+        }
+        19 => {
+            let capability = array_fields_mut(&mut fields[18])?;
+            array_fields_mut(&mut capability[1])?[0] = Value::Null;
+        }
+        20 => array_fields_mut(&mut fields[16])?[0] = Value::Bool(false),
+        21 => array_fields_mut(&mut fields[17])?[0] = Value::Bool(false),
+        _ => return Err(io::Error::other("unknown deep profile boundary").into()),
+    }
+    Ok(true)
 }
 
 fn mutate_fixture_relationship(
@@ -2226,16 +2373,10 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
     if mutate_manifest_boundary(fields, mutation)? {
         return Ok(());
     }
+    if mutate_manifest_descriptor(fields, mutation)? {
+        return Ok(());
+    }
     match mutation {
-        BundleMutation::DescriptorEmpty => fields[4] = array(Vec::new()),
-        BundleMutation::DescriptorRoleOverflow => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            array_fields_mut(&mut descriptors[0])?[3] = uint(256);
-        }
-        BundleMutation::DescriptorMissingPath => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            array_fields_mut(&mut descriptors[0])?[0] = text("aaa");
-        }
         BundleMutation::ExpectedClaimLayerOverflow => {
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[1] = uint(256);
@@ -2260,11 +2401,12 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[5] = bytes(&[99; 32]);
         }
-        BundleMutation::RawManifestField(index) => fields[usize::from(index)] = Value::Null,
-        BundleMutation::RawDescriptorField(index) => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            array_fields_mut(&mut descriptors[0])?[usize::from(index)] = Value::Null;
+        BundleMutation::ExpectedEmpty => fields[5] = array(Vec::new()),
+        BundleMutation::ExpectedPathType => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[4] = Value::Null;
         }
+        BundleMutation::RawManifestField(index) => fields[usize::from(index)] = Value::Null,
         BundleMutation::RawExpectedField(index) => {
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[usize::from(index)] = Value::Null;
@@ -2272,24 +2414,8 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         BundleMutation::Magic => fields[0] = text("CFB0"),
         BundleMutation::Version => fields[1] = uint(1),
         BundleMutation::Mode => fields[2] = uint(2),
+        BundleMutation::ModeOverflow => fields[2] = uint(256),
         BundleMutation::ProfileDigest => fields[3] = bytes(&[0; 32]),
-        BundleMutation::DescriptorOrder => array_fields_mut(&mut fields[4])?.swap(0, 1),
-        BundleMutation::DescriptorDuplicate => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            descriptors.push(descriptors[0].clone());
-        }
-        BundleMutation::DescriptorSize => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            array_fields_mut(&mut descriptors[0])?[1] = uint(u64::MAX);
-        }
-        BundleMutation::DescriptorDigest => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            array_fields_mut(&mut descriptors[0])?[2] = bytes(&[99; 32]);
-        }
-        BundleMutation::DescriptorRole => {
-            let descriptors = array_fields_mut(&mut fields[4])?;
-            array_fields_mut(&mut descriptors[0])?[3] = uint(19);
-        }
         BundleMutation::ExpectedOrder => array_fields_mut(&mut fields[5])?.swap(0, 1),
         BundleMutation::ExpectedDuplicate => {
             let expected = array_fields_mut(&mut fields[5])?;
@@ -2297,6 +2423,17 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         }
         BundleMutation::RawMemberField(_)
         | BundleMutation::RawArchiveField(_)
+        | BundleMutation::RawDescriptorField(_)
+        | BundleMutation::PathBoundary(_)
+        | BundleMutation::ExpectedCaseBoundary(_)
+        | BundleMutation::DescriptorEmpty
+        | BundleMutation::DescriptorRoleOverflow
+        | BundleMutation::DescriptorMissingPath
+        | BundleMutation::DescriptorOrder
+        | BundleMutation::DescriptorDuplicate
+        | BundleMutation::DescriptorSize
+        | BundleMutation::DescriptorDigest
+        | BundleMutation::DescriptorRole
         | BundleMutation::Encoding
         | BundleMutation::ManifestShape
         | BundleMutation::DescriptorRecordShape
@@ -2316,6 +2453,48 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         | BundleMutation::ProfileExpectedBinding => {}
     }
     Ok(())
+}
+
+fn mutate_manifest_descriptor(fields: &mut [Value], mutation: BundleMutation) -> TestResult<bool> {
+    let descriptors = match mutation {
+        BundleMutation::DescriptorEmpty => {
+            fields[4] = array(Vec::new());
+            return Ok(true);
+        }
+        BundleMutation::RawDescriptorField(_)
+        | BundleMutation::DescriptorRoleOverflow
+        | BundleMutation::DescriptorMissingPath
+        | BundleMutation::DescriptorOrder
+        | BundleMutation::DescriptorDuplicate
+        | BundleMutation::DescriptorSize
+        | BundleMutation::DescriptorDigest
+        | BundleMutation::DescriptorRole => array_fields_mut(&mut fields[4])?,
+        _ => return Ok(false),
+    };
+    match mutation {
+        BundleMutation::RawDescriptorField(index) => {
+            array_fields_mut(&mut descriptors[0])?[usize::from(index)] = Value::Null;
+        }
+        BundleMutation::DescriptorRoleOverflow => {
+            array_fields_mut(&mut descriptors[0])?[3] = uint(256);
+        }
+        BundleMutation::DescriptorMissingPath => {
+            array_fields_mut(&mut descriptors[0])?[0] = text("aaa");
+        }
+        BundleMutation::DescriptorOrder => descriptors.swap(0, 1),
+        BundleMutation::DescriptorDuplicate => descriptors.push(descriptors[0].clone()),
+        BundleMutation::DescriptorSize => {
+            array_fields_mut(&mut descriptors[0])?[1] = uint(u64::MAX);
+        }
+        BundleMutation::DescriptorDigest => {
+            array_fields_mut(&mut descriptors[0])?[2] = bytes(&[99; 32]);
+        }
+        BundleMutation::DescriptorRole => {
+            array_fields_mut(&mut descriptors[0])?[3] = uint(19);
+        }
+        _ => {}
+    }
+    Ok(true)
 }
 
 fn mutate_manifest_boundary(fields: &mut [Value], mutation: BundleMutation) -> TestResult<bool> {
@@ -2442,6 +2621,8 @@ fn trust_policy(
         .to_bytes();
     fields.push(if matches!(mutation, Some(TrustMutation::Signature)) {
         bytes(&[0; 64])
+    } else if matches!(mutation, Some(TrustMutation::SignatureType)) {
+        Value::Null
     } else {
         bytes(&signature)
     });
@@ -2495,6 +2676,7 @@ fn mutate_trust_policy(
         TrustMutation::RootsTooMany => fields[5] = excessive_trust_roots(),
         TrustMutation::AdditionalRoot => add_secondary_root(fields, false)?,
         TrustMutation::Revocations => fields[6] = array(vec![text("test-key")]),
+        TrustMutation::RevocationKeyType => fields[6] = array(vec![Value::Null]),
         TrustMutation::RevocationsTooMany => fields[6] = excessive_revocations(),
         TrustMutation::RevocationsOrder => {
             fields[6] = array(vec![text("z-key"), text("a-key")]);
@@ -2539,7 +2721,10 @@ fn mutate_trust_policy(
         TrustMutation::Expiry => fields[9] = text("invalid expiry!"),
         TrustMutation::Previous => fields[10] = bytes(&[1; 32]),
         TrustMutation::PreviousInvalid => fields[10] = bytes(&[1; 31]),
-        TrustMutation::Encoding | TrustMutation::Shape | TrustMutation::Signature => {}
+        TrustMutation::Encoding
+        | TrustMutation::Shape
+        | TrustMutation::Signature
+        | TrustMutation::SignatureType => {}
     }
     Ok(())
 }
@@ -2642,11 +2827,22 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
     fields.push(
         if matches!(mutation, Some(ProfileMutation::ExecutionDigest)) {
             bytes(&[99; 32])
+        } else if matches!(mutation, Some(ProfileMutation::DeepTypeBoundary(35))) {
+            Value::Null
         } else {
             bytes(&digest)
         },
     );
     match mutation {
+        ProfileMutation::DeepTypeBoundary(23) => {
+            array_fields_mut(&mut fields[5])?[0] = Value::Null;
+        }
+        ProfileMutation::DeepTypeBoundary(24) => {
+            array_fields_mut(&mut fields[12])?[0] = Value::Bool(false);
+        }
+        ProfileMutation::DeepTypeBoundary(25) => {
+            array_fields_mut(&mut fields[14])?[0] = Value::Null;
+        }
         Some(ProfileMutation::ArtifactEncoding(1)) => Ok(vec![0xff]),
         Some(ProfileMutation::ArtifactShape(1)) => canonical(&Value::Null),
         _ => canonical(&array(fields)),

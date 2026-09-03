@@ -1094,6 +1094,28 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
 }
 
 #[test]
+fn evaluator_rejects_deeply_malformed_profile_values() -> TestResult {
+    for mutation in (0..38).map(ProfileMutation::DeepTypeBoundary) {
+        let corpus = support::corpus_with_profile_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_request_identities_not_admitted_by_the_profile() -> TestResult {
     let corpus = support::corpus()?;
     for request in [
@@ -1136,6 +1158,7 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
         BundleMutation::Magic,
         BundleMutation::Version,
         BundleMutation::Mode,
+        BundleMutation::ModeOverflow,
         BundleMutation::ProfileDigest,
         BundleMutation::DescriptorOrder,
         BundleMutation::DescriptorDuplicate,
@@ -1158,6 +1181,8 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
         BundleMutation::ExpectedModeAbove,
         BundleMutation::ExpectedMissingPath,
         BundleMutation::ExpectedDigest,
+        BundleMutation::ExpectedEmpty,
+        BundleMutation::ExpectedPathType,
         BundleMutation::Signer,
         BundleMutation::Signature,
         BundleMutation::ArchiveShape,
@@ -1278,6 +1303,7 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
         TrustMutation::RootsTooMany,
         TrustMutation::DuplicateRootKey,
         TrustMutation::Revocations,
+        TrustMutation::RevocationKeyType,
         TrustMutation::RevocationsTooMany,
         TrustMutation::RevocationsOrder,
         TrustMutation::RevokedArtifact,
@@ -1293,6 +1319,7 @@ fn evaluator_rejects_each_request_bound_trust_policy_attack() -> TestResult {
         TrustMutation::Expiry,
         TrustMutation::PreviousInvalid,
         TrustMutation::Signature,
+        TrustMutation::SignatureType,
     ];
     for mutation in mutations {
         let corpus = support::corpus_with_trust_mutation(mutation)?;
@@ -1413,6 +1440,33 @@ fn evaluator_rejects_each_signed_release_admission_attack() -> TestResult {
         ReleaseMutation::ExtraMember,
         ReleaseMutation::MissingBinding,
     ];
+    for mutation in mutations {
+        let corpus = support::corpus_with_release_mutation(mutation)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_rejects_malformed_release_admission_fields() -> TestResult {
+    let mutations = [ReleaseMutation::Encoding, ReleaseMutation::Shape]
+        .into_iter()
+        .chain((0..11).map(ReleaseMutation::RawField))
+        .chain((0..4).map(ReleaseMutation::RawFromProviderField))
+        .chain((0..4).map(ReleaseMutation::RawToProviderField));
     for mutation in mutations {
         let corpus = support::corpus_with_release_mutation(mutation)?;
         let mut adapter = PublicAdapter {

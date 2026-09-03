@@ -706,7 +706,7 @@ fn process_adapter_bounds_deadline_and_blocked_request_transport() -> TestResult
         "/bin/sh",
         vec![
             OsString::from("-c"),
-            OsString::from("sleep 30 <&0 & exit 0"),
+            OsString::from("sleep 30 <&0 >/dev/null 2>&1 & exit 0"),
         ],
     )?;
     assert_eq!(
