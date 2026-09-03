@@ -339,7 +339,7 @@ impl Profile {
         let execution_profile_digests = digest_list(&fields[7])?;
         let (registry, required_providers) = decode_provider_binding(&fields[8])?;
         let (evaluator_artifact_digests, hard_caps) = decode_protocol(&fields[11])?;
-        let fixtures = decode_fixtures(&fields[9])?;
+        let fixtures = decode_fixtures(&fields[9], hard_caps)?;
         let allowed_divergences = decode_allowed_divergences(&fields[10])?;
         let (independence_requirements, trust_policy_snapshot_digest) =
             decode_requirements(&fields[12])?;
@@ -360,7 +360,7 @@ impl Profile {
             &allowed_divergences,
             hard_caps,
         )?;
-        validate_support_closure(
+        let registry_member = validate_support_closure(
             bundle,
             &header,
             &registry,
@@ -383,7 +383,7 @@ impl Profile {
             provenance_digest: header.publication_digest,
         };
         profile.validate_request(request)?;
-        let registry_member = profile.validate_bundle_closure(bundle, &registry)?;
+        profile.validate_bundle_closure(bundle)?;
         validate_release_admissions(bundle, &profile.fixtures)?;
         validate_provider_contracts(
             bundle,
@@ -423,18 +423,10 @@ impl Profile {
         {
             return Err(ProfileError::DigestMismatch);
         }
-        self.fixtures.iter().try_for_each(|fixture| {
-            self.evaluator_hard_caps
-                .admits(fixture.deterministic_budget)
-        })
+        Ok(())
     }
 
-    fn validate_bundle_closure<'a>(
-        &self,
-        bundle: &'a VerifiedBundle,
-        registry: &ArtifactDescriptor,
-    ) -> Result<&'a VerifiedMember, ProfileError> {
-        let registry_member = validate_descriptor(bundle, registry)?;
+    fn validate_bundle_closure(&self, bundle: &VerifiedBundle) -> Result<(), ProfileError> {
         for fixture in &self.fixtures {
             validate_descriptor_roles(bundle, &fixture.schema, &[4])?;
             validate_descriptor_roles(bundle, &fixture.payload, &[0])?;
@@ -459,8 +451,7 @@ impl Profile {
                 }
             }
         }
-        validate_expected_results(bundle, &self.fixtures)?;
-        Ok(registry_member)
+        validate_expected_results(bundle, &self.fixtures)
     }
 }
 
@@ -471,49 +462,46 @@ fn validate_release_admissions(
     let selected = fixtures
         .iter()
         .filter(|fixture| fixture.family == 5 && fixture.modes.contains(&bundle.mode))
-        .collect::<Vec<_>>();
-    let expected = selected
-        .iter()
-        .filter_map(|fixture| {
+        .map(|fixture| {
             fixture
                 .release_admission
                 .as_ref()
-                .map(|binding| binding.release_admission_digest)
+                .map(|binding| (fixture, binding))
+                .ok_or(ProfileError::ClosureIncomplete)
         })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = selected
+        .iter()
+        .map(|(_, binding)| binding.release_admission_digest)
         .collect::<BTreeSet<_>>();
-    let actual_members = bundle
+    let actual = bundle
         .members
         .values()
         .filter(|member| member.role == 16)
-        .collect::<Vec<_>>();
-    let actual = actual_members
-        .iter()
-        .map(|member| member.digest)
-        .collect::<BTreeSet<_>>();
+        .map(|member| (member.digest, member))
+        .collect::<BTreeMap<_, _>>();
     if expected.len() != selected.len()
-        || actual_members.len() != selected.len()
-        || actual != expected
+        || actual.len() != selected.len()
+        || actual.keys().copied().collect::<BTreeSet<_>>() != expected
     {
         return Err(ProfileError::ClosureIncomplete);
     }
-    selected
-        .into_iter()
-        .try_for_each(|fixture| validate_release_admission(bundle, fixture))
+    selected.into_iter().try_for_each(|(fixture, binding)| {
+        validate_release_admission(
+            bundle,
+            fixture,
+            binding,
+            actual[&binding.release_admission_digest],
+        )
+    })
 }
 
 fn validate_release_admission(
     bundle: &VerifiedBundle,
     fixture: &Fixture,
+    binding: &ReleaseAdmissionBinding,
+    member: &VerifiedMember,
 ) -> Result<(), ProfileError> {
-    let binding = fixture
-        .release_admission
-        .as_ref()
-        .ok_or(ProfileError::ClosureIncomplete)?;
-    let member = bundle
-        .members
-        .values()
-        .find(|member| member.role == 16 && member.digest == binding.release_admission_digest)
-        .ok_or(ProfileError::ClosureIncomplete)?;
     let value = decode_canonical(&member.bytes)?;
     let fields = array(&value, 11)?;
     let from = decode_provider_key(&fields[6])?;
@@ -533,21 +521,23 @@ fn validate_release_admission(
     }
     let signature: [u8; 64] = fixed_bytes(&fields[10])?;
     let unsigned = encode(&Value::Array(fields[..10].to_vec()))?;
-    let verifier = ed25519_dalek::VerifyingKey::from_bytes(&bundle.authority_public_key)
-        .map_err(|_| ProfileError::InvalidEncoding)?;
-    verifier
+    bundle
+        .authority_verifying_key
         .verify(&unsigned, &ed25519_dalek::Signature::from_bytes(&signature))
         .map_err(|_| ProfileError::InvalidEncoding)
 }
 
-fn decode_fixtures(value: &Value) -> Result<Vec<Fixture>, ProfileError> {
+fn decode_fixtures(
+    value: &Value,
+    hard_caps: EvaluatorHardCaps,
+) -> Result<Vec<Fixture>, ProfileError> {
     let values = array_values(value)?;
     if values.is_empty() || values.len() > MAX_FIXTURES {
         return Err(ProfileError::FieldOutOfBounds);
     }
     let fixtures = values
         .iter()
-        .map(decode_fixture)
+        .map(|fixture| decode_fixture(fixture, hard_caps))
         .collect::<Result<Vec<_>, _>>()?;
     if !fixtures
         .windows(2)
@@ -558,12 +548,12 @@ fn decode_fixtures(value: &Value) -> Result<Vec<Fixture>, ProfileError> {
     Ok(fixtures)
 }
 
-fn decode_fixture(value: &Value) -> Result<Fixture, ProfileError> {
+fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture, ProfileError> {
     let fields = array(value, 24)?;
     let fixture_digest = validate_fixture_digest(fields)?;
     let header = decode_fixture_header(fields)?;
     let evidence = decode_fixture_evidence(fields)?;
-    let policy = decode_fixture_policy(fields)?;
+    let policy = decode_fixture_policy(fields, hard_caps)?;
     let fixture = Fixture {
         case_id: header.case_id,
         mandatory: header.mandatory,
@@ -661,8 +651,12 @@ fn decode_fixture_evidence(fields: &[Value]) -> Result<FixtureEvidence, ProfileE
     })
 }
 
-fn decode_fixture_policy(fields: &[Value]) -> Result<FixturePolicy, ProfileError> {
+fn decode_fixture_policy(
+    fields: &[Value],
+    hard_caps: EvaluatorHardCaps,
+) -> Result<FixturePolicy, ProfileError> {
     let deterministic_budget = DeterministicBudget::from_value(&fields[16])?;
+    hard_caps.admits(deterministic_budget)?;
     let safety = array(&fields[17], 1)?;
     let capability = array(&fields[18], 2)?;
     let capability_ids = string_list(&capability[1])?;
@@ -986,13 +980,12 @@ fn validate_outcome_relationship(fixture: &Fixture) -> Result<(), ProfileError> 
 
 const fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
     let coherent = fixture.replay_claim == 4
-        || match fixture.redaction_state {
-            0 => true,
-            1 => fixture.replay_claim == 1,
-            2 => fixture.replay_claim == 2,
-            3 => fixture.replay_claim == 3,
-            _ => false,
-        };
+        || [
+            true,
+            fixture.replay_claim == 1,
+            fixture.replay_claim == 2,
+            fixture.replay_claim == 3,
+        ][usize::from(fixture.redaction_state)];
     if coherent {
         Ok(())
     } else {
@@ -1131,20 +1124,21 @@ fn value_depth(value: &Value) -> usize {
     }
 }
 
-fn validate_support_closure(
-    bundle: &VerifiedBundle,
+fn validate_support_closure<'a>(
+    bundle: &'a VerifiedBundle,
     header: &ProfileHeader,
     registry: &ArtifactDescriptor,
     fixtures: &[Fixture],
     execution_profiles: &[[u8; 32]],
     evaluator_artifacts: [[u8; 32]; 3],
     trust_policy_digest: [u8; 32],
-) -> Result<(), ProfileError> {
+) -> Result<&'a VerifiedMember, ProfileError> {
     if registry.member_path != "authority/fixture-provider-registry.cbor"
         || registry.media_type != "application/cbor"
     {
         return Err(ProfileError::ClosureIncomplete);
     }
+    let registry_member = validate_descriptor_roles(bundle, registry, &[12])?;
     let support = [
         (
             "support/normative-requirements.md",
@@ -1177,7 +1171,6 @@ fn validate_support_closure(
             4,
             evaluator_artifacts[2],
         ),
-        (registry.member_path.as_str(), 12, registry.digest),
         (
             "authority/trust-policy-snapshot.tps1",
             15,
@@ -1202,7 +1195,7 @@ fn validate_support_closure(
     if actual_execution_profiles == declared_execution_profiles
         && actual_execution_profiles.len() == execution_profiles.len()
     {
-        Ok(())
+        Ok(registry_member)
     } else {
         Err(ProfileError::ClosureIncomplete)
     }
@@ -1606,14 +1599,10 @@ fn validate_member_binding<'a>(
     role: u8,
     digest: [u8; 32],
 ) -> Result<&'a VerifiedMember, ProfileError> {
-    if let Some(member) = bundle
+    bundle
         .member(path)
         .filter(|member| member.role == role && member.digest == digest)
-    {
-        Ok(member)
-    } else {
-        Err(ProfileError::ClosureIncomplete)
-    }
+        .ok_or(ProfileError::ClosureIncomplete)
 }
 
 fn decode_oracle(value: &Value) -> Result<StrictOracle, ProfileError> {

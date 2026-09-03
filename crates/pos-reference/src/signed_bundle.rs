@@ -79,7 +79,7 @@ pub struct VerifiedBundle {
     pub members: BTreeMap<String, VerifiedMember>,
     pub expected_results: BTreeMap<ExpectedResultKey, String>,
     pub(crate) authority_key_id: String,
-    pub(crate) authority_public_key: [u8; 32],
+    pub(crate) authority_verifying_key: ed25519_dalek::VerifyingKey,
 }
 
 impl VerifiedBundle {
@@ -163,7 +163,7 @@ pub fn verify_signed_bundle(
         validate_requested_artifacts(archive_bytes, trust_policy_bytes, request)?;
     let decoded = decode_archive(archive_bytes, request)?;
     validate_archive_closure(&decoded, &trust_policy)?;
-    let authority = verify_archive_signature(&decoded, &trust_policy)?;
+    let (authority, authority_verifying_key) = verify_archive_signature(&decoded, &trust_policy)?;
     if decoded
         .members
         .values()
@@ -183,7 +183,7 @@ pub fn verify_signed_bundle(
         members: decoded.members,
         expected_results,
         authority_key_id: authority.key_id,
-        authority_public_key: authority.public_key,
+        authority_verifying_key,
     })
 }
 
@@ -265,7 +265,7 @@ fn validate_archive_closure(
 fn verify_archive_signature(
     archive: &DecodedArchive,
     trust_policy: &TrustPolicy,
-) -> Result<TrustRoot, BundleError> {
+) -> Result<(TrustRoot, ed25519_dalek::VerifyingKey), BundleError> {
     let trusted_authority = trust_policy
         .authority_for(archive.signer_key)
         .ok_or(BundleError::SignatureInvalid)?;
@@ -276,7 +276,7 @@ fn verify_archive_signature(
         &ed25519_dalek::Signature::from_bytes(&archive.signature),
     )
     .map_err(|_| BundleError::SignatureInvalid)?;
-    Ok(trusted_authority.clone())
+    Ok((trusted_authority.clone(), key))
 }
 
 fn sensitive_name(value: &str) -> bool {
