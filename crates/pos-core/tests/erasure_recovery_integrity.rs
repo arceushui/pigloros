@@ -27,7 +27,8 @@ use pos_core::{
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureCoordinator,
     ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
     ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
@@ -345,6 +346,45 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
             .digest()
     );
     assert!(restarted.verified_state(reference(240))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
+) -> Result<(), ErasureErrorV1> {
+    let graph = active_graph(vec![target(10)], None)?;
+    let request = graph.request.reference();
+    let manifest = graph
+        .adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    graph.adapter.remove_object(request);
+
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR);
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let failures = coordinator.recovery_errors(request)?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].request(), request);
+    assert_eq!(failures[0].manifest(), manifest);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    let bytes = failures[0].to_canonical_cbor()?;
+    assert_eq!(
+        ErasureRecoveryErrorV1::from_canonical_cbor(&bytes)?,
+        failures[0]
+    );
+    assert_eq!(
+        ErasureRecoveryErrorV1::from_canonical_cbor(&[]),
+        Err(ErasureErrorV1::InvalidEncoding)
+    );
     Ok(())
 }
 

@@ -43,8 +43,9 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta},
     ConsentAppendPermit, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, KeyRegistryStateV1,
-    PreparedErasureCasV1, StoredErasureManifestV1, GEOGRAPHIC_EVENT_TYPE,
+    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReferenceV1,
+    ErasureStateResolverV1, KeyRegistryStateV1, PreparedErasureCasV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -163,6 +164,7 @@ pub struct MemoryStore {
     erasure_administrative_resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    erasure_recovery_errors: BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ()>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -464,6 +466,7 @@ impl MemoryStore {
             erasure_administrative_resolutions: BTreeMap::new(),
             erasure_effects: BTreeMap::new(),
             erasure_effect_subjects: BTreeMap::new(),
+            erasure_recovery_errors: BTreeMap::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1233,6 +1236,41 @@ impl ErasurePersistencePortV1 for MemoryStore {
         request: ErasureReferenceV1,
     ) -> Result<u64, ErasureErrorV1> {
         memory_index_count(&self.erasure_administrative_resolutions, request)
+    }
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self
+            .erasure_recovery_errors
+            .keys()
+            .filter(|(candidate, _)| *candidate == request)
+            .map(|(_, reference)| *reference)
+            .collect())
+    }
+    fn append_recovery_error(
+        &mut self,
+        request: ErasureReferenceV1,
+        object: ErasurePersistenceObjectV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let reference = object.reference();
+        let key = (request, reference);
+        let mut evidence = self.erasure_evidence.clone();
+        insert_exact(&mut evidence, reference, object.canonical_cbor())?;
+        let mut recovery_errors = self.erasure_recovery_errors.clone();
+        if !recovery_errors.contains_key(&key) {
+            let count = recovery_errors
+                .keys()
+                .filter(|(candidate, _)| *candidate == request)
+                .count();
+            if count >= ERASURE_MAX_RECOVERY_ERRORS {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
+            recovery_errors.insert(key, ());
+        }
+        self.erasure_evidence = evidence;
+        self.erasure_recovery_errors = recovery_errors;
+        Ok(())
     }
     fn compare_and_swap(
         &mut self,

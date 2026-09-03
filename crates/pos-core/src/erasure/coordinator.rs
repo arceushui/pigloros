@@ -14,9 +14,9 @@ use super::{
     ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
     ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1,
     ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
-    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureReferenceV1,
-    ErasureRequestV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateTransitionV1,
-    ErasureStateV1, ErasureVerifiedStateQueryV1, PreparedErasureCasV1,
+    ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureRecoveryErrorV1,
+    ErasureReferenceV1, ErasureRequestV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
+    ErasureStateTransitionV1, ErasureStateV1, ErasureVerifiedStateQueryV1, PreparedErasureCasV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -56,15 +56,24 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     }
 
     fn recover(
-        &self,
+        &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
-        self.port
-            .read_manifest(request)?
-            .map(|stored| {
-                RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, &stored)
-            })
-            .transpose()
+        let Some(stored) = self.port.read_manifest(request)? else {
+            return Ok(None);
+        };
+        match RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, &stored) {
+            Ok(record) => Ok(Some(record)),
+            Err(error) => {
+                let recovery_error = ErasureRecoveryErrorV1::new(request, stored.digest(), error)?;
+                let object = ErasurePersistenceObjectV1::new(
+                    recovery_error.reference(),
+                    recovery_error.to_canonical_cbor()?,
+                );
+                self.port.append_recovery_error(request, object)?;
+                Err(error)
+            }
+        }
     }
 
     fn record(
@@ -169,6 +178,34 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         let verified = record.verified_state();
         self.cache(record);
         Ok(Some(verified))
+    }
+
+    /// Return the durable recovery failures retained for one request.
+    ///
+    /// Recovery failures are intentionally queryable even while the primary
+    /// ERCRP1 graph remains unrecoverable. This allows containment and
+    /// administrative consumers to inspect bounded, payload-free evidence
+    /// without weakening fail-closed recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed persistence, decoding, or provenance error when an
+    /// indexed recovery-error object cannot be verified.
+    pub fn recovery_errors(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
+        self.port
+            .recovery_error_refs(request)?
+            .into_iter()
+            .map(|reference| {
+                let bytes = self.port.read_object(reference)?;
+                let record = ErasureRecoveryErrorV1::from_canonical_cbor(&bytes)?;
+                (record.request() == request && record.reference() == reference)
+                    .then_some(record)
+                    .ok_or(ErasureErrorV1::ProvenanceMissing)
+            })
+            .collect()
     }
 
     /// Authenticate and submit ERQ1 through an initial manifest CAS.

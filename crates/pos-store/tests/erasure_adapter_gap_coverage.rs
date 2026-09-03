@@ -335,6 +335,21 @@ where
             .administrative_resolution_index_count(request)
     }
 
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().recovery_error_refs(request)
+    }
+
+    fn append_recovery_error(
+        &mut self,
+        request: ErasureReferenceV1,
+        object: pos_core::ErasurePersistenceObjectV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.store.borrow_mut().append_recovery_error(request, object)
+    }
+
     fn compare_and_swap(
         &mut self,
         mutation: PreparedErasureCasV1,

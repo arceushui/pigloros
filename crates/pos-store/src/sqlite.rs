@@ -43,9 +43,10 @@ use pos_core::{
     },
     timeline::{Timeline, TimelineMeta, TimelineMode},
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
-    ErasurePersistencePortV1, ErasureReferenceV1, ErasureStateResolverV1, Hash,
-    KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1,
-    OwnerIdV1, PreparedErasureCasV1, StoredErasureManifestV1, GEOGRAPHIC_EVENT_TYPE,
+    ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReferenceV1,
+    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PreparedErasureCasV1,
+    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -263,6 +264,29 @@ const ERASURE_SCHEMA_TABLES: &[ErasureSchemaTable] = &[
             "length(state_digest)=32",
             "length(request_digest)=32",
             "length(state_cbor)<=1048576",
+        ],
+    },
+    ErasureSchemaTable {
+        name: "erasure_recovery_errors",
+        columns_query: "PRAGMA table_info(erasure_recovery_errors)",
+        columns: &[
+            ErasureSchemaColumn {
+                name: "request_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+            ErasureSchemaColumn {
+                name: "error_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: true,
+            },
+        ],
+        required_sql_fragments: &[
+            "length(request_digest)=32",
+            "length(error_digest)=32",
+            "primarykey(request_digest,error_digest)",
         ],
     },
     ErasureSchemaTable {
@@ -723,6 +747,11 @@ impl SqliteStore {
              CREATE TABLE IF NOT EXISTS erasure_evidence (
                  reference_digest BLOB NOT NULL PRIMARY KEY CHECK (length(reference_digest) = 32),
                  object_cbor BLOB NOT NULL CHECK (length(object_cbor) <= 16777216)
+             );
+             CREATE TABLE IF NOT EXISTS erasure_recovery_errors (
+                 request_digest BLOB NOT NULL CHECK (length(request_digest) = 32),
+                 error_digest BLOB NOT NULL CHECK (length(error_digest) = 32),
+                 PRIMARY KEY (request_digest, error_digest)
              );
              CREATE TABLE IF NOT EXISTS erasure_states (
                  state_digest BLOB NOT NULL PRIMARY KEY CHECK (length(state_digest) = 32),
@@ -4419,6 +4448,40 @@ impl ErasurePersistencePortV1 for SqliteStore {
             request,
         )
     }
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT error_digest FROM erasure_recovery_errors
+                 WHERE request_digest=?1 ORDER BY error_digest",
+            )
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        statement
+            .query_map(params![request.digest().as_slice()], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+            .map(|result| {
+                result
+                    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
+                    .and_then(reference_from_sql)
+            })
+            .collect()
+    }
+    fn append_recovery_error(
+        &mut self,
+        request: ErasureReferenceV1,
+        object: ErasurePersistenceObjectV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        let result = apply_sqlite_recovery_error(&self.conn, request, &object);
+        finish_erasure_transaction(&self.conn, result)
+    }
     fn compare_and_swap(
         &mut self,
         mutation: PreparedErasureCasV1,
@@ -4587,6 +4650,53 @@ fn insert_sqlite_exact(
     (stored.as_slice() == bytes)
         .then_some(())
         .ok_or(ErasureErrorV1::ProvenanceMissing)
+}
+
+fn apply_sqlite_recovery_error(
+    conn: &Connection,
+    request: ErasureReferenceV1,
+    object: &ErasurePersistenceObjectV1,
+) -> Result<(), ErasureErrorV1> {
+    let reference = object.reference();
+    let already_indexed = conn
+        .query_row(
+            "SELECT 1 FROM erasure_recovery_errors
+             WHERE request_digest=?1 AND error_digest=?2",
+            params![request.digest().as_slice(), reference.digest().as_slice()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
+        .is_some();
+    if !already_indexed {
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM erasure_recovery_errors WHERE request_digest=?1",
+                params![request.digest().as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        if usize::try_from(count).unwrap_or(usize::MAX) >= ERASURE_MAX_RECOVERY_ERRORS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+    }
+    insert_sqlite_exact(conn, reference, object.canonical_cbor())?;
+    conn.execute(
+        "INSERT INTO erasure_recovery_errors(request_digest,error_digest)
+         VALUES(?1,?2) ON CONFLICT(request_digest,error_digest) DO NOTHING",
+        params![request.digest().as_slice(), reference.digest().as_slice()],
+    )
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    let retained = conn
+        .query_row(
+            "SELECT 1 FROM erasure_recovery_errors
+             WHERE request_digest=?1 AND error_digest=?2",
+            params![request.digest().as_slice(), reference.digest().as_slice()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+    retained.ok_or(ErasureErrorV1::ProvenanceMissing)
 }
 
 fn insert_sqlite_index(

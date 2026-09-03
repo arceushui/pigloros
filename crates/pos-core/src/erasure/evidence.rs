@@ -14,20 +14,21 @@ use super::{
     ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
     ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
-    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
-    ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1, ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1,
-    ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_AUTHORIZATION_REJECTION_TAG_V1,
-    ERASURE_CAS_EFFECT_TAG_V1, ERASURE_CORRECTION_PROVENANCE_TAG_V1,
-    ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1, ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
-    ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
-    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS,
-    ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS,
-    ERASURE_OBLIGATION_SET_TAG_V1, ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1,
-    ERASURE_RECEIPT_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateV1, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+    ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_CAS_EFFECT_TAG_V1,
+    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
+    ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1, ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1,
+    ERASURE_FREEZE_FAILURE_TAG_V1, ERASURE_FREEZE_PROVENANCE_TAG_V1,
+    ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
+    ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES,
+    ERASURE_MAX_SCOPE_EXTENSIONS, ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_OBLIGATION_TAG_V1, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1,
+    ERASURE_RECOVERY_ERROR_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
     ERASURE_SCOPE_EXTENSION_TAG_V1, ERQ1, ERS1, VERSION,
 };
 use ciborium::value::Value;
@@ -189,6 +190,27 @@ pub(super) fn correction_provenance_from_fields(
         correction_reason: bytes32(&fields[4])?,
         authorization_provenance: bytes32(&fields[5])?,
     })
+}
+
+pub(super) fn recovery_error_value(record: &ErasureRecoveryErrorV1) -> Value {
+    Value::Array(vec![
+        text(ERASURE_RECOVERY_ERROR_TAG_V1),
+        uint(VERSION),
+        digest(record.request()),
+        digest(record.manifest()),
+        uint(record.error().code()),
+    ])
+}
+
+pub(super) fn recovery_error_from_fields(
+    fields: &[Value],
+) -> Result<ErasureRecoveryErrorV1, ErasureErrorV1> {
+    header(fields, ERASURE_RECOVERY_ERROR_TAG_V1)?;
+    ErasureRecoveryErrorV1::new(
+        bytes32(&fields[2])?,
+        bytes32(&fields[3])?,
+        ErasureErrorV1::from_code(unsigned(&fields[4])?)?,
+    )
 }
 
 pub(super) fn authorization_rejection_value(record: &ErasureAuthorizationRejectionV1) -> Value {
