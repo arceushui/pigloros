@@ -19,6 +19,7 @@ use crate::evaluator_protocol::SubjectAdapterKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const TRANSPORT_OVERHEAD_BYTES: u64 = 64 * 1024;
+const MAX_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_RESPONSE_BYTES_U64: u64 = 128 * 1024 * 1024;
 
 /// Out-of-process public adapter identity and executable invocation.
@@ -56,7 +57,10 @@ impl ProcessAdapter {
 
     fn invoke(&self, attempt: &CaseAttempt) -> Result<SubjectObservation, AdapterError> {
         let request = encode_attempt(attempt).map_err(|_| AdapterError::ProtocolFailure)?;
-        let maximum_response = response_limit(attempt)?;
+        let maximum_response = response_limit(attempt);
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(attempt.watchdog_ms))
+            .ok_or(AdapterError::ProtocolFailure)?;
         let mut child = command(&self.program, &self.arguments)
             .spawn()
             .map_err(|_| AdapterError::Unavailable)?;
@@ -67,13 +71,13 @@ impl ProcessAdapter {
             .ok_or(AdapterError::ProtocolFailure)?;
         let (writer_tx, writer_rx) = mpsc::sync_channel(1);
         let (reader_tx, reader_rx) = mpsc::sync_channel(1);
-        let _writer = thread::spawn(move || drop(writer_tx.send(write_request(stdin, &request))));
+        let writer_worker = writer_tx.clone();
+        let reader_worker = reader_tx.clone();
+        let _writer =
+            thread::spawn(move || drop(writer_worker.send(write_request(stdin, &request))));
         let _reader = thread::spawn(move || {
-            drop(reader_tx.send(read_response(stdout, maximum_response)));
+            drop(reader_worker.send(read_response(stdout, maximum_response)));
         });
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(attempt.watchdog_ms))
-            .ok_or(AdapterError::ProtocolFailure)?;
         let status = loop {
             if let Some(status) = child
                 .try_wait()
@@ -90,9 +94,11 @@ impl ProcessAdapter {
         let wrote = receive_before(&writer_rx, deadline).inspect_err(|_| {
             terminate(&mut child);
         })?;
+        drop(writer_tx);
         let response = receive_before(&reader_rx, deadline).inspect_err(|_| {
             terminate(&mut child);
         })?;
+        drop(reader_tx);
         if !status.success() || wrote.is_err() {
             return Err(AdapterError::Unavailable);
         }
@@ -134,18 +140,14 @@ fn receive_before<T>(receiver: &mpsc::Receiver<T>, deadline: Instant) -> Result<
         .ok_or(AdapterError::WatchdogExpired)?;
     receiver
         .recv_timeout(remaining)
-        .map_err(|error| match error {
-            mpsc::RecvTimeoutError::Timeout => AdapterError::WatchdogExpired,
-            mpsc::RecvTimeoutError::Disconnected => AdapterError::ProtocolFailure,
-        })
+        .map_err(|_| AdapterError::WatchdogExpired)
 }
 
 #[cfg(unix)]
 fn terminate(child: &mut std::process::Child) {
     let process_group = Pid::from_child(child);
-    if kill_process_group(process_group, Signal::KILL).is_err() {
-        drop(child.kill());
-    }
+    drop(kill_process_group(process_group, Signal::KILL));
+    drop(child.kill());
     drop(child.wait());
 }
 
@@ -155,13 +157,13 @@ fn terminate(child: &mut std::process::Child) {
     drop(child.wait());
 }
 
-fn response_limit(attempt: &CaseAttempt) -> Result<usize, AdapterError> {
+fn response_limit(attempt: &CaseAttempt) -> usize {
     let requested = attempt
         .budget
         .output_bytes
         .saturating_add(TRANSPORT_OVERHEAD_BYTES)
         .min(MAX_RESPONSE_BYTES_U64);
-    usize::try_from(requested).map_err(|_| AdapterError::ProtocolFailure)
+    usize::try_from(requested).unwrap_or(MAX_RESPONSE_BYTES)
 }
 
 fn write_request(mut stdin: std::process::ChildStdin, request: &[u8]) -> std::io::Result<()> {

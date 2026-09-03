@@ -899,6 +899,10 @@ pub(crate) fn contract_digest(domain: &[u8], value: &Value) -> Result<[u8; 32], 
     Ok(*blake3::hash(&input).as_bytes())
 }
 
+pub(crate) fn contract_digest_matches(domain: &[u8], value: &Value, expected: [u8; 32]) -> bool {
+    contract_digest(domain, value).is_ok_and(|actual| actual == expected)
+}
+
 pub(crate) fn array(value: &Value, width: usize) -> Result<&[Value], ProtocolError> {
     match value {
         Value::Array(fields) if fields.len() == width => Ok(fields),

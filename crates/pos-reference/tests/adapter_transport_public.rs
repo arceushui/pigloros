@@ -665,6 +665,13 @@ fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestRe
         Err(AdapterError::ProtocolFailure)
     );
 
+    let mut unrepresentable_deadline = attempt();
+    unrepresentable_deadline.watchdog_ms = u64::MAX;
+    assert_eq!(
+        malformed.execute(&unrepresentable_deadline),
+        Err(AdapterError::ProtocolFailure)
+    );
+
     let mut oversized = ProcessAdapter::new(
         SubjectAdapterKind::ExportedArtifact,
         [1; 32],

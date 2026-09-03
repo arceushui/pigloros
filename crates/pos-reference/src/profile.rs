@@ -6,8 +6,8 @@ use ciborium::value::Value;
 use ed25519_dalek::Verifier;
 
 use crate::evaluator_protocol::{
-    array, array_values, bool_value, contract_digest, decode_canonical, encode, fixed_bytes, text,
-    uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
+    array, array_values, bool_value, contract_digest, contract_digest_matches, decode_canonical,
+    encode, fixed_bytes, text, uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
 use crate::signed_bundle::{ExpectedResultKey, VerifiedBundle, VerifiedMember};
 
@@ -324,13 +324,12 @@ impl Profile {
         let value = decode_canonical(bytes)?;
         let fields = array(&value, 18)?;
         let header = decode_profile_header(fields)?;
-        let actual_digest = contract_digest(
+        let profile_digest = fixed_bytes(&fields[17])?;
+        if !contract_digest_matches(
             b"PiglorOS.ConformanceProfile.v1",
             &Value::Array(fields[..17].to_vec()),
-        )?;
-        let profile_digest = fixed_bytes(&fields[17])?;
-        if actual_digest != profile_digest
-            || profile_digest != bundle.profile_digest
+            profile_digest,
+        ) || profile_digest != bundle.profile_digest
             || profile_digest != request.profile_digest
         {
             return Err(ProfileError::DigestMismatch);
@@ -585,12 +584,12 @@ fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture
 }
 
 fn validate_fixture_digest(fields: &[Value]) -> Result<[u8; 32], ProfileError> {
-    let actual_digest = contract_digest(
+    let fixture_digest = fixed_bytes(&fields[23])?;
+    if !contract_digest_matches(
         b"PiglorOS.Conformance.Fixture.v1",
         &Value::Array(fields[..23].to_vec()),
-    )?;
-    let fixture_digest = fixed_bytes(&fields[23])?;
-    if actual_digest != fixture_digest {
+        fixture_digest,
+    ) {
         return Err(ProfileError::DigestMismatch);
     }
     Ok(fixture_digest)
@@ -1479,12 +1478,12 @@ fn validate_execution_profile(
     let fields = array(&value, 17)?;
     validate_execution_profile_identity(fields, path)?;
     let maximum = validate_execution_profile_contract(fields)?;
-    let expected = contract_digest(
+    let expected = fixed_bytes::<32>(&fields[16])?;
+    if !contract_digest_matches(
         b"PiglorOS.ExecutionProfile.v1",
         &Value::Array(fields[..16].to_vec()),
-    )?;
-    if fixed_bytes::<32>(&fields[16])? != expected
-        || member_digest != *blake3::hash(bytes).as_bytes()
+        expected,
+    ) || member_digest != *blake3::hash(bytes).as_bytes()
     {
         return Err(ProfileError::DigestMismatch);
     }
@@ -1830,11 +1829,12 @@ fn validate_provider_contracts(
     if text(&fields[0])? != "FPR1" || uint(&fields[1])? != 1 {
         return Err(ProfileError::UnsupportedVersion);
     }
-    let expected_digest = contract_digest(
+    let expected_digest = fixed_bytes::<32>(&fields[3])?;
+    if !contract_digest_matches(
         b"PiglorOS.Conformance.ProviderRegistry.v1",
         &Value::Array(fields[..3].to_vec()),
-    )?;
-    if fixed_bytes::<32>(&fields[3])? != expected_digest {
+        expected_digest,
+    ) {
         return Err(ProfileError::DigestMismatch);
     }
     let entries = array_values(&fields[2])?;
@@ -1966,11 +1966,12 @@ fn validate_provider_package(
     if unique_paths.len() != schemas.len() + support.len() {
         return Err(ProfileError::NonCanonicalOrder);
     }
-    let expected_digest = contract_digest(
+    let expected_digest = fixed_bytes::<32>(&fields[11])?;
+    if !contract_digest_matches(
         b"PiglorOS.Conformance.ProviderPackage.v1",
         &Value::Array(fields[..11].to_vec()),
-    )?;
-    if fixed_bytes::<32>(&fields[11])? != expected_digest {
+        expected_digest,
+    ) {
         return Err(ProfileError::DigestMismatch);
     }
     Ok(schemas)

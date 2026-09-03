@@ -635,7 +635,10 @@ fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, Bund
     let mut previous_path: Option<String> = None;
     for value in values {
         let [path_value, raw_value, role_value] = into_array::<3>(value)?;
-        let path = validated_path(text(&path_value)?)?;
+        let Value::Text(path_value) = path_value else {
+            return Err(BundleError::InvalidEncoding);
+        };
+        let path = validated_path(&path_value)?;
         if previous_path
             .as_ref()
             .is_some_and(|previous| previous.as_bytes() >= path.as_bytes())
@@ -665,9 +668,6 @@ fn decode_expected_results(value: Value) -> Result<Vec<ExpectedResult>, BundleEr
     let Value::Array(values) = value else {
         return Err(BundleError::InvalidEncoding);
     };
-    if values.len() > MAX_MEMBERS {
-        return Err(BundleError::FieldOutOfBounds);
-    }
     let results = values
         .iter()
         .map(|value| {
