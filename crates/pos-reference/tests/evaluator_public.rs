@@ -736,6 +736,7 @@ const PROFILE_MUTATIONS: &[ProfileMutation] = &[
     ProfileMutation::Lifecycle,
     ProfileMutation::NormativeDigest,
     ProfileMutation::MatrixDigest,
+    ProfileMutation::MatrixContent,
     ProfileMutation::FixturePolicyDigest,
     ProfileMutation::LimitationsDigest,
     ProfileMutation::PublicationDigest,

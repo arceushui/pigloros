@@ -68,6 +68,7 @@ pub enum ProfileMutation {
     Lifecycle,
     NormativeDigest,
     MatrixDigest,
+    MatrixContent,
     FixturePolicyDigest,
     LimitationsDigest,
     PublicationDigest,
@@ -485,6 +486,12 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let trust_digest = hash(&trust_policy);
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
+    if matches!(profile_mutation, Some(ProfileMutation::MatrixContent)) {
+        members.insert(
+            "authority/execution-matrix.json".to_owned(),
+            (b"{}".to_vec(), 11),
+        );
+    }
     let evaluator_protocol_digest = member_hash(&members, "support/evaluator-protocol-v1.json")?;
     add_provider_contracts(&mut members, profile_mutation, subject_adapter, claim_layer)?;
     if let Some(bytes) = extra {
@@ -584,7 +591,11 @@ fn support_members(trust: &[u8], execution: &[u8]) -> BTreeMap<String, (Vec<u8>,
     BTreeMap::from([
         (
             "authority/execution-matrix.json".to_owned(),
-            (b"{}".to_vec(), 11),
+            (
+                include_bytes!("../../../../fixtures/conformance/matrix/execution-matrix.json")
+                    .to_vec(),
+                11,
+            ),
         ),
         (
             "authority/execution-profiles/test-profile.epf1".to_owned(),
@@ -1209,6 +1220,7 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::Lifecycle => profile_fields[4] = uint(1),
         ProfileMutation::NormativeDigest => profile_fields[5] = bytes(&[0; 32]),
         ProfileMutation::MatrixDigest => profile_fields[6] = bytes(&[0; 32]),
+        ProfileMutation::MatrixContent => {}
         ProfileMutation::FixturePolicyDigest => profile_fields[13] = bytes(&[0; 32]),
         ProfileMutation::LimitationsDigest => profile_fields[14] = bytes(&[0; 32]),
         ProfileMutation::PublicationDigest => profile_fields[15] = bytes(&[0; 32]),
