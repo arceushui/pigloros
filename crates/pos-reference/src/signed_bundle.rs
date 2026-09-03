@@ -215,36 +215,35 @@ fn decode_archive(
     request: &EvaluationRequest,
 ) -> Result<DecodedArchive, BundleError> {
     let root = decode_canonical_with_limit(archive_bytes, MAX_ARCHIVE_BYTES)?;
-    let mut archive = into_array(root, 4)?;
-    let manifest_value = archive.remove(0);
+    let [manifest_value, members_value, signer_key_value, signature_value] = into_array::<4>(root)?;
     let manifest_bytes = encode(&manifest_value)?;
-    let mut manifest = into_array(manifest_value, 6)?;
-    if text(&manifest[0])? != "CFB1" || uint(&manifest[1])? != 0 {
+    let [magic, version, mode, profile, descriptors, expected] = into_array::<6>(manifest_value)?;
+    if text(&magic)? != "CFB1" || uint(&version)? != 0 {
         return Err(BundleError::InvalidEncoding);
     }
-    let mode = u8::try_from(uint(&manifest[2])?).map_err(|_| BundleError::InvalidEncoding)?;
+    let mode = u8::try_from(uint(&mode)?).map_err(|_| BundleError::InvalidEncoding)?;
     if mode > 1 {
         return Err(BundleError::InvalidEncoding);
     }
-    let profile_digest = fixed_bytes(&manifest[3])?;
+    let profile_digest = fixed_bytes(&profile)?;
     if profile_digest != request.profile_digest {
         return Err(BundleError::DigestMismatch);
     }
     Ok(DecodedArchive {
         mode,
         profile_digest,
-        descriptors: decode_descriptors(manifest.remove(4))?,
-        expected: decode_expected_results(manifest.remove(4))?,
-        members: decode_members(archive.remove(0))?,
-        signer_key: fixed_bytes(&archive[0])?,
-        signature: fixed_bytes(&archive[1])?,
+        descriptors: decode_descriptors(descriptors)?,
+        expected: decode_expected_results(expected)?,
+        members: decode_members(members_value)?,
+        signer_key: fixed_bytes(&signer_key_value)?,
+        signature: fixed_bytes(&signature_value)?,
         manifest_bytes,
     })
 }
 
-fn into_array(value: Value, width: usize) -> Result<Vec<Value>, BundleError> {
+fn into_array<const WIDTH: usize>(value: Value) -> Result<[Value; WIDTH], BundleError> {
     match value {
-        Value::Array(values) if values.len() == width => Ok(values),
+        Value::Array(values) => values.try_into().map_err(|_| BundleError::InvalidEncoding),
         _ => Err(BundleError::InvalidEncoding),
     }
 }
@@ -638,18 +637,18 @@ fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, Bund
     let mut total = 0_usize;
     let mut previous_path: Option<String> = None;
     for value in values {
-        let mut fields = into_array(value, 3)?;
-        let path = validated_path(text(&fields[0])?)?;
+        let [path_value, raw_value, role_value] = into_array::<3>(value)?;
+        let path = validated_path(text(&path_value)?)?;
         if previous_path
             .as_ref()
             .is_some_and(|previous| previous.as_bytes() >= path.as_bytes())
         {
             return Err(BundleError::NonCanonicalOrder);
         }
-        let Value::Bytes(raw) = fields.remove(1) else {
+        let Value::Bytes(raw) = raw_value else {
             return Err(BundleError::InvalidEncoding);
         };
-        let role = u8::try_from(uint(&fields[1])?).map_err(|_| BundleError::InvalidEncoding)?;
+        let role = u8::try_from(uint(&role_value)?).map_err(|_| BundleError::InvalidEncoding)?;
         total += raw.len();
         if raw.len() > MAX_MEMBER_BYTES || total > MAX_ARCHIVE_BYTES || role > 19 {
             return Err(BundleError::FieldOutOfBounds);
