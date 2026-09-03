@@ -26,6 +26,11 @@ for command in b3sum cargo git gzip jq rustc; do
   }
 done
 
+if [[ -n $(git status --porcelain=v1 --untracked-files=all) ]]; then
+  printf '%s\n' 'evaluator packages must be built from a clean source tree' >&2
+  exit 2
+fi
+
 work_directory=$(mktemp -d)
 cleanup() {
   rm -rf -- "${work_directory}"
