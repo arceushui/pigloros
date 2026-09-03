@@ -44,8 +44,8 @@ use pos_core::{
     timeline::{Timeline, TimelineMeta},
     ConsentAppendPermit, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
     ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReferenceV1,
-    ErasureStateResolverV1, KeyRegistryStateV1, PreparedErasureCasV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureStateResolverV1, KeyRegistryStateV1, PreparedErasureCasV1, StoredErasureManifestV1,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]

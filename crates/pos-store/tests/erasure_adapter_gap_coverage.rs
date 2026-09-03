@@ -347,7 +347,9 @@ where
         request: ErasureReferenceV1,
         object: pos_core::ErasurePersistenceObjectV1,
     ) -> Result<(), ErasureErrorV1> {
-        self.store.borrow_mut().append_recovery_error(request, object)
+        self.store
+            .borrow_mut()
+            .append_recovery_error(request, object)
     }
 
     fn compare_and_swap(

@@ -62,12 +62,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         failure_subject: ErasureReferenceV1,
         error: ErasureErrorV1,
     ) -> Result<(), ErasureErrorV1> {
-        let recovery_error = ErasureRecoveryErrorV1::new(
-            request,
-            manifest,
-            failure_subject,
-            error,
-        )?;
+        let recovery_error =
+            ErasureRecoveryErrorV1::new(request, manifest, failure_subject, error)?;
         let object = ErasurePersistenceObjectV1::new(
             recovery_error.reference(),
             recovery_error.to_canonical_cbor()?,

@@ -44,9 +44,9 @@ use pos_core::{
     timeline::{Timeline, TimelineMeta, TimelineMode},
     ConsentAppendPermit, CoreError, ErasureCasOutcomeV1, ErasureErrorV1, ErasureIndexInsertV1,
     ErasurePersistenceObjectV1, ErasurePersistencePortV1, ErasureReferenceV1,
-    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
-    KeyIdentityV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PreparedErasureCasV1,
-    StoredErasureManifestV1, ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
+    ErasureStateResolverV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PreparedErasureCasV1, StoredErasureManifestV1,
+    ERASURE_MAX_RECOVERY_ERRORS, GEOGRAPHIC_EVENT_TYPE,
 };
 
 #[cfg(test)]
@@ -4463,7 +4463,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
             .query_map(
                 params![
                     request.digest().as_slice(),
-                    (ERASURE_MAX_RECOVERY_ERRORS + 1) as i64,
+                    i64::try_from(ERASURE_MAX_RECOVERY_ERRORS + 1).unwrap_or(i64::MAX),
                 ],
                 |row| row.get::<_, Vec<u8>>(0),
             )

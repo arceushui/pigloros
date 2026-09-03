@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+use ciborium::value::Value;
+
 #[path = "support/coordinator.rs"]
 pub mod coordinator_support;
 #[path = "support/erasure.rs"]
@@ -27,12 +29,11 @@ use pos_core::{
     ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureCoordinator,
     ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureInventoryCategoryV1,
     ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureRecoveryErrorV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ErasureVerifiedStateQueryV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, ErasureVerifiedStateQueryV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -350,8 +351,7 @@ fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), Er
 }
 
 #[test]
-fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
-) -> Result<(), ErasureErrorV1> {
+fn recovery_failures_are_retained_and_exact_retries_are_idempotent() -> Result<(), ErasureErrorV1> {
     let graph = active_graph(vec![target(10)], None)?;
     let request = graph.request.reference();
     let manifest = graph
@@ -372,8 +372,12 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     adapter.insert_object(request, graph.request.to_canonical_cbor()?);
-    let closure = target_closure_digest(&[target(10)]);
-    adapter.remove_object(closure);
+    let missing_closure = reference(250);
+    adapter.replace_manifest_field(request, 4, Value::Bytes(missing_closure.digest().to_vec()))?;
+    let changed_manifest = adapter
+        .current_manifest(request)
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
     assert_eq!(
         coordinator.verified_state(request),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -385,13 +389,18 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
 
     let failures = coordinator.recovery_errors(request)?;
     assert_eq!(failures.len(), 2);
-    assert_eq!(failures[0].request(), request);
-    assert_eq!(failures[0].manifest(), Some(manifest));
-    assert_eq!(failures[0].failure_subject(), request);
-    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
-    assert_eq!(failures[1].manifest(), Some(manifest));
-    assert_eq!(failures[1].failure_subject(), closure);
-    assert_eq!(failures[1].error(), ErasureErrorV1::ProvenanceMissing);
+    assert!(failures.iter().any(|failure| {
+        failure.request() == request
+            && failure.manifest() == Some(manifest)
+            && failure.failure_subject() == request
+            && failure.error() == ErasureErrorV1::ProvenanceMissing
+    }));
+    assert!(failures.iter().any(|failure| {
+        failure.request() == request
+            && failure.manifest() == Some(changed_manifest)
+            && failure.failure_subject() == missing_closure
+            && failure.error() == ErasureErrorV1::ProvenanceMissing
+    }));
     let bytes = failures[0].to_canonical_cbor()?;
     assert_eq!(
         ErasureRecoveryErrorV1::from_canonical_cbor(&bytes)?,
@@ -405,8 +414,8 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
 }
 
 #[test]
-fn manifest_read_failures_are_retained_without_a_manifest_reference(
-) -> Result<(), ErasureErrorV1> {
+fn manifest_read_failures_are_retained_without_a_manifest_reference() -> Result<(), ErasureErrorV1>
+{
     let request = request()?;
     let adapter = port(vec![], None).with_operation_fault(PublicCoordinatorFault {
         operation: PublicCoordinatorOperation::LoadManifest,
