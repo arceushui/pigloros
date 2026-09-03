@@ -9,7 +9,7 @@ use crate::evaluator_protocol::{
     array, array_values, bool_value, contract_digest, decode_canonical, encode, fixed_bytes, text,
     uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
-use crate::signed_bundle::VerifiedBundle;
+use crate::signed_bundle::{VerifiedBundle, VerifiedMember};
 
 const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
@@ -223,9 +223,7 @@ pub struct Fixture {
     pub capability_ids: Vec<String>,
     pub provenance_digest: [u8; 32],
     pub fixture_digest: [u8; 32],
-    trust_policy_snapshot_digest: Option<[u8; 32]>,
-    release_admission_digest: Option<[u8; 32]>,
-    transition: Option<ProviderTransition>,
+    release_admission: Option<ReleaseAdmissionBinding>,
 }
 
 struct FixtureHeader {
@@ -255,10 +253,15 @@ struct FixturePolicy {
     watchdog_ms: u64,
     network_allowed: bool,
     capability_ids: Vec<String>,
-    trust_policy_snapshot_digest: Option<[u8; 32]>,
-    release_admission_digest: Option<[u8; 32]>,
+    release_admission: Option<ReleaseAdmissionBinding>,
     provenance_digest: [u8; 32],
-    transition: Option<ProviderTransition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReleaseAdmissionBinding {
+    trust_policy_snapshot_digest: [u8; 32],
+    release_admission_digest: [u8; 32],
+    transition: ProviderTransition,
 }
 
 /// Validated current-only CPF1 information needed by the evaluator.
@@ -380,11 +383,11 @@ impl Profile {
             provenance_digest: header.publication_digest,
         };
         profile.validate_request(request)?;
-        profile.validate_bundle_closure(bundle, &registry)?;
+        let registry_member = profile.validate_bundle_closure(bundle, &registry)?;
         validate_release_admissions(bundle, &profile.fixtures)?;
         validate_provider_contracts(
             bundle,
-            &registry,
+            registry_member,
             &required_providers,
             profile_claim_layer,
             &profile.fixtures,
@@ -426,17 +429,17 @@ impl Profile {
         })
     }
 
-    fn validate_bundle_closure(
+    fn validate_bundle_closure<'a>(
         &self,
-        bundle: &VerifiedBundle,
+        bundle: &'a VerifiedBundle,
         registry: &ArtifactDescriptor,
-    ) -> Result<(), ProfileError> {
-        validate_descriptor(bundle, registry)?;
+    ) -> Result<&'a VerifiedMember, ProfileError> {
+        let registry_member = validate_descriptor(bundle, registry)?;
         for fixture in &self.fixtures {
             validate_descriptor_roles(bundle, &fixture.schema, &[4])?;
             validate_descriptor_roles(bundle, &fixture.payload, &[0])?;
             fixture.auxiliary.iter().try_for_each(|descriptor| {
-                validate_descriptor_roles(bundle, descriptor, &[0, 1, 17])
+                validate_descriptor_roles(bundle, descriptor, &[0, 1, 17]).map(|_| ())
             })?;
             if let StrictOracle::Output(descriptor) = &fixture.oracle {
                 validate_descriptor_roles(bundle, descriptor, &[1])?;
@@ -456,7 +459,8 @@ impl Profile {
                 }
             }
         }
-        validate_expected_results(bundle, &self.fixtures)
+        validate_expected_results(bundle, &self.fixtures)?;
+        Ok(registry_member)
     }
 }
 
@@ -470,7 +474,12 @@ fn validate_release_admissions(
         .collect::<Vec<_>>();
     let expected = selected
         .iter()
-        .filter_map(|fixture| fixture.release_admission_digest)
+        .filter_map(|fixture| {
+            fixture
+                .release_admission
+                .as_ref()
+                .map(|binding| binding.release_admission_digest)
+        })
         .collect::<BTreeSet<_>>();
     let actual_members = bundle
         .members
@@ -496,20 +505,14 @@ fn validate_release_admission(
     bundle: &VerifiedBundle,
     fixture: &Fixture,
 ) -> Result<(), ProfileError> {
-    let digest = fixture
-        .release_admission_digest
+    let binding = fixture
+        .release_admission
+        .as_ref()
         .ok_or(ProfileError::ClosureIncomplete)?;
     let member = bundle
         .members
         .values()
-        .find(|member| member.role == 16 && member.digest == digest)
-        .ok_or(ProfileError::ClosureIncomplete)?;
-    let transition = fixture
-        .transition
-        .as_ref()
-        .ok_or(ProfileError::ClosureIncomplete)?;
-    let snapshot = fixture
-        .trust_policy_snapshot_digest
+        .find(|member| member.role == 16 && member.digest == binding.release_admission_digest)
         .ok_or(ProfileError::ClosureIncomplete)?;
     let value = decode_canonical(&member.bytes)?;
     let fields = array(&value, 11)?;
@@ -520,9 +523,9 @@ fn validate_release_admission(
         || uint(&fields[2])? != 0
         || text(&fields[3])? != fixture.case_id
         || fixed_bytes::<32>(&fields[4])? != fixture.execution_profile_digest
-        || fixed_bytes::<32>(&fields[5])? != snapshot
-        || from != transition.from
-        || to != transition.to
+        || fixed_bytes::<32>(&fields[5])? != binding.trust_policy_snapshot_digest
+        || from != binding.transition.from
+        || to != binding.transition.to
         || bool_value(&fields[8])?
         || text(&fields[9])? != bundle.authority_key_id
     {
@@ -584,9 +587,7 @@ fn decode_fixture(value: &Value) -> Result<Fixture, ProfileError> {
         capability_ids: policy.capability_ids,
         provenance_digest: policy.provenance_digest,
         fixture_digest,
-        trust_policy_snapshot_digest: policy.trust_policy_snapshot_digest,
-        release_admission_digest: policy.release_admission_digest,
-        transition: policy.transition,
+        release_admission: policy.release_admission,
     };
     validate_fixture(&fixture).map(|()| fixture)
 }
@@ -668,15 +669,28 @@ fn decode_fixture_policy(fields: &[Value]) -> Result<FixturePolicy, ProfileError
     if capability_ids.len() > MAX_CAPABILITIES {
         return Err(ProfileError::FieldOutOfBounds);
     }
+    let release_admission = match (
+        optional_digest(&fields[19])?,
+        optional_digest(&fields[20])?,
+        optional_transition(&fields[22])?,
+    ) {
+        (None, None, None) => None,
+        (Some(trust_policy_snapshot_digest), Some(release_admission_digest), Some(transition)) => {
+            Some(ReleaseAdmissionBinding {
+                trust_policy_snapshot_digest,
+                release_admission_digest,
+                transition,
+            })
+        }
+        _ => return Err(ProfileError::ClosureIncomplete),
+    };
     Ok(FixturePolicy {
         deterministic_budget,
         watchdog_ms: uint(&safety[0])?,
         network_allowed: bool_value(&capability[0])?,
         capability_ids,
-        trust_policy_snapshot_digest: optional_digest(&fields[19])?,
-        release_admission_digest: optional_digest(&fields[20])?,
+        release_admission,
         provenance_digest: decode_provenance(&fields[21])?,
-        transition: optional_transition(&fields[22])?,
     })
 }
 
@@ -988,34 +1002,30 @@ const fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileErr
 
 fn validate_downgrade_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
     if fixture.family != 5 {
-        return if fixture.trust_policy_snapshot_digest.is_none()
-            && fixture.release_admission_digest.is_none()
-            && fixture.transition.is_none()
-        {
+        return if fixture.release_admission.is_none() {
             Ok(())
         } else {
             Err(ProfileError::ClosureIncomplete)
         };
     }
-    let valid = fixture
-        .trust_policy_snapshot_digest
-        .is_some_and(|digest| digest != [0; 32])
-        && fixture
-            .release_admission_digest
-            .is_some_and(|digest| digest != [0; 32])
-        && fixture.transition.as_ref().is_some_and(|transition| {
-            let targets_selected_provider = transition.to == fixture.provider;
-            let preserves_provider = transition.from.provider_id == transition.to.provider_id;
-            let preserves_contract =
-                transition.from.contract_version == transition.to.contract_version;
-            let preserves_major = transition.from.abi_major == transition.to.abi_major;
-            let downgrades_minor = transition.from.abi_minor > transition.to.abi_minor;
-            targets_selected_provider
-                && preserves_provider
-                && preserves_contract
-                && preserves_major
-                && downgrades_minor
-        });
+    let valid = fixture.release_admission.as_ref().is_some_and(|binding| {
+        binding.trust_policy_snapshot_digest != [0; 32]
+            && binding.release_admission_digest != [0; 32]
+            && {
+                let transition = &binding.transition;
+                let targets_selected_provider = transition.to == fixture.provider;
+                let preserves_provider = transition.from.provider_id == transition.to.provider_id;
+                let preserves_contract =
+                    transition.from.contract_version == transition.to.contract_version;
+                let preserves_major = transition.from.abi_major == transition.to.abi_major;
+                let downgrades_minor = transition.from.abi_minor > transition.to.abi_minor;
+                targets_selected_provider
+                    && preserves_provider
+                    && preserves_contract
+                    && preserves_major
+                    && downgrades_minor
+            }
+    });
     if valid {
         Ok(())
     } else {
@@ -1142,11 +1152,6 @@ fn validate_support_closure(
             header.normative_spec_digest,
         ),
         (
-            "authority/execution-matrix.json",
-            11,
-            header.execution_matrix_digest,
-        ),
-        (
             "support/fixture-family-contract.json",
             18,
             header.fixture_policy_digest,
@@ -1182,12 +1187,12 @@ fn validate_support_closure(
     for (path, role, digest) in support {
         validate_member_binding(bundle, path, role, digest)?;
     }
-    validate_execution_matrix(bundle)?;
+    validate_execution_matrix(bundle, header.execution_matrix_digest)?;
     let actual_execution_profiles = bundle
         .members
         .iter()
         .filter(|(_, member)| member.role == 14)
-        .map(|(path, member)| {
+        .map(|(path, member)| -> Result<[u8; 32], ProfileError> {
             let maximum = validate_execution_profile(path, &member.bytes, member.digest)?;
             validate_fixture_execution_budget(member.digest, maximum, fixtures)?;
             Ok(member.digest)
@@ -1203,10 +1208,11 @@ fn validate_support_closure(
     }
 }
 
-fn validate_execution_matrix(bundle: &VerifiedBundle) -> Result<(), ProfileError> {
-    let member = bundle
-        .member("authority/execution-matrix.json")
-        .ok_or(ProfileError::ClosureIncomplete)?;
+fn validate_execution_matrix(
+    bundle: &VerifiedBundle,
+    digest: [u8; 32],
+) -> Result<(), ProfileError> {
+    let member = validate_member_binding(bundle, "authority/execution-matrix.json", 11, digest)?;
     let root: serde_json::Value =
         serde_json::from_slice(&member.bytes).map_err(|_| ProfileError::InvalidEncoding)?;
     let root = json_object(&root)?;
@@ -1280,7 +1286,7 @@ fn validate_matrix_inventory(
     }
     let mut executed_total = 0_u64;
     for (fixture_index, fixture_id) in FIXTURES.iter().enumerate() {
-        validate_matrix_row(&rows[fixture_index], fixture_id)?;
+        let declared_executed = validate_matrix_row(&rows[fixture_index], fixture_id)?;
         validate_matrix_predicate(&predicates[fixture_index], fixture_id)?;
         let mut row_executed = 0_u64;
         for (variant_index, variant) in VARIANTS.iter().enumerate() {
@@ -1291,8 +1297,7 @@ fn validate_matrix_inventory(
                 }
             }
         }
-        let row = json_object(&rows[fixture_index])?;
-        if json_u64(row, "executed_case_count")? != row_executed {
+        if declared_executed != row_executed {
             return Err(ProfileError::ClosureIncomplete);
         }
         executed_total += row_executed;
@@ -1304,7 +1309,7 @@ fn validate_matrix_inventory(
     }
 }
 
-fn validate_matrix_row(value: &serde_json::Value, fixture_id: &str) -> Result<(), ProfileError> {
+fn validate_matrix_row(value: &serde_json::Value, fixture_id: &str) -> Result<u64, ProfileError> {
     let row = json_object(value)?;
     require_json_fields(
         row,
@@ -1336,10 +1341,9 @@ fn validate_matrix_row(value: &serde_json::Value, fixture_id: &str) -> Result<()
         )?
         || json_array(row, "observable_surfaces")?.is_empty()
     {
-        Err(ProfileError::ClosureIncomplete)
-    } else {
-        Ok(())
+        return Err(ProfileError::ClosureIncomplete);
     }
+    json_u64(row, "executed_case_count")
 }
 
 fn validate_matrix_predicate(
@@ -1596,17 +1600,17 @@ fn valid_text_list(value: &Value, empty_allowed: bool) -> Result<bool, ProfileEr
     Ok(true)
 }
 
-fn validate_member_binding(
-    bundle: &VerifiedBundle,
+fn validate_member_binding<'a>(
+    bundle: &'a VerifiedBundle,
     path: &str,
     role: u8,
     digest: [u8; 32],
-) -> Result<(), ProfileError> {
-    if bundle
+) -> Result<&'a VerifiedMember, ProfileError> {
+    if let Some(member) = bundle
         .member(path)
-        .is_some_and(|member| member.role == role && member.digest == digest)
+        .filter(|member| member.role == role && member.digest == digest)
     {
-        Ok(())
+        Ok(member)
     } else {
         Err(ProfileError::ClosureIncomplete)
     }
@@ -1743,31 +1747,28 @@ fn decode_hard_caps(value: &Value) -> Result<EvaluatorHardCaps, ProfileError> {
     })
 }
 
-fn validate_descriptor(
-    bundle: &VerifiedBundle,
+fn validate_descriptor<'a>(
+    bundle: &'a VerifiedBundle,
     descriptor: &ArtifactDescriptor,
-) -> Result<(), ProfileError> {
+) -> Result<&'a VerifiedMember, ProfileError> {
     let member = bundle
         .member(&descriptor.member_path)
         .ok_or(ProfileError::ClosureIncomplete)?;
     if member.bytes.len() as u64 != descriptor.byte_length || member.digest != descriptor.digest {
         Err(ProfileError::DigestMismatch)
     } else {
-        Ok(())
+        Ok(member)
     }
 }
 
-fn validate_descriptor_roles(
-    bundle: &VerifiedBundle,
+fn validate_descriptor_roles<'a>(
+    bundle: &'a VerifiedBundle,
     descriptor: &ArtifactDescriptor,
     roles: &[u8],
-) -> Result<(), ProfileError> {
-    validate_descriptor(bundle, descriptor)?;
-    if bundle
-        .member(&descriptor.member_path)
-        .is_some_and(|member| roles.contains(&member.role))
-    {
-        Ok(())
+) -> Result<&'a VerifiedMember, ProfileError> {
+    let member = validate_descriptor(bundle, descriptor)?;
+    if roles.contains(&member.role) {
+        Ok(member)
     } else {
         Err(ProfileError::ClosureIncomplete)
     }
@@ -1828,14 +1829,11 @@ struct ProviderRecord {
 
 fn validate_provider_contracts(
     bundle: &VerifiedBundle,
-    registry_descriptor: &ArtifactDescriptor,
+    registry_member: &VerifiedMember,
     required: &[ProviderKey],
     profile_claim_layer: u8,
     fixtures: &[Fixture],
 ) -> Result<(), ProfileError> {
-    let registry_member = bundle
-        .member(&registry_descriptor.member_path)
-        .ok_or(ProfileError::ClosureIncomplete)?;
     let value = decode_canonical(&registry_member.bytes)?;
     let fields = array(&value, 4)?;
     if text(&fields[0])? != "FPR1" || uint(&fields[1])? != 1 {
@@ -1915,8 +1913,8 @@ fn decode_provider_record(
     if package.media_type != "application/cbor" {
         return Err(ProfileError::ClosureIncomplete);
     }
-    validate_descriptor_roles(bundle, &package, &[13])?;
-    let schemas = validate_provider_package(bundle, &package, &key, claim_layer, adapter)?;
+    let package_member = validate_descriptor_roles(bundle, &package, &[13])?;
+    let schemas = validate_provider_package(bundle, package_member, &key, claim_layer, adapter)?;
     Ok(ProviderRecord {
         key,
         claim_layer,
@@ -1928,14 +1926,11 @@ fn decode_provider_record(
 
 fn validate_provider_package(
     bundle: &VerifiedBundle,
-    descriptor: &ArtifactDescriptor,
+    package: &VerifiedMember,
     key: &ProviderKey,
     claim_layer: u8,
     adapter: SubjectAdapterKind,
 ) -> Result<Vec<ArtifactDescriptor>, ProfileError> {
-    let package = bundle
-        .member(&descriptor.member_path)
-        .ok_or(ProfileError::ClosureIncomplete)?;
     let value = decode_canonical(&package.bytes)?;
     let fields = array(&value, 12)?;
     if text(&fields[0])? != "FPP1"
