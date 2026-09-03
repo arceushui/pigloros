@@ -4459,7 +4459,7 @@ impl ErasurePersistencePortV1 for SqliteStore {
                  WHERE request_digest=?1 ORDER BY error_digest",
             )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        statement
+        let references = statement
             .query_map(params![request.digest().as_slice()], |row| {
                 row.get::<_, Vec<u8>>(0)
             })
@@ -4469,7 +4469,8 @@ impl ErasurePersistencePortV1 for SqliteStore {
                     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
                     .and_then(reference_from_sql)
             })
-            .collect()
+            .collect();
+        references
     }
     fn append_recovery_error(
         &mut self,
