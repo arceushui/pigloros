@@ -203,6 +203,11 @@ struct CompletedGraph {
     receipt: pos_core::ErasureReceiptV1,
 }
 
+struct ActiveGraph {
+    adapter: PublicCoordinatorPort,
+    request: ErasureRequestV1,
+}
+
 fn completed_graph(
     mut targets: Vec<ErasureRequiredTargetV1>,
     lineage_rule: Option<ErasureReferenceV1>,
@@ -235,6 +240,25 @@ fn completed_graph(
         request,
         receipt,
     })
+}
+
+fn active_graph(
+    mut targets: Vec<ErasureRequiredTargetV1>,
+    lineage_rule: Option<ErasureReferenceV1>,
+) -> Result<ActiveGraph, ErasureErrorV1> {
+    targets.sort_unstable();
+    let request = request()?;
+    let port = port(targets.clone(), lineage_rule);
+    let adapter = port.clone();
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    coordinator.submit(request.clone(), request.provenance())?;
+    coordinator.authorize(request.reference(), reference(21))?;
+    coordinator.freeze_access(request.reference(), freeze_transition())?;
+    coordinator.dispatch_attempt(
+        request.reference(),
+        &admission(request.reference(), &targets)?,
+    )?;
+    Ok(ActiveGraph { adapter, request })
 }
 
 fn scope(
@@ -311,6 +335,26 @@ fn recovery_rejects_reordered_persisted_acknowledgement_inventory() -> Result<()
     graph
         .adapter
         .reverse_attempt_inventory(graph.request.reference(), 0, 5)?;
+    assert_recovery_fails(graph.adapter, &graph.request);
+    Ok(())
+}
+
+#[test]
+fn recovery_accepts_an_untampered_completed_graph() -> Result<(), ErasureErrorV1> {
+    let graph = completed_graph(vec![target(10)], None)?;
+    let recovered = ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR)
+        .submit(graph.request.clone(), graph.request.provenance())?;
+    assert_eq!(recovered.lifecycle(), ErasureLifecycleV1::Complete);
+    Ok(())
+}
+
+#[test]
+fn recovery_rejects_an_active_graph_with_a_non_pending_state() -> Result<(), ErasureErrorV1> {
+    let graph = active_graph(vec![target(10)], None)?;
+    graph.adapter.replace_manifest_with_state_lifecycle(
+        graph.request.reference(),
+        ErasureLifecycleV1::DestructionDispatched,
+    )?;
     assert_recovery_fails(graph.adapter, &graph.request);
     Ok(())
 }
