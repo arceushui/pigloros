@@ -78,6 +78,32 @@ const fn target(seed: u8) -> ErasureRequiredTargetV1 {
     }
 }
 
+fn encoded_target(target: ErasureRequiredTargetV1) -> Value {
+    let artifact_class = match target.artifact_class {
+        ErasureArtifactClassV1::TimelineReplay => 0,
+        ErasureArtifactClassV1::ReproManifest => 1,
+        ErasureArtifactClassV1::CausalTrace => 2,
+        ErasureArtifactClassV1::CalibrationReport => 3,
+        ErasureArtifactClassV1::Export => 4,
+        ErasureArtifactClassV1::ForkOrSnapshot => 5,
+        ErasureArtifactClassV1::ConformanceReport => 6,
+    };
+    let key_role = match target.key_role {
+        ErasureKeyRoleV1::DataEncryption => 0,
+        ErasureKeyRoleV1::Signing => 1,
+        ErasureKeyRoleV1::BackupEnvelope => 2,
+        ErasureKeyRoleV1::ReplicaTransport => 3,
+    };
+    Value::Array(vec![
+        Value::Integer(artifact_class.into()),
+        Value::Bytes(target.artifact_digest.digest().to_vec()),
+        Value::Integer(key_role.into()),
+        Value::Bytes(target.key_digest.digest().to_vec()),
+        Value::Bytes(target.replica_set.digest().to_vec()),
+        Value::Bytes(target.replica_id.digest().to_vec()),
+    ])
+}
+
 fn request(
     scope: ErasureScopeV1,
     selectors: Vec<ErasureReferenceV1>,
@@ -2066,6 +2092,24 @@ fn coordinator_recovery_rejects_malformed_private_graph_envelopes() -> Result<()
         3,
         Value::Array(vec![Value::Bool(true)]),
     )?;
+    let duplicate_target = encoded_target(target(10));
+    assert_manifest_object_field_rejected(
+        4,
+        ERASURE_TARGET_CLOSURE_TAG_V1,
+        3,
+        Value::Array(vec![duplicate_target.clone(), duplicate_target]),
+    )?;
+    assert_active_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            14,
+            Value::Array(vec![
+                Value::Integer(0.into()),
+                Value::Bytes(graph.admission.reference().digest().to_vec()),
+                Value::Array(vec![Value::Bool(true)]),
+            ]),
+        )
+    })?;
 
     for field in 0..12 {
         assert_graph_mutation_rejected(|graph| {
@@ -2098,6 +2142,16 @@ fn coordinator_recovery_rejects_malformed_private_graph_envelopes() -> Result<()
                 ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
                 5,
                 Value::Array(vec![Value::Bool(true)]),
+            )
+        })?;
+        assert_graph_mutation_rejected(|graph| {
+            graph.adapter.replace_attempt_component_field(
+                graph.request.reference(),
+                0,
+                page_field,
+                ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1,
+                4,
+                Value::Integer(2.into()),
             )
         })?;
     }

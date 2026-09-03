@@ -5236,6 +5236,22 @@ mod tests {
     }
 
     #[test]
+    fn memory_effect_insert_accepts_only_exact_duplicates() {
+        let manifest = ErasureReferenceV1::from_digest([1; 32]);
+        let effect = pos_core::ErasureCasEffectV1::None;
+        let bytes = effect.to_canonical_cbor().test_ok();
+        let mut effects = BTreeMap::new();
+        assert!(insert_effect_exact(&mut effects, manifest, &effect, &bytes).is_ok());
+        assert!(insert_effect_exact(&mut effects, manifest, &effect, &bytes).is_ok());
+
+        let other = pos_core::ErasureCasEffectV1::ReceiptAdmission {
+            receipt: ErasureReferenceV1::from_digest([2; 32]),
+        };
+        let other_bytes = other.to_canonical_cbor().test_ok();
+        assert!(insert_effect_exact(&mut effects, manifest, &other, &other_bytes).is_err());
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn memory_boundary_rejects_non_v1_serialized_draft() {
         let draft = make_draft(EntityId::new(), b"payload");
