@@ -13,12 +13,14 @@ use pos_core::{
 };
 
 /// Build a deterministic test-only digest reference.
+#[must_use]
 pub const fn reference(value: u8) -> ErasureReferenceV1 {
     ErasureReferenceV1::from_digest([value; 32])
 }
 
 /// Build the common TimelineReplay/DataEncryption target used by persistence
 /// lifecycle scenarios.
+#[must_use]
 pub const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: ErasureArtifactClassV1::TimelineReplay,
@@ -31,6 +33,7 @@ pub const fn replay_target(seed: u8) -> ErasureRequiredTargetV1 {
 }
 
 /// Build the varied target matrix used by codec and receipt scenarios.
+#[must_use]
 pub const fn target(seed: u8) -> ErasureRequiredTargetV1 {
     ErasureRequiredTargetV1 {
         artifact_class: match seed % 7 {
@@ -70,6 +73,10 @@ pub struct RequestFixtureInput {
 }
 
 /// Construct an ERQ1 through the same public constructor used by callers.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] when the fixture fields violate ERQ1 invariants.
 pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureErrorV1> {
     ErasureRequestV1::new(ErasureRequestInputV1 {
         request: input.request,
@@ -86,6 +93,11 @@ pub fn request(input: RequestFixtureInput) -> Result<ErasureRequestV1, ErasureEr
 }
 
 /// Build one category-scoped obligation for an ERQ1 target.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] when the target or derived command identity is
+/// not valid for an ERRA1 obligation.
 pub fn obligation(
     request: ErasureReferenceV1,
     target: ErasureRequiredTargetV1,
@@ -114,6 +126,11 @@ pub struct RetryAdmissionFixture<'a> {
 
 /// Construct a retry admission while keeping obligation/command ordering
 /// aligned through the public ERRA1 constructor.
+///
+/// # Errors
+///
+/// Returns [`ErasureErrorV1`] when the supplied obligation identities do not
+/// form a valid ERRA1 admission.
 pub fn retry_admission(
     input: RetryAdmissionFixture<'_>,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
