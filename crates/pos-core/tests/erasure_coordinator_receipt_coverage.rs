@@ -1640,8 +1640,7 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         api.submit_corrected(corrected, correction.clone())?,
         corrected_state
     );
-    let mutation_base = adapter.clone();
-    let mut recovered = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+    let mut recovered = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
     assert_eq!(
         recovered.submit_corrected(
             corrected_request(correction.reference())?,
@@ -1649,15 +1648,6 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         )?,
         corrected_state
     );
-
-    assert_correction_recovery_guards(
-        &mutation_base,
-        corrected_reference,
-        original.reference(),
-        rejected.state_digest(),
-        original_submitted.state_digest(),
-        &correction,
-    )?;
 
     let conflicting_correction =
         correction_for(original.reference(), rejected.state_digest(), reference(98))?;
@@ -1679,9 +1669,18 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         provenance: reference(52),
     })?;
     assert_eq!(
-        api.submit_corrected(wrong_request, correction),
+        api.submit_corrected(wrong_request, correction.clone()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+    let mutation_base = adapter;
+    assert_correction_recovery_guards(
+        &mutation_base,
+        corrected_reference,
+        original.reference(),
+        rejected.state_digest(),
+        original_submitted.state_digest(),
+        &correction,
+    )?;
     Ok(())
 }
 
