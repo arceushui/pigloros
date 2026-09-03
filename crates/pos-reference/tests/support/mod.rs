@@ -1636,7 +1636,9 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::MatrixDigest => profile_fields[6] = bytes(&[0; 32]),
         ProfileMutation::MatrixContent
         | ProfileMutation::MatrixBoundary(_)
-        | ProfileMutation::MatrixExecutedCase => {}
+        | ProfileMutation::MatrixExecutedCase
+        | ProfileMutation::ArtifactEncoding(_)
+        | ProfileMutation::ArtifactShape(_) => {}
         ProfileMutation::FixturePolicyDigest => profile_fields[13] = bytes(&[0; 32]),
         ProfileMutation::LimitationsDigest => profile_fields[14] = bytes(&[0; 32]),
         ProfileMutation::PublicationDigest => profile_fields[15] = bytes(&[0; 32]),
@@ -1696,7 +1698,6 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             let index = usize::from(mutation == ProfileMutation::RequirementDeclaration) + 3;
             array_fields_mut(&mut profile_fields[12])?[index] = bytes(&[0; 32]);
         }
-        ProfileMutation::ArtifactEncoding(_) | ProfileMutation::ArtifactShape(_) => {}
         remaining => mutate_fixture(profile_fields, remaining)?,
     }
     Ok(())
@@ -2208,7 +2209,8 @@ fn archive(
 
 fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult<()> {
     let fields = array_fields_mut(manifest)?;
-    if mutate_profile_expected_result(fields, mutation)? {
+    if mutate_profile_expected_result(fields, mutation)? || mutate_archive_record(fields, mutation)?
+    {
         return Ok(());
     }
     match mutation {
@@ -2262,12 +2264,6 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[usize::from(index)] = Value::Null;
         }
-        BundleMutation::DescriptorRecordShape => {
-            array_fields_mut(&mut fields[4])?[0] = Value::Null;
-        }
-        BundleMutation::ExpectedRecordShape => {
-            array_fields_mut(&mut fields[5])?[0] = Value::Null;
-        }
         BundleMutation::Magic => fields[0] = text("CFB0"),
         BundleMutation::Version => fields[1] = uint(1),
         BundleMutation::Mode => fields[2] = uint(2),
@@ -2298,7 +2294,9 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         | BundleMutation::RawArchiveField(_)
         | BundleMutation::Encoding
         | BundleMutation::ManifestShape
+        | BundleMutation::DescriptorRecordShape
         | BundleMutation::MemberRecordShape
+        | BundleMutation::ExpectedRecordShape
         | BundleMutation::MemberEmpty
         | BundleMutation::MemberRoleOverflow
         | BundleMutation::MemberOrder
@@ -2313,6 +2311,16 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         | BundleMutation::ProfileExpectedBinding => {}
     }
     Ok(())
+}
+
+fn mutate_archive_record(fields: &mut [Value], mutation: BundleMutation) -> TestResult<bool> {
+    let field = match mutation {
+        BundleMutation::DescriptorRecordShape => &mut fields[4],
+        BundleMutation::ExpectedRecordShape => &mut fields[5],
+        _ => return Ok(false),
+    };
+    array_fields_mut(field)?[0] = Value::Null;
+    Ok(true)
 }
 
 fn mutate_profile_expected_result(
