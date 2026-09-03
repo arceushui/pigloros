@@ -84,13 +84,11 @@ impl ProcessAdapter {
             }
             thread::sleep(POLL_INTERVAL);
         };
-        let wrote = receive_before(&writer_rx, deadline).map_err(|error| {
+        let wrote = receive_before(&writer_rx, deadline).inspect_err(|_| {
             terminate(&mut child);
-            error
         })?;
-        let response = receive_before(&reader_rx, deadline).map_err(|error| {
+        let response = receive_before(&reader_rx, deadline).inspect_err(|_| {
             terminate(&mut child);
-            error
         })?;
         if !status.success() || wrote.is_err() {
             return Err(AdapterError::Unavailable);

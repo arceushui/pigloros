@@ -596,9 +596,8 @@ fn valid_version_identifiers(value: &str, no_leading_zero: bool) -> bool {
 }
 
 fn decode_descriptors(value: Value) -> Result<Vec<Descriptor>, BundleError> {
-    let values = match value {
-        Value::Array(values) => values,
-        _ => return Err(BundleError::InvalidEncoding),
+    let Value::Array(values) = value else {
+        return Err(BundleError::InvalidEncoding);
     };
     if values.is_empty() || values.len() > MAX_MEMBERS {
         return Err(BundleError::FieldOutOfBounds);
@@ -629,9 +628,8 @@ fn decode_descriptors(value: Value) -> Result<Vec<Descriptor>, BundleError> {
 }
 
 fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, BundleError> {
-    let values = match value {
-        Value::Array(values) => values,
-        _ => return Err(BundleError::InvalidEncoding),
+    let Value::Array(values) = value else {
+        return Err(BundleError::InvalidEncoding);
     };
     if values.is_empty() || values.len() > MAX_MEMBERS {
         return Err(BundleError::FieldOutOfBounds);
@@ -648,9 +646,8 @@ fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, Bund
         {
             return Err(BundleError::NonCanonicalOrder);
         }
-        let raw = match fields.remove(1) {
-            Value::Bytes(bytes) => bytes,
-            _ => return Err(BundleError::InvalidEncoding),
+        let Value::Bytes(raw) = fields.remove(1) else {
+            return Err(BundleError::InvalidEncoding);
         };
         let role = u8::try_from(uint(&fields[1])?).map_err(|_| BundleError::InvalidEncoding)?;
         total += raw.len();
@@ -669,9 +666,8 @@ fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, Bund
 }
 
 fn decode_expected_results(value: Value) -> Result<Vec<ExpectedResult>, BundleError> {
-    let values = match value {
-        Value::Array(values) => values,
-        _ => return Err(BundleError::InvalidEncoding),
+    let Value::Array(values) = value else {
+        return Err(BundleError::InvalidEncoding);
     };
     if values.len() > MAX_MEMBERS {
         return Err(BundleError::FieldOutOfBounds);
