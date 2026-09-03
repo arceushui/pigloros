@@ -473,7 +473,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         claim_layer,
         subject_adapter,
         extra,
-        release_mutation,
+        release_mutation: _,
         mixed_oracles,
         profile_mutation,
         bundle_mutation,
