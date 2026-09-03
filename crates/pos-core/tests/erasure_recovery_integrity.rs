@@ -359,9 +359,21 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
         .current_manifest(request)
         .ok_or(ErasureErrorV1::ProvenanceMissing)?
         .digest();
-    graph.adapter.remove_object(request);
+    let adapter = graph.adapter;
+    adapter.remove_object(request);
 
-    let mut coordinator = ErasureCoordinatorStateMachineV1::new(graph.adapter, COORDINATOR);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR);
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    assert_eq!(
+        coordinator.verified_state(request),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+    adapter.insert_object(request, graph.request.to_canonical_cbor()?);
+    let closure = target_closure_digest(&[target(10)]);
+    adapter.remove_object(closure);
     assert_eq!(
         coordinator.verified_state(request),
         Err(ErasureErrorV1::ProvenanceMissing)
@@ -372,10 +384,14 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
     );
 
     let failures = coordinator.recovery_errors(request)?;
-    assert_eq!(failures.len(), 1);
+    assert_eq!(failures.len(), 2);
     assert_eq!(failures[0].request(), request);
-    assert_eq!(failures[0].manifest(), manifest);
+    assert_eq!(failures[0].manifest(), Some(manifest));
+    assert_eq!(failures[0].failure_subject(), request);
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    assert_eq!(failures[1].manifest(), Some(manifest));
+    assert_eq!(failures[1].failure_subject(), closure);
+    assert_eq!(failures[1].error(), ErasureErrorV1::ProvenanceMissing);
     let bytes = failures[0].to_canonical_cbor()?;
     assert_eq!(
         ErasureRecoveryErrorV1::from_canonical_cbor(&bytes)?,
@@ -385,6 +401,29 @@ fn recovery_failures_are_retained_and_exact_retries_are_idempotent(
         ErasureRecoveryErrorV1::from_canonical_cbor(&[]),
         Err(ErasureErrorV1::InvalidEncoding)
     );
+    Ok(())
+}
+
+#[test]
+fn manifest_read_failures_are_retained_without_a_manifest_reference(
+) -> Result<(), ErasureErrorV1> {
+    let request = request()?;
+    let adapter = port(vec![], None).with_operation_fault(PublicCoordinatorFault {
+        operation: PublicCoordinatorOperation::LoadManifest,
+        occurrence: 0,
+    });
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
+
+    assert_eq!(
+        coordinator.verified_state(request.reference()),
+        Err(ErasureErrorV1::TrustSnapshotInvalid)
+    );
+    let failures = coordinator.recovery_errors(request.reference())?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].request(), request.reference());
+    assert_eq!(failures[0].manifest(), None);
+    assert_eq!(failures[0].failure_subject(), request.reference());
+    assert_eq!(failures[0].error(), ErasureErrorV1::TrustSnapshotInvalid);
     Ok(())
 }
 

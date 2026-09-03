@@ -4456,21 +4456,29 @@ impl ErasurePersistencePortV1 for SqliteStore {
             .conn
             .prepare(
                 "SELECT error_digest FROM erasure_recovery_errors
-                 WHERE request_digest=?1 ORDER BY error_digest",
+                 WHERE request_digest=?1 ORDER BY error_digest LIMIT ?2",
             )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
         let references = statement
-            .query_map(params![request.digest().as_slice()], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })
+            .query_map(
+                params![
+                    request.digest().as_slice(),
+                    (ERASURE_MAX_RECOVERY_ERRORS + 1) as i64,
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
             .map(|result| {
                 result
                     .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
                     .and_then(reference_from_sql)
             })
-            .collect();
-        references
+            .collect::<Result<Vec<_>, _>>()?;
+        if references.len() > ERASURE_MAX_RECOVERY_ERRORS {
+            Err(ErasureErrorV1::ScopeInvalid)
+        } else {
+            Ok(references)
+        }
     }
     fn append_recovery_error(
         &mut self,

@@ -217,7 +217,8 @@ impl std::error::Error for ErasureErrorV1 {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErasureRecoveryErrorV1 {
     request: ErasureReferenceV1,
-    manifest: ErasureReferenceV1,
+    manifest: Option<ErasureReferenceV1>,
+    failure_subject: ErasureReferenceV1,
     error: ErasureErrorV1,
     content_digest: ErasureReferenceV1,
 }
@@ -233,12 +234,14 @@ impl ErasureRecoveryErrorV1 {
     /// Returns a closed encoding or size-bound error.
     pub fn new(
         request: ErasureReferenceV1,
-        manifest: ErasureReferenceV1,
+        manifest: Option<ErasureReferenceV1>,
+        failure_subject: ErasureReferenceV1,
         error: ErasureErrorV1,
     ) -> Result<Self, ErasureErrorV1> {
         Self {
             request,
             manifest,
+            failure_subject,
             error,
             content_digest: ErasureReferenceV1::from_digest([0; 32]),
         }
@@ -253,8 +256,14 @@ impl ErasureRecoveryErrorV1 {
 
     /// Return the ERCRP1 manifest that was being recovered.
     #[must_use]
-    pub const fn manifest(self) -> ErasureReferenceV1 {
+    pub const fn manifest(self) -> Option<ErasureReferenceV1> {
         self.manifest
+    }
+
+    /// Return the minimized reference that identifies the failed recovery subject.
+    #[must_use]
+    pub const fn failure_subject(self) -> ErasureReferenceV1 {
+        self.failure_subject
     }
 
     /// Return the closed recovery error.
@@ -287,8 +296,8 @@ impl ErasureRecoveryErrorV1 {
     ///
     /// Returns a closed error for malformed, noncanonical, or oversized bytes.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
-        decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 5)
-            .and_then(|value| exact_array(&value, 5).and_then(recovery_error_from_fields))
+        decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 6)
+            .and_then(|value| exact_array(&value, 6).and_then(recovery_error_from_fields))
     }
 
     fn with_digest(self) -> Result<Self, ErasureErrorV1> {
@@ -3664,7 +3673,9 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
         request: ErasureReferenceV1,
     ) -> Result<u64, ErasureErrorV1>;
     /// Return immutable ERRE1 recovery-error references for one request in
-    /// deterministic content-address order.
+    /// deterministic content-address order. The adapter must inspect no more
+    /// than `ERASURE_MAX_RECOVERY_ERRORS + 1` rows and must fail closed when
+    /// the extra sentinel row exists.
     ///
     /// # Errors
     ///
