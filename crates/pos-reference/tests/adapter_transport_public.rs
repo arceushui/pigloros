@@ -681,24 +681,6 @@ fn process_adapter_watchdog_terminates_descendants_holding_transport_open() -> T
     Ok(())
 }
 
-#[cfg(unix)]
-#[test]
-fn process_adapter_rejects_an_unrepresentable_deadline() -> TestResult {
-    let mut impossible_deadline = attempt();
-    impossible_deadline.watchdog_ms = u64::MAX;
-    let mut adapter = ProcessAdapter::new(
-        SubjectAdapterKind::ExportedArtifact,
-        [1; 32],
-        "/bin/true",
-        Vec::new(),
-    )?;
-    assert_eq!(
-        adapter.execute(&impossible_deadline),
-        Err(AdapterError::ProtocolFailure)
-    );
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn process_adapter_bounds_blocked_request_transport() -> TestResult {

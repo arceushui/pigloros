@@ -60,10 +60,11 @@ impl ProcessAdapter {
         let mut child = command(&self.program, &self.arguments)
             .spawn()
             .map_err(|_| AdapterError::Unavailable)?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            terminate(&mut child);
-            return Err(AdapterError::ProtocolFailure);
-        };
+        let (stdin, stdout) = child
+            .stdin
+            .take()
+            .zip(child.stdout.take())
+            .ok_or(AdapterError::ProtocolFailure)?;
         let (writer_tx, writer_rx) = mpsc::sync_channel(1);
         let (reader_tx, reader_rx) = mpsc::sync_channel(1);
         let _writer = thread::spawn(move || drop(writer_tx.send(write_request(stdin, &request))));
