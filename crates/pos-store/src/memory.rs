@@ -5249,6 +5249,17 @@ mod tests {
         };
         let other_bytes = other.to_canonical_cbor().test_ok();
         assert!(insert_effect_exact(&mut effects, manifest, &other, &other_bytes).is_err());
+
+        let request = ErasureReferenceV1::from_digest([3; 32]);
+        let mut indexes = BTreeMap::new();
+        let first = ErasureReferenceV1::from_digest([4; 32]);
+        let second = ErasureReferenceV1::from_digest([5; 32]);
+        assert!(insert_index(&mut indexes, request, 0, first).is_ok());
+        assert!(insert_index(&mut indexes, request, 0, first).is_ok());
+        assert_eq!(
+            insert_index(&mut indexes, request, 0, second),
+            Err(ErasureErrorV1::PolicyConflict)
+        );
     }
 
     #[test]

@@ -12,8 +12,8 @@ pub mod erasure_support;
 use ciborium::value::Value;
 use pos_core::erasure::{
     target_closure_digest, ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_CAS_EFFECT_TAG_V1,
-    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_SCOPE_COMMITMENT_TAG_V1,
-    ERASURE_TARGET_CLOSURE_TAG_V1,
+    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_TARGET_CLOSURE_TAG_V1,
 };
 use pos_core::{
     acknowledgement_inventory_reference, destruction_command_reference,
@@ -1896,6 +1896,13 @@ fn coordinator_recovery_rejects_active_and_completed_dispatch_mismatches(
             Value::Bytes(reference(240).digest().to_vec()),
         )
     })?;
+    assert_active_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_active_admission_field(
+            graph.request.reference(),
+            7,
+            Value::Bytes(reference(241).digest().to_vec()),
+        )
+    })?;
     assert_graph_mutation_rejected(|graph| {
         graph
             .adapter
@@ -1906,6 +1913,16 @@ fn coordinator_recovery_rejects_active_and_completed_dispatch_mismatches(
             graph.request.reference(),
             20,
             Value::Bytes(reference(241).digest().to_vec()),
+        )
+    })?;
+    assert_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_attempt_component_field(
+            graph.request.reference(),
+            0,
+            2,
+            ERASURE_RETRY_ADMISSION_TAG_V1,
+            7,
+            Value::Bytes(reference(242).digest().to_vec()),
         )
     })?;
     assert_graph_mutation_rejected(|graph| {
