@@ -60,9 +60,12 @@ fn public_error_boundaries_preserve_closed_failure_classes() {
         ProfileError::InvalidEncoding
     );
 
+    assert_eq!(
+        EvaluatorError::from(ProtocolError::UnsupportedVersion),
+        EvaluatorError::UnsupportedVersion
+    );
     for error in [
         ProtocolError::InvalidEncoding,
-        ProtocolError::UnsupportedVersion,
         ProtocolError::FieldOutOfBounds,
         ProtocolError::NonCanonicalOrder,
         ProtocolError::DigestMismatch,
@@ -101,7 +104,7 @@ fn evaluator_identity() -> EvaluatorIdentity {
             technical_independent: true,
             authorship_independent: true,
             organizational_independent: false,
-            declaration_digest: [63; 32],
+            declaration_digest: [47; 32],
             shared_code_audit_digest: [64; 32],
             reviewer_ids: vec!["reviewer-one".to_owned()],
         },

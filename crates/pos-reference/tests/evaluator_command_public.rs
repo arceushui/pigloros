@@ -22,9 +22,11 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
     let request = directory.join("request.cbor");
     let bundle = directory.join("bundle.cfb1");
     let policy = directory.join("policy.tps1");
+    let source = directory.join("evaluator-source.tar.gz");
     fs::write(&request, corpus.request)?;
     fs::write(&bundle, corpus.archive)?;
     fs::write(&policy, corpus.trust_policy)?;
+    fs::write(&source, b"independently reviewed evaluator source")?;
     let digest = "01".repeat(32);
     let declaration_digest = "2f".repeat(32);
     let mut command = evaluator();
@@ -35,8 +37,8 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
         bundle.to_str().ok_or("bundle path is not UTF-8")?,
         "--trust-policy",
         policy.to_str().ok_or("policy path is not UTF-8")?,
-        "--source-digest",
-        digest.as_str(),
+        "--evaluator-source",
+        source.to_str().ok_or("source path is not UTF-8")?,
         "--declaration-digest",
         declaration_digest.as_str(),
         "--shared-code-audit-digest",
@@ -60,35 +62,14 @@ fn command_rejects_incomplete_duplicate_and_noncanonical_identity_arguments() ->
         .output()?;
     assert!(!duplicated.status.success());
 
-    let uppercase_digest = "A".repeat(64);
-    let invalid_digest = evaluator()
-        .args(["--source-digest", uppercase_digest.as_str()])
-        .output()?;
-    assert!(!invalid_digest.status.success());
-
-    let zero_digest = "0".repeat(64);
-    let zero_identity = evaluator()
-        .args(["--source-digest", zero_digest.as_str()])
-        .output()?;
-    assert!(!zero_identity.status.success());
-
     let unknown = evaluator().arg("--legacy-protocol").output()?;
     assert!(!unknown.status.success());
-
-    let wrong_length = evaluator().args(["--source-digest", "01"]).output()?;
-    assert!(!wrong_length.status.success());
-
-    let invalid_low_nibble = "0g".repeat(32);
-    let invalid_digest = evaluator()
-        .args(["--source-digest", invalid_low_nibble.as_str()])
-        .output()?;
-    assert!(!invalid_digest.status.success());
 
     for option in [
         "--request",
         "--bundle",
         "--trust-policy",
-        "--source-digest",
+        "--evaluator-source",
         "--declaration-digest",
         "--shared-code-audit-digest",
         "--reviewer",
@@ -140,8 +121,8 @@ fn command_rejects_each_missing_required_option() -> TestResult {
             "bundle",
             "--trust-policy",
             "policy",
-            "--source-digest",
-            digest.as_str(),
+            "--evaluator-source",
+            "source",
             "--reviewer",
             "reviewer-one",
         ],
@@ -152,8 +133,8 @@ fn command_rejects_each_missing_required_option() -> TestResult {
             "bundle",
             "--trust-policy",
             "policy",
-            "--source-digest",
-            digest.as_str(),
+            "--evaluator-source",
+            "source",
             "--declaration-digest",
             digest.as_str(),
             "--reviewer",
@@ -166,8 +147,8 @@ fn command_rejects_each_missing_required_option() -> TestResult {
             "bundle",
             "--trust-policy",
             "policy",
-            "--source-digest",
-            digest.as_str(),
+            "--evaluator-source",
+            "source",
             "--declaration-digest",
             digest.as_str(),
             "--shared-code-audit-digest",
@@ -199,8 +180,8 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
             bundle.to_str().ok_or("bundle path is not UTF-8")?,
             "--trust-policy",
             policy.to_str().ok_or("policy path is not UTF-8")?,
-            "--source-digest",
-            digest.as_str(),
+            "--evaluator-source",
+            "source",
             "--declaration-digest",
             digest.as_str(),
             "--shared-code-audit-digest",
@@ -224,8 +205,8 @@ fn command_bounds_files_before_decoding_untrusted_requests() -> TestResult {
             bundle.to_str().ok_or("bundle path is not UTF-8")?,
             "--trust-policy",
             policy.to_str().ok_or("policy path is not UTF-8")?,
-            "--source-digest",
-            digest.as_str(),
+            "--evaluator-source",
+            "source",
             "--declaration-digest",
             digest.as_str(),
             "--shared-code-audit-digest",
@@ -252,6 +233,10 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
     let report = ConformanceReport::from_canonical_cbor(&output.stdout)?;
     assert_eq!(report.cases.len(), 7);
     assert_eq!(
+        report.evaluator_source_digest,
+        *blake3::hash(b"independently reviewed evaluator source").as_bytes()
+    );
+    assert_eq!(
         report.independence.reviewer_ids,
         vec!["reviewer-one".to_owned()]
     );
@@ -264,12 +249,23 @@ fn command_emits_a_self_verified_report_through_the_public_process_boundary() ->
 #[cfg(unix)]
 #[test]
 fn command_closes_input_adapter_and_evaluation_failures() -> TestResult {
-    for input in ["request.cbor", "bundle.cfb1", "policy.tps1"] {
+    for input in [
+        "request.cbor",
+        "bundle.cfb1",
+        "policy.tps1",
+        "evaluator-source.tar.gz",
+    ] {
         let directory = tempfile::tempdir()?;
         let mut missing_input = complete_command(directory.path())?;
         fs::remove_file(directory.path().join(input))?;
         assert!(!missing_input.output()?.status.success());
     }
+
+    let directory = tempfile::tempdir()?;
+    let mut oversized_source = complete_command(directory.path())?;
+    fs::File::create(directory.path().join("evaluator-source.tar.gz"))?
+        .set_len(1024 * 1024 * 1024 + 1)?;
+    assert!(!oversized_source.output()?.status.success());
 
     let directory = tempfile::tempdir()?;
     assert!(
@@ -302,10 +298,7 @@ fn command_rejects_duplicate_and_unsorted_public_identity_options() -> TestResul
     for duplicate in [
         ["--bundle", "second"],
         ["--trust-policy", "second"],
-        [
-            "--source-digest",
-            "0101010101010101010101010101010101010101010101010101010101010101",
-        ],
+        ["--evaluator-source", "second-source"],
         [
             "--declaration-digest",
             "0101010101010101010101010101010101010101010101010101010101010101",
