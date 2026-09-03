@@ -1144,6 +1144,11 @@ fn validate_support_closure(
     for (path, role, digest) in support {
         validate_member_binding(bundle, path, role, digest)?;
     }
+    validate_execution_matrix(
+        bundle,
+        fixed_bytes(&profile_fields[6])?,
+        u8::try_from(uint(&profile_fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?,
+    )?;
     let actual_execution_profiles = bundle
         .members
         .iter()
@@ -1161,6 +1166,279 @@ fn validate_support_closure(
     } else {
         Err(ProfileError::ClosureIncomplete)
     }
+}
+
+fn validate_execution_matrix(
+    bundle: &VerifiedBundle,
+    expected_digest: [u8; 32],
+    lifecycle: u8,
+) -> Result<(), ProfileError> {
+    let member = bundle
+        .member("authority/execution-matrix.json")
+        .ok_or(ProfileError::ClosureIncomplete)?;
+    if member.digest != expected_digest {
+        return Err(ProfileError::DigestMismatch);
+    }
+    let root: serde_json::Value =
+        serde_json::from_slice(&member.bytes).map_err(|_| ProfileError::InvalidEncoding)?;
+    let root = json_object(&root)?;
+    validate_execution_matrix_header(root, lifecycle)?;
+    validate_matrix_inventory(root)
+}
+
+fn validate_execution_matrix_header(
+    root: &serde_json::Map<String, serde_json::Value>,
+    lifecycle: u8,
+) -> Result<(), ProfileError> {
+    require_json_fields(
+        root,
+        &[
+            "case_count",
+            "cases",
+            "equality_predicates",
+            "executed_case_count",
+            "expected_result_policy",
+            "lifecycle",
+            "magic",
+            "matrix_id",
+            "mode_count",
+            "row_count",
+            "rows",
+            "source",
+            "variant_count",
+            "version",
+        ],
+    )?;
+    let lifecycle_name = ["Draft", "Candidate", "Stable", "Retired"]
+        .get(usize::from(lifecycle))
+        .ok_or(ProfileError::FieldOutOfBounds)?;
+    if json_text(root, "magic")? != "NIM1"
+        || json_u64(root, "version")? != 1
+        || json_text(root, "lifecycle")? != *lifecycle_name
+        || json_u64(root, "row_count")? != 12
+        || json_u64(root, "variant_count")? != 4
+        || json_u64(root, "mode_count")? != 4
+        || json_u64(root, "case_count")? != 192
+        || json_text(root, "matrix_id")?.is_empty()
+        || json_text(root, "source")?.is_empty()
+        || json_text(root, "expected_result_policy")?.is_empty()
+    {
+        Err(ProfileError::ClosureIncomplete)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_matrix_inventory(
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), ProfileError> {
+    const FIXTURES: [&str; 12] = [
+        "NI-TOOL-001",
+        "NI-CACHE-002",
+        "NI-STATE-003",
+        "NI-OBS-004",
+        "NI-TIME-005",
+        "NI-PUBLIC-006",
+        "NI-EVAL-007",
+        "NI-FORK-008",
+        "NI-ARCHIVE-009",
+        "NI-NET-010",
+        "NI-SERVICE-011",
+        "NI-CRASH-012",
+    ];
+    const VARIANTS: [&str; 4] = ["S", "D", "W", "C"];
+    const MODES: [&str; 4] = ["L", "A", "R", "F"];
+    let rows = json_array(root, "rows")?;
+    let predicates = json_array(root, "equality_predicates")?;
+    let cases = json_array(root, "cases")?;
+    if rows.len() != FIXTURES.len() || predicates.len() != FIXTURES.len() || cases.len() != 192 {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    let mut executed_total = 0_u64;
+    for (fixture_index, fixture_id) in FIXTURES.iter().enumerate() {
+        validate_matrix_row(&rows[fixture_index], fixture_id)?;
+        validate_matrix_predicate(&predicates[fixture_index], fixture_id)?;
+        let mut row_executed = 0_u64;
+        for (variant_index, variant) in VARIANTS.iter().enumerate() {
+            for (mode_index, mode) in MODES.iter().enumerate() {
+                let index = fixture_index * 16 + variant_index * 4 + mode_index;
+                if validate_matrix_case(&cases[index], fixture_id, variant, mode)? {
+                    row_executed += 1;
+                }
+            }
+        }
+        let row = json_object(&rows[fixture_index])?;
+        if json_u64(row, "executed_case_count")? != row_executed {
+            return Err(ProfileError::ClosureIncomplete);
+        }
+        executed_total += row_executed;
+    }
+    if json_u64(root, "executed_case_count")? == executed_total {
+        Ok(())
+    } else {
+        Err(ProfileError::ClosureIncomplete)
+    }
+}
+
+fn validate_matrix_row(value: &serde_json::Value, fixture_id: &str) -> Result<(), ProfileError> {
+    let row = json_object(value)?;
+    require_json_fields(
+        row,
+        &[
+            "case_count",
+            "channel",
+            "classification",
+            "equality",
+            "executed_case_count",
+            "fixture_id",
+            "modes",
+            "observable_surfaces",
+            "sole_unauthorized_delta",
+            "variants",
+        ],
+    )?;
+    if json_text(row, "fixture_id")? != fixture_id
+        || row.get("variants") != Some(&serde_json::json!(["S", "D", "W", "C"]))
+        || row.get("modes") != Some(&serde_json::json!(["L", "A", "R", "F"]))
+        || json_u64(row, "case_count")? != 16
+        || [
+            "channel",
+            "classification",
+            "equality",
+            "sole_unauthorized_delta",
+        ]
+        .iter()
+        .any(|field| json_text(row, field).is_err_or(str::is_empty))
+        || json_array(row, "observable_surfaces")?.is_empty()
+    {
+        Err(ProfileError::ClosureIncomplete)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_matrix_predicate(
+    value: &serde_json::Value,
+    fixture_id: &str,
+) -> Result<(), ProfileError> {
+    let predicate = json_object(value)?;
+    require_json_fields(predicate, &["AuthEq", "OpEq", "PublicEq", "fixture_id"])?;
+    if json_text(predicate, "fixture_id")? != fixture_id
+        || ["AuthEq", "PublicEq", "OpEq"]
+            .iter()
+            .any(|field| json_text(predicate, field).is_err_or(str::is_empty))
+    {
+        Err(ProfileError::ClosureIncomplete)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_matrix_case(
+    value: &serde_json::Value,
+    fixture_id: &str,
+    variant: &str,
+    mode: &str,
+) -> Result<bool, ProfileError> {
+    let case = json_object(value)?;
+    require_json_fields(
+        case,
+        &[
+            "authority_fixture_id",
+            "authority_result_digest",
+            "case_id",
+            "executed",
+            "expected_result",
+            "expected_result_digest",
+            "fixture_id",
+            "mode",
+            "variant",
+        ],
+    )?;
+    let executed = case
+        .get("executed")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(ProfileError::InvalidEncoding)?;
+    if json_text(case, "case_id")? != format!("{fixture_id}-{variant}-{mode}")
+        || json_text(case, "fixture_id")? != fixture_id
+        || json_text(case, "variant")? != variant
+        || json_text(case, "mode")? != mode
+    {
+        return Err(ProfileError::NonCanonicalOrder);
+    }
+    let evidence = [
+        "authority_fixture_id",
+        "authority_result_digest",
+        "expected_result",
+        "expected_result_digest",
+    ];
+    if !executed && evidence.iter().any(|field| !case[*field].is_null())
+        || executed
+            && (case["expected_result"].is_null()
+                || !json_digest(case.get("expected_result_digest")))
+    {
+        return Err(ProfileError::ClosureIncomplete);
+    }
+    Ok(executed)
+}
+
+fn json_object(
+    value: &serde_json::Value,
+) -> Result<&serde_json::Map<String, serde_json::Value>, ProfileError> {
+    value.as_object().ok_or(ProfileError::InvalidEncoding)
+}
+
+fn require_json_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    fields: &[&str],
+) -> Result<(), ProfileError> {
+    if object.len() == fields.len() && fields.iter().all(|field| object.contains_key(*field)) {
+        Ok(())
+    } else {
+        Err(ProfileError::InvalidEncoding)
+    }
+}
+
+fn json_text<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<&'a str, ProfileError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or(ProfileError::InvalidEncoding)
+}
+
+fn json_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<u64, ProfileError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(ProfileError::InvalidEncoding)
+}
+
+fn json_array<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<&'a [serde_json::Value], ProfileError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or(ProfileError::InvalidEncoding)
+}
+
+fn json_digest(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn validate_execution_profile(
