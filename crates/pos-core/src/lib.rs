@@ -11,6 +11,9 @@
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
 pub mod authority;
+#[cfg(test)]
+extern crate self as pos_core;
+
 pub mod clock;
 pub mod consent;
 pub mod crypto;
@@ -59,15 +62,50 @@ pub use consent::{
 pub use crypto::{Hash, PublicKey, Signature};
 pub use entity::{Entity, EntityKind, Relationship, RelationshipKind};
 pub use erasure::{
-    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1, ErasureArtifactClassV1,
-    ErasureArtifactTransitionV1, ErasureCoordinator, ErasureCoordinatorPortV1,
-    ErasureCoordinatorRecordV1, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
-    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_REFERENCES, ERASURE_RECEIPT_MAX_BYTES,
-    ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+    acknowledgement_inventory_reference, destruction_command_reference,
+    erasure_evidence_set_reference, selected_obligations_reference,
+    ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
+    ErasureAcknowledgementProvenanceV1, ErasureAcknowledgementV1,
+    ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
+    ErasureAdministrativeResolutionV1, ErasureApplicabilityDecisionV1, ErasureArtifactClassV1,
+    ErasureArtifactTransitionV1, ErasureAtomicFreezeAdmissionInputV1,
+    ErasureAtomicFreezeAdmissionV1, ErasureAtomicFreezeResultV1, ErasureAttemptOutcomeInputV1,
+    ErasureAttemptOutcomeV1, ErasureAttemptQuotaReservationV1,
+    ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
+    ErasureCasOutcomeV1, ErasureCoordinator, ErasureCoordinatorPortV1,
+    ErasureCoordinatorStateMachineV1, ErasureCorrectionProvenanceInputV1,
+    ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
+    ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
+    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
+    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeAuthorizationVerifierV1,
+    ErasureFreezeFailureInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
+    ErasureFreezeProvenanceV1, ErasureIndexInsertV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
+    ErasureObligationSetInputV1, ErasureObligationSetV1, ErasureObligationV1,
+    ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
+    ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
+    ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureStateV1, ErasureVerifiedStateQueryV1, ErasureVerifiedStateV1, PreparedErasureCasV1,
+    StoredErasureManifestV1, ERASURE_ACKNOWLEDGEMENT_PROVENANCE_TAG_V1,
+    ERASURE_ADMINISTRATIVE_RESOLUTION_TAG_V1, ERASURE_ATTEMPT_OUTCOME_TAG_V1,
+    ERASURE_AUTHORIZATION_REJECTION_TAG_V1, ERASURE_COORDINATOR_RECORD_MAX_BYTES,
+    ERASURE_CORRECTION_PROVENANCE_TAG_V1, ERASURE_FREEZE_ADMISSION_AUTHORIZATION_TAG_V1,
+    ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES, ERASURE_FREEZE_ADMISSION_EVIDENCE_TAG_V1,
+    ERASURE_FREEZE_AUTHORIZATION_EVIDENCE_TAG_V1, ERASURE_FREEZE_FAILURE_TAG_V1,
+    ERASURE_FREEZE_PROVENANCE_TAG_V1, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
+    ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
+    ERASURE_MAX_INVENTORY_RESULTS, ERASURE_MAX_OBLIGATIONS, ERASURE_MAX_OBLIGATIONS_PER_CATEGORY,
+    ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS,
+    ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_MAX_BYTES, ERASURE_OBLIGATION_SET_TAG_V1,
+    ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RECEIPT_MAX_BYTES,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
+    ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
 };
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};
