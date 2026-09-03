@@ -55,23 +55,51 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }
     }
 
+    fn retain_recovery_error(
+        &mut self,
+        request: ErasureReferenceV1,
+        manifest: Option<ErasureReferenceV1>,
+        failure_subject: ErasureReferenceV1,
+        error: ErasureErrorV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let recovery_error = ErasureRecoveryErrorV1::new(
+            request,
+            manifest,
+            failure_subject,
+            error,
+        )?;
+        let object = ErasurePersistenceObjectV1::new(
+            recovery_error.reference(),
+            recovery_error.to_canonical_cbor()?,
+        );
+        self.port.append_recovery_error(request, object)
+    }
+
     fn recover(
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
-        let Some(stored) = self.port.read_manifest(request)? else {
-            return Ok(None);
+        let stored = match self.port.read_manifest(request) {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.retain_recovery_error(request, None, request, error)?;
+                return Err(error);
+            }
         };
         match RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, &stored) {
             Ok(record) => Ok(Some(record)),
-            Err(error) => {
-                let recovery_error = ErasureRecoveryErrorV1::new(request, stored.digest(), error)?;
-                let object = ErasurePersistenceObjectV1::new(
-                    recovery_error.reference(),
-                    recovery_error.to_canonical_cbor()?,
-                );
-                self.port.append_recovery_error(request, object)?;
-                Err(error)
+            Err(failure) => {
+                let failure_subject = (failure.subject() == reference_zero())
+                    .then_some(stored.digest())
+                    .unwrap_or(failure.subject());
+                self.retain_recovery_error(
+                    request,
+                    Some(stored.digest()),
+                    failure_subject,
+                    failure.error(),
+                )?;
+                Err(failure.error())
             }
         }
     }
@@ -195,8 +223,11 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureRecoveryErrorV1>, ErasureErrorV1> {
-        self.port
-            .recovery_error_refs(request)?
+        let references = self.port.recovery_error_refs(request)?;
+        if references.len() > super::ERASURE_MAX_RECOVERY_ERRORS {
+            return Err(ErasureErrorV1::ScopeInvalid);
+        }
+        references
             .into_iter()
             .map(|reference| {
                 let bytes = self.port.read_object(reference)?;

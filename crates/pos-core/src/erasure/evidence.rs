@@ -197,7 +197,8 @@ pub(super) fn recovery_error_value(record: &ErasureRecoveryErrorV1) -> Value {
         text(ERASURE_RECOVERY_ERROR_TAG_V1),
         uint(VERSION),
         digest(record.request()),
-        digest(record.manifest()),
+        optional_digest(record.manifest()),
+        digest(record.failure_subject()),
         uint(record.error().code()),
     ])
 }
@@ -208,8 +209,9 @@ pub(super) fn recovery_error_from_fields(
     header(fields, ERASURE_RECOVERY_ERROR_TAG_V1)?;
     ErasureRecoveryErrorV1::new(
         bytes32(&fields[2])?,
-        bytes32(&fields[3])?,
-        ErasureErrorV1::from_code(unsigned(&fields[4])?)?,
+        optional_bytes32(&fields[3])?,
+        bytes32(&fields[4])?,
+        ErasureErrorV1::from_code(unsigned(&fields[5])?)?,
     )
 }
 

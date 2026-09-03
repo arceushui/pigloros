@@ -22,7 +22,7 @@ use pos_core::{
     ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
     ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
-    ErasureStateTransitionV1, ErasureStateV1,
+    ErasureStateTransitionV1, ErasureStateV1, ERASURE_MAX_RECOVERY_ERRORS,
 };
 use pos_store::memory::MemoryStore;
 
@@ -723,7 +723,7 @@ fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn
     );
     let failures = observer.recovery_errors(request.reference())?;
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].manifest(), manifest);
+    assert_eq!(failures[0].manifest(), Some(manifest));
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
@@ -846,8 +846,41 @@ fn sqlite_recovery_errors_survive_file_backed_reopen(
     );
     let failures = observer.recovery_errors(request.reference())?;
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].manifest(), manifest);
+    assert_eq!(failures[0].manifest(), Some(manifest));
     assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_error_reads_reject_an_over_bound_index(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    drop(SqliteStore::open(path)?);
+
+    let request = reference(30);
+    let raw = rusqlite::Connection::open(path)?;
+    for value in 0..=ERASURE_MAX_RECOVERY_ERRORS {
+        let ordinal = u64::try_from(value)?;
+        let mut digest = [0_u8; 32];
+        digest[..8].copy_from_slice(&ordinal.to_be_bytes());
+        raw.execute(
+            "INSERT INTO erasure_recovery_errors(request_digest,error_digest)
+             VALUES(?1,?2)",
+            rusqlite::params![request.digest().as_slice(), digest.as_slice()],
+        )?;
+    }
+    drop(raw);
+
+    let store = SqliteStore::open(path)?;
+    assert_eq!(
+        store.recovery_error_refs(request),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     Ok(())
 }
 

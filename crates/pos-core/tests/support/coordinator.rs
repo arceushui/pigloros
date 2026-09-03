@@ -1089,14 +1089,20 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-        Ok(self
+        let references = self
             .storage
             .borrow()
             .recovery_errors
             .iter()
             .filter(|(candidate, _)| *candidate == request)
             .map(|(_, reference)| *reference)
-            .collect())
+            .take(pos_core::ERASURE_MAX_RECOVERY_ERRORS + 1)
+            .collect::<Vec<_>>();
+        if references.len() > pos_core::ERASURE_MAX_RECOVERY_ERRORS {
+            Err(ErasureErrorV1::ScopeInvalid)
+        } else {
+            Ok(references)
+        }
     }
 
     fn append_recovery_error(
@@ -1107,21 +1113,18 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         let mut storage = self.storage.borrow_mut();
         let reference = object.reference();
         let key = (request, reference);
-        let already_indexed = storage.recovery_errors.contains(&key);
-        if !already_indexed {
-            let count = storage
-                .recovery_errors
+        let mut recovery_errors = storage.recovery_errors.clone();
+        if recovery_errors.insert(key) {
+            let count = recovery_errors
                 .iter()
                 .filter(|(candidate, _)| *candidate == request)
                 .count();
-            if count >= pos_core::ERASURE_MAX_RECOVERY_ERRORS {
+            if count > pos_core::ERASURE_MAX_RECOVERY_ERRORS {
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
         }
         insert_exact(&mut storage.objects, reference, object.canonical_cbor())?;
-        if !already_indexed {
-            storage.recovery_errors.insert(key);
-        }
+        storage.recovery_errors = recovery_errors;
         Ok(())
     }
 

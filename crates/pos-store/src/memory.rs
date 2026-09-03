@@ -1241,12 +1241,18 @@ impl ErasurePersistencePortV1 for MemoryStore {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
-        Ok(self
+        let references = self
             .erasure_recovery_errors
             .iter()
             .filter(|(candidate, _)| *candidate == request)
             .map(|(_, reference)| *reference)
-            .collect())
+            .take(ERASURE_MAX_RECOVERY_ERRORS + 1)
+            .collect::<Vec<_>>();
+        if references.len() > ERASURE_MAX_RECOVERY_ERRORS {
+            Err(ErasureErrorV1::ScopeInvalid)
+        } else {
+            Ok(references)
+        }
     }
     fn append_recovery_error(
         &mut self,
