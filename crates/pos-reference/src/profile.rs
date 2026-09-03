@@ -15,6 +15,7 @@ const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
 const MAX_CAPABILITIES: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 128;
+const MAX_PROVIDERS: usize = 4_096;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ProviderKey {
@@ -101,6 +102,15 @@ impl DeterministicBudget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EvaluatorHardCaps {
     pub values: [u64; 18],
+}
+
+/// Independence properties required by one CPF1 profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IndependenceRequirements {
+    pub technical: bool,
+    pub authorship: bool,
+    pub organizational: bool,
+    pub declaration_digest: [u8; 32],
 }
 
 impl EvaluatorHardCaps {
@@ -225,6 +235,7 @@ pub struct Profile {
     pub fixtures: Vec<Fixture>,
     pub evaluator_protocol_digest: [u8; 32],
     pub evaluator_hard_caps: EvaluatorHardCaps,
+    pub independence_requirements: IndependenceRequirements,
     pub trust_policy_snapshot_digest: [u8; 32],
     pub limitations_digest: [u8; 32],
     pub provenance_digest: [u8; 32],
@@ -274,7 +285,6 @@ impl Profile {
         let value = decode_canonical(bytes)?;
         let fields = array(&value, 18)?;
         validate_profile_header(fields)?;
-        let profile_claim_layer = 0;
         let actual_digest = contract_digest(
             b"PiglorOS.ConformanceProfile.v1",
             &Value::Array(fields[..17].to_vec()),
@@ -292,7 +302,12 @@ impl Profile {
         let (evaluator_artifact_digests, hard_caps) = decode_protocol(&fields[11])?;
         let fixtures = decode_fixtures(&fields[9], hard_caps)?;
         let allowed_divergences = decode_allowed_divergences(&fields[10])?;
-        let trust_policy_snapshot_digest = decode_requirements(&fields[12])?;
+        let (independence_requirements, trust_policy_snapshot_digest) =
+            decode_requirements(&fields[12])?;
+        let profile_claim_layer = fixtures
+            .first()
+            .map(|fixture| fixture.claim_layer)
+            .ok_or(ProfileError::ClosureIncomplete)?;
         validate_optional_digest(&fields[16])?;
         validate_profile_relationships(
             &fixtures,
@@ -326,6 +341,7 @@ impl Profile {
             fixtures,
             evaluator_protocol_digest: evaluator_artifact_digests[0],
             evaluator_hard_caps: hard_caps,
+            independence_requirements,
             trust_policy_snapshot_digest,
             limitations_digest: fixed_bytes(&fields[14])?,
             provenance_digest: fixed_bytes(&fields[15])?,
@@ -665,7 +681,7 @@ fn decode_provider_binding(
     let fields = array(value, 2)?;
     let registry = decode_descriptor(&fields[0])?;
     let values = array_values(&fields[1])?;
-    if values.is_empty() || values.len() > 256 {
+    if values.is_empty() || values.len() > MAX_PROVIDERS {
         return Err(ProfileError::FieldOutOfBounds);
     }
     let providers = values
@@ -707,17 +723,21 @@ fn decode_protocol(value: &Value) -> Result<([[u8; 32]; 3], EvaluatorHardCaps), 
     Ok((digests, decode_hard_caps(&fields[4])?))
 }
 
-fn decode_requirements(value: &Value) -> Result<[u8; 32], ProfileError> {
+fn decode_requirements(
+    value: &Value,
+) -> Result<(IndependenceRequirements, [u8; 32]), ProfileError> {
     let fields = array(value, 5)?;
-    bool_value(&fields[0])?;
-    bool_value(&fields[1])?;
-    bool_value(&fields[2])?;
+    let requirements = IndependenceRequirements {
+        technical: bool_value(&fields[0])?,
+        authorship: bool_value(&fields[1])?,
+        organizational: bool_value(&fields[2])?,
+        declaration_digest: fixed_bytes(&fields[4])?,
+    };
     let trust = fixed_bytes(&fields[3])?;
-    let declaration = fixed_bytes(&fields[4])?;
-    if trust == [0; 32] || declaration == [0; 32] {
+    if trust == [0; 32] || requirements.declaration_digest == [0; 32] {
         Err(ProfileError::FieldOutOfBounds)
     } else {
-        Ok(trust)
+        Ok((requirements, trust))
     }
 }
 
@@ -1507,7 +1527,7 @@ fn validate_provider_contracts(
         return Err(ProfileError::DigestMismatch);
     }
     let entries = array_values(&fields[2])?;
-    if entries.is_empty() || entries.len() > 256 {
+    if entries.is_empty() || entries.len() > MAX_PROVIDERS {
         return Err(ProfileError::FieldOutOfBounds);
     }
     let providers = entries

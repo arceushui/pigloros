@@ -26,6 +26,7 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
     fs::write(&bundle, corpus.archive)?;
     fs::write(&policy, corpus.trust_policy)?;
     let digest = "01".repeat(32);
+    let declaration_digest = "2f".repeat(32);
     let mut command = evaluator();
     command.args([
         "--request",
@@ -37,7 +38,7 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
         "--source-digest",
         digest.as_str(),
         "--declaration-digest",
-        digest.as_str(),
+        declaration_digest.as_str(),
         "--shared-code-audit-digest",
         digest.as_str(),
         "--reviewer",

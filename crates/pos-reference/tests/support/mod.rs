@@ -322,6 +322,7 @@ struct FixtureExpectation {
 #[derive(Clone, Copy)]
 struct CorpusOptions<'a> {
     mode: u64,
+    claim_layer: u64,
     subject_adapter: SubjectAdapterKind,
     extra: Option<&'a [u8]>,
     release_mutation: Option<ReleaseMutation>,
@@ -335,6 +336,7 @@ impl Default for CorpusOptions<'_> {
     fn default() -> Self {
         Self {
             mode: 0,
+            claim_layer: 0,
             subject_adapter: SubjectAdapterKind::ExportedArtifact,
             extra: None,
             release_mutation: None,
@@ -361,6 +363,17 @@ pub fn corpus() -> TestResult<Corpus> {
 pub fn corpus_for_adapter(adapter: SubjectAdapterKind) -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
         subject_adapter: adapter,
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a complete corpus for one CPF1 claim layer.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn corpus_for_claim_layer(claim_layer: u8) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        claim_layer: u64::from(claim_layer),
         ..CorpusOptions::default()
     })
 }
@@ -456,6 +469,7 @@ pub fn corpus_with_release_mutation(mutation: ReleaseMutation) -> TestResult<Cor
 fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let CorpusOptions {
         mode,
+        claim_layer,
         subject_adapter,
         extra,
         release_mutation,
@@ -472,7 +486,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
     let evaluator_protocol_digest = member_hash(&members, "support/evaluator-protocol-v1.json")?;
-    add_provider_contracts(&mut members, profile_mutation, subject_adapter)?;
+    add_provider_contracts(&mut members, profile_mutation, subject_adapter, claim_layer)?;
     if let Some(bytes) = extra {
         members.insert("fixtures/prohibited.bin".to_owned(), (bytes.to_vec(), 0));
     }
@@ -489,6 +503,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         release_mutation,
         mixed_oracles,
         subject_adapter,
+        claim_layer,
     )?;
     let mut profile = profile(
         &members,
@@ -658,6 +673,7 @@ fn fixtures(
     release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
     subject_adapter: SubjectAdapterKind,
+    claim_layer: u64,
 ) -> TestResult<Vec<Value>> {
     (0_u64..=6)
         .map(|family| -> TestResult<Value> {
@@ -716,7 +732,7 @@ fn fixtures(
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
-                uint(0),
+                uint(claim_layer),
                 uint(family),
                 provider,
                 uint(adapter_code(subject_adapter)),
@@ -852,6 +868,7 @@ fn add_provider_contracts(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     mutation: Option<ProfileMutation>,
     subject_adapter: SubjectAdapterKind,
+    claim_layer: u64,
 ) -> TestResult<()> {
     add_provider_artifacts(members);
     let schemas = provider_schemas(members)?;
@@ -859,7 +876,7 @@ fn add_provider_contracts(
         text("FPP1"),
         uint(1),
         provider_key(1),
-        uint(0),
+        uint(claim_layer),
         uint(adapter_code(subject_adapter)),
         array(schemas),
         descriptor(members, "providers/test-provider/LICENSE")?,
@@ -888,7 +905,13 @@ fn add_provider_contracts(
         (canonical(&array(package_fields))?, 13),
     );
 
-    add_provider_registry(members, package_path, mutation, subject_adapter)
+    add_provider_registry(
+        members,
+        package_path,
+        mutation,
+        subject_adapter,
+        claim_layer,
+    )
 }
 
 fn add_provider_artifacts(members: &mut BTreeMap<String, (Vec<u8>, u8)>) {
@@ -945,6 +968,7 @@ fn add_provider_registry(
     package_path: &str,
     mutation: Option<ProfileMutation>,
     subject_adapter: SubjectAdapterKind,
+    claim_layer: u64,
 ) -> TestResult<()> {
     let mut registry_fields = vec![
         text("FPR1"),
@@ -954,7 +978,7 @@ fn add_provider_registry(
             text("1.0.0"),
             uint(1),
             uint(1),
-            uint(0),
+            uint(claim_layer),
             uint(adapter_code(subject_adapter)),
             descriptor_with_media(members, package_path, "application/cbor")?,
         ])]),
