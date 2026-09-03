@@ -945,6 +945,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         }
         let (extension_object, node_object, index) = record.append_scope_extension(extension)?;
         self.port.admit_scope_extension(&extension)?;
+        record.scope_extensions.push(extension);
         self.commit_delta(
             record.clone(),
             Some(record.manifest_digest),

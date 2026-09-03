@@ -445,6 +445,7 @@ pub(super) struct RecoveredErasureV1 {
     pub(super) administrative_resolution_count: u64,
     pub(super) authorize_provenance: Option<ErasureReferenceV1>,
     pub(super) dispatch_provenance: Option<ErasureReferenceV1>,
+    pub(super) scope_extensions: Vec<ErasureScopeExtensionV1>,
 }
 
 struct RecoveredFoundationV1 {
@@ -671,6 +672,7 @@ impl RecoveredErasureV1 {
             administrative_resolution_count: 0,
             authorize_provenance: None,
             dispatch_provenance: None,
+            scope_extensions: Vec::new(),
         }
     }
 
@@ -749,6 +751,7 @@ impl RecoveredErasureV1 {
             administrative_resolution_count: 0,
             authorize_provenance: manifest.authorize_provenance,
             dispatch_provenance: manifest.dispatch_provenance,
+            scope_extensions: Vec::new(),
         };
         recovered.recover_attempts(port)?;
         recovered.recover_scope(port, recovery_verifier)?;
@@ -766,6 +769,7 @@ impl RecoveredErasureV1 {
             self.request.clone(),
             self.state.clone(),
             self.scope.clone(),
+            self.scope_extensions.clone(),
         )
     }
 
@@ -1523,6 +1527,7 @@ impl RecoveredErasureV1 {
             verifier.validate_scope_extension(&extension)?;
             predecessor_node = Some(reference);
             predecessor_extension = Some(extension.reference());
+            self.scope_extensions.push(extension);
             self.scope_head = Some(RecoveredScopeHeadV1 {
                 node: reference,
                 extension: extension.reference(),

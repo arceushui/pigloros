@@ -2900,6 +2900,7 @@ pub struct ErasureVerifiedStateV1 {
     request: ErasureRequestV1,
     state: ErasureStateV1,
     scope: Option<ErasureScopeCommitmentV1>,
+    scope_extensions: Vec<ErasureScopeExtensionV1>,
 }
 
 impl ErasureVerifiedStateV1 {
@@ -2908,12 +2909,14 @@ impl ErasureVerifiedStateV1 {
         request: ErasureRequestV1,
         state: ErasureStateV1,
         scope: Option<ErasureScopeCommitmentV1>,
+        scope_extensions: Vec<ErasureScopeExtensionV1>,
     ) -> Self {
         Self {
             manifest_digest,
             request,
             state,
             scope,
+            scope_extensions,
         }
     }
 
@@ -2939,6 +2942,22 @@ impl ErasureVerifiedStateV1 {
     #[must_use]
     pub const fn scope(&self) -> Option<&ErasureScopeCommitmentV1> {
         self.scope.as_ref()
+    }
+
+    /// Return the validated ERSE1 extension chain in ordinal order.
+    ///
+    /// Every extension was recovered, content-address checked, linked to the
+    /// preceding node, and accepted by the recovery authorization boundary.
+    /// The initial immutable scope commitment is not repeated in this slice.
+    #[must_use]
+    pub const fn scope_extensions(&self) -> &[ErasureScopeExtensionV1] {
+        &self.scope_extensions
+    }
+
+    /// Return the admitted future-Fork identities in extension order.
+    #[must_use]
+    pub fn scope_forks(&self) -> impl Iterator<Item = ErasureReferenceV1> + '_ {
+        self.scope_extensions.iter().map(ErasureScopeExtensionV1::fork)
     }
 
     /// Return the validated lifecycle.
