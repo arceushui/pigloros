@@ -3032,6 +3032,37 @@ pub trait ErasureFreezeAuthorizationVerifierV1 {
     ) -> Result<(), ErasureErrorV1>;
 }
 
+/// Host-owned verifier for authorization attached to recovered erasure
+/// extensions and administrative resolutions.
+///
+/// The persistence layer validates immutable structural bindings. The host
+/// remains responsible for interpreting retained #186/#187 evidence and
+/// checking capabilities, principals, policy, and trust semantics.
+pub trait ErasureRecoveryAuthorizationVerifierV1 {
+    /// Verify the host admission which authorized one future-Fork extension.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization or provenance error when the retained
+    /// admission evidence is not independently authenticated.
+    fn validate_scope_extension(
+        &self,
+        extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1>;
+
+    /// Verify the host admission which authorized one administrative
+    /// resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed authorization or provenance error when the principal,
+    /// capability, policy, trust, or retained evidence is not authenticated.
+    fn validate_administrative_resolution(
+        &self,
+        resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1>;
+}
+
 /// Exact stored ERCRP1 bytes and their content address. Adapters return this
 /// envelope unchanged; decoding and recovery remain core-owned.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3590,7 +3621,9 @@ pub trait ErasureCoordinator {
 /// Host capability boundary for authentication, atomic freeze admission, and
 /// irreversible-work admission.
 pub trait ErasureCoordinatorPortV1:
-    ErasurePersistencePortV1 + ErasureFreezeAuthorizationVerifierV1
+    ErasurePersistencePortV1
+    + ErasureFreezeAuthorizationVerifierV1
+    + ErasureRecoveryAuthorizationVerifierV1
 {
     /// Authenticate a request before the state machine records it.
     ///
@@ -3957,10 +3990,10 @@ pub struct ErasureCoordinatorStateMachineV1<P> {
     records: Vec<RecoveredErasureV1>,
 }
 
-#[path = "erasure_codec.rs"]
-mod codec;
 mod coordinator;
-use codec::{
+#[path = "erasure/evidence.rs"]
+mod evidence;
+use evidence::{
     acknowledgement_provenance_from_fields, acknowledgement_provenance_value,
     acknowledgements_are_closure_subset, administrative_resolution_from_fields,
     administrative_resolution_value, attempt_outcome_from_fields, attempt_outcome_value,

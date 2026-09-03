@@ -18,11 +18,11 @@ use pos_core::{
     ErasureIndexInsertV1, ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
     ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
-    ErasureStateV1,
+    ErasureReceiptInventoriesV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
+    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -298,6 +298,22 @@ impl<S: ErasurePersistencePortV1> ErasureFreezeAuthorizationVerifierV1 for Host<
         authorization: &ErasureFreezeAuthorizationEvidenceV1,
     ) -> Result<(), ErasureErrorV1> {
         authorization.verify_admission_body_binding(admission)
+    }
+}
+
+impl<S: ErasurePersistencePortV1> ErasureRecoveryAuthorizationVerifierV1 for Host<S> {
+    fn validate_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
+    }
+
+    fn validate_administrative_resolution(
+        &self,
+        _resolution: &pos_core::ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        Ok(())
     }
 }
 

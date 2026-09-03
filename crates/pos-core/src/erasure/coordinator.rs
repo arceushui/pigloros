@@ -61,7 +61,9 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
     ) -> Result<Option<RecoveredErasureV1>, ErasureErrorV1> {
         self.port
             .read_manifest(request)?
-            .map(|stored| RecoveredErasureV1::recover(&self.port, &self.port, request, &stored))
+            .map(|stored| {
+                RecoveredErasureV1::recover(&self.port, &self.port, &self.port, request, &stored)
+            })
             .transpose()
     }
 

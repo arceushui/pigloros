@@ -20,9 +20,10 @@ use pos_core::{
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureIndexInsertV1,
     ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
+    ErasureStateTransitionV1, ErasureStateV1,
 };
 
 use crate::erasure_support::{freeze_evidence_fixture, FreezeEvidenceFixtureInput};
@@ -59,6 +60,8 @@ pub enum PublicCoordinatorOperation {
     ResolutionRef,
     CompareAndSwap,
     ValidateFreezeAuthorization,
+    ValidateScopeExtension,
+    ValidateAdministrativeResolution,
     AdmitAuthorization,
     AdmitCorrectedSubmission,
     AdmitAtomicFreeze,
@@ -417,6 +420,39 @@ impl PublicCoordinatorPort {
             .insert(reference, canonical_cbor);
     }
 
+    /// Point the manifest at an earlier valid ERS1 state without changing
+    /// that state's immutable bytes. Recovery must reject this rollback when
+    /// completed attempt evidence names a newer terminal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance or encoding error when no suitable state
+    /// or manifest exists.
+    pub fn replace_manifest_with_state_lifecycle(
+        &self,
+        request: ErasureReferenceV1,
+        lifecycle: pos_core::ErasureLifecycleV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let state = storage
+            .states
+            .values()
+            .filter_map(|bytes| ErasureStateV1::from_canonical_cbor(bytes).ok())
+            .find(|state| state.request() == request && state.lifecycle() == lifecycle)
+            .map(|state| state.state_digest())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let (_, manifest) = storage
+            .manifests
+            .get(&request)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let changed = replace_array_field(&manifest, 3, Value::Bytes(state.digest().to_vec()))?;
+        storage
+            .manifests
+            .insert(request, (addressed("ERCRP1", &changed), changed));
+        Ok(())
+    }
+
     /// Replace one field in the single completed attempt page and re-address
     /// the page, its index entry, and the manifest history head.
     ///
@@ -472,6 +508,59 @@ impl PublicCoordinatorPort {
         let changed = replace_array_field(&component_bytes, object_field, replacement)?;
         let changed_reference = addressed(object_tag, &changed);
         storage.objects.remove(&component);
+        storage.objects.insert(changed_reference, changed);
+        replace_attempt_page_field(
+            &mut storage,
+            request,
+            ordinal,
+            page_field,
+            Value::Bytes(changed_reference.digest().to_vec()),
+        )
+    }
+
+    /// Reverse one persisted acknowledgement inventory while repairing the
+    /// enclosing page address. This models reordered persisted evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provenance or encoding error when the selected page or
+    /// inventory is absent or malformed.
+    pub fn reverse_attempt_inventory(
+        &self,
+        request: ErasureReferenceV1,
+        ordinal: u64,
+        page_field: usize,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let page = *storage
+            .attempts
+            .get(&(request, ordinal))
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let page_bytes = storage
+            .objects
+            .get(&page)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let inventory = array_reference_field(&page_bytes, page_field)?;
+        let inventory_bytes = storage
+            .objects
+            .get(&inventory)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let mut value: Value = ciborium::from_reader(inventory_bytes.as_slice())
+            .map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        let Value::Array(fields) = &mut value else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        let Value::Array(references) = fields.get_mut(5).ok_or(ErasureErrorV1::InvalidEncoding)?
+        else {
+            return Err(ErasureErrorV1::InvalidEncoding);
+        };
+        references.reverse();
+        let mut changed = Vec::new();
+        ciborium::into_writer(&value, &mut changed).map_err(|_| ErasureErrorV1::InvalidEncoding)?;
+        let changed_reference = addressed(ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, &changed);
+        storage.objects.remove(&inventory);
         storage.objects.insert(changed_reference, changed);
         replace_attempt_page_field(
             &mut storage,
@@ -1002,6 +1091,22 @@ impl ErasureFreezeAuthorizationVerifierV1 for PublicCoordinatorPort {
     ) -> Result<(), ErasureErrorV1> {
         self.maybe_fail(PublicCoordinatorOperation::ValidateFreezeAuthorization)?;
         authorization.verify_admission_body_binding(admission)
+    }
+}
+
+impl ErasureRecoveryAuthorizationVerifierV1 for PublicCoordinatorPort {
+    fn validate_scope_extension(
+        &self,
+        _extension: &ErasureScopeExtensionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.maybe_fail(PublicCoordinatorOperation::ValidateScopeExtension)
+    }
+
+    fn validate_administrative_resolution(
+        &self,
+        _resolution: &ErasureAdministrativeResolutionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.maybe_fail(PublicCoordinatorOperation::ValidateAdministrativeResolution)
     }
 }
 

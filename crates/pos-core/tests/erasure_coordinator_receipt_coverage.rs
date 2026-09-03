@@ -1948,6 +1948,7 @@ fn coordinator_recovery_rejects_scope_chain_mismatches() -> Result<(), ErasureEr
     for (field, replacement) in [
         (2, Value::Bytes(reference(240).digest().to_vec())),
         (3, Value::Bytes(reference(240).digest().to_vec())),
+        (5, Value::Bytes(reference(240).digest().to_vec())),
         (6, Value::Bytes(reference(240).digest().to_vec())),
     ] {
         assert_scope_graph_mutation_rejected(|graph| {
@@ -1972,6 +1973,9 @@ fn coordinator_recovery_rejects_scope_chain_mismatches() -> Result<(), ErasureEr
 fn coordinator_recovery_rejects_resolution_chain_mismatches() -> Result<(), ErasureErrorV1> {
     for (field, replacement) in [
         (2, Value::Bytes(reference(240).digest().to_vec())),
+        (5, Value::Bytes(reference(240).digest().to_vec())),
+        (6, Value::Bytes(reference(240).digest().to_vec())),
+        (7, Value::Bytes(reference(240).digest().to_vec())),
         (12, Value::Bytes(reference(240).digest().to_vec())),
     ] {
         assert_resolution_graph_mutation_rejected(|graph| {
