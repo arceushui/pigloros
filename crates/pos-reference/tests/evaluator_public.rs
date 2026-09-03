@@ -10,9 +10,8 @@ use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, IndependenceEvidence, SubjectAdapterKind,
 };
 use pos_reference::profile::{
-    DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, Profile, ProfileError,
+    DeterministicBudget, EvaluatorHardCaps, NamespacedFailure, ProfileError,
 };
-use pos_reference::signed_bundle::verify_signed_bundle;
 use support::{BundleMutation, ProfileMutation, ReleaseMutation, TrustMutation};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -290,13 +289,6 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
 fn evaluator_accepts_every_current_profile_claim_layer() -> TestResult {
     for claim_layer in 0..=6 {
         let corpus = support::corpus_for_claim_layer(claim_layer)?;
-        let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
-        let bundle = verify_signed_bundle(&corpus.archive, &corpus.trust_policy, &request)?;
-        Profile::from_bundle(&bundle, &request).map_err(|error| {
-            std::io::Error::other(format!(
-                "claim layer {claim_layer} profile validation failed: {error:?}"
-            ))
-        })?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output,

@@ -526,6 +526,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         execution_digest,
         hash(&expected_output),
         mode,
+        claim_layer,
         bundle_mutation,
     )?;
     let archive_digest = hash(&archive);
@@ -1690,6 +1691,7 @@ fn archive(
     execution: [u8; 32],
     expected_output_digest: [u8; 32],
     mode: u64,
+    claim_layer: u64,
     mutation: Option<BundleMutation>,
 ) -> TestResult<Vec<u8>> {
     let descriptors: Vec<Value> = members
@@ -1719,7 +1721,7 @@ fn archive(
             let path = format!("fixtures/{case_id}.expected");
             let value = array(vec![
                 text(&case_id),
-                uint(0),
+                uint(claim_layer),
                 bytes(&execution),
                 uint(mode),
                 text(&path),
