@@ -469,17 +469,68 @@ fn corrected_request(provenance: ErasureReferenceV1) -> Result<ErasureRequestV1,
 fn assert_mutated_correction_is_rejected(
     adapter: &PublicCoordinatorPort,
     old_request: ErasureReferenceV1,
-    request: ErasureRequestV1,
-    state: ErasureStateV1,
-    correction: ErasureCorrectionProvenanceV1,
+    request: &ErasureRequestV1,
+    state: &ErasureStateV1,
+    correction: &ErasureCorrectionProvenanceV1,
 ) -> Result<(), ErasureErrorV1> {
-    adapter.replace_corrected_graph(old_request, &request, &state, &correction)?;
+    adapter.replace_corrected_graph(old_request, request, state, correction)?;
     assert_eq!(
         ErasureCoordinatorStateMachineV1::new(adapter.clone(), COORDINATOR)
-            .submit(request.clone(), request.provenance(),),
+            .submit(request.clone(), request.provenance()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
     Ok(())
+}
+
+fn assert_correction_recovery_guards(
+    adapter: &PublicCoordinatorPort,
+    corrected_reference: ErasureReferenceV1,
+    original_reference: ErasureReferenceV1,
+    rejected_terminal_state: ErasureReferenceV1,
+    submitted_terminal_state: ErasureReferenceV1,
+    correction: &ErasureCorrectionProvenanceV1,
+) -> Result<(), ErasureErrorV1> {
+    let same_request_correction =
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: corrected_reference,
+            rejected_terminal_state,
+            correction_reason: correction.correction_reason(),
+            authorization_provenance: correction.authorization_provenance(),
+        })?;
+    let same_request = corrected_request(same_request_correction.reference())?;
+    let same_request_state = ErasureStateV1::submitted(
+        same_request.reference(),
+        COORDINATOR,
+        same_request.provenance(),
+    )?;
+    assert_mutated_correction_is_rejected(
+        adapter,
+        corrected_reference,
+        &same_request,
+        &same_request_state,
+        &same_request_correction,
+    )?;
+
+    let wrong_terminal_correction =
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: original_reference,
+            rejected_terminal_state: submitted_terminal_state,
+            correction_reason: correction.correction_reason(),
+            authorization_provenance: correction.authorization_provenance(),
+        })?;
+    let invalid_terminal_request = corrected_request(wrong_terminal_correction.reference())?;
+    let invalid_terminal_state = ErasureStateV1::submitted(
+        invalid_terminal_request.reference(),
+        COORDINATOR,
+        invalid_terminal_request.provenance(),
+    )?;
+    assert_mutated_correction_is_rejected(
+        adapter,
+        corrected_reference,
+        &invalid_terminal_request,
+        &invalid_terminal_state,
+        &wrong_terminal_correction,
+    )
 }
 
 fn correction_for(
@@ -1599,46 +1650,13 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         corrected_state
     );
 
-    let same_request_correction =
-        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-            rejected_request: corrected_reference,
-            rejected_terminal_state: rejected.state_digest(),
-            correction_reason: correction.correction_reason(),
-            authorization_provenance: correction.authorization_provenance(),
-        })?;
-    let same_request = corrected_request(same_request_correction.reference())?;
-    let same_request_state = ErasureStateV1::submitted(
-        same_request.reference(),
-        COORDINATOR,
-        same_request.provenance(),
-    )?;
-    assert_mutated_correction_is_rejected(
+    assert_correction_recovery_guards(
         &mutation_base,
         corrected_reference,
-        same_request,
-        same_request_state,
-        same_request_correction,
-    )?;
-
-    let wrong_terminal_correction =
-        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
-            rejected_request: original.reference(),
-            rejected_terminal_state: original_submitted.state_digest(),
-            correction_reason: correction.correction_reason(),
-            authorization_provenance: correction.authorization_provenance(),
-        })?;
-    let invalid_terminal_request = corrected_request(wrong_terminal_correction.reference())?;
-    let invalid_terminal_state = ErasureStateV1::submitted(
-        invalid_terminal_request.reference(),
-        COORDINATOR,
-        invalid_terminal_request.provenance(),
-    )?;
-    assert_mutated_correction_is_rejected(
-        &mutation_base,
-        corrected_reference,
-        invalid_terminal_request,
-        invalid_terminal_state,
-        wrong_terminal_correction,
+        original.reference(),
+        rejected.state_digest(),
+        original_submitted.state_digest(),
+        &correction,
     )?;
 
     let conflicting_correction =
