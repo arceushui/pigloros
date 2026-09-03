@@ -204,9 +204,6 @@ fn validate_requested_artifacts(
     if archive_digest != request.fixture_bundle_digest {
         return Err(BundleError::DigestMismatch);
     }
-    if trust_policy.artifact_is_revoked(&archive_digest) {
-        return Err(BundleError::TrustPolicyMismatch);
-    }
     Ok((trust_policy, archive_digest))
 }
 

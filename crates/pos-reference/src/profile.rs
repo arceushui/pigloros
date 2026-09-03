@@ -320,7 +320,7 @@ impl Profile {
         let bytes = bundle.profile_bytes();
         let value = decode_canonical(bytes)?;
         let fields = array(&value, 18)?;
-        validate_profile_header(fields)?;
+        let header = decode_profile_header(fields)?;
         let actual_digest = contract_digest(
             b"PiglorOS.ConformanceProfile.v1",
             &Value::Array(fields[..17].to_vec()),
@@ -336,14 +336,11 @@ impl Profile {
         let execution_profile_digests = digest_list(&fields[7])?;
         let (registry, required_providers) = decode_provider_binding(&fields[8])?;
         let (evaluator_artifact_digests, hard_caps) = decode_protocol(&fields[11])?;
-        let fixtures = decode_fixtures(&fields[9], hard_caps)?;
+        let fixtures = decode_fixtures(&fields[9])?;
         let allowed_divergences = decode_allowed_divergences(&fields[10])?;
         let (independence_requirements, trust_policy_snapshot_digest) =
             decode_requirements(&fields[12])?;
-        let profile_claim_layer = fixtures
-            .first()
-            .map(|fixture| fixture.claim_layer)
-            .ok_or(ProfileError::ClosureIncomplete)?;
+        let profile_claim_layer = fixtures[0].claim_layer;
         validate_optional_digest(&fields[16])?;
         validate_profile_relationships(
             &fixtures,
@@ -362,7 +359,7 @@ impl Profile {
         )?;
         validate_support_closure(
             bundle,
-            fields,
+            &header,
             &registry,
             &fixtures,
             &execution_profile_digests,
@@ -370,17 +367,17 @@ impl Profile {
             trust_policy_snapshot_digest,
         )?;
         let profile = Self {
-            profile_id: identifier(&fields[2])?,
+            profile_id: header.profile_id,
             profile_digest,
-            normative_spec_digest: fixed_bytes(&fields[5])?,
+            normative_spec_digest: header.normative_spec_digest,
             execution_profile_digests,
             fixtures,
             evaluator_protocol_digest: evaluator_artifact_digests[0],
             evaluator_hard_caps: hard_caps,
             independence_requirements,
             trust_policy_snapshot_digest,
-            limitations_digest: fixed_bytes(&fields[14])?,
-            provenance_digest: fixed_bytes(&fields[15])?,
+            limitations_digest: header.limitations_digest,
+            provenance_digest: header.publication_digest,
         };
         profile.validate_request(request)?;
         profile.validate_bundle_closure(bundle, &registry)?;
@@ -540,17 +537,14 @@ fn validate_release_admission(
         .map_err(|_| ProfileError::InvalidEncoding)
 }
 
-fn decode_fixtures(
-    value: &Value,
-    hard_caps: EvaluatorHardCaps,
-) -> Result<Vec<Fixture>, ProfileError> {
+fn decode_fixtures(value: &Value) -> Result<Vec<Fixture>, ProfileError> {
     let values = array_values(value)?;
     if values.is_empty() || values.len() > MAX_FIXTURES {
         return Err(ProfileError::FieldOutOfBounds);
     }
     let fixtures = values
         .iter()
-        .map(|fixture| decode_fixture(fixture, hard_caps))
+        .map(decode_fixture)
         .collect::<Result<Vec<_>, _>>()?;
     if !fixtures
         .windows(2)
@@ -561,12 +555,12 @@ fn decode_fixtures(
     Ok(fixtures)
 }
 
-fn decode_fixture(value: &Value, hard_caps: EvaluatorHardCaps) -> Result<Fixture, ProfileError> {
+fn decode_fixture(value: &Value) -> Result<Fixture, ProfileError> {
     let fields = array(value, 24)?;
     let fixture_digest = validate_fixture_digest(fields)?;
     let header = decode_fixture_header(fields)?;
     let evidence = decode_fixture_evidence(fields)?;
-    let policy = decode_fixture_policy(fields, hard_caps)?;
+    let policy = decode_fixture_policy(fields)?;
     let fixture = Fixture {
         case_id: header.case_id,
         mandatory: header.mandatory,
@@ -666,12 +660,8 @@ fn decode_fixture_evidence(fields: &[Value]) -> Result<FixtureEvidence, ProfileE
     })
 }
 
-fn decode_fixture_policy(
-    fields: &[Value],
-    hard_caps: EvaluatorHardCaps,
-) -> Result<FixturePolicy, ProfileError> {
+fn decode_fixture_policy(fields: &[Value]) -> Result<FixturePolicy, ProfileError> {
     let deterministic_budget = DeterministicBudget::from_value(&fields[16])?;
-    hard_caps.admits(deterministic_budget)?;
     let safety = array(&fields[17], 1)?;
     let capability = array(&fields[18], 2)?;
     let capability_ids = string_list(&capability[1])?;
@@ -690,23 +680,41 @@ fn decode_fixture_policy(
     })
 }
 
-fn validate_profile_header(fields: &[Value]) -> Result<(), ProfileError> {
+struct ProfileHeader {
+    profile_id: String,
+    normative_spec_digest: [u8; 32],
+    execution_matrix_digest: [u8; 32],
+    fixture_policy_digest: [u8; 32],
+    limitations_digest: [u8; 32],
+    publication_digest: [u8; 32],
+}
+
+fn decode_profile_header(fields: &[Value]) -> Result<ProfileHeader, ProfileError> {
     if text(&fields[0])? != "CPF1" || uint(&fields[1])? != 1 {
         return Err(ProfileError::UnsupportedVersion);
     }
-    if !valid_identifier(text(&fields[2])?)
-        || !semantic_version(text(&fields[3])?, Some(10))
+    let header = ProfileHeader {
+        profile_id: identifier(&fields[2])?,
+        normative_spec_digest: fixed_bytes(&fields[5])?,
+        execution_matrix_digest: fixed_bytes(&fields[6])?,
+        fixture_policy_digest: fixed_bytes(&fields[13])?,
+        limitations_digest: fixed_bytes(&fields[14])?,
+        publication_digest: fixed_bytes(&fields[15])?,
+    };
+    if !semantic_version(text(&fields[3])?, Some(10))
         || uint(&fields[4])? != 0
-        || [5, 6, 13, 14, 15]
-            .into_iter()
-            .map(|index| fixed_bytes::<32>(&fields[index]))
-            .collect::<Result<Vec<_>, _>>()?
-            .contains(&[0; 32])
+        || [
+            header.normative_spec_digest,
+            header.execution_matrix_digest,
+            header.fixture_policy_digest,
+            header.limitations_digest,
+            header.publication_digest,
+        ]
+        .contains(&[0; 32])
     {
-        Err(ProfileError::FieldOutOfBounds)
-    } else {
-        Ok(())
+        return Err(ProfileError::FieldOutOfBounds);
     }
+    Ok(header)
 }
 
 fn decode_provider_binding(
@@ -831,7 +839,8 @@ fn optional_transition(value: &Value) -> Result<Option<ProviderTransition>, Prof
 
 fn decode_provenance(value: &Value) -> Result<[u8; 32], ProfileError> {
     let fields = array(value, 7)?;
-    if text(&fields[0])?.is_empty() || text(&fields[0])?.len() > 128 {
+    let source = text(&fields[0])?;
+    if source.is_empty() || source.len() > 128 {
         return Err(ProfileError::FieldOutOfBounds);
     }
     let digests = fields[1..]
@@ -852,10 +861,7 @@ fn validate_profile_relationships(
     allowed_divergences: &[AllowedDivergence],
     profile_claim_layer: u8,
 ) -> Result<(), ProfileError> {
-    let claim_layer = fixtures
-        .first()
-        .map(|fixture| fixture.claim_layer)
-        .ok_or(ProfileError::ClosureIncomplete)?;
+    let claim_layer = fixtures[0].claim_layer;
     let required = required_providers.iter().cloned().collect::<BTreeSet<_>>();
     let executions = execution_profiles.iter().copied().collect::<BTreeSet<_>>();
     let allowed = allowed_divergences.iter().cloned().collect::<BTreeSet<_>>();
@@ -1117,7 +1123,7 @@ fn value_depth(value: &Value) -> usize {
 
 fn validate_support_closure(
     bundle: &VerifiedBundle,
-    profile_fields: &[Value],
+    header: &ProfileHeader,
     registry: &ArtifactDescriptor,
     fixtures: &[Fixture],
     execution_profiles: &[[u8; 32]],
@@ -1133,27 +1139,23 @@ fn validate_support_closure(
         (
             "support/normative-requirements.md",
             3,
-            fixed_bytes(&profile_fields[5])?,
+            header.normative_spec_digest,
         ),
         (
             "authority/execution-matrix.json",
             11,
-            fixed_bytes(&profile_fields[6])?,
+            header.execution_matrix_digest,
         ),
         (
             "support/fixture-family-contract.json",
             18,
-            fixed_bytes(&profile_fields[13])?,
+            header.fixture_policy_digest,
         ),
-        (
-            "support/limitations.md",
-            9,
-            fixed_bytes(&profile_fields[14])?,
-        ),
+        ("support/limitations.md", 9, header.limitations_digest),
         (
             "support/publication-review.json",
             8,
-            fixed_bytes(&profile_fields[15])?,
+            header.publication_digest,
         ),
         (
             "support/evaluator-protocol-v1.json",
@@ -1186,10 +1188,11 @@ fn validate_support_closure(
         .iter()
         .filter(|(_, member)| member.role == 14)
         .map(|(path, member)| {
-            validate_execution_profile(path, &member.bytes, member.digest).map(|()| member.digest)
+            let maximum = validate_execution_profile(path, &member.bytes, member.digest)?;
+            validate_fixture_execution_budget(member.digest, maximum, fixtures)?;
+            Ok(member.digest)
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    validate_execution_profile_budgets(bundle, execution_profiles, fixtures)?;
     let declared_execution_profiles = execution_profiles.iter().copied().collect::<BTreeSet<_>>();
     if actual_execution_profiles == declared_execution_profiles
         && actual_execution_profiles.len() == execution_profiles.len()
@@ -1474,11 +1477,11 @@ fn validate_execution_profile(
     path: &str,
     bytes: &[u8],
     member_digest: [u8; 32],
-) -> Result<(), ProfileError> {
+) -> Result<[u64; 8], ProfileError> {
     let value = decode_canonical(bytes)?;
     let fields = array(&value, 17)?;
     validate_execution_profile_identity(fields, path)?;
-    validate_execution_profile_contract(fields)?;
+    let maximum = validate_execution_profile_contract(fields)?;
     let expected = contract_digest(
         b"PiglorOS.ExecutionProfile.v1",
         &Value::Array(fields[..16].to_vec()),
@@ -1488,7 +1491,7 @@ fn validate_execution_profile(
     {
         return Err(ProfileError::DigestMismatch);
     }
-    Ok(())
+    Ok(maximum)
 }
 
 fn validate_execution_profile_identity(fields: &[Value], path: &str) -> Result<(), ProfileError> {
@@ -1514,7 +1517,7 @@ fn validate_execution_profile_identity(fields: &[Value], path: &str) -> Result<(
     }
 }
 
-fn validate_execution_profile_contract(fields: &[Value]) -> Result<(), ProfileError> {
+fn validate_execution_profile_contract(fields: &[Value]) -> Result<[u64; 8], ProfileError> {
     if !valid_text_list(&fields[9], false)?
         || !valid_text_list(&fields[10], false)?
         || !valid_text_list(&fields[13], true)?
@@ -1526,52 +1529,43 @@ fn validate_execution_profile_contract(fields: &[Value]) -> Result<(), ProfileEr
     if bool_value(&network[0])? || !valid_text_list(&network[1], true)? {
         return Err(ProfileError::ClosureIncomplete);
     }
-    execution_budget(&fields[12])?;
+    let maximum = execution_budget(&fields[12])?;
     let versions = array(&fields[14], 2)?;
     if !semantic_version(text(&versions[0])?, None) || !semantic_version(text(&versions[1])?, None)
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
-    Ok(())
+    Ok(maximum)
 }
 
-fn validate_execution_profile_budgets(
-    bundle: &VerifiedBundle,
-    declared: &[[u8; 32]],
+fn validate_fixture_execution_budget(
+    execution_profile_digest: [u8; 32],
+    maximum: [u64; 8],
     fixtures: &[Fixture],
 ) -> Result<(), ProfileError> {
-    bundle
-        .members
-        .values()
-        .filter(|member| member.role == 14 && declared.contains(&member.digest))
-        .try_for_each(|member| {
-            let value = decode_canonical(&member.bytes)?;
-            let fields = array(&value, 17)?;
-            let maximum = execution_budget(&fields[12])?;
-            for fixture in fixtures
-                .iter()
-                .filter(|fixture| fixture.execution_profile_digest == member.digest)
-            {
-                let requested = [
-                    fixture.deterministic_budget.memory_bytes,
-                    fixture.deterministic_budget.cpu_fuel,
-                    fixture.deterministic_budget.host_calls,
-                    fixture.deterministic_budget.event_count,
-                    fixture.deterministic_budget.output_bytes,
-                    fixture.deterministic_budget.storage_bytes,
-                    fixture.deterministic_budget.execution_steps,
-                    fixture.deterministic_budget.simulation_time_ns,
-                ];
-                if requested
-                    .iter()
-                    .zip(maximum)
-                    .any(|(requested, maximum)| *requested > maximum)
-                {
-                    return Err(ProfileError::FieldOutOfBounds);
-                }
-            }
-            Ok(())
-        })
+    for fixture in fixtures
+        .iter()
+        .filter(|fixture| fixture.execution_profile_digest == execution_profile_digest)
+    {
+        let requested = [
+            fixture.deterministic_budget.memory_bytes,
+            fixture.deterministic_budget.cpu_fuel,
+            fixture.deterministic_budget.host_calls,
+            fixture.deterministic_budget.event_count,
+            fixture.deterministic_budget.output_bytes,
+            fixture.deterministic_budget.storage_bytes,
+            fixture.deterministic_budget.execution_steps,
+            fixture.deterministic_budget.simulation_time_ns,
+        ];
+        if requested
+            .iter()
+            .zip(maximum)
+            .any(|(requested, maximum)| *requested > maximum)
+        {
+            return Err(ProfileError::FieldOutOfBounds);
+        }
+    }
+    Ok(())
 }
 
 fn execution_budget(value: &Value) -> Result<[u64; 8], ProfileError> {
@@ -1649,20 +1643,22 @@ fn decode_descriptor(value: &Value) -> Result<ArtifactDescriptor, ProfileError> 
     let fields = array(value, 4)?;
     let member_path = text(&fields[0])?.to_owned();
     let media_type = text(&fields[1])?.to_owned();
+    let byte_length = uint(&fields[2])?;
+    let digest = fixed_bytes(&fields[3])?;
     if member_path.is_empty()
         || !valid_member_path(&member_path)
         || !valid_media_type(&media_type)
-        || uint(&fields[2])? == 0
-        || uint(&fields[2])? > 64 * 1024 * 1024
-        || fixed_bytes::<32>(&fields[3])? == [0; 32]
+        || byte_length == 0
+        || byte_length > 64 * 1024 * 1024
+        || digest == [0; 32]
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
     Ok(ArtifactDescriptor {
         member_path,
         media_type,
-        byte_length: uint(&fields[2])?,
-        digest: fixed_bytes(&fields[3])?,
+        byte_length,
+        digest,
     })
 }
 

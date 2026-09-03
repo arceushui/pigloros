@@ -1558,6 +1558,15 @@ fn mutate_provider_registry(fields: &mut [Value], mutation: ProfileMutation) {
             };
             record[4] = Value::Null;
         }
+        ProfileMutation::DeepTypeBoundary(38) => {
+            let Value::Array(providers) = &mut fields[2] else {
+                return;
+            };
+            let Value::Array(record) = &mut providers[0] else {
+                return;
+            };
+            record[4] = uint(256);
+        }
         ProfileMutation::RawRegistryField(index) => {
             fields[usize::from(index)] = Value::Null;
         }
@@ -1946,7 +1955,7 @@ fn mutate_deep_fixture_field(fields: &mut [Value], mutation: ProfileMutation) ->
         return Ok(false);
     };
     match index {
-        0..=2 | 6 | 7 | 18 | 22..=37 => {}
+        0..=2 | 6 | 7 | 18 | 22..=38 => {}
         3 => array_fields_mut(&mut fields[7])?[0] = Value::Null,
         4 => fields[19] = Value::Bool(false),
         5 => fields[20] = Value::Bool(false),
@@ -1985,6 +1994,7 @@ fn mutate_deep_fixture_field(fields: &mut [Value], mutation: ProfileMutation) ->
         }
         20 => array_fields_mut(&mut fields[16])?[0] = Value::Bool(false),
         21 => array_fields_mut(&mut fields[17])?[0] = Value::Bool(false),
+        39 => fields[2] = uint(256),
         _ => return Err(io::Error::other("unknown deep profile boundary").into()),
     }
     Ok(true)
