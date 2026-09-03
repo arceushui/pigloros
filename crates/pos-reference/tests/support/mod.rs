@@ -500,10 +500,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         execution_digest,
         trust_digest,
         &expected_output,
-        release_mutation,
-        mixed_oracles,
-        subject_adapter,
-        claim_layer,
+        options,
     )?;
     let mut profile = profile(
         &members,
@@ -670,10 +667,7 @@ fn fixtures(
     execution: [u8; 32],
     trust: [u8; 32],
     expected: &[u8],
-    release_mutation: Option<ReleaseMutation>,
-    mixed_oracles: bool,
-    subject_adapter: SubjectAdapterKind,
-    claim_layer: u64,
+    options: CorpusOptions<'_>,
 ) -> TestResult<Vec<Value>> {
     (0_u64..=6)
         .map(|family| -> TestResult<Value> {
@@ -704,22 +698,28 @@ fn fixtures(
                     trust,
                     &provider_key(2),
                     &provider_key(1),
-                    release_mutation,
+                    options.release_mutation,
                 )?;
                 let digest = hash(&admission);
-                if !matches!(release_mutation, Some(ReleaseMutation::MissingMember)) {
+                if !matches!(
+                    options.release_mutation,
+                    Some(ReleaseMutation::MissingMember)
+                ) {
                     members.insert(
                         format!("authority/release-admissions/{case_id}.rad1"),
                         (admission.clone(), 16),
                     );
                 }
-                if matches!(release_mutation, Some(ReleaseMutation::ExtraMember)) {
+                if matches!(options.release_mutation, Some(ReleaseMutation::ExtraMember)) {
                     members.insert(
                         "authority/release-admissions/extra.rad1".to_owned(),
                         (admission, 16),
                     );
                 }
-                if matches!(release_mutation, Some(ReleaseMutation::MissingBinding)) {
+                if matches!(
+                    options.release_mutation,
+                    Some(ReleaseMutation::MissingBinding)
+                ) {
                     Value::Null
                 } else {
                     bytes(&digest)
@@ -727,15 +727,20 @@ fn fixtures(
             } else {
                 Value::Null
             };
-            let expectation =
-                fixture_expectation(members, &evidence_path, &output_path, mixed_oracles, family)?;
+            let expectation = fixture_expectation(
+                members,
+                &evidence_path,
+                &output_path,
+                options.mixed_oracles,
+                family,
+            )?;
             let mut fixture = vec![
                 text(&case_id),
                 Value::Bool(true),
-                uint(claim_layer),
+                uint(options.claim_layer),
                 uint(family),
                 provider,
-                uint(adapter_code(subject_adapter)),
+                uint(adapter_code(options.subject_adapter)),
                 bytes(&execution),
                 array(vec![uint(0), uint(1)]),
                 descriptor(members, &schema_path)?,

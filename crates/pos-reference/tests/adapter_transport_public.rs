@@ -662,3 +662,21 @@ fn process_adapter_keeps_crashes_timeouts_and_bad_frames_operational() -> TestRe
     assert_eq!(successful.execute(&operational_attempt), Ok(expected));
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn process_adapter_watchdog_terminates_descendants_holding_transport_open() -> TestResult {
+    let mut descendant = ProcessAdapter::new(
+        SubjectAdapterKind::ExportedArtifact,
+        [1; 32],
+        "/bin/sh",
+        vec![OsString::from("-c"), OsString::from("sleep 30 & exit 0")],
+    )?;
+    let started = std::time::Instant::now();
+    assert_eq!(
+        descendant.execute(&attempt()),
+        Err(AdapterError::WatchdogExpired)
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    Ok(())
+}
