@@ -683,7 +683,7 @@ fn process_adapter_watchdog_terminates_descendants_holding_transport_open() -> T
 
 #[cfg(unix)]
 #[test]
-fn process_adapter_bounds_deadline_and_blocked_request_transport() -> TestResult {
+fn process_adapter_rejects_an_unrepresentable_deadline() -> TestResult {
     let mut impossible_deadline = attempt();
     impossible_deadline.watchdog_ms = u64::MAX;
     let mut adapter = ProcessAdapter::new(
@@ -696,17 +696,24 @@ fn process_adapter_bounds_deadline_and_blocked_request_transport() -> TestResult
         adapter.execute(&impossible_deadline),
         Err(AdapterError::ProtocolFailure)
     );
+    Ok(())
+}
 
+#[cfg(target_os = "linux")]
+#[test]
+fn process_adapter_bounds_blocked_request_transport() -> TestResult {
     let mut blocked_request = attempt();
     blocked_request.watchdog_ms = 100;
     blocked_request.payload = vec![0; 1024 * 1024];
     let mut adapter = ProcessAdapter::new(
         SubjectAdapterKind::ExportedArtifact,
         [1; 32],
-        "/bin/sh",
+        "/usr/bin/python3",
         vec![
             OsString::from("-c"),
-            OsString::from("sleep 30 <&0 >/dev/null 2>&1 & exit 0"),
+            OsString::from(
+                "import os,time\nif os.fork(): os._exit(0)\nos.close(1)\nos.close(2)\ntime.sleep(30)",
+            ),
         ],
     )?;
     assert_eq!(
