@@ -14,6 +14,7 @@ const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_TRUST_POLICY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EVALUATOR_BINARY_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_EVALUATOR_SOURCE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 enum CommandError {
@@ -37,7 +38,7 @@ struct Options {
     request: PathBuf,
     archive: PathBuf,
     trust_policy: PathBuf,
-    source_digest: [u8; 32],
+    evaluator_source: PathBuf,
     declaration_digest: [u8; 32],
     shared_code_audit_digest: [u8; 32],
     reviewer_ids: Vec<String>,
@@ -52,7 +53,7 @@ struct OptionsBuilder {
     request: Option<PathBuf>,
     archive: Option<PathBuf>,
     trust_policy: Option<PathBuf>,
-    source_digest: Option<[u8; 32]>,
+    evaluator_source: Option<PathBuf>,
     declaration_digest: Option<[u8; 32]>,
     shared_code_audit_digest: Option<[u8; 32]>,
     reviewer_ids: Vec<String>,
@@ -80,8 +81,9 @@ fn run() -> Result<(), CommandError> {
     })?;
     let executable = env::current_exe().map_err(|_| CommandError::Identity)?;
     let binary_digest = digest_bounded(&executable, MAX_EVALUATOR_BINARY_BYTES)?;
+    let source_digest = digest_bounded(&options.evaluator_source, MAX_EVALUATOR_SOURCE_BYTES)?;
     let identity = EvaluatorIdentity {
-        source_digest: options.source_digest,
+        source_digest,
         binary_digest,
         independence: IndependenceEvidence {
             technical_independent: true,
@@ -144,7 +146,9 @@ fn parse_option(
         "--request" => set_once(&mut builder.request, next_path(arguments)?)?,
         "--bundle" => set_once(&mut builder.archive, next_path(arguments)?)?,
         "--trust-policy" => set_once(&mut builder.trust_policy, next_path(arguments)?)?,
-        "--source-digest" => set_once(&mut builder.source_digest, next_digest(arguments)?)?,
+        "--evaluator-source" => {
+            set_once(&mut builder.evaluator_source, next_path(arguments)?)?;
+        }
         "--declaration-digest" => {
             set_once(&mut builder.declaration_digest, next_digest(arguments)?)?;
         }
@@ -182,7 +186,7 @@ impl OptionsBuilder {
             request: self.request.ok_or(CommandError::Arguments)?,
             archive: self.archive.ok_or(CommandError::Arguments)?,
             trust_policy: self.trust_policy.ok_or(CommandError::Arguments)?,
-            source_digest: self.source_digest.ok_or(CommandError::Arguments)?,
+            evaluator_source: self.evaluator_source.ok_or(CommandError::Arguments)?,
             declaration_digest: self.declaration_digest.ok_or(CommandError::Arguments)?,
             shared_code_audit_digest: self
                 .shared_code_audit_digest
@@ -248,7 +252,18 @@ const fn hexadecimal_nibble(value: u8) -> Option<u8> {
 }
 
 fn digest_bounded(path: &Path, maximum: u64) -> Result<[u8; 32], CommandError> {
-    read_bounded(path, maximum).map(|bytes| *blake3::hash(&bytes).as_bytes())
+    let file = File::open(path).map_err(|_| CommandError::Input)?;
+    if file.metadata().map_err(|_| CommandError::Input)?.len() > maximum {
+        return Err(CommandError::Input);
+    }
+    let mut bounded = file.take(maximum.saturating_add(1));
+    let mut hasher = blake3::Hasher::new();
+    let byte_length = io::copy(&mut bounded, &mut hasher).map_err(|_| CommandError::Input)?;
+    if byte_length > maximum {
+        Err(CommandError::Input)
+    } else {
+        Ok(*hasher.finalize().as_bytes())
+    }
 }
 
 fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, CommandError> {
