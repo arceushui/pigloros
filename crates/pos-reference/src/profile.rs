@@ -1301,14 +1301,15 @@ fn validate_matrix_row(value: &serde_json::Value, fixture_id: &str) -> Result<()
         || row.get("variants") != Some(&serde_json::json!(["S", "D", "W", "C"]))
         || row.get("modes") != Some(&serde_json::json!(["L", "A", "R", "F"]))
         || json_u64(row, "case_count")? != 16
-        || [
-            "channel",
-            "classification",
-            "equality",
-            "sole_unauthorized_delta",
-        ]
-        .iter()
-        .any(|field| json_text(row, field).is_err_or(str::is_empty))
+        || !json_fields_nonempty(
+            row,
+            &[
+                "channel",
+                "classification",
+                "equality",
+                "sole_unauthorized_delta",
+            ],
+        )?
         || json_array(row, "observable_surfaces")?.is_empty()
     {
         Err(ProfileError::ClosureIncomplete)
@@ -1324,9 +1325,7 @@ fn validate_matrix_predicate(
     let predicate = json_object(value)?;
     require_json_fields(predicate, &["AuthEq", "OpEq", "PublicEq", "fixture_id"])?;
     if json_text(predicate, "fixture_id")? != fixture_id
-        || ["AuthEq", "PublicEq", "OpEq"]
-            .iter()
-            .any(|field| json_text(predicate, field).is_err_or(str::is_empty))
+        || !json_fields_nonempty(predicate, &["AuthEq", "PublicEq", "OpEq"])?
     {
         Err(ProfileError::ClosureIncomplete)
     } else {
@@ -1407,6 +1406,15 @@ fn json_text<'a>(
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or(ProfileError::InvalidEncoding)
+}
+
+fn json_fields_nonempty(
+    object: &serde_json::Map<String, serde_json::Value>,
+    fields: &[&str],
+) -> Result<bool, ProfileError> {
+    fields.iter().try_fold(true, |all_nonempty, field| {
+        Ok(all_nonempty && !json_text(object, field)?.is_empty())
+    })
 }
 
 fn json_u64(
