@@ -19,7 +19,6 @@ use crate::evaluator_protocol::SubjectAdapterKind;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const TRANSPORT_OVERHEAD_BYTES: u64 = 64 * 1024;
-const MAX_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_RESPONSE_BYTES_U64: u64 = 128 * 1024 * 1024;
 
 /// Out-of-process public adapter identity and executable invocation.
