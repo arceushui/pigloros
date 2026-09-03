@@ -823,6 +823,7 @@ const PROFILE_MUTATIONS: &[ProfileMutation] = &[
     ProfileMutation::FixtureRedaction,
     ProfileMutation::FixtureBudget,
     ProfileMutation::FixtureBudgetAboveCap,
+    ProfileMutation::FixtureBudgetAboveExecutionProfile,
     ProfileMutation::FixtureWatchdog,
     ProfileMutation::FixtureNetworkPlugin,
     ProfileMutation::FixtureNetworkAirGapped,
@@ -1057,7 +1058,7 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
         .chain(std::iter::once(ProfileMutation::DivergenceCoordinateLong))
         .chain((0..7).map(ProfileMutation::SelectedCapBoundary))
         .chain((0..10).map(ProfileMutation::ExecutionContractBoundary))
-        .chain((0..9).map(ProfileMutation::FixtureSemanticBoundary))
+        .chain((0..10).map(ProfileMutation::FixtureSemanticBoundary))
         .chain((0..8).map(ProfileMutation::ProvenanceBoundary))
         .chain((0..3).map(ProfileMutation::DescriptorValueBoundary))
         .chain((0..5).map(ProfileMutation::RelationshipBoundary))

@@ -111,6 +111,7 @@ pub enum ProfileMutation {
     FixtureRedaction,
     FixtureBudget,
     FixtureBudgetAboveCap,
+    FixtureBudgetAboveExecutionProfile,
     FixtureWatchdog,
     FixtureNetworkPlugin,
     FixtureNetworkAirGapped,
@@ -1912,6 +1913,9 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
             ProfileMutation::FixtureBudgetAboveCap => {
                 array_fields_mut(&mut fields[16])?[0] = uint(1024 * 1024 * 1024 + 1);
             }
+            ProfileMutation::FixtureBudgetAboveExecutionProfile => {
+                array_fields_mut(&mut fields[16])?[0] = uint(101);
+            }
             ProfileMutation::FixtureWatchdog => fields[17] = array(vec![uint(0)]),
             ProfileMutation::FixtureNetworkPlugin => {
                 fields[5] = uint(2);
@@ -2076,7 +2080,8 @@ fn mutate_fixture_boundary(fields: &mut [Value], mutation: ProfileMutation) -> T
             5 => array_fields_mut(&mut fields[18])?[0] = Value::Bool(true),
             6 => fields[19] = bytes(&[8; 32]),
             7 => fields[20] = bytes(&[8; 32]),
-            _ => fields[22] = array(vec![provider_key(0), provider_key(1)]),
+            8 => fields[22] = array(vec![provider_key(0), provider_key(1)]),
+            _ => fields[7] = array(vec![uint(1)]),
         },
         ProfileMutation::ProvenanceBoundary(index) => {
             let provenance = array_fields_mut(&mut fields[21])?;
