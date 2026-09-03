@@ -8,17 +8,6 @@ use netlink_packet_netfilter::{
     NetfilterHeader, NetfilterMessage, NetfilterProtoFamily,
 };
 use rtnetlink::new_connection;
-use zbus::zvariant::OwnedObjectPath;
-
-#[zbus::proxy(
-    interface = "org.freedesktop.systemd1.Manager",
-    default_service = "org.freedesktop.systemd1",
-    default_path = "/org/freedesktop/systemd1"
-)]
-trait SystemdManager {
-    #[zbus(name = "GetUnit")]
-    fn get_unit(&self, name: &str) -> zbus::Result<OwnedObjectPath>;
-}
 
 #[tokio::main]
 async fn main() {
@@ -34,10 +23,10 @@ async fn probe_systemd() -> &'static str {
     let Ok(connection) = zbus::Connection::system().await else {
         return "unavailable";
     };
-    let Ok(proxy) = SystemdManagerProxy::new(&connection).await else {
+    let Ok(proxy) = zbus_systemd::systemd1::ManagerProxy::new(&connection).await else {
         return "unavailable";
     };
-    match proxy.get_unit("-.mount").await {
+    match proxy.get_unit("-.mount".to_owned()).await {
         Ok(_) => "typed-get-unit-ok",
         Err(_) => "typed-get-unit-rejected",
     }
@@ -68,4 +57,3 @@ fn encode_nftables_probe() -> usize {
     message.emit(&mut bytes);
     bytes.len()
 }
-
