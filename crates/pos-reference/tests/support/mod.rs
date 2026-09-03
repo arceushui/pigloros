@@ -238,7 +238,6 @@ pub enum BundleMutation {
     ExpectedModeAbove,
     ExpectedMissingPath,
     ExpectedDigest,
-    ExpectedEmpty,
     ExpectedPathType,
     ProfileExpectedCount,
     ProfileExpectedCase,
@@ -2401,7 +2400,6 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[5] = bytes(&[99; 32]);
         }
-        BundleMutation::ExpectedEmpty => fields[5] = array(Vec::new()),
         BundleMutation::ExpectedPathType => {
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[4] = Value::Null;

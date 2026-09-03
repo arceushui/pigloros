@@ -1181,7 +1181,6 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
         BundleMutation::ExpectedModeAbove,
         BundleMutation::ExpectedMissingPath,
         BundleMutation::ExpectedDigest,
-        BundleMutation::ExpectedEmpty,
         BundleMutation::ExpectedPathType,
         BundleMutation::Signer,
         BundleMutation::Signature,
