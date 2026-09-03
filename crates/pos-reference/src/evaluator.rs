@@ -122,6 +122,8 @@ pub struct EvaluationArtifacts {
 /// Closed failures that prevent a structurally valid CNR1 from being emitted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum EvaluatorError {
+    #[error("evaluator protocol version is unsupported")]
+    UnsupportedVersion,
     #[error("EVR1 request is invalid")]
     Request,
     #[error("CFB1 bundle is invalid")]
@@ -139,8 +141,12 @@ pub enum EvaluatorError {
 }
 
 impl From<ProtocolError> for EvaluatorError {
-    fn from(_: ProtocolError) -> Self {
-        Self::Request
+    fn from(error: ProtocolError) -> Self {
+        if error == ProtocolError::UnsupportedVersion {
+            Self::UnsupportedVersion
+        } else {
+            Self::Request
+        }
     }
 }
 
