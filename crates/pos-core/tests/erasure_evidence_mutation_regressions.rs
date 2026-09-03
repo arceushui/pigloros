@@ -1,43 +1,31 @@
 //! Evidence codec mutation regressions for the direct V1 records.
 
+#[path = "support/erasure.rs"]
+mod erasure_support;
+
 use ciborium::value::Value;
+use erasure_support::{reference, replay_target, request as fixture_request, RequestFixtureInput};
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementProvenanceInputV1,
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionActionV1,
     ErasureAdministrativeResolutionInputV1, ErasureAdministrativeResolutionV1,
-    ErasureApplicabilityDecisionV1, ErasureArtifactClassV1, ErasureAttemptOutcomeInputV1,
-    ErasureAttemptOutcomeV1, ErasureAttemptQuotaReservationV1,
-    ErasureAuthorizationRejectionInputV1, ErasureAuthorizationRejectionV1, ErasureCasEffectV1,
-    ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureFreezeAdmissionEvidenceInputV1, ErasureFreezeAdmissionEvidenceV1,
-    ErasureFreezeApplicabilityRowV1, ErasureFreezeAuthorizationEvidenceInputV1,
-    ErasureFreezeAuthorizationEvidenceV1, ErasureFreezeFailureInputV1, ErasureFreezeFailureV1,
-    ErasureFreezeProvenanceInputV1, ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1,
-    ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
-    ErasureObligationSetV1, ErasureObligationV1, ErasureReceiptProvenanceInputV1,
-    ErasureReceiptProvenanceV1, ErasureReferenceV1, ErasureRequestInputV1, ErasureRequestV1,
-    ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
-    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
-    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
+    ErasureApplicabilityDecisionV1, ErasureAttemptOutcomeInputV1, ErasureAttemptOutcomeV1,
+    ErasureAttemptQuotaReservationV1, ErasureAuthorizationRejectionInputV1,
+    ErasureAuthorizationRejectionV1, ErasureCasEffectV1, ErasureCorrectionProvenanceV1,
+    ErasureDestructionCommandV1, ErasureErrorV1, ErasureFreezeAdmissionEvidenceInputV1,
+    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeApplicabilityRowV1,
+    ErasureFreezeAuthorizationEvidenceInputV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureFreezeFailureInputV1, ErasureFreezeFailureV1, ErasureFreezeProvenanceInputV1,
+    ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureLifecycleV1,
+    ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
+    ErasureObligationV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
+    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
 };
 
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
-
-const fn target() -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(10),
-        key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(11),
-        replica_set: reference(12),
-        replica_id: reference(13),
-    }
-}
-
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
+    fixture_request(RequestFixtureInput {
         request: reference(1),
         subject: reference(2),
         scope: ErasureScopeV1::PrivateSubjectData,
@@ -157,7 +145,7 @@ evidence_roundtrip!(
 evidence_roundtrip!(obligation_roundtrips, ErasureObligationV1, {
     ErasureObligationV1::new(ErasureObligationInputV1 {
         category: ErasureInventoryCategoryV1::Artifact,
-        target: target(),
+        target: replay_target(10),
         owner: reference(4),
         command_identity: reference(5),
     })
@@ -340,7 +328,7 @@ fn cas_effect_codec_roundtrips_every_durable_variant() -> Result<(), ErasureErro
             commands: vec![ErasureDestructionCommandV1 {
                 obligation: reference(22),
                 category: ErasureInventoryCategoryV1::Artifact,
-                target: target(),
+                target: replay_target(10),
                 owner: reference(23),
                 command: reference(24),
                 provenance: admission,
@@ -373,7 +361,7 @@ fn cas_effect_codec_rejects_unknown_kinds_and_mismatched_command_provenance(
         commands: vec![ErasureDestructionCommandV1 {
             obligation: reference(22),
             category: ErasureInventoryCategoryV1::Key,
-            target: target(),
+            target: replay_target(10),
             owner: reference(23),
             command: reference(24),
             provenance: admission,

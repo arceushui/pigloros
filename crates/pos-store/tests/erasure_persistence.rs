@@ -57,7 +57,11 @@ fn freeze_evidence(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut matrix = Vec::with_capacity(targets.len().saturating_mul(4));
+    let mut matrix = Vec::with_capacity(
+        targets
+            .len()
+            .saturating_mul(ErasureInventoryCategoryV1::CANONICAL.len()),
+    );
     for category in ErasureInventoryCategoryV1::CANONICAL {
         for (target_index, target) in targets.iter().enumerate() {
             let owner = owners.get(&(category, *target)).copied();

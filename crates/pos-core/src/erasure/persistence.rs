@@ -19,7 +19,7 @@ use super::{
     ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
     ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1,
-    ErasureStateV1, PreparedErasureCasV1, StoredErasureManifestV1,
+    ErasureStateV1, ErasureVerifiedStateV1, PreparedErasureCasV1, StoredErasureManifestV1,
     ERASURE_ACKNOWLEDGEMENT_INVENTORY_TAG_V1, ERASURE_ATTEMPT_HISTORY_TAG_V1,
     ERASURE_COORDINATOR_RECORD_MAX_BYTES, ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT,
     ERASURE_MAX_ADMINISTRATIVE_RESOLUTIONS, ERASURE_MAX_ATTEMPT_OUTCOMES,
@@ -758,6 +758,15 @@ impl RecoveredErasureV1 {
 
     pub(super) const fn state(&self) -> &ErasureStateV1 {
         &self.state
+    }
+
+    pub(super) fn verified_state(&self) -> ErasureVerifiedStateV1 {
+        ErasureVerifiedStateV1::from_parts(
+            self.manifest_digest,
+            self.request.clone(),
+            self.state.clone(),
+            self.scope.clone(),
+        )
     }
 
     pub(super) fn prepare(

@@ -6,38 +6,25 @@ pub mod coordinator_support;
 pub mod erasure_support;
 
 use coordinator_support::{PublicCoordinatorPort, PublicCoordinatorPortConfig};
-use pos_core::erasure::destruction_command_reference;
+use erasure_support::{
+    obligation as fixture_obligation, reference, replay_target, request as fixture_request,
+    retry_admission as fixture_retry_admission, RequestFixtureInput, RetryAdmissionFixture,
+};
 use pos_core::{
     ErasureCasEffectV1, ErasureCasOutcomeV1, ErasureCoordinatorStateMachineV1,
     ErasureCorrectionProvenanceInputV1, ErasureCorrectionProvenanceV1, ErasureErrorV1,
-    ErasureInventoryCategoryV1, ErasureKeyRoleV1, ErasureLifecycleV1, ErasureObligationInputV1,
-    ErasureObligationV1, ErasurePersistencePortV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
+    ErasureLifecycleV1, ErasurePersistencePortV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeV1,
+    ErasureStateResolverV1, ErasureStateTransitionV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
-
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
-
-const fn target() -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: pos_core::ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(10),
-        key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(11),
-        replica_set: reference(12),
-        replica_id: reference(13),
-    }
-}
 
 fn request_with(
     request: ErasureReferenceV1,
     provenance: ErasureReferenceV1,
 ) -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
+    fixture_request(RequestFixtureInput {
         request,
         subject: reference(2),
         scope: ErasureScopeV1::PrivateSubjectData,
@@ -97,18 +84,12 @@ fn admission_with_provenance(
     target: ErasureRequiredTargetV1,
     authorization_provenance: ErasureReferenceV1,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
-    let obligation = ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })?;
-    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    let obligation = fixture_obligation(request, target)?;
+    fixture_retry_admission(RetryAdmissionFixture {
         request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: vec![obligation.reference()],
-        command_identities: vec![obligation.command_identity()],
+        obligations: std::slice::from_ref(&obligation),
         policy: reference(6),
         trust: reference(8),
         admitted_position: 11,
@@ -119,7 +100,7 @@ fn admission_with_provenance(
 
 #[test]
 fn conflicting_active_attempt_is_rejected_before_host_admission() -> Result<(), ErasureErrorV1> {
-    let target = target();
+    let target = replay_target(10);
     let port = PublicCoordinatorPort::new(config(vec![target], false));
     let observer = port.clone();
     let request = request()?;
@@ -219,7 +200,7 @@ fn restart_revalidates_authorization_rejection_provenance() -> Result<(), Erasur
 #[test]
 fn restart_recovers_a_frozen_state_and_verifies_retained_authorization(
 ) -> Result<(), ErasureErrorV1> {
-    let port = PublicCoordinatorPort::new(config(vec![target()], false));
+    let port = PublicCoordinatorPort::new(config(vec![replay_target(10)], false));
     let request = request()?;
     {
         let mut coordinator = ErasureCoordinatorStateMachineV1::new(port.clone(), COORDINATOR);
@@ -235,7 +216,7 @@ fn restart_recovers_a_frozen_state_and_verifies_retained_authorization(
 
 #[test]
 fn attempt_admission_is_coupled_to_the_raw_cas_effect() -> Result<(), ErasureErrorV1> {
-    let target = target();
+    let target = replay_target(10);
     let port = PublicCoordinatorPort::new(config(vec![target], false));
     let observer = port.clone();
     let request = request()?;
@@ -264,7 +245,7 @@ fn attempt_admission_is_coupled_to_the_raw_cas_effect() -> Result<(), ErasureErr
 
 #[test]
 fn restart_recovers_an_active_attempt_from_its_durable_outbox() -> Result<(), ErasureErrorV1> {
-    let target = target();
+    let target = replay_target(10);
     let port = PublicCoordinatorPort::new(config(vec![target], false));
     let request = request()?;
     {
@@ -290,7 +271,7 @@ fn restart_recovers_an_active_attempt_from_its_durable_outbox() -> Result<(), Er
 
 #[test]
 fn restart_rejects_an_active_attempt_without_its_durable_outbox() -> Result<(), ErasureErrorV1> {
-    let target = target();
+    let target = replay_target(10);
     let port = PublicCoordinatorPort::new(config(vec![target], false));
     let request = request()?;
     let admitted = admission(request.reference(), target)?;

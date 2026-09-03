@@ -4,6 +4,8 @@
 //! the broad public lifecycle coverage so each recovery invariant has a small,
 //! readable fixture.
 
+use std::collections::BTreeMap;
+
 #[path = "support/coordinator.rs"]
 pub mod coordinator_support;
 #[path = "support/erasure.rs"]
@@ -13,40 +15,29 @@ use coordinator_support::{
     PublicCoordinatorFault, PublicCoordinatorOperation, PublicCoordinatorPort,
     PublicCoordinatorPortConfig,
 };
-use pos_core::erasure::{destruction_command_reference, target_closure_digest};
+use erasure_support::{
+    obligation as fixture_obligation, reference, replay_target as target,
+    request as fixture_request, retry_admission as fixture_retry_admission, RequestFixtureInput,
+    RetryAdmissionFixture,
+};
+use pos_core::erasure::target_closure_digest;
 use pos_core::{
     ErasureAcknowledgementOutcomeV1, ErasureAcknowledgementV1,
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
-    ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
-    ErasureCoordinator, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
-    ErasureObligationInputV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
-    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
-    ErasureStateTransitionV1,
+    ErasureAdministrativeResolutionV1, ErasureArtifactTransitionV1, ErasureCoordinator,
+    ErasureCoordinatorStateMachineV1, ErasureErrorV1, ErasureInventoryCategoryV1,
+    ErasureInventoryResultV1, ErasureLifecycleV1, ErasureObligationV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestV1,
+    ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
+    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
+    ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1, ErasureStateV1,
+    ErasureVerifiedStateQueryV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
 
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
-
-const fn target(seed: u8) -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: ErasureArtifactClassV1::TimelineReplay,
-        artifact_digest: reference(seed),
-        key_role: ErasureKeyRoleV1::DataEncryption,
-        key_digest: reference(seed.wrapping_add(1)),
-        replica_set: reference(seed.wrapping_add(2)),
-        replica_id: reference(seed.wrapping_add(3)),
-    }
-}
-
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
+    fixture_request(RequestFixtureInput {
         request: reference(1),
         subject: reference(2),
         scope: ErasureScopeV1::PrivateSubjectData,
@@ -90,18 +81,6 @@ const fn freeze_transition() -> ErasureStateTransitionV1 {
     }
 }
 
-fn obligation(
-    request: ErasureReferenceV1,
-    target: ErasureRequiredTargetV1,
-) -> Result<ErasureObligationV1, ErasureErrorV1> {
-    ErasureObligationV1::new(ErasureObligationInputV1 {
-        category: ErasureInventoryCategoryV1::Artifact,
-        target,
-        owner: target.replica_id,
-        command_identity: destruction_command_reference(request, target),
-    })
-}
-
 fn admission(
     request: ErasureReferenceV1,
     targets: &[ErasureRequiredTargetV1],
@@ -109,21 +88,14 @@ fn admission(
     let mut obligations = targets
         .iter()
         .copied()
-        .map(|target| obligation(request, target))
+        .map(|target| fixture_obligation(request, target))
         .collect::<Result<Vec<_>, _>>()?;
     obligations.sort_unstable_by_key(ErasureObligationV1::reference);
-    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    fixture_retry_admission(RetryAdmissionFixture {
         request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: obligations
-            .iter()
-            .map(ErasureObligationV1::reference)
-            .collect(),
-        command_identities: obligations
-            .iter()
-            .map(ErasureObligationV1::command_identity)
-            .collect(),
+        obligations: &obligations,
         policy: reference(5),
         trust: reference(6),
         admitted_position: 11,
@@ -137,7 +109,7 @@ fn acknowledgement(
     target: ErasureRequiredTargetV1,
     evidence: ErasureReferenceV1,
 ) -> Result<ErasureAcknowledgementV1, ErasureErrorV1> {
-    let obligation = obligation(request, target)?;
+    let obligation = fixture_obligation(request, target)?;
     Ok(ErasureAcknowledgementV1 {
         obligation: obligation.reference(),
         target,
@@ -309,12 +281,78 @@ fn resolution(
     })
 }
 
+struct StateMapResolver(BTreeMap<ErasureReferenceV1, ErasureStateV1>);
+
+impl ErasureStateResolverV1 for StateMapResolver {
+    fn resolve_state(
+        &self,
+        digest: ErasureReferenceV1,
+    ) -> Result<Option<ErasureStateV1>, ErasureErrorV1> {
+        Ok(self.0.get(&digest).cloned())
+    }
+}
+
 fn assert_recovery_fails(adapter: PublicCoordinatorPort, request: &ErasureRequestV1) {
     assert_eq!(
         ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR)
             .submit(request.clone(), request.provenance()),
         Err(ErasureErrorV1::ProvenanceMissing)
     );
+}
+
+#[test]
+fn verified_state_query_reloads_scope_and_fence_after_restart() -> Result<(), ErasureErrorV1> {
+    let target = target(10);
+    let port = port(vec![target], None);
+    let observer = port.clone();
+    let request = request()?;
+    {
+        let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+        coordinator.submit(request.clone(), request.provenance())?;
+        coordinator.authorize(request.reference(), reference(21))?;
+        coordinator.freeze_inventory(request.reference(), &freeze_transition())?;
+    }
+
+    let mut restarted = ErasureCoordinatorStateMachineV1::new(observer.clone(), COORDINATOR);
+    let verified = <ErasureCoordinatorStateMachineV1<PublicCoordinatorPort> as
+        ErasureVerifiedStateQueryV1>::verified_state(&mut restarted, request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(verified.request(), &request);
+    assert_eq!(verified.state().request(), request.reference());
+    assert_eq!(verified.lifecycle(), ErasureLifecycleV1::AccessFrozen);
+    assert_eq!(verified.freeze_position(), Some(10));
+    let scope = verified.scope().ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    assert_eq!(scope.request(), request.reference());
+    assert_eq!(scope.scope_members(), &[reference(7)]);
+    assert_eq!(
+        verified.manifest_digest(),
+        observer
+            .current_manifest(request.reference())
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?
+            .digest()
+    );
+    assert!(restarted.verified_state(reference(240))?.is_none());
+    Ok(())
+}
+
+#[test]
+fn public_state_chain_query_requires_the_complete_predecessor_chain() -> Result<(), ErasureErrorV1>
+{
+    let request = request()?;
+    let mut coordinator =
+        ErasureCoordinatorStateMachineV1::new(port(Vec::new(), None), COORDINATOR);
+    let root = coordinator.submit(request.clone(), request.provenance())?;
+    let successor = coordinator.authorize(request.reference(), reference(21))?;
+
+    assert!(successor
+        .verify_predecessor_chain(&StateMapResolver(BTreeMap::new()))
+        .is_err());
+    let mut states = BTreeMap::new();
+    states.insert(root.state_digest(), root);
+    assert!(successor
+        .verify_predecessor_chain(&StateMapResolver(states))
+        .is_ok());
+    Ok(())
 }
 
 #[test]

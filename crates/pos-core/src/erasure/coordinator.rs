@@ -16,7 +16,7 @@ use super::{
     ErasureIndexInsertV1, ErasureLifecycleV1, ErasurePersistedStateV1, ErasurePersistenceObjectV1,
     ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1, ErasureReferenceV1,
     ErasureRequestV1, ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateTransitionV1,
-    ErasureStateV1, PreparedErasureCasV1,
+    ErasureStateV1, ErasureVerifiedStateQueryV1, PreparedErasureCasV1,
 };
 use super::{
     ErasureAcknowledgementV1, ErasureReceiptInputV1, ErasureReceiptV1, ErasureRetryAdmissionV1,
@@ -145,6 +145,30 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             .iter()
             .find(|record| record.request.reference() == request)
             .map(RecoveredErasureV1::state)
+    }
+
+    /// Recover one request from durable storage and expose its verified scope
+    /// and fence state to containment consumers such as #186.
+    ///
+    /// Unlike [`Self::existing`], this method always consults the adapter and
+    /// revalidates the complete ERCRP1 graph. A missing request returns
+    /// `Ok(None)`; malformed or unauthoritative persisted evidence fails
+    /// closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed persistence, provenance, authorization, or validation
+    /// error when the durable graph cannot be verified.
+    pub fn verified_state(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<super::ErasureVerifiedStateV1>, ErasureErrorV1> {
+        let Some(record) = self.recover(request)? else {
+            return Ok(None);
+        };
+        let verified = record.verified_state();
+        self.cache(record);
+        Ok(Some(verified))
     }
 
     /// Authenticate and submit ERQ1 through an initial manifest CAS.
@@ -975,6 +999,17 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
             vec![index],
             ErasureCasEffectV1::None,
         )
+    }
+}
+
+impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
+    for ErasureCoordinatorStateMachineV1<P>
+{
+    fn verified_state(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<super::ErasureVerifiedStateV1>, ErasureErrorV1> {
+        ErasureCoordinatorStateMachineV1::verified_state(self, request)
     }
 }
 

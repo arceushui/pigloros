@@ -49,34 +49,10 @@ use coordinator_support::{
     PublicCoordinatorFault, PublicCoordinatorOperation, PublicCoordinatorPort,
     PublicCoordinatorPortConfig,
 };
-
-const fn reference(value: u8) -> ErasureReferenceV1 {
-    ErasureReferenceV1::from_digest([value; 32])
-}
-
-const fn target(seed: u8) -> ErasureRequiredTargetV1 {
-    ErasureRequiredTargetV1 {
-        artifact_class: match seed % 7 {
-            0 => ErasureArtifactClassV1::TimelineReplay,
-            1 => ErasureArtifactClassV1::ReproManifest,
-            2 => ErasureArtifactClassV1::CausalTrace,
-            3 => ErasureArtifactClassV1::CalibrationReport,
-            4 => ErasureArtifactClassV1::Export,
-            5 => ErasureArtifactClassV1::ForkOrSnapshot,
-            _ => ErasureArtifactClassV1::ConformanceReport,
-        },
-        artifact_digest: reference(seed),
-        key_role: match seed % 4 {
-            0 => ErasureKeyRoleV1::DataEncryption,
-            1 => ErasureKeyRoleV1::Signing,
-            2 => ErasureKeyRoleV1::BackupEnvelope,
-            _ => ErasureKeyRoleV1::ReplicaTransport,
-        },
-        key_digest: reference(seed.wrapping_add(1)),
-        replica_set: reference(seed.wrapping_add(2)),
-        replica_id: reference(seed.wrapping_add(3)),
-    }
-}
+use erasure_support::{
+    reference, request as fixture_request, retry_admission as fixture_retry_admission, target,
+    RetryAdmissionFixture,
+};
 
 fn encoded_target(target: ErasureRequiredTargetV1) -> Value {
     let artifact_class = match target.artifact_class {
@@ -108,7 +84,7 @@ fn request(
     scope: ErasureScopeV1,
     selectors: Vec<ErasureReferenceV1>,
 ) -> Result<ErasureRequestV1, ErasureErrorV1> {
-    ErasureRequestV1::new(ErasureRequestInputV1 {
+    fixture_request(erasure_support::RequestFixtureInput {
         request: reference(1),
         subject: reference(2),
         scope,
@@ -199,7 +175,9 @@ fn applicability_matrix(
     target_count: usize,
     applicable: Option<(ErasureInventoryCategoryV1, usize, ErasureReferenceV1)>,
 ) -> Result<Vec<ErasureFreezeApplicabilityRowV1>, ErasureErrorV1> {
-    let mut matrix = Vec::with_capacity(target_count.saturating_mul(4));
+    let mut matrix = Vec::with_capacity(
+        target_count.saturating_mul(ErasureInventoryCategoryV1::CANONICAL.len()),
+    );
     for category in ErasureInventoryCategoryV1::CANONICAL {
         for target_index in 0..target_count {
             let selected = applicable
@@ -530,12 +508,11 @@ fn coordinator_admission(
     source_receipt: Option<ErasureReferenceV1>,
 ) -> Result<ErasureRetryAdmissionV1, ErasureErrorV1> {
     let obligation = obligation(request, ErasureInventoryCategoryV1::Artifact, target)?;
-    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    fixture_retry_admission(RetryAdmissionFixture {
         request,
         attempt_ordinal,
         source_receipt,
-        unresolved_obligations: vec![obligation.reference()],
-        command_identities: vec![obligation.command_identity()],
+        obligations: std::slice::from_ref(&obligation),
         policy: reference(5),
         trust: reference(6),
         admitted_position: 11 + attempt_ordinal,
@@ -554,18 +531,11 @@ fn coordinator_admission_for_targets(
         .map(|target| obligation(request, ErasureInventoryCategoryV1::Artifact, target))
         .collect::<Result<Vec<_>, _>>()?;
     obligations.sort_unstable_by_key(ErasureObligationV1::reference);
-    ErasureRetryAdmissionV1::new(ErasureRetryAdmissionInputV1 {
+    fixture_retry_admission(RetryAdmissionFixture {
         request,
         attempt_ordinal: 0,
         source_receipt: None,
-        unresolved_obligations: obligations
-            .iter()
-            .map(ErasureObligationV1::reference)
-            .collect(),
-        command_identities: obligations
-            .iter()
-            .map(ErasureObligationV1::command_identity)
-            .collect(),
+        obligations: &obligations,
         policy: reference(5),
         trust: reference(6),
         admitted_position: 11,
@@ -693,6 +663,19 @@ impl ErasureStateResolverV1 for ResolverReply {
             Self::State(state) => Ok(Some(state.as_ref().clone())),
         }
     }
+}
+
+#[test]
+fn public_decoder_and_manifest_seams_fail_closed_for_empty_and_malformed_bytes(
+) -> Result<(), ErasureErrorV1> {
+    assert!(ErasureRequestV1::from_canonical_cbor(&[]).is_err());
+    assert!(ErasureRequestV1::from_canonical_cbor(&[0xff]).is_err());
+
+    let request = request(ErasureScopeV1::PrivateSubjectData, vec![reference(20)])?;
+    let bytes = request.to_canonical_cbor()?;
+    assert_eq!(ErasureRequestV1::from_canonical_cbor(&bytes)?, request);
+    assert!(StoredErasureManifestV1::new(reference(1), vec![1, 2, 3]).is_err());
+    Ok(())
 }
 
 fn reject_invalid_acknowledgements(

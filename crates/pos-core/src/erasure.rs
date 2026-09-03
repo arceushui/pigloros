@@ -2886,6 +2886,92 @@ pub struct ErasureStateV1 {
     state_digest: ErasureReferenceV1,
 }
 
+/// Verified, payload-free erasure state handed from #184 to #186.
+///
+/// The coordinator constructs this snapshot only after recovering and
+/// validating the complete durable ERCRP1 graph. A caller can therefore use
+/// the request selectors, the retained resolved scope, and the frozen Tick
+/// Boundary together without reaching into raw persistence records. The scope
+/// is absent before access freeze; callers must not infer a fence from the
+/// lifecycle alone.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ErasureVerifiedStateV1 {
+    manifest_digest: ErasureReferenceV1,
+    request: ErasureRequestV1,
+    state: ErasureStateV1,
+    scope: Option<ErasureScopeCommitmentV1>,
+}
+
+impl ErasureVerifiedStateV1 {
+    pub(crate) fn from_parts(
+        manifest_digest: ErasureReferenceV1,
+        request: ErasureRequestV1,
+        state: ErasureStateV1,
+        scope: Option<ErasureScopeCommitmentV1>,
+    ) -> Self {
+        Self {
+            manifest_digest,
+            request,
+            state,
+            scope,
+        }
+    }
+
+    /// Return the current durable ERCRP1 manifest identity.
+    #[must_use]
+    pub const fn manifest_digest(&self) -> ErasureReferenceV1 {
+        self.manifest_digest
+    }
+
+    /// Return the validated ERQ1 request and its canonical selectors.
+    #[must_use]
+    pub const fn request(&self) -> &ErasureRequestV1 {
+        &self.request
+    }
+
+    /// Return the validated current ERS1 state.
+    #[must_use]
+    pub const fn state(&self) -> &ErasureStateV1 {
+        &self.state
+    }
+
+    /// Return the retained immutable resolved Timeline/Fork scope, if frozen.
+    #[must_use]
+    pub const fn scope(&self) -> Option<&ErasureScopeCommitmentV1> {
+        self.scope.as_ref()
+    }
+
+    /// Return the validated lifecycle.
+    #[must_use]
+    pub const fn lifecycle(&self) -> ErasureLifecycleV1 {
+        self.state.lifecycle()
+    }
+
+    /// Return the durable access-freeze Tick Boundary, if one is committed.
+    #[must_use]
+    pub const fn freeze_position(&self) -> Option<u64> {
+        self.state.freeze_position()
+    }
+}
+
+/// Public recovery/query seam for consumers that enforce erasure containment.
+///
+/// Implementations must return a snapshot only after durable recovery has
+/// validated every referenced record. In particular, a warm cache or a raw
+/// ERCRP1 manifest is not sufficient evidence for #186's runtime fence.
+pub trait ErasureVerifiedStateQueryV1 {
+    /// Recover and return one request's authoritative verified state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed persistence, provenance, authorization, or validation
+    /// error when the durable graph cannot be verified.
+    fn verified_state(
+        &mut self,
+        request: ErasureReferenceV1,
+    ) -> Result<Option<ErasureVerifiedStateV1>, ErasureErrorV1>;
+}
+
 mod receipt;
 pub use receipt::target_closure_digest;
 use receipt::{
