@@ -1095,7 +1095,7 @@ fn evaluator_rejects_each_profile_numeric_and_relationship_boundary() -> TestRes
 
 #[test]
 fn evaluator_rejects_deeply_malformed_profile_values() -> TestResult {
-    for mutation in (0..41).map(ProfileMutation::DeepTypeBoundary) {
+    for mutation in (0..42).map(ProfileMutation::DeepTypeBoundary) {
         let corpus = support::corpus_with_profile_mutation(mutation)?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,

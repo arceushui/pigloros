@@ -1484,7 +1484,9 @@ fn mutate_provider_package(
     mutation: ProfileMutation,
 ) -> TestResult<()> {
     match mutation {
-        ProfileMutation::DeepTypeBoundary(28) => fields[5] = array(vec![Value::Null]),
+        ProfileMutation::DeepTypeBoundary(28) => {
+            array_fields_mut(&mut fields[5])?[0] = Value::Null;
+        }
         ProfileMutation::DeepTypeBoundary(29) => {
             let schemas = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut schemas[0])?[0] = Value::Null;
@@ -1495,6 +1497,11 @@ fn mutate_provider_package(
         }
         ProfileMutation::DeepTypeBoundary(31) => fields[6] = Value::Null,
         ProfileMutation::DeepTypeBoundary(34) => fields[3] = Value::Null,
+        ProfileMutation::DeepTypeBoundary(41) => {
+            let schemas = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut schemas[0])?[1] =
+                descriptor(members, "providers/test-provider/NOTICE")?;
+        }
         ProfileMutation::RawPackageField(index) => {
             fields[usize::from(index)] = Value::Null;
         }
@@ -1866,7 +1873,9 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
     let fixtures = array_fields_mut(&mut profile_fields[9])?;
     let fixture_index = if matches!(
         mutation,
-        ProfileMutation::RawFixtureTransitionField(_) | ProfileMutation::DeepTypeBoundary(5)
+        ProfileMutation::RawFixtureTransitionField(_)
+            | ProfileMutation::DeepTypeBoundary(5)
+            | ProfileMutation::FixtureSemanticBoundary(8)
     ) {
         5
     } else {
@@ -1901,7 +1910,7 @@ fn mutate_fixture(profile_fields: &mut [Value], mutation: ProfileMutation) -> Te
                 array_fields_mut(&mut fields[16])?[0] = uint(0);
             }
             ProfileMutation::FixtureBudgetAboveCap => {
-                array_fields_mut(&mut fields[16])?[0] = uint(101);
+                array_fields_mut(&mut fields[16])?[0] = uint(1024 * 1024 * 1024 + 1);
             }
             ProfileMutation::FixtureWatchdog => fields[17] = array(vec![uint(0)]),
             ProfileMutation::FixtureNetworkPlugin => {
@@ -1961,7 +1970,7 @@ fn mutate_deep_fixture_field(fields: &mut [Value], mutation: ProfileMutation) ->
         return Ok(false);
     };
     match index {
-        0..=2 | 6 | 7 | 18 | 22..=38 | 40 => {}
+        0..=2 | 6 | 7 | 18 | 22..=38 | 40 | 41 => {}
         3 => array_fields_mut(&mut fields[7])?[0] = Value::Null,
         4 => fields[19] = Value::Bool(false),
         5 => fields[20] = Value::Bool(false),
