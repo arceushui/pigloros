@@ -69,6 +69,8 @@ pub enum ProfileMutation {
     NormativeDigest,
     MatrixDigest,
     MatrixContent,
+    MatrixBoundary(u8),
+    MatrixExecutedCase,
     FixturePolicyDigest,
     LimitationsDigest,
     PublicationDigest,
@@ -486,7 +488,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let trust_digest = hash(&trust_policy);
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
-    mutate_support_members(&mut members, profile_mutation);
+    mutate_support_members(&mut members, profile_mutation)?;
     let evaluator_protocol_digest = member_hash(&members, "support/evaluator-protocol-v1.json")?;
     add_provider_contracts(&mut members, profile_mutation, subject_adapter, claim_layer)?;
     if let Some(bytes) = extra {
@@ -571,13 +573,217 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
 fn mutate_support_members(
     members: &mut BTreeMap<String, (Vec<u8>, u8)>,
     mutation: Option<ProfileMutation>,
-) {
+) -> TestResult<()> {
     if matches!(mutation, Some(ProfileMutation::MatrixContent)) {
         members.insert(
             "authority/execution-matrix.json".to_owned(),
             (b"{}".to_vec(), 11),
         );
     }
+    if let Some(ProfileMutation::MatrixBoundary(index)) = mutation {
+        mutate_execution_matrix(members, index)?;
+    }
+    if matches!(mutation, Some(ProfileMutation::MatrixExecutedCase)) {
+        mutate_execution_matrix(members, u8::MAX)?;
+    }
+    Ok(())
+}
+
+fn mutate_execution_matrix(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    index: u8,
+) -> TestResult<()> {
+    let (bytes, _) = members
+        .get_mut("authority/execution-matrix.json")
+        .ok_or_else(|| io::Error::other("execution matrix member missing"))?;
+    let mut matrix: serde_json::Value = serde_json::from_slice(bytes)?;
+    let root = matrix
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("execution matrix root is not an object"))?;
+    mutate_matrix_root(root, index)?;
+    *bytes = serde_json::to_vec(&matrix)?;
+    Ok(())
+}
+
+fn mutate_matrix_root(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    index: u8,
+) -> TestResult<()> {
+    match index {
+        0 => drop_json_field(root, "magic"),
+        1 => set_json(root, "extra", true),
+        2 => set_json(root, "magic", 1),
+        3 => set_json(root, "magic", "NIM0"),
+        4 => set_json(root, "version", "1"),
+        5 => set_json(root, "version", 2),
+        6 => set_json(root, "lifecycle", "Candidate"),
+        7 => set_json(root, "row_count", 11),
+        8 => set_json(root, "variant_count", 3),
+        9 => set_json(root, "mode_count", 3),
+        10 => set_json(root, "case_count", 191),
+        11 => set_json(root, "matrix_id", ""),
+        12 => set_json(root, "source", ""),
+        13 => set_json(root, "expected_result_policy", ""),
+        14 => set_json(root, "rows", serde_json::Value::Null),
+        15 => truncate_json_array(root, "rows")?,
+        16 => set_json(root, "equality_predicates", serde_json::Value::Null),
+        17 => truncate_json_array(root, "equality_predicates")?,
+        18 => set_json(root, "cases", serde_json::Value::Null),
+        19 => truncate_json_array(root, "cases")?,
+        20..=27 => mutate_matrix_row(root, index - 20)?,
+        28..=31 => mutate_matrix_predicate(root, index - 28)?,
+        32..=42 => mutate_matrix_case(root, index - 32)?,
+        43 => set_json(root, "executed_case_count", 1),
+        44 => set_nested_json(root, "rows", 0, "executed_case_count", 1)?,
+        u8::MAX => make_first_matrix_case_executed(root)?,
+        _ => return Err(io::Error::other("unknown execution matrix mutation").into()),
+    }
+    Ok(())
+}
+
+fn mutate_matrix_row(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    index: u8,
+) -> TestResult<()> {
+    match index {
+        0 => set_json_array_value(root, "rows", 0, serde_json::Value::Null)?,
+        1 => drop_nested_json_field(root, "rows", 0, "channel")?,
+        2 => set_nested_json(root, "rows", 0, "fixture_id", "wrong")?,
+        3 => set_nested_json(root, "rows", 0, "variants", ["S", "D"])?,
+        4 => set_nested_json(root, "rows", 0, "modes", ["L", "A"])?,
+        5 => set_nested_json(root, "rows", 0, "case_count", 15)?,
+        6 => set_nested_json(root, "rows", 0, "channel", "")?,
+        7 => set_nested_json(root, "rows", 0, "observable_surfaces", Vec::<String>::new())?,
+        _ => return Err(io::Error::other("unknown matrix row mutation").into()),
+    }
+    Ok(())
+}
+
+fn mutate_matrix_predicate(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    index: u8,
+) -> TestResult<()> {
+    match index {
+        0 => set_json_array_value(root, "equality_predicates", 0, serde_json::Value::Null)?,
+        1 => drop_nested_json_field(root, "equality_predicates", 0, "AuthEq")?,
+        2 => set_nested_json(root, "equality_predicates", 0, "fixture_id", "wrong")?,
+        3 => set_nested_json(root, "equality_predicates", 0, "AuthEq", "")?,
+        _ => return Err(io::Error::other("unknown matrix predicate mutation").into()),
+    }
+    Ok(())
+}
+
+fn mutate_matrix_case(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    index: u8,
+) -> TestResult<()> {
+    match index {
+        0 => set_json_array_value(root, "cases", 0, serde_json::Value::Null)?,
+        1 => drop_nested_json_field(root, "cases", 0, "case_id")?,
+        2 => set_nested_json(root, "cases", 0, "executed", "false")?,
+        3 => set_nested_json(root, "cases", 0, "case_id", "wrong")?,
+        4 => set_nested_json(root, "cases", 0, "fixture_id", "wrong")?,
+        5 => set_nested_json(root, "cases", 0, "variant", "D")?,
+        6 => set_nested_json(root, "cases", 0, "mode", "A")?,
+        7 => set_nested_json(root, "cases", 0, "expected_result", "accepted")?,
+        8 => set_nested_json(root, "cases", 0, "expected_result_digest", "0".repeat(64))?,
+        9 => set_executed_case(root, serde_json::Value::Null)?,
+        10 => set_executed_case(root, serde_json::json!("invalid"))?,
+        _ => return Err(io::Error::other("unknown matrix case mutation").into()),
+    }
+    Ok(())
+}
+
+fn set_executed_case(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    digest: serde_json::Value,
+) -> TestResult<()> {
+    set_nested_json(root, "cases", 0, "executed", true)?;
+    set_nested_json(root, "cases", 0, "expected_result", "accepted")?;
+    set_nested_json(root, "cases", 0, "expected_result_digest", digest)
+}
+
+fn make_first_matrix_case_executed(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+) -> TestResult<()> {
+    set_executed_case(root, serde_json::json!("0".repeat(64)))?;
+    set_nested_json(root, "rows", 0, "executed_case_count", 1)?;
+    set_json(root, "executed_case_count", 1);
+    Ok(())
+}
+
+fn set_json(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    value: impl serde::Serialize,
+) {
+    object.insert(field.to_owned(), serde_json::json!(value));
+}
+
+fn drop_json_field(object: &mut serde_json::Map<String, serde_json::Value>, field: &str) {
+    object.retain(|key, _| key != field);
+}
+
+fn truncate_json_array(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> TestResult<()> {
+    json_array_mut(root, field)?.pop();
+    Ok(())
+}
+
+fn set_json_array_value(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    array_field: &str,
+    index: usize,
+    value: serde_json::Value,
+) -> TestResult<()> {
+    *json_array_mut(root, array_field)?
+        .get_mut(index)
+        .ok_or_else(|| io::Error::other("execution matrix index missing"))? = value;
+    Ok(())
+}
+
+fn set_nested_json(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    array_field: &str,
+    index: usize,
+    field: &str,
+    value: impl serde::Serialize,
+) -> TestResult<()> {
+    nested_json_object_mut(root, array_field, index)?
+        .insert(field.to_owned(), serde_json::json!(value));
+    Ok(())
+}
+
+fn drop_nested_json_field(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    array_field: &str,
+    index: usize,
+    field: &str,
+) -> TestResult<()> {
+    nested_json_object_mut(root, array_field, index)?.retain(|key, _| key != field);
+    Ok(())
+}
+
+fn nested_json_object_mut<'a>(
+    root: &'a mut serde_json::Map<String, serde_json::Value>,
+    array_field: &str,
+    index: usize,
+) -> TestResult<&'a mut serde_json::Map<String, serde_json::Value>> {
+    json_array_mut(root, array_field)?
+        .get_mut(index)
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("execution matrix object missing").into())
+}
+
+fn json_array_mut<'a>(
+    root: &'a mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> TestResult<&'a mut Vec<serde_json::Value>> {
+    root.get_mut(field)
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| io::Error::other("execution matrix array missing").into())
 }
 
 fn insert_profile_member(
@@ -1228,7 +1434,9 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
         ProfileMutation::Lifecycle => profile_fields[4] = uint(1),
         ProfileMutation::NormativeDigest => profile_fields[5] = bytes(&[0; 32]),
         ProfileMutation::MatrixDigest => profile_fields[6] = bytes(&[0; 32]),
-        ProfileMutation::MatrixContent => {}
+        ProfileMutation::MatrixContent
+        | ProfileMutation::MatrixBoundary(_)
+        | ProfileMutation::MatrixExecutedCase => {}
         ProfileMutation::FixturePolicyDigest => profile_fields[13] = bytes(&[0; 32]),
         ProfileMutation::LimitationsDigest => profile_fields[14] = bytes(&[0; 32]),
         ProfileMutation::PublicationDigest => profile_fields[15] = bytes(&[0; 32]),

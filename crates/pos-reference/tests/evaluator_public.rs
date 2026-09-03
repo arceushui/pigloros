@@ -872,6 +872,46 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
 }
 
 #[test]
+fn evaluator_rejects_each_execution_matrix_contract_boundary() -> TestResult {
+    for index in 0..=44 {
+        let corpus = support::corpus_with_profile_mutation(ProfileMutation::MatrixBoundary(index))?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity(),
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Profile),
+            "execution matrix boundary {index} was accepted"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_accepts_an_executed_matrix_case_with_consistent_counts() -> TestResult {
+    let corpus = support::corpus_with_profile_mutation(ProfileMutation::MatrixExecutedCase)?;
+    let mut adapter = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+    };
+    evaluate(
+        &corpus.request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity(),
+        &mut adapter,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn evaluator_rejects_wrong_types_at_each_required_profile_contract_field() -> TestResult {
     let mutations = (0..16)
         .map(ProfileMutation::RawProfileField)
