@@ -198,3 +198,9 @@ There is no drop-in open-source Sandbox Provider Adapter for ADR-069. The recomm
 - **Reject as the ADR control path:** external `nft` command execution, raw OCI configuration as public policy, transparent libkrun networking defaults, and any provider that weakens a requested capability when its backend cannot implement it exactly.
 
 This preserves the approved open-source extensibility goal: users may install and locally trust interchangeable providers, while every provider must prove the same exact capability and conformance contract rather than inherit trust from its upstream project name.
+
+## Hosted prototype checkpoint
+
+Hosted GitHub Actions run [33753475722](https://github.com/arceushui/pigloros/actions/runs/33753475722) compiled and executed an isolated throwaway Rust probe on Ubuntu 24.04. Exact direct dependencies were `zbus_systemd 0.26100.0`, `zbus 5.19.0`, `rtnetlink 0.23.0`, `netlink-packet-route 0.33.0`, `netlink-packet-netfilter 0.4.0`, and `netlink-packet-core 0.9.0`. The generated lock contained 99 packages. `cargo check` completed in 25.72 seconds; the clean build/run completed in 31.34 seconds and reported `systemd=typed-get-unit-ok`, `route_netlink=typed-link-read-ok`, and `nftables_packet_bytes=20`.
+
+This proves that the pure-Rust generated systemd interface, route-netlink stack, and nftables packet model compose and execute without shell commands. It does **not** prove privileged transient-unit creation, nftables transactions/read-back, namespace lifecycle, dm-verity, broker-death cleanup, or the operational latency targets. Those remain explicit #211 prototype gates before ADR acceptance.
