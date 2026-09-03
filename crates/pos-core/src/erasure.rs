@@ -2950,14 +2950,16 @@ impl ErasureVerifiedStateV1 {
     /// preceding node, and accepted by the recovery authorization boundary.
     /// The initial immutable scope commitment is not repeated in this slice.
     #[must_use]
-    pub const fn scope_extensions(&self) -> &[ErasureScopeExtensionV1] {
+    pub fn scope_extensions(&self) -> &[ErasureScopeExtensionV1] {
         &self.scope_extensions
     }
 
     /// Return the admitted future-Fork identities in extension order.
     #[must_use]
     pub fn scope_forks(&self) -> impl Iterator<Item = ErasureReferenceV1> + '_ {
-        self.scope_extensions.iter().map(ErasureScopeExtensionV1::fork)
+        self.scope_extensions
+            .iter()
+            .map(ErasureScopeExtensionV1::fork)
     }
 
     /// Return the validated lifecycle.
