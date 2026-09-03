@@ -1,9 +1,14 @@
 pub mod support;
 
 use std::error::Error;
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 use pos_reference::evaluator_protocol::{CaseStatus, ConformanceReport};
 
@@ -51,6 +56,18 @@ fn complete_command_with_adapter(directory: &Path, adapter: &str) -> TestResult<
         adapter,
     ]);
     Ok(command)
+}
+
+#[cfg(unix)]
+fn request_with_version(request: &[u8], version: u64) -> TestResult<Vec<u8>> {
+    let mut value: ciborium::value::Value = ciborium::from_reader(request)?;
+    let ciborium::value::Value::Array(fields) = &mut value else {
+        return Err("request is not an array".into());
+    };
+    fields[1] = ciborium::value::Value::Integer(version.into());
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&value, &mut bytes)?;
+    Ok(bytes)
 }
 
 #[test]
@@ -324,5 +341,50 @@ fn command_rejects_duplicate_and_unsorted_public_identity_options() -> TestResul
         .args(["--reviewer", "reviewer-alpha"])
         .output()?;
     assert!(!output.status.success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_rejects_noncanonical_digest_and_argument_boundaries() -> TestResult {
+    for digest in [
+        "01".to_owned(),
+        "g1".repeat(32),
+        "1g".repeat(32),
+        "AA".repeat(32),
+        "00".repeat(32),
+    ] {
+        assert!(!evaluator()
+            .args(["--declaration-digest", digest.as_str()])
+            .output()?
+            .status
+            .success());
+    }
+    assert!(!evaluator()
+        .arg(OsString::from_vec(vec![0xff]))
+        .output()?
+        .status
+        .success());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_preserves_unsupported_request_version_and_source_read_failures() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let mut unsupported = complete_command(directory.path())?;
+    let corpus = support::corpus()?;
+    fs::write(
+        directory.path().join("request.cbor"),
+        request_with_version(&corpus.request, 2)?,
+    )?;
+    assert!(!unsupported.output()?.status.success());
+
+    let directory = tempfile::tempdir()?;
+    let mut unreadable_source = complete_command(directory.path())?;
+    let source = directory.path().join("evaluator-source.tar.gz");
+    fs::remove_file(&source)?;
+    fs::create_dir(&source)?;
+    assert!(!unreadable_source.output()?.status.success());
     Ok(())
 }

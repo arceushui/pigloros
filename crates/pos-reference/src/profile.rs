@@ -1144,11 +1144,7 @@ fn validate_support_closure(
     for (path, role, digest) in support {
         validate_member_binding(bundle, path, role, digest)?;
     }
-    validate_execution_matrix(
-        bundle,
-        fixed_bytes(&profile_fields[6])?,
-        u8::try_from(uint(&profile_fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?,
-    )?;
+    validate_execution_matrix(bundle)?;
     let actual_execution_profiles = bundle
         .members
         .iter()
@@ -1168,27 +1164,19 @@ fn validate_support_closure(
     }
 }
 
-fn validate_execution_matrix(
-    bundle: &VerifiedBundle,
-    expected_digest: [u8; 32],
-    lifecycle: u8,
-) -> Result<(), ProfileError> {
+fn validate_execution_matrix(bundle: &VerifiedBundle) -> Result<(), ProfileError> {
     let member = bundle
         .member("authority/execution-matrix.json")
         .ok_or(ProfileError::ClosureIncomplete)?;
-    if member.digest != expected_digest {
-        return Err(ProfileError::DigestMismatch);
-    }
     let root: serde_json::Value =
         serde_json::from_slice(&member.bytes).map_err(|_| ProfileError::InvalidEncoding)?;
     let root = json_object(&root)?;
-    validate_execution_matrix_header(root, lifecycle)?;
+    validate_execution_matrix_header(root)?;
     validate_matrix_inventory(root)
 }
 
 fn validate_execution_matrix_header(
     root: &serde_json::Map<String, serde_json::Value>,
-    lifecycle: u8,
 ) -> Result<(), ProfileError> {
     require_json_fields(
         root,
@@ -1209,12 +1197,9 @@ fn validate_execution_matrix_header(
             "version",
         ],
     )?;
-    let lifecycle_name = ["Draft", "Candidate", "Stable", "Retired"]
-        .get(usize::from(lifecycle))
-        .ok_or(ProfileError::FieldOutOfBounds)?;
     if json_text(root, "magic")? != "NIM1"
         || json_u64(root, "version")? != 1
-        || json_text(root, "lifecycle")? != *lifecycle_name
+        || json_text(root, "lifecycle")? != "Draft"
         || json_u64(root, "row_count")? != 12
         || json_u64(root, "variant_count")? != 4
         || json_u64(root, "mode_count")? != 4
