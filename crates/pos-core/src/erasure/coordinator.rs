@@ -1009,7 +1009,7 @@ impl<P: ErasureCoordinatorPortV1> ErasureVerifiedStateQueryV1
         &mut self,
         request: ErasureReferenceV1,
     ) -> Result<Option<super::ErasureVerifiedStateV1>, ErasureErrorV1> {
-        ErasureCoordinatorStateMachineV1::verified_state(self, request)
+        Self::verified_state(self, request)
     }
 }
 

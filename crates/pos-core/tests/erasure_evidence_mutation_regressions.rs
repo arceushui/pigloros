@@ -1,7 +1,7 @@
 //! Evidence codec mutation regressions for the direct V1 records.
 
 #[path = "support/erasure.rs"]
-mod erasure_support;
+pub mod erasure_support;
 
 use ciborium::value::Value;
 use erasure_support::{reference, replay_target, request as fixture_request, RequestFixtureInput};
@@ -19,9 +19,9 @@ use pos_core::{
     ErasureFreezeProvenanceV1, ErasureInventoryCategoryV1, ErasureLifecycleV1,
     ErasureObligationInputV1, ErasureObligationSetInputV1, ErasureObligationSetV1,
     ErasureObligationV1, ErasureReceiptProvenanceInputV1, ErasureReceiptProvenanceV1,
-    ErasureReferenceV1, ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
-    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
-    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
+    ErasureRequestV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
+    ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
+    ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateV1,
 };
 
 fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {

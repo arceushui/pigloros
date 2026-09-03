@@ -2903,7 +2903,7 @@ pub struct ErasureVerifiedStateV1 {
 }
 
 impl ErasureVerifiedStateV1 {
-    pub(crate) fn from_parts(
+    pub(crate) const fn from_parts(
         manifest_digest: ErasureReferenceV1,
         request: ErasureRequestV1,
         state: ErasureStateV1,
