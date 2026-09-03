@@ -42,7 +42,8 @@ use pos_core::{
     ErasureStateTransitionV1, ErasureStateV1, StoredErasureManifestV1,
     ERASURE_ATTEMPT_OUTCOME_TAG_V1, ERASURE_FREEZE_ADMISSION_EVIDENCE_MAX_BYTES,
     ERASURE_MAX_ACKNOWLEDGEMENTS_PER_ATTEMPT, ERASURE_MAX_INVENTORY_RESULTS,
-    ERASURE_MAX_REFERENCES, ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1,
+    ERASURE_MAX_OBLIGATIONS_PER_CATEGORY, ERASURE_MAX_REFERENCES,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1,
 };
 
 use coordinator_support::{
@@ -441,6 +442,13 @@ const COORDINATOR: ErasureReferenceV1 = reference(200);
 
 fn coordinator_request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     request(ErasureScopeV1::PrivateSubjectData, vec![reference(20)])
+}
+
+fn sequence_reference(seed: usize) -> ErasureReferenceV1 {
+    let seed = u64::try_from(seed).unwrap_or(u64::MAX);
+    let mut digest = [0; 32];
+    digest[..8].copy_from_slice(&seed.saturating_add(1).to_be_bytes());
+    ErasureReferenceV1::from_digest(digest)
 }
 
 fn corrected_request(provenance: ErasureReferenceV1) -> Result<ErasureRequestV1, ErasureErrorV1> {
@@ -1534,10 +1542,11 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
     let port = coordinator_port(Vec::new(), None);
     let adapter = port.clone();
     let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
-    coordinator.submit(original.clone(), original.provenance())?;
+    let original_submitted = coordinator.submit(original.clone(), original.provenance())?;
     let rejected = coordinator.reject(original.reference(), reference(21))?;
     let correction = correction_for(original.reference(), rejected.state_digest(), reference(22))?;
     let corrected = corrected_request(correction.reference())?;
+    let corrected_reference = corrected.reference();
     let mut faulted = ErasureCoordinatorStateMachineV1::new(
         adapter
             .clone()
@@ -1564,6 +1573,7 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         api.submit_corrected(corrected, correction.clone())?,
         corrected_state
     );
+    let mutation_base = adapter.clone();
     let mut recovered = ErasureCoordinatorStateMachineV1::new(adapter, COORDINATOR);
     assert_eq!(
         recovered.submit_corrected(
@@ -1572,6 +1582,61 @@ fn coordinator_corrected_submission_recovers_rejected_predecessor() -> Result<()
         )?,
         corrected_state
     );
+
+    let same_request_correction =
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: corrected_reference,
+            rejected_terminal_state: rejected.state_digest(),
+            correction_reason: correction.correction_reason(),
+            authorization_provenance: correction.authorization_provenance(),
+        })?;
+    let same_request = corrected_request(same_request_correction.reference())?;
+    let same_request_state = ErasureStateV1::submitted(
+        same_request.reference(),
+        COORDINATOR,
+        same_request.provenance(),
+    )?;
+    let same_request_adapter = mutation_base.clone();
+    same_request_adapter.replace_corrected_graph(
+        corrected_reference,
+        &same_request,
+        &same_request_state,
+        &same_request_correction,
+    )?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(same_request_adapter, COORDINATOR)
+            .submit(same_request.clone(), same_request.provenance()),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
+    let wrong_terminal_correction =
+        ErasureCorrectionProvenanceV1::new(ErasureCorrectionProvenanceInputV1 {
+            rejected_request: original.reference(),
+            rejected_terminal_state: original_submitted.state_digest(),
+            correction_reason: correction.correction_reason(),
+            authorization_provenance: correction.authorization_provenance(),
+        })?;
+    let invalid_terminal_request = corrected_request(wrong_terminal_correction.reference())?;
+    let invalid_terminal_state = ErasureStateV1::submitted(
+        invalid_terminal_request.reference(),
+        COORDINATOR,
+        invalid_terminal_request.provenance(),
+    )?;
+    let invalid_terminal_adapter = mutation_base;
+    invalid_terminal_adapter.replace_corrected_graph(
+        corrected_reference,
+        &invalid_terminal_request,
+        &invalid_terminal_state,
+        &wrong_terminal_correction,
+    )?;
+    assert_eq!(
+        ErasureCoordinatorStateMachineV1::new(invalid_terminal_adapter, COORDINATOR).submit(
+            invalid_terminal_request.clone(),
+            invalid_terminal_request.provenance(),
+        ),
+        Err(ErasureErrorV1::ProvenanceMissing)
+    );
+
     let conflicting_correction =
         correction_for(original.reference(), rejected.state_digest(), reference(98))?;
     let conflicting_request = corrected_request(conflicting_correction.reference())?;
@@ -2651,6 +2716,12 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
     )?;
     let retry_state = api.dispatch_destruction(request.reference(), retry)?;
     assert_eq!(retry_state.lifecycle(), ErasureLifecycleV1::PartialFailure);
+    let mut stronger_replay = coordinator_receipt_input(target, 30);
+    stronger_replay.replay_claim = ErasureReplayClaimV1::Exact;
+    assert_eq!(
+        api.finalize(request.reference(), stronger_replay),
+        Err(ErasureErrorV1::PolicyConflict)
+    );
     api.acknowledge(
         request.reference(),
         coordinator_acknowledgement(
@@ -2689,6 +2760,78 @@ fn coordinator_public_partial_retry_and_extension_paths_close() -> Result<(), Er
         complete.terminal_state(),
         scope.reference(),
     )
+}
+
+#[test]
+fn coordinator_rejects_an_acknowledgement_for_a_completed_obligation_on_retry(
+) -> Result<(), ErasureErrorV1> {
+    let mut targets = vec![target(10), target(20)];
+    targets.sort_unstable();
+    let request = coordinator_request()?;
+    let port = coordinator_port(targets.clone(), None);
+    let mut coordinator = ErasureCoordinatorStateMachineV1::new(port, COORDINATOR);
+    let api: &mut dyn ErasureCoordinator = &mut coordinator;
+
+    api.submit(request.clone())?;
+    api.authorize(request.reference(), reference(21))?;
+    api.freeze_access(request.reference(), coordinator_freeze_transition())?;
+    api.dispatch_destruction(
+        request.reference(),
+        coordinator_admission_for_targets(request.reference(), &targets)?,
+    )?;
+    api.acknowledge(
+        request.reference(),
+        coordinator_acknowledgement(
+            request.reference(),
+            targets[0],
+            reference(171),
+            ErasureAcknowledgementOutcomeV1::Acknowledged,
+        )?,
+    )?;
+    api.acknowledge(
+        request.reference(),
+        coordinator_acknowledgement(
+            request.reference(),
+            targets[1],
+            reference(172),
+            ErasureAcknowledgementOutcomeV1::Negative,
+        )?,
+    )?;
+    let partial = api.finalize(
+        request.reference(),
+        coordinator_receipt_input_for_targets(&targets),
+    )?;
+
+    let retry_obligation = obligation(
+        request.reference(),
+        ErasureInventoryCategoryV1::Artifact,
+        targets[1],
+    )?;
+    let retry = fixture_retry_admission(RetryAdmissionFixture {
+        request: request.reference(),
+        attempt_ordinal: 1,
+        source_receipt: Some(partial.receipt_digest()),
+        obligations: std::slice::from_ref(&retry_obligation),
+        policy: reference(5),
+        trust: reference(6),
+        admitted_position: 21,
+        deadline_position: 30,
+        authorization_provenance: reference(10),
+    })?;
+    api.dispatch_destruction(request.reference(), retry)?;
+    assert_eq!(
+        api.acknowledge(
+            request.reference(),
+            coordinator_acknowledgement(
+                request.reference(),
+                targets[0],
+                reference(173),
+                ErasureAcknowledgementOutcomeV1::Acknowledged,
+            )?,
+        ),
+        Err(ErasureErrorV1::Unauthorized)
+    );
+    Ok(())
 }
 
 #[test]
@@ -3698,6 +3841,38 @@ fn atomic_freeze_admission_rejects_duplicate_and_missing_applicability(
             vec![frozen_target],
             vec![valid_obligation],
             applicability_matrix(1, None)?,
+        )?,
+        ErasureErrorV1::ScopeInvalid,
+    );
+    Ok(())
+}
+
+#[test]
+fn atomic_freeze_admission_rejects_a_category_overflow() -> Result<(), ErasureErrorV1> {
+    let request = reference(1);
+    let frozen_target = target(11);
+    let command_identity = destruction_command_reference(request, frozen_target);
+    let mut obligations = Vec::with_capacity(ERASURE_MAX_OBLIGATIONS_PER_CATEGORY + 1);
+    for seed in 0..=ERASURE_MAX_OBLIGATIONS_PER_CATEGORY {
+        obligations.push(ErasureObligationV1::new(ErasureObligationInputV1 {
+            category: ErasureInventoryCategoryV1::Artifact,
+            target: frozen_target,
+            owner: sequence_reference(seed),
+            command_identity,
+        })?);
+    }
+    assert_atomic_freeze_rejected(
+        atomic_freeze_input(
+            vec![frozen_target],
+            obligations,
+            applicability_matrix(
+                1,
+                Some((
+                    ErasureInventoryCategoryV1::Artifact,
+                    0,
+                    frozen_target.replica_id,
+                )),
+            )?,
         )?,
         ErasureErrorV1::ScopeInvalid,
     );

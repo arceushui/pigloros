@@ -15,8 +15,8 @@ use pos_core::{
     ErasureAcknowledgementProvenanceV1, ErasureAdministrativeResolutionV1,
     ErasureAtomicFreezeAdmissionInputV1, ErasureAtomicFreezeAdmissionV1,
     ErasureAtomicFreezeResultV1, ErasureAttemptQuotaReservationV1, ErasureCasOutcomeV1,
-    ErasureCoordinatorPortV1, ErasureDestructionCommandV1, ErasureErrorV1,
-    ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
+    ErasureCoordinatorPortV1, ErasureCorrectionProvenanceV1, ErasureDestructionCommandV1,
+    ErasureErrorV1, ErasureFreezeAdmissionEvidenceV1, ErasureFreezeAuthorizationEvidenceV1,
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureIndexInsertV1,
     ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
@@ -413,6 +413,60 @@ impl PublicCoordinatorPort {
         storage.manifests.insert(
             request,
             (addressed("ERCRP1", &changed_manifest), changed_manifest),
+        );
+        Ok(())
+    }
+
+    /// Readdress a corrected request graph after changing its correction proof.
+    ///
+    /// This keeps the request, submitted state, correction object, and ERCRP1
+    /// links content-addressed while a recovery test changes one public
+    /// correction invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or provenance error when the source manifest
+    /// is absent or any replacement cannot be serialized.
+    pub fn replace_corrected_graph(
+        &self,
+        old_request: ErasureReferenceV1,
+        request: &ErasureRequestV1,
+        state: &ErasureStateV1,
+        correction: &ErasureCorrectionProvenanceV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let request_bytes = request.to_canonical_cbor()?;
+        let state_bytes = state.to_canonical_cbor()?;
+        let correction_bytes = correction.to_canonical_cbor()?;
+        let mut storage = self.storage.borrow_mut();
+        let (_, manifest) = storage
+            .manifests
+            .get(&old_request)
+            .cloned()
+            .ok_or(ErasureErrorV1::ProvenanceMissing)?;
+        let manifest = replace_array_field(
+            &manifest,
+            2,
+            Value::Bytes(request.reference().digest().to_vec()),
+        )?;
+        let manifest = replace_array_field(
+            &manifest,
+            3,
+            Value::Bytes(state.state_digest().digest().to_vec()),
+        )?;
+        let manifest = replace_array_field(
+            &manifest,
+            5,
+            Value::Bytes(correction.reference().digest().to_vec()),
+        )?;
+        storage.objects.insert(request.reference(), request_bytes);
+        storage.states.insert(state.state_digest(), state_bytes);
+        storage
+            .objects
+            .insert(correction.reference(), correction_bytes);
+        storage.manifests.remove(&old_request);
+        storage.manifests.insert(
+            request.reference(),
+            (addressed("ERCRP1", &manifest), manifest),
         );
         Ok(())
     }
