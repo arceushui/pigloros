@@ -2834,6 +2834,14 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
         },
     );
     match mutation {
+        Some(ProfileMutation::ArtifactEncoding(1)) => Ok(vec![0xff]),
+        Some(ProfileMutation::ArtifactShape(1)) => canonical(&Value::Null),
+        _ => canonical(&array(fields)),
+    }
+}
+
+fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
+    match mutation {
         ProfileMutation::DeepTypeBoundary(23) => {
             array_fields_mut(&mut fields[5])?[0] = Value::Null;
         }
@@ -2843,14 +2851,6 @@ fn execution_profile(mutation: Option<ProfileMutation>) -> TestResult<Vec<u8>> {
         ProfileMutation::DeepTypeBoundary(25) => {
             array_fields_mut(&mut fields[14])?[0] = Value::Null;
         }
-        Some(ProfileMutation::ArtifactEncoding(1)) => Ok(vec![0xff]),
-        Some(ProfileMutation::ArtifactShape(1)) => canonical(&Value::Null),
-        _ => canonical(&array(fields)),
-    }
-}
-
-fn mutate_execution_profile(fields: &mut [Value], mutation: ProfileMutation) -> TestResult<()> {
-    match mutation {
         ProfileMutation::ExecutionContractBoundary(index) => match index {
             0 => fields[2] = text("alternate-profile"),
             1 => fields[5] = array(Vec::new()),
