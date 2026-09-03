@@ -434,6 +434,7 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
     let cbor_tag_secret = [
         0xc0, 0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x61, b'x',
     ];
+    let cbor_nonempty_integer = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x00];
     let secrets = [
         br#"{"password":"x"}"#.as_slice(),
         br#"{"api-key":"x"}"#.as_slice(),
@@ -443,6 +444,7 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
         cbor_secret.as_slice(),
         cbor_array_secret.as_slice(),
         cbor_tag_secret.as_slice(),
+        cbor_nonempty_integer.as_slice(),
         b"-----BEGIN PRIVATE KEY-----\nvalue\n-----END PRIVATE KEY-----".as_slice(),
         b"prefix bearer abcdefghijklmnop suffix".as_slice(),
         b"prefix basic abcdefghijklmnop suffix".as_slice(),
@@ -489,10 +491,12 @@ fn signed_bundle_rejects_structured_and_prefixed_secret_material() -> TestResult
 fn signed_bundle_allows_empty_secret_slots_and_noncredential_text() -> TestResult {
     let empty_cbor_secret = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x60];
     let empty_cbor_secret_bytes = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0x40];
+    let empty_cbor_secret_null = [0xa1, 0x66, b's', b'e', b'c', b'r', b'e', b't', 0xf6];
     for public_data in [
         br#"{"password":null,"token":"","ordinary":"secret"}"#.as_slice(),
         empty_cbor_secret.as_slice(),
         empty_cbor_secret_bytes.as_slice(),
+        empty_cbor_secret_null.as_slice(),
         b"short bearer value and short ghp_token".as_slice(),
     ] {
         let corpus = support::corpus_with_secret(public_data)?;

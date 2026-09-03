@@ -108,13 +108,7 @@ fn run() -> Result<(), CommandError> {
         &identity,
         &mut adapter,
     )
-    .map_err(|error| {
-        if error == pos_reference::evaluator::EvaluatorError::UnsupportedVersion {
-            CommandError::UnsupportedVersion
-        } else {
-            CommandError::Evaluation
-        }
-    })?;
+    .map_err(|_| CommandError::Evaluation)?;
     io::stdout()
         .lock()
         .write_all(&artifacts.report_bytes)
