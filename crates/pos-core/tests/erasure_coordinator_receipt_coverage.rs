@@ -1889,10 +1889,30 @@ fn coordinator_recovery_rejects_active_and_completed_dispatch_mismatches(
             .adapter
             .replace_manifest_field(graph.request.reference(), 20, Value::Null)
     })?;
+    assert_active_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            20,
+            Value::Bytes(reference(240).digest().to_vec()),
+        )
+    })?;
     assert_graph_mutation_rejected(|graph| {
         graph
             .adapter
             .replace_manifest_field(graph.request.reference(), 20, Value::Null)
+    })?;
+    assert_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_field(
+            graph.request.reference(),
+            20,
+            Value::Bytes(reference(241).digest().to_vec()),
+        )
+    })?;
+    assert_graph_mutation_rejected(|graph| {
+        graph.adapter.replace_manifest_with_state_lifecycle(
+            graph.request.reference(),
+            ErasureLifecycleV1::Submitted,
+        )
     })
 }
 
