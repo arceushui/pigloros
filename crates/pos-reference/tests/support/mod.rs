@@ -486,12 +486,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
     let trust_digest = hash(&trust_policy);
     let expected_output = b"accepted".to_vec();
     let mut members = support_members(&trust_policy, &execution_profile);
-    if matches!(profile_mutation, Some(ProfileMutation::MatrixContent)) {
-        members.insert(
-            "authority/execution-matrix.json".to_owned(),
-            (b"{}".to_vec(), 11),
-        );
-    }
+    mutate_support_members(&mut members, profile_mutation);
     let evaluator_protocol_digest = member_hash(&members, "support/evaluator-protocol-v1.json")?;
     add_provider_contracts(&mut members, profile_mutation, subject_adapter, claim_layer)?;
     if let Some(bytes) = extra {
@@ -570,6 +565,18 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         subject_digest,
         expected_output,
     })
+}
+
+fn mutate_support_members(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    mutation: Option<ProfileMutation>,
+) {
+    if matches!(mutation, Some(ProfileMutation::MatrixContent)) {
+        members.insert(
+            "authority/execution-matrix.json".to_owned(),
+            (b"{}".to_vec(), 11),
+        );
+    }
 }
 
 fn insert_profile_member(
