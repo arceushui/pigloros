@@ -213,7 +213,7 @@ fn evaluator_identity() -> EvaluatorIdentity {
             technical_independent: true,
             authorship_independent: true,
             organizational_independent: false,
-            declaration_digest: [63; 32],
+            declaration_digest: [47; 32],
             shared_code_audit_digest: [64; 32],
             reviewer_ids: vec!["reviewer-one".to_owned()],
         },
@@ -282,6 +282,59 @@ fn signed_public_corpus_produces_deterministic_self_verified_cnr1() -> TestResul
         ConformanceReport::from_canonical_cbor(&first.report_bytes),
         Ok(first.report)
     );
+    Ok(())
+}
+
+#[test]
+fn evaluator_accepts_every_current_profile_claim_layer() -> TestResult {
+    for claim_layer in 0..=6 {
+        let corpus = support::corpus_for_claim_layer(claim_layer)?;
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output,
+        };
+        let result = evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        )?;
+        assert!(result
+            .report
+            .cases
+            .iter()
+            .all(|case| case.claim_layer == claim_layer));
+    }
+    Ok(())
+}
+
+#[test]
+fn evaluator_enforces_profile_independence_requirements() -> TestResult {
+    let corpus = support::corpus()?;
+    let updates: [fn(&mut EvaluatorIdentity); 3] = [
+        |identity: &mut EvaluatorIdentity| identity.independence.technical_independent = false,
+        |identity: &mut EvaluatorIdentity| identity.independence.authorship_independent = false,
+        |identity: &mut EvaluatorIdentity| identity.independence.declaration_digest = [99; 32],
+    ];
+    for update in updates {
+        let mut identity = evaluator_identity();
+        update(&mut identity);
+        let mut adapter = PublicAdapter {
+            subject_digest: corpus.subject_digest,
+            output: corpus.expected_output.clone(),
+        };
+        assert_eq!(
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &identity,
+                &mut adapter,
+            ),
+            Err(EvaluatorError::Independence)
+        );
+    }
     Ok(())
 }
 
@@ -639,38 +692,39 @@ fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
         Err(EvaluatorError::AdapterIdentity)
     );
 
-    for (report_limit, diagnostic_limit) in [(1, 0), (1024 * 1024, 1)] {
+    let request = request_with_limits(&corpus.request, 1, 0)?;
+    let mut adapter = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output.clone(),
+    };
+    assert_eq!(
+        evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        ),
+        Err(EvaluatorError::OutputLimit)
+    );
+
+    for diagnostic_limit in [0, 1] {
+        let report_limit = 1024 * 1024;
         let request = request_with_limits(&corpus.request, report_limit, diagnostic_limit)?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
             output: corpus.expected_output.clone(),
         };
-        assert_eq!(
-            evaluate(
-                &request,
-                &corpus.archive,
-                &corpus.trust_policy,
-                &evaluator_identity(),
-                &mut adapter,
-            ),
-            Err(EvaluatorError::OutputLimit)
-        );
+        assert!(evaluate(
+            &request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        )?
+        .diagnostic_bytes
+        .is_none());
     }
-
-    let request = request_with_limits(&corpus.request, 1024 * 1024, 0)?;
-    let mut adapter = PublicAdapter {
-        subject_digest: corpus.subject_digest,
-        output: corpus.expected_output,
-    };
-    assert!(evaluate(
-        &request,
-        &corpus.archive,
-        &corpus.trust_policy,
-        &evaluator_identity(),
-        &mut adapter,
-    )?
-    .diagnostic_bytes
-    .is_none());
     Ok(())
 }
 

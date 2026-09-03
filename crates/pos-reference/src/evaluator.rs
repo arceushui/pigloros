@@ -130,6 +130,8 @@ pub enum EvaluatorError {
     Profile,
     #[error("subject adapter identity does not match EVR1")]
     AdapterIdentity,
+    #[error("evaluator independence does not satisfy CPF1")]
+    Independence,
     #[error("CNR1 output exceeds its capability")]
     OutputLimit,
     #[error("CNR1 self-verification failed")]
@@ -176,6 +178,14 @@ pub fn evaluate(
     }
     let bundle = verify_signed_bundle(archive_bytes, trust_policy_bytes, &request)?;
     let profile = Profile::from_bundle(&bundle, &request)?;
+    let requirements = profile.independence_requirements;
+    if requirements.technical && !evaluator.independence.technical_independent
+        || requirements.authorship && !evaluator.independence.authorship_independent
+        || requirements.organizational && !evaluator.independence.organizational_independent
+        || requirements.declaration_digest != evaluator.independence.declaration_digest
+    {
+        return Err(EvaluatorError::Independence);
+    }
     let mut cases = evaluate_cases(&profile, &bundle, &request, adapter)?;
     cases.sort_by(compare_case_outcomes);
 
@@ -456,11 +466,7 @@ fn diagnostics(report: &ConformanceReport, limit: u64) -> Result<Option<Vec<u8>>
         "unavailable_case_ids": unavailable,
     });
     let bytes = serde_json::to_vec(&value).map_err(|_| EvaluatorError::ReportVerification)?;
-    if bytes.len() as u64 > limit {
-        Err(EvaluatorError::OutputLimit)
-    } else {
-        Ok(Some(bytes))
-    }
+    Ok((bytes.len() as u64 <= limit).then_some(bytes))
 }
 
 fn hexadecimal(bytes: &[u8]) -> String {
