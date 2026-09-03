@@ -142,7 +142,9 @@ fn receive_before<T>(receiver: &mpsc::Receiver<T>, deadline: Instant) -> Result<
 #[cfg(unix)]
 fn terminate(child: &mut std::process::Child) {
     let process_group = Pid::from_child(child);
-    drop(kill_process_group(process_group, Signal::KILL));
+    if kill_process_group(process_group, Signal::KILL).is_err() {
+        drop(child.kill());
+    }
     drop(child.wait());
 }
 
