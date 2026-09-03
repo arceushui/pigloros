@@ -112,6 +112,10 @@ pub const ERASURE_ATTEMPT_HISTORY_TAG_V1: &str = "ERAH1";
 pub const ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1: &str = "ERSEH1";
 /// Domain tag for one durable adapter effect committed with an ERCRP1 advance.
 pub const ERASURE_CAS_EFFECT_TAG_V1: &str = "ERCE1";
+/// Domain tag for one immutable recovery-error record.
+pub const ERASURE_RECOVERY_ERROR_TAG_V1: &str = "ERRE1";
+/// Maximum number of recovery errors retained for one ERQ1 request.
+pub const ERASURE_MAX_RECOVERY_ERRORS: usize = 4_096;
 
 /// Closed, payload-safe failures exposed by ERQ1, ERS1, and ERC1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +212,99 @@ impl std::fmt::Display for ErasureErrorV1 {
 }
 
 impl std::error::Error for ErasureErrorV1 {}
+
+/// Immutable, payload-free evidence that one durable ERCRP1 graph failed recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErasureRecoveryErrorV1 {
+    request: ErasureReferenceV1,
+    manifest: ErasureReferenceV1,
+    error: ErasureErrorV1,
+    content_digest: ErasureReferenceV1,
+}
+
+impl ErasureRecoveryErrorV1 {
+    /// Construct and content-address one recovery failure.
+    ///
+    /// The record retains only minimized references and the closed error code;
+    /// it never copies erased or application payload bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or size-bound error.
+    pub fn new(
+        request: ErasureReferenceV1,
+        manifest: ErasureReferenceV1,
+        error: ErasureErrorV1,
+    ) -> Result<Self, ErasureErrorV1> {
+        Self {
+            request,
+            manifest,
+            error,
+            content_digest: ErasureReferenceV1::from_digest([0; 32]),
+        }
+        .with_digest()
+    }
+
+    /// Return the ERQ1 request whose recovery failed.
+    #[must_use]
+    pub const fn request(self) -> ErasureReferenceV1 {
+        self.request
+    }
+
+    /// Return the ERCRP1 manifest that was being recovered.
+    #[must_use]
+    pub const fn manifest(self) -> ErasureReferenceV1 {
+        self.manifest
+    }
+
+    /// Return the closed recovery error.
+    #[must_use]
+    pub const fn error(self) -> ErasureErrorV1 {
+        self.error
+    }
+
+    /// Return this record's content address.
+    #[must_use]
+    pub const fn reference(self) -> ErasureReferenceV1 {
+        self.content_digest
+    }
+
+    /// Encode the exact deterministic ERRE1 record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed encoding or size-bound error.
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ErasureErrorV1> {
+        encode_limited(
+            &recovery_error_value(self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+    }
+
+    /// Decode one canonical ERRE1 record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error for malformed, noncanonical, or oversized bytes.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ErasureErrorV1> {
+        decode_limited(bytes, ERASURE_PORTABLE_RECORD_MAX_BYTES, 5)
+            .and_then(|value| exact_array(&value, 5).and_then(recovery_error_from_fields))
+    }
+
+    fn with_digest(self) -> Result<Self, ErasureErrorV1> {
+        encode_limited(
+            &recovery_error_value(&self),
+            ERASURE_PORTABLE_RECORD_MAX_BYTES,
+        )
+        .map(|bytes| Self {
+            content_digest: ErasureReferenceV1::from_digest(domain_digest(
+                ERASURE_RECOVERY_ERROR_TAG_V1,
+                &bytes,
+            )),
+            ..self
+        })
+    }
+}
 
 /// A minimized digest reference; it never carries erased payload bytes.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -3566,6 +3663,31 @@ pub trait ErasurePersistencePortV1: ErasureStateResolverV1 {
         &self,
         request: ErasureReferenceV1,
     ) -> Result<u64, ErasureErrorV1>;
+    /// Return immutable ERRE1 recovery-error references for one request in
+    /// deterministic content-address order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed adapter read error.
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1>;
+    /// Atomically retain one immutable ERRE1 recovery-error object and its
+    /// request index entry.
+    ///
+    /// Repeating the exact `(request, object.reference())` insertion is
+    /// idempotent. A different object at the same content address fails
+    /// closed, and the per-request retention bound is enforced by the adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed transaction, bound, or provenance error.
+    fn append_recovery_error(
+        &mut self,
+        request: ErasureReferenceV1,
+        object: ErasurePersistenceObjectV1,
+    ) -> Result<(), ErasureErrorV1>;
     /// Atomically apply a core-prepared delta. If the current manifest already
     /// equals the supplied next manifest and every referenced delta is equal,
     /// return [`ErasureCasOutcomeV1::ExactRetry`]; otherwise stale heads fail
@@ -4123,8 +4245,9 @@ use evidence::{
     inventories_exceed_bound, inventories_have_duplicate_targets, inventory_categories_match,
     inventory_transitions_preserve_or_weaken, obligation_from_fields, obligation_set_from_fields,
     obligation_set_value, obligation_value, receipt_core_value, receipt_from_fields,
-    receipt_provenance_from_fields, receipt_provenance_value, receipt_value, reference_zero,
-    request_from_fields, request_value, retry_admission_from_fields, retry_admission_value,
+    receipt_provenance_from_fields, receipt_provenance_value, receipt_value,
+    recovery_error_from_fields, recovery_error_value, reference_zero, request_from_fields,
+    request_value, retry_admission_from_fields, retry_admission_value,
     scope_commitment_from_fields, scope_commitment_value, scope_extension_from_fields,
     scope_extension_value, sort_inventories, state_core_value, state_from_fields, state_value,
     strictly_increasing,

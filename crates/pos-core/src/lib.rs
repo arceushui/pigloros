@@ -85,7 +85,8 @@ pub use erasure::{
     ErasurePersistedStateV1, ErasurePersistenceObjectV1, ErasurePersistencePortV1,
     ErasureReceiptInputV1, ErasureReceiptInventoriesV1, ErasureReceiptProvenanceInputV1,
     ErasureReceiptProvenanceV1, ErasureReceiptV1, ErasureRecoveryAuthorizationVerifierV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1, ErasureRequestV1,
+    ErasureRecoveryErrorV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1,
     ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1,
     ErasureScopeExtensionV1, ErasureScopeV1, ErasureStateResolverV1, ErasureStateTransitionV1,
@@ -102,10 +103,11 @@ pub use erasure::{
     ERASURE_MAX_OUTCOME_OWNERS, ERASURE_MAX_REFERENCES, ERASURE_MAX_SCOPE_EXTENSIONS,
     ERASURE_MAX_TARGETS, ERASURE_OBLIGATION_SET_MAX_BYTES, ERASURE_OBLIGATION_SET_TAG_V1,
     ERASURE_OBLIGATION_TAG_V1, ERASURE_PORTABLE_RECORD_MAX_BYTES, ERASURE_RECEIPT_MAX_BYTES,
-    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1, ERASURE_REQUEST_OR_STATE_MAX_BYTES,
-    ERASURE_RETRY_ADMISSION_MAX_BYTES, ERASURE_RETRY_ADMISSION_TAG_V1,
+    ERASURE_RECEIPT_PROVENANCE_TAG_V1, ERASURE_RECEIPT_TAG_V1, ERASURE_RECOVERY_ERROR_TAG_V1,
+    ERASURE_REQUEST_OR_STATE_MAX_BYTES, ERASURE_RETRY_ADMISSION_MAX_BYTES,
+    ERASURE_RETRY_ADMISSION_TAG_V1,
     ERASURE_SCOPE_COMMITMENT_TAG_V1, ERASURE_SCOPE_EXTENSION_HEAD_TAG_V1,
-    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES,
+    ERASURE_SCOPE_EXTENSION_TAG_V1, ERASURE_SCOPE_LEDGER_MAX_BYTES, ERASURE_MAX_RECOVERY_ERRORS,
 };
 pub use error::CoreError;
 pub use event::{CanonicalBytes, Determinism, Event, EventDraft, Kind, RunMode, SchemaVersion};

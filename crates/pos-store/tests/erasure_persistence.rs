@@ -196,6 +196,7 @@ struct Host<S> {
     store: Rc<RefCell<S>>,
     targets: Vec<ErasureRequiredTargetV1>,
     verify_exact_retry: bool,
+    fail_read_object: bool,
 }
 
 type RetainedEffect = (ErasureReferenceV1, pos_core::ErasureCasEffectV1);
@@ -219,6 +220,9 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
     }
 
     fn read_object(&self, reference: ErasureReferenceV1) -> Result<Vec<u8>, ErasureErrorV1> {
+        if self.fail_read_object {
+            return Err(ErasureErrorV1::ProvenanceMissing);
+        }
         self.store.borrow().read_object(reference)
     }
 
@@ -277,6 +281,21 @@ impl<S: ErasurePersistencePortV1> ErasurePersistencePortV1 for Host<S> {
         self.store
             .borrow()
             .administrative_resolution_index_count(request)
+    }
+
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        self.store.borrow().recovery_error_refs(request)
+    }
+
+    fn append_recovery_error(
+        &mut self,
+        request: ErasureReferenceV1,
+        object: pos_core::ErasurePersistenceObjectV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.store.borrow_mut().append_recovery_error(request, object)
     }
 
     fn compare_and_swap(
@@ -463,6 +482,7 @@ fn complete_with_retry_validation<S: ErasurePersistencePortV1>(
             store: Rc::clone(&shared),
             targets: vec![target],
             verify_exact_retry,
+            fail_read_object: false,
         },
         reference(30),
     );
@@ -575,6 +595,7 @@ fn assert_raw_backend<S: ErasurePersistencePortV1>(
             store: shared,
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
         },
         reference(30),
     );
@@ -594,6 +615,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
             store: Rc::clone(&shared),
             targets: Vec::new(),
             verify_exact_retry: false,
+            fail_read_object: false,
         },
         reference(30),
     );
@@ -602,6 +624,7 @@ fn assert_stale_head<S: ErasurePersistencePortV1>(
             store: shared,
             targets: Vec::new(),
             verify_exact_retry: false,
+            fail_read_object: false,
         },
         reference(30),
     );
@@ -635,6 +658,7 @@ fn assert_empty_backend<S: ErasurePersistencePortV1>(
     assert_eq!(store.scope_index_count(missing)?, 0);
     assert_eq!(store.administrative_resolution_ref(missing, 0)?, None);
     assert_eq!(store.administrative_resolution_index_count(missing)?, 0);
+    assert!(store.recovery_error_refs(missing)?.is_empty());
     Ok(())
 }
 
@@ -659,6 +683,48 @@ fn memory_manifest_cas_reports_empty_indexes_and_objects() -> Result<(), Box<dyn
 fn memory_manifest_cas_accepts_exact_retry_for_every_effect(
 ) -> Result<(), Box<dyn std::error::Error>> {
     complete_with_retry_validation(MemoryStore::new(), true)?;
+    Ok(())
+}
+
+#[test]
+fn memory_recovery_errors_are_idempotent_and_retrievable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (shared, request, _) = complete(MemoryStore::new())?;
+    let manifest = shared
+        .borrow()
+        .read_manifest(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    let mut failing = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::clone(&shared),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: true,
+        },
+        reference(30),
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            failing.verified_state(request.reference()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    drop(failing);
+
+    let observer = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: shared,
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+        },
+        reference(30),
+    );
+    let failures = observer.recovery_errors(request.reference())?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].manifest(), manifest);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
 
@@ -713,6 +779,7 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
             store: Rc::new(RefCell::new(reopened)),
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
         },
         reference(30),
     );
@@ -721,6 +788,66 @@ fn sqlite_effect_payloads_survive_file_backed_reopen() -> Result<(), Box<dyn std
         coordinator.submit(request, provenance)?.lifecycle(),
         ErasureLifecycleV1::Complete
     );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_recovery_errors_survive_file_backed_reopen(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let database = tempfile::NamedTempFile::new()?;
+    let path = database
+        .path()
+        .to_str()
+        .ok_or(ErasureErrorV1::InvalidEncoding)?;
+    let (shared, request, _) = complete(SqliteStore::open(path)?)?;
+    let manifest = shared
+        .borrow()
+        .read_manifest(request.reference())?
+        .ok_or(ErasureErrorV1::ProvenanceMissing)?
+        .digest();
+    drop(shared);
+
+    let raw = rusqlite::Connection::open(path)?;
+    assert_eq!(
+        raw.execute(
+            "DELETE FROM erasure_evidence WHERE reference_digest=?1",
+            rusqlite::params![request.reference().digest().as_slice()],
+        )?,
+        1
+    );
+    drop(raw);
+
+    let mut failing = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+        },
+        reference(30),
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            failing.verified_state(request.reference()),
+            Err(ErasureErrorV1::ProvenanceMissing)
+        );
+    }
+    drop(failing);
+
+    let observer = ErasureCoordinatorStateMachineV1::new(
+        Host {
+            store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
+            targets: vec![target()],
+            verify_exact_retry: false,
+            fail_read_object: false,
+        },
+        reference(30),
+    );
+    let failures = observer.recovery_errors(request.reference())?;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].manifest(), manifest);
+    assert_eq!(failures[0].error(), ErasureErrorV1::ProvenanceMissing);
     Ok(())
 }
 
@@ -754,6 +881,7 @@ fn sqlite_recovery_rejects_a_missing_durable_attempt_effect(
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
         },
         reference(30),
     );
@@ -794,6 +922,7 @@ fn sqlite_recovery_rejects_a_corrupted_durable_attempt_effect(
             store: Rc::new(RefCell::new(SqliteStore::open(path)?)),
             targets: vec![target()],
             verify_exact_retry: false,
+            fail_read_object: false,
         },
         reference(30),
     );

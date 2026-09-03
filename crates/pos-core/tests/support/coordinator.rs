@@ -20,7 +20,8 @@ use pos_core::{
     ErasureFreezeAuthorizationVerifierV1, ErasureFreezeFailureV1, ErasureIndexInsertV1,
     ErasureInventoryCategoryV1, ErasureObligationInputV1, ErasureObligationSetInputV1,
     ErasureObligationSetV1, ErasureObligationV1, ErasurePersistencePortV1, ErasureReceiptInputV1,
-    ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1, ErasureRequestV1,
+    ErasurePersistenceObjectV1, ErasureRecoveryAuthorizationVerifierV1, ErasureReferenceV1,
+    ErasureRequestV1,
     ErasureRequiredTargetV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
     ErasureScopeCommitmentV1, ErasureScopeExtensionV1, ErasureStateResolverV1,
     ErasureStateTransitionV1, ErasureStateV1,
@@ -90,6 +91,7 @@ struct RawStorage {
     resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
+    recovery_errors: BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ()>,
 }
 
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
@@ -1083,6 +1085,46 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         Ok(index_count(&self.storage.borrow().resolutions, request))
     }
 
+    fn recovery_error_refs(
+        &self,
+        request: ErasureReferenceV1,
+    ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
+        Ok(self
+            .storage
+            .borrow()
+            .recovery_errors
+            .keys()
+            .filter(|(candidate, _)| *candidate == request)
+            .map(|(_, reference)| *reference)
+            .collect())
+    }
+
+    fn append_recovery_error(
+        &mut self,
+        request: ErasureReferenceV1,
+        object: ErasurePersistenceObjectV1,
+    ) -> Result<(), ErasureErrorV1> {
+        let mut storage = self.storage.borrow_mut();
+        let reference = object.reference();
+        let key = (request, reference);
+        let already_indexed = storage.recovery_errors.contains_key(&key);
+        if !already_indexed {
+            let count = storage
+                .recovery_errors
+                .keys()
+                .filter(|(candidate, _)| *candidate == request)
+                .count();
+            if count >= pos_core::ERASURE_MAX_RECOVERY_ERRORS {
+                return Err(ErasureErrorV1::ScopeInvalid);
+            }
+        }
+        insert_exact(&mut storage.objects, reference, object.canonical_cbor())?;
+        if !already_indexed {
+            storage.recovery_errors.insert(key, ());
+        }
+        Ok(())
+    }
+
     fn compare_and_swap(
         &mut self,
         mutation: pos_core::PreparedErasureCasV1,
@@ -1126,6 +1168,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             resolutions: storage.resolutions.clone(),
             effects: storage.effects.clone(),
             effect_subjects: storage.effect_subjects.clone(),
+            recovery_errors: storage.recovery_errors.clone(),
         };
         for object in mutation.new_objects() {
             insert_exact(
