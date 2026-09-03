@@ -19,13 +19,13 @@ use pos_core::{
     ErasureAdministrativeResolutionActionV1, ErasureAdministrativeResolutionInputV1,
     ErasureAdministrativeResolutionV1, ErasureArtifactClassV1, ErasureArtifactTransitionV1,
     ErasureCoordinator, ErasureCoordinatorStateMachineV1, ErasureErrorV1,
-    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1,
-    ErasureLifecycleV1, ErasureObligationInputV1, ErasureObligationV1, ErasureReceiptInputV1,
-    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    ErasureRequestInputV1, ErasureRequestV1, ErasureRequiredTargetV1,
-    ErasureRetryAdmissionInputV1, ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1,
-    ErasureScopeCommitmentV1, ErasureScopeExtensionInputV1, ErasureScopeExtensionV1,
-    ErasureScopeV1, ErasureStateTransitionV1,
+    ErasureInventoryCategoryV1, ErasureInventoryResultV1, ErasureKeyRoleV1, ErasureLifecycleV1,
+    ErasureObligationInputV1, ErasureObligationV1, ErasureReceiptInputV1,
+    ErasureReceiptInventoriesV1, ErasureReferenceV1, ErasureReplayClaimV1, ErasureRequestInputV1,
+    ErasureRequestV1, ErasureRequiredTargetV1, ErasureRetryAdmissionInputV1,
+    ErasureRetryAdmissionV1, ErasureScopeCommitmentInputV1, ErasureScopeCommitmentV1,
+    ErasureScopeExtensionInputV1, ErasureScopeExtensionV1, ErasureScopeV1,
+    ErasureStateTransitionV1,
 };
 
 const COORDINATOR: ErasureReferenceV1 = reference(200);
@@ -60,7 +60,10 @@ fn request() -> Result<ErasureRequestV1, ErasureErrorV1> {
     })
 }
 
-fn port(targets: Vec<ErasureRequiredTargetV1>, lineage_rule: Option<ErasureReferenceV1>) -> PublicCoordinatorPort {
+fn port(
+    targets: Vec<ErasureRequiredTargetV1>,
+    lineage_rule: Option<ErasureReferenceV1>,
+) -> PublicCoordinatorPort {
     PublicCoordinatorPort::new(PublicCoordinatorPortConfig {
         targets,
         fail_commits: false,
@@ -212,7 +215,10 @@ fn completed_graph(
     coordinator.submit(request.clone(), request.provenance())?;
     coordinator.authorize(request.reference(), reference(21))?;
     coordinator.freeze_access(request.reference(), freeze_transition())?;
-    coordinator.dispatch_attempt(request.reference(), &admission(request.reference(), &targets)?)?;
+    coordinator.dispatch_attempt(
+        request.reference(),
+        &admission(request.reference(), &targets)?,
+    )?;
     for (index, target) in targets.iter().copied().enumerate() {
         coordinator.acknowledge(
             request.reference(),
@@ -300,8 +306,7 @@ fn recovery_rejects_manifest_state_rollback_after_a_completed_attempt() -> Resul
 }
 
 #[test]
-fn recovery_rejects_reordered_persisted_acknowledgement_inventory() -> Result<(), ErasureErrorV1>
-{
+fn recovery_rejects_reordered_persisted_acknowledgement_inventory() -> Result<(), ErasureErrorV1> {
     let graph = completed_graph(vec![target(10), target(20)], None)?;
     graph
         .adapter
@@ -315,8 +320,12 @@ fn recovery_revalidates_scope_and_resolution_host_admissions() -> Result<(), Era
     let lineage_rule = reference(170);
     let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
     let targets = vec![target(10)];
-    let scope = scope(graph.request.reference(), &targets, lineage_rule)?;
-    let extension = extension(graph.request.reference(), &scope, lineage_rule)?;
+    let scope_commitment = scope(graph.request.reference(), &targets, lineage_rule)?;
+    let extension = extension(
+        graph.request.reference(),
+        &scope_commitment,
+        lineage_rule,
+    )?;
     ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
         .append_scope_extension(graph.request.reference(), extension)?;
     let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
@@ -330,11 +339,11 @@ fn recovery_revalidates_scope_and_resolution_host_admissions() -> Result<(), Era
     );
 
     let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
-    let scope = scope(graph.request.reference(), &targets, lineage_rule)?;
+    let scope_commitment = scope(graph.request.reference(), &targets, lineage_rule)?;
     let resolution = resolution(
         graph.request.reference(),
         graph.receipt.terminal_state(),
-        scope.reference(),
+        scope_commitment.reference(),
     )?;
     ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
         .resolve_administratively(graph.request.reference(), &resolution)?;
