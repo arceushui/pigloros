@@ -4628,21 +4628,37 @@ fn validate_sqlite_state_row(
     reference: ErasureReferenceV1,
     bytes: &[u8],
 ) -> Result<(), ErasureErrorV1> {
-    let row = conn
-        .query_row(
-            "SELECT request_digest,state_cbor FROM erasure_states WHERE state_digest=?1",
-            params![reference.digest().as_slice()],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-        .optional()
-        .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-        .ok_or(ErasureErrorV1::ProvenanceMissing)?;
-    let stored_request = reference_from_sql(row.0)?;
-    if stored_request == request && row.1.as_slice() == bytes {
+    let row =
+        load_sqlite_erasure_state_row(conn, reference)?.ok_or(ErasureErrorV1::ProvenanceMissing)?;
+    let stored_request = reference_from_sql(row.request_digest)?;
+    if stored_request == request && row.state_cbor.as_slice() == bytes {
         Ok(())
     } else {
         Err(ErasureErrorV1::ProvenanceMissing)
     }
+}
+
+struct ErasureStateRow {
+    request_digest: Vec<u8>,
+    state_cbor: Vec<u8>,
+}
+
+fn load_sqlite_erasure_state_row(
+    conn: &Connection,
+    reference: ErasureReferenceV1,
+) -> Result<Option<ErasureStateRow>, ErasureErrorV1> {
+    conn.query_row(
+        "SELECT request_digest,state_cbor FROM erasure_states WHERE state_digest=?1",
+        params![reference.digest().as_slice()],
+        |row| {
+            Ok(ErasureStateRow {
+                request_digest: row.get(0)?,
+                state_cbor: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)
 }
 
 fn sqlite_mutation_is_exact(
@@ -4752,34 +4768,23 @@ fn resolve_sqlite_erasure_state(
     conn: &Connection,
     digest: ErasureReferenceV1,
 ) -> Result<Option<pos_core::ErasureStateV1>, ErasureErrorV1> {
-    conn.query_row(
-        "SELECT request_digest, state_cbor
-         FROM erasure_states WHERE state_digest = ?1",
-        params![digest.digest().as_slice()],
-        |row| {
-            row.get::<_, Vec<u8>>(0).and_then(|request_digest| {
-                row.get::<_, Vec<u8>>(1)
-                    .map(|state_cbor| (request_digest, state_cbor))
+    load_sqlite_erasure_state_row(conn, digest)?
+        .map(|row| {
+            let request_digest: [u8; 32] = row
+                .request_digest
+                .try_into()
+                .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
+            pos_core::ErasureStateV1::from_canonical_cbor(&row.state_cbor).and_then(|state| {
+                if state.state_digest() == digest
+                    && state.request() == ErasureReferenceV1::from_digest(request_digest)
+                {
+                    Ok(state)
+                } else {
+                    Err(ErasureErrorV1::ProvenanceMissing)
+                }
             })
-        },
-    )
-    .optional()
-    .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?
-    .map(|(request_digest, bytes)| {
-        let request_digest: [u8; 32] = request_digest
-            .try_into()
-            .map_err(|_| ErasureErrorV1::ProvenanceMissing)?;
-        pos_core::ErasureStateV1::from_canonical_cbor(&bytes).and_then(|state| {
-            if state.state_digest() == digest
-                && state.request() == ErasureReferenceV1::from_digest(request_digest)
-            {
-                Ok(state)
-            } else {
-                Err(ErasureErrorV1::ProvenanceMissing)
-            }
         })
-    })
-    .transpose()
+        .transpose()
 }
 
 fn finish_erasure_transaction<T>(

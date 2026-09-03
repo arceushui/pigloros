@@ -283,7 +283,7 @@ fn freeze_admission_roundtrip_preserves_the_complete_applicability_matrix(
         request: reference(1),
         scope_commitment: reference(2),
         obligation_set: reference(3),
-        applicability_matrix: matrix,
+        applicability_matrix: matrix.clone(),
         freeze_position: 10,
         policy: reference(4),
         trust: reference(5),
@@ -295,6 +295,27 @@ fn freeze_admission_roundtrip_preserves_the_complete_applicability_matrix(
         admission
     );
     assert!(ErasureFreezeAdmissionEvidenceV1::from_canonical_cbor(&replace(&bytes, 5)?).is_err());
+
+    let mut misordered_matrix = matrix;
+    misordered_matrix[1] = ErasureFreezeApplicabilityRowV1::new(
+        ErasureInventoryCategoryV1::Artifact,
+        0,
+        ErasureApplicabilityDecisionV1::Inapplicable,
+        None,
+    )?;
+    assert_eq!(
+        ErasureFreezeAdmissionEvidenceV1::new(ErasureFreezeAdmissionEvidenceInputV1 {
+            request: reference(1),
+            scope_commitment: reference(2),
+            obligation_set: reference(3),
+            applicability_matrix: misordered_matrix,
+            freeze_position: 10,
+            policy: reference(4),
+            trust: reference(5),
+            authorization_provenance: reference(6),
+        }),
+        Err(ErasureErrorV1::ScopeInvalid)
+    );
     Ok(())
 }
 
