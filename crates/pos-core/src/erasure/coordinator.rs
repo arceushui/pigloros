@@ -914,8 +914,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        self.port.admit_scope_extension(&extension)?;
         let (extension_object, node_object, index) = record.append_scope_extension(extension)?;
+        self.port.admit_scope_extension(&extension)?;
         self.commit_delta(
             record.clone(),
             Some(record.manifest_digest),
@@ -961,8 +961,8 @@ impl<P: ErasureCoordinatorPortV1> ErasureCoordinatorStateMachineV1<P> {
         ) {
             return Err(ErasureErrorV1::PolicyConflict);
         }
-        self.port.admit_administrative_resolution(resolution)?;
         let (object, index) = record.append_administrative_resolution(resolution)?;
+        self.port.admit_administrative_resolution(resolution)?;
         self.commit_delta(
             record.clone(),
             Some(record.manifest_digest),
