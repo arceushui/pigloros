@@ -4,8 +4,14 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use rustix::process::{kill_process_group, Pid, Signal};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use crate::adapter_transport::{decode_observation, encode_attempt};
 use crate::evaluator::{AdapterError, CaseAttempt, SubjectAdapter, SubjectObservation};
@@ -56,8 +62,12 @@ impl ProcessAdapter {
             .map_err(|_| AdapterError::Unavailable)?;
         let stdin = child.stdin.take().ok_or(AdapterError::ProtocolFailure)?;
         let stdout = child.stdout.take().ok_or(AdapterError::ProtocolFailure)?;
-        let writer = thread::spawn(move || write_request(stdin, &request));
-        let reader = thread::spawn(move || read_response(stdout, maximum_response));
+        let (writer_tx, writer_rx) = mpsc::sync_channel(1);
+        let (reader_tx, reader_rx) = mpsc::sync_channel(1);
+        let _writer = thread::spawn(move || drop(writer_tx.send(write_request(stdin, &request))));
+        let _reader = thread::spawn(move || {
+            drop(reader_tx.send(read_response(stdout, maximum_response)));
+        });
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(attempt.watchdog_ms))
             .ok_or(AdapterError::ProtocolFailure)?;
@@ -69,16 +79,19 @@ impl ProcessAdapter {
                 break status;
             }
             if Instant::now() >= deadline {
-                drop(child.kill());
-                drop(child.wait());
-                drop(writer.join());
-                drop(reader.join());
+                terminate(&mut child);
                 return Err(AdapterError::WatchdogExpired);
             }
             thread::sleep(POLL_INTERVAL);
         };
-        let wrote = writer.join().map_err(|_| AdapterError::ProtocolFailure)?;
-        let response = reader.join().map_err(|_| AdapterError::ProtocolFailure)?;
+        let wrote = receive_before(&writer_rx, deadline).map_err(|error| {
+            terminate(&mut child);
+            error
+        })?;
+        let response = receive_before(&reader_rx, deadline).map_err(|error| {
+            terminate(&mut child);
+            error
+        })?;
         if !status.success() || wrote.is_err() {
             return Err(AdapterError::Unavailable);
         }
@@ -109,7 +122,34 @@ fn command(program: &Path, arguments: &[OsString]) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .env_clear();
+    #[cfg(unix)]
+    command.process_group(0);
     command
+}
+
+fn receive_before<T>(receiver: &mpsc::Receiver<T>, deadline: Instant) -> Result<T, AdapterError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(AdapterError::WatchdogExpired)?;
+    receiver
+        .recv_timeout(remaining)
+        .map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => AdapterError::WatchdogExpired,
+            mpsc::RecvTimeoutError::Disconnected => AdapterError::ProtocolFailure,
+        })
+}
+
+#[cfg(unix)]
+fn terminate(child: &mut std::process::Child) {
+    let process_group = Pid::from_child(child);
+    drop(kill_process_group(process_group, Signal::KILL));
+    drop(child.wait());
+}
+
+#[cfg(not(unix))]
+fn terminate(child: &mut std::process::Child) {
+    drop(child.kill());
+    drop(child.wait());
 }
 
 fn response_limit(attempt: &CaseAttempt) -> Result<usize, AdapterError> {
