@@ -1,0 +1,42 @@
+name: sandbox-provider-prototype
+
+on:
+  push:
+    branches:
+      - ticket-191-sandbox-provider-research
+    paths:
+      - "prototypes/sandbox-provider-feasibility/**"
+      - ".github/workflows/sandbox-provider-prototype.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  typed-control-plane:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate isolated prototype lockfile
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: cargo generate-lockfile
+      - name: Check exact dependency composition
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: cargo check --locked
+      - name: Run unprivileged typed-interface probe
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: cargo run --locked
+      - name: Record dependency tree
+        working-directory: prototypes/sandbox-provider-feasibility
+        run: cargo tree --locked | tee dependency-tree.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-provider-prototype-evidence
+          path: |
+            prototypes/sandbox-provider-feasibility/Cargo.lock
+            prototypes/sandbox-provider-feasibility/dependency-tree.txt
+          if-no-files-found: error
+          retention-days: 7
