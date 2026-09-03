@@ -215,8 +215,10 @@ fn decode_archive(
     request: &EvaluationRequest,
 ) -> Result<DecodedArchive, BundleError> {
     let root = decode_canonical_with_limit(archive_bytes, MAX_ARCHIVE_BYTES)?;
-    let archive = array(&root, 4)?;
-    let manifest = array(&archive[0], 6)?;
+    let mut archive = into_array(root, 4)?;
+    let manifest_value = archive.remove(0);
+    let manifest_bytes = encode(&manifest_value)?;
+    let mut manifest = into_array(manifest_value, 6)?;
     if text(&manifest[0])? != "CFB1" || uint(&manifest[1])? != 0 {
         return Err(BundleError::InvalidEncoding);
     }
@@ -231,13 +233,20 @@ fn decode_archive(
     Ok(DecodedArchive {
         mode,
         profile_digest,
-        descriptors: decode_descriptors(&manifest[4])?,
-        expected: decode_expected_results(&manifest[5])?,
-        members: decode_members(&archive[1])?,
-        signer_key: fixed_bytes(&archive[2])?,
-        signature: fixed_bytes(&archive[3])?,
-        manifest_bytes: encode(&archive[0])?,
+        descriptors: decode_descriptors(manifest.remove(4))?,
+        expected: decode_expected_results(manifest.remove(4))?,
+        members: decode_members(archive.remove(0))?,
+        signer_key: fixed_bytes(&archive[0])?,
+        signature: fixed_bytes(&archive[1])?,
+        manifest_bytes,
     })
+}
+
+fn into_array(value: Value, width: usize) -> Result<Vec<Value>, BundleError> {
+    match value {
+        Value::Array(values) if values.len() == width => Ok(values),
+        _ => Err(BundleError::InvalidEncoding),
+    }
 }
 
 fn validate_archive_closure(
@@ -586,8 +595,11 @@ fn valid_version_identifiers(value: &str, no_leading_zero: bool) -> bool {
         })
 }
 
-fn decode_descriptors(value: &Value) -> Result<Vec<Descriptor>, BundleError> {
-    let values = array_values(value)?;
+fn decode_descriptors(value: Value) -> Result<Vec<Descriptor>, BundleError> {
+    let values = match value {
+        Value::Array(values) => values,
+        _ => return Err(BundleError::InvalidEncoding),
+    };
     if values.is_empty() || values.len() > MAX_MEMBERS {
         return Err(BundleError::FieldOutOfBounds);
     }
@@ -616,8 +628,11 @@ fn decode_descriptors(value: &Value) -> Result<Vec<Descriptor>, BundleError> {
     Ok(descriptors)
 }
 
-fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, BundleError> {
-    let values = array_values(value)?;
+fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, BundleError> {
+    let values = match value {
+        Value::Array(values) => values,
+        _ => return Err(BundleError::InvalidEncoding),
+    };
     if values.is_empty() || values.len() > MAX_MEMBERS {
         return Err(BundleError::FieldOutOfBounds);
     }
@@ -625,7 +640,7 @@ fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, Bun
     let mut total = 0_usize;
     let mut previous_path: Option<String> = None;
     for value in values {
-        let fields = array(value, 3)?;
+        let mut fields = into_array(value, 3)?;
         let path = validated_path(text(&fields[0])?)?;
         if previous_path
             .as_ref()
@@ -633,11 +648,11 @@ fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, Bun
         {
             return Err(BundleError::NonCanonicalOrder);
         }
-        let raw = match &fields[1] {
-            Value::Bytes(bytes) => bytes.clone(),
+        let raw = match fields.remove(1) {
+            Value::Bytes(bytes) => bytes,
             _ => return Err(BundleError::InvalidEncoding),
         };
-        let role = u8::try_from(uint(&fields[2])?).map_err(|_| BundleError::InvalidEncoding)?;
+        let role = u8::try_from(uint(&fields[1])?).map_err(|_| BundleError::InvalidEncoding)?;
         total += raw.len();
         if raw.len() > MAX_MEMBER_BYTES || total > MAX_ARCHIVE_BYTES || role > 19 {
             return Err(BundleError::FieldOutOfBounds);
@@ -653,8 +668,11 @@ fn decode_members(value: &Value) -> Result<BTreeMap<String, VerifiedMember>, Bun
     Ok(members)
 }
 
-fn decode_expected_results(value: &Value) -> Result<Vec<ExpectedResult>, BundleError> {
-    let values = array_values(value)?;
+fn decode_expected_results(value: Value) -> Result<Vec<ExpectedResult>, BundleError> {
+    let values = match value {
+        Value::Array(values) => values,
+        _ => return Err(BundleError::InvalidEncoding),
+    };
     if values.len() > MAX_MEMBERS {
         return Err(BundleError::FieldOutOfBounds);
     }
