@@ -321,11 +321,7 @@ fn recovery_revalidates_scope_and_resolution_host_admissions() -> Result<(), Era
     let graph = completed_graph(vec![target(10)], Some(lineage_rule))?;
     let targets = vec![target(10)];
     let scope_commitment = scope(graph.request.reference(), &targets, lineage_rule)?;
-    let extension = extension(
-        graph.request.reference(),
-        &scope_commitment,
-        lineage_rule,
-    )?;
+    let extension = extension(graph.request.reference(), &scope_commitment, lineage_rule)?;
     ErasureCoordinatorStateMachineV1::new(graph.adapter.clone(), COORDINATOR)
         .append_scope_extension(graph.request.reference(), extension)?;
     let faulted = graph.adapter.with_operation_fault(PublicCoordinatorFault {
