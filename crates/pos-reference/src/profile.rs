@@ -978,7 +978,7 @@ fn validate_outcome_relationship(fixture: &Fixture) -> Result<(), ProfileError> 
     }
 }
 
-const fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
+fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
     let coherent = fixture.replay_claim == 4
         || [
             true,
