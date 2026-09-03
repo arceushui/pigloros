@@ -873,7 +873,7 @@ fn evaluator_rejects_each_cryptographically_bound_profile_contract_mutation() ->
 
 #[test]
 fn evaluator_rejects_each_execution_matrix_contract_boundary() -> TestResult {
-    for index in 0..=44 {
+    for index in 0..=84 {
         let corpus = support::corpus_with_profile_mutation(ProfileMutation::MatrixBoundary(index))?;
         let mut adapter = PublicAdapter {
             subject_digest: corpus.subject_digest,
