@@ -1258,15 +1258,14 @@ impl ErasurePersistencePortV1 for MemoryStore {
         let mut evidence = self.erasure_evidence.clone();
         insert_exact(&mut evidence, reference, object.canonical_cbor())?;
         let mut recovery_errors = self.erasure_recovery_errors.clone();
-        if !recovery_errors.contains(&key) {
+        if recovery_errors.insert(key) {
             let count = recovery_errors
                 .iter()
                 .filter(|(candidate, _)| *candidate == request)
                 .count();
-            if count >= ERASURE_MAX_RECOVERY_ERRORS {
+            if count > ERASURE_MAX_RECOVERY_ERRORS {
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
-            recovery_errors.insert(key);
         }
         self.erasure_evidence = evidence;
         self.erasure_recovery_errors = recovery_errors;
