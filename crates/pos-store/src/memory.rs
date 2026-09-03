@@ -5,7 +5,7 @@
 //! Multi-level fork chains are supported: a child of a child walks the chain recursively.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     time::Instant,
 };
 
@@ -164,7 +164,7 @@ pub struct MemoryStore {
     erasure_administrative_resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     erasure_effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     erasure_effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
-    erasure_recovery_errors: BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ()>,
+    erasure_recovery_errors: BTreeSet<(ErasureReferenceV1, ErasureReferenceV1)>,
     hasher: Box<dyn Hasher>,
     clock: Box<dyn AdmissionClock>,
 }
@@ -466,7 +466,7 @@ impl MemoryStore {
             erasure_administrative_resolutions: BTreeMap::new(),
             erasure_effects: BTreeMap::new(),
             erasure_effect_subjects: BTreeMap::new(),
-            erasure_recovery_errors: BTreeMap::new(),
+            erasure_recovery_errors: BTreeSet::new(),
             hasher,
             clock: Box::new(SystemAdmissionClock),
         }
@@ -1243,7 +1243,7 @@ impl ErasurePersistencePortV1 for MemoryStore {
     ) -> Result<Vec<ErasureReferenceV1>, ErasureErrorV1> {
         Ok(self
             .erasure_recovery_errors
-            .keys()
+            .iter()
             .filter(|(candidate, _)| *candidate == request)
             .map(|(_, reference)| *reference)
             .collect())
@@ -1258,15 +1258,15 @@ impl ErasurePersistencePortV1 for MemoryStore {
         let mut evidence = self.erasure_evidence.clone();
         insert_exact(&mut evidence, reference, object.canonical_cbor())?;
         let mut recovery_errors = self.erasure_recovery_errors.clone();
-        if !recovery_errors.contains_key(&key) {
+        if !recovery_errors.contains(&key) {
             let count = recovery_errors
-                .keys()
+                .iter()
                 .filter(|(candidate, _)| *candidate == request)
                 .count();
             if count >= ERASURE_MAX_RECOVERY_ERRORS {
                 return Err(ErasureErrorV1::ScopeInvalid);
             }
-            recovery_errors.insert(key, ());
+            recovery_errors.insert(key);
         }
         self.erasure_evidence = evidence;
         self.erasure_recovery_errors = recovery_errors;

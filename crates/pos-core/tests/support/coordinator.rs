@@ -1,7 +1,7 @@
 //! Shared raw persistence and host-port fixture for ADR-060 public tests.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use ciborium::value::Value;
@@ -91,7 +91,7 @@ struct RawStorage {
     resolutions: BTreeMap<(ErasureReferenceV1, u64), ErasureReferenceV1>,
     effects: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     effect_subjects: BTreeMap<ErasureReferenceV1, ErasureReferenceV1>,
-    recovery_errors: BTreeMap<(ErasureReferenceV1, ErasureReferenceV1), ()>,
+    recovery_errors: BTreeSet<(ErasureReferenceV1, ErasureReferenceV1)>,
 }
 
 fn addressed(tag: &str, bytes: &[u8]) -> ErasureReferenceV1 {
@@ -1093,7 +1093,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
             .storage
             .borrow()
             .recovery_errors
-            .keys()
+            .iter()
             .filter(|(candidate, _)| *candidate == request)
             .map(|(_, reference)| *reference)
             .collect())
@@ -1107,11 +1107,11 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         let mut storage = self.storage.borrow_mut();
         let reference = object.reference();
         let key = (request, reference);
-        let already_indexed = storage.recovery_errors.contains_key(&key);
+        let already_indexed = storage.recovery_errors.contains(&key);
         if !already_indexed {
             let count = storage
                 .recovery_errors
-                .keys()
+                .iter()
                 .filter(|(candidate, _)| *candidate == request)
                 .count();
             if count >= pos_core::ERASURE_MAX_RECOVERY_ERRORS {
@@ -1120,7 +1120,7 @@ impl ErasurePersistencePortV1 for PublicCoordinatorPort {
         }
         insert_exact(&mut storage.objects, reference, object.canonical_cbor())?;
         if !already_indexed {
-            storage.recovery_errors.insert(key, ());
+            storage.recovery_errors.insert(key);
         }
         Ok(())
     }
