@@ -335,6 +335,22 @@ fn evaluator_enforces_profile_independence_requirements() -> TestResult {
             Err(EvaluatorError::Independence)
         );
     }
+    let corpus =
+        support::corpus_with_profile_mutation(ProfileMutation::OrganizationalIndependenceRequired)?;
+    let mut adapter = PublicAdapter {
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output,
+    };
+    assert_eq!(
+        evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut adapter,
+        ),
+        Err(EvaluatorError::Independence)
+    );
     Ok(())
 }
 
@@ -727,6 +743,21 @@ fn evaluator_reports_each_closed_adverse_subject_result() -> TestResult {
 #[test]
 fn evaluator_enforces_adapter_identity_and_bounded_outputs() -> TestResult {
     let corpus = support::corpus()?;
+    let mut wrong_kind = KindAdapter {
+        kind: SubjectAdapterKind::PublicGatewayProtocol,
+        subject_digest: corpus.subject_digest,
+        output: corpus.expected_output.clone(),
+    };
+    assert_eq!(
+        evaluate(
+            &corpus.request,
+            &corpus.archive,
+            &corpus.trust_policy,
+            &evaluator_identity(),
+            &mut wrong_kind,
+        ),
+        Err(EvaluatorError::AdapterIdentity)
+    );
     let mut wrong_adapter = PublicAdapter {
         subject_digest: [99; 32],
         output: corpus.expected_output.clone(),
@@ -1174,6 +1205,8 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
         BundleMutation::MemberBytes,
         BundleMutation::MemberEmpty,
         BundleMutation::MemberRoleOverflow,
+        BundleMutation::MemberRoleAboveMaximum,
+        BundleMutation::MemberMissing,
         BundleMutation::ExpectedOrder,
         BundleMutation::ExpectedDuplicate,
         BundleMutation::ExpectedClaimLayerOverflow,
@@ -1183,6 +1216,8 @@ fn evaluator_rejects_each_request_bound_archive_attack() -> TestResult {
         BundleMutation::ExpectedMissingPath,
         BundleMutation::ExpectedDigest,
         BundleMutation::ExpectedPathType,
+        BundleMutation::ExpectedInvalidPath,
+        BundleMutation::ExpectedCountAboveMaximum,
         BundleMutation::Signer,
         BundleMutation::Signature,
         BundleMutation::ArchiveShape,

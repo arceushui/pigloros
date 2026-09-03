@@ -287,9 +287,6 @@ fn case_attempt(
         .iter()
         .map(|descriptor| member_bytes(&descriptor.member_path))
         .collect::<Result<Vec<_>, _>>()?;
-    if mode == 1 && fixture.network_allowed {
-        return Err(EvaluatorError::Profile);
-    }
     Ok(CaseAttempt {
         case_id: fixture.case_id.clone(),
         claim_layer: fixture.claim_layer,

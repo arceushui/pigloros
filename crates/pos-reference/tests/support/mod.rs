@@ -96,6 +96,7 @@ pub enum ProfileMutation {
     HardCapAboveMaximum,
     RequirementDigest,
     RequirementDeclaration,
+    OrganizationalIndependenceRequired,
     FixtureModesEmpty,
     FixtureModesUnsorted,
     FixtureModeOutOfRange,
@@ -233,6 +234,8 @@ pub enum BundleMutation {
     DescriptorMissingPath,
     MemberEmpty,
     MemberRoleOverflow,
+    MemberRoleAboveMaximum,
+    MemberMissing,
     ExpectedClaimLayerOverflow,
     ExpectedModeOverflow,
     ExpectedClaimLayerAbove,
@@ -240,6 +243,8 @@ pub enum BundleMutation {
     ExpectedMissingPath,
     ExpectedDigest,
     ExpectedPathType,
+    ExpectedInvalidPath,
+    ExpectedCountAboveMaximum,
     ProfileExpectedCount,
     ProfileExpectedCase,
     ProfileExpectedMode,
@@ -1762,6 +1767,9 @@ fn mutate_profile(profile: &mut Value, mutation: ProfileMutation) -> TestResult<
             let index = usize::from(mutation == ProfileMutation::RequirementDeclaration) + 3;
             array_fields_mut(&mut profile_fields[12])?[index] = bytes(&[0; 32]);
         }
+        ProfileMutation::OrganizationalIndependenceRequired => {
+            array_fields_mut(&mut profile_fields[12])?[2] = Value::Bool(true);
+        }
         remaining => mutate_fixture(profile_fields, remaining)?,
     }
     Ok(())
@@ -2434,6 +2442,14 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
             let expected = array_fields_mut(&mut fields[5])?;
             array_fields_mut(&mut expected[0])?[4] = Value::Null;
         }
+        BundleMutation::ExpectedInvalidPath => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            array_fields_mut(&mut expected[0])?[4] = text("../expected");
+        }
+        BundleMutation::ExpectedCountAboveMaximum => {
+            let expected = array_fields_mut(&mut fields[5])?;
+            *expected = vec![expected[0].clone(); 65_537];
+        }
         BundleMutation::RawManifestField(index) => fields[usize::from(index)] = Value::Null,
         BundleMutation::RawExpectedField(index) => {
             let expected = array_fields_mut(&mut fields[5])?;
@@ -2469,6 +2485,8 @@ fn mutate_manifest(manifest: &mut Value, mutation: BundleMutation) -> TestResult
         | BundleMutation::ExpectedRecordShape
         | BundleMutation::MemberEmpty
         | BundleMutation::MemberRoleOverflow
+        | BundleMutation::MemberRoleAboveMaximum
+        | BundleMutation::MemberMissing
         | BundleMutation::MemberOrder
         | BundleMutation::MemberDuplicate
         | BundleMutation::MemberBytes
@@ -2598,6 +2616,13 @@ fn mutate_archive_root(root: &mut Value, mutation: BundleMutation) -> TestResult
         BundleMutation::MemberRoleOverflow => {
             let members = array_fields_mut(&mut fields[1])?;
             array_fields_mut(&mut members[0])?[2] = uint(256);
+        }
+        BundleMutation::MemberRoleAboveMaximum => {
+            let members = array_fields_mut(&mut fields[1])?;
+            array_fields_mut(&mut members[0])?[2] = uint(20);
+        }
+        BundleMutation::MemberMissing => {
+            array_fields_mut(&mut fields[1])?.pop();
         }
         BundleMutation::MemberOrder => array_fields_mut(&mut fields[1])?.swap(0, 1),
         BundleMutation::MemberDuplicate => {

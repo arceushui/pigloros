@@ -191,7 +191,7 @@ fn attempt_transport_rejects_each_bounded_identity_failure() {
 }
 
 #[test]
-fn attempt_transport_rejects_each_scalar_and_collection_boundary() {
+fn attempt_transport_rejects_each_scalar_and_collection_boundary() -> TestResult {
     for mutation in 0..7 {
         let mut value = attempt();
         match mutation {
@@ -208,6 +208,18 @@ fn attempt_transport_rejects_each_scalar_and_collection_boundary() {
             Err(TransportError::FieldOutOfBounds)
         );
     }
+    for (index, replacement) in [
+        (2, Value::Text(String::new())),
+        (2, Value::Text("a".repeat(129))),
+        (3, Value::Integer(256_u64.into())),
+        (4, Value::Integer(256_u64.into())),
+        (5, Value::Integer(256_u64.into())),
+    ] {
+        let mut changed = attempt_value();
+        replace_field(&mut changed, index, replacement)?;
+        assert!(decode_attempt(&canonical(&changed)?).is_err());
+    }
+    Ok(())
 }
 
 #[test]
@@ -407,7 +419,7 @@ fn observation_transport_rejects_nonexclusive_or_unbounded_results() -> TestResu
 }
 
 #[test]
-fn observation_transport_rejects_each_failure_field_boundary() {
+fn observation_transport_rejects_each_failure_field_boundary() -> TestResult {
     for mutation in 0..6 {
         let invalid_failure = SubjectObservation {
             result: SubjectResult::Failure(NamespacedFailure {
@@ -434,6 +446,30 @@ fn observation_transport_rejects_each_failure_field_boundary() {
             Err(TransportError::FieldOutOfBounds)
         );
     }
+    let encoded = encode_observation(&SubjectObservation {
+        result: SubjectResult::Failure(NamespacedFailure {
+            owner_id: "owner".to_owned(),
+            contract_version: "1.0.0".to_owned(),
+            code_id: "failure".to_owned(),
+        }),
+        usage: usage(),
+    })?;
+    let valid: Value = ciborium::from_reader(encoded.as_slice())?;
+    for (index, replacement) in [
+        (0, Value::Text(String::new())),
+        (1, Value::Text("a".repeat(129))),
+    ] {
+        let mut changed = valid.clone();
+        let Value::Array(fields) = &mut changed else {
+            return Err("observation is not an array".into());
+        };
+        let Value::Array(failure) = &mut fields[4] else {
+            return Err("failure is not an array".into());
+        };
+        failure[index] = replacement;
+        assert!(decode_observation(&canonical(&changed)?).is_err());
+    }
+    Ok(())
 }
 
 #[test]

@@ -742,9 +742,6 @@ pub(crate) fn decode_canonical_with_limit(
     let mut cursor = Cursor::new(bytes);
     let value: Value =
         ciborium::from_reader(&mut cursor).map_err(|_| ProtocolError::InvalidEncoding)?;
-    if cursor.position() != bytes.len() as u64 {
-        return Err(ProtocolError::InvalidEncoding);
-    }
     if encode_with_limit(&value, maximum_bytes)? != bytes {
         return Err(ProtocolError::InvalidEncoding);
     }
@@ -760,13 +757,11 @@ fn read_cbor_length(bytes: &[u8], index: &mut usize, additional: u8) -> Result<u
         27 => 8,
         _ => return Err(ProtocolError::InvalidEncoding),
     };
-    let end = index
-        .checked_add(width)
-        .ok_or(ProtocolError::FieldOutOfBounds)?;
     let encoded = bytes
-        .get(*index..end)
+        .get(*index..)
+        .and_then(|remaining| remaining.get(..width))
         .ok_or(ProtocolError::InvalidEncoding)?;
-    *index = end;
+    *index += width;
     let mut value = [0_u8; 8];
     value[8 - width..].copy_from_slice(encoded);
     Ok(u64::from_be_bytes(value))
@@ -786,9 +781,7 @@ fn preflight_cbor_item(
         .get(*index)
         .copied()
         .ok_or(ProtocolError::InvalidEncoding)?;
-    *index = index
-        .checked_add(1)
-        .ok_or(ProtocolError::FieldOutOfBounds)?;
+    *index += 1;
     let major = initial >> 5;
     let additional = initial & 0x1f;
     let length = read_cbor_length(bytes, index, additional)?;
@@ -831,13 +824,11 @@ fn preflight_bytes(
     if length > maximum_bytes {
         return Err(ProtocolError::FieldOutOfBounds);
     }
-    let end = index
-        .checked_add(length)
-        .ok_or(ProtocolError::FieldOutOfBounds)?;
     bytes
-        .get(*index..end)
+        .get(*index..)
+        .and_then(|remaining| remaining.get(..length))
         .ok_or(ProtocolError::InvalidEncoding)?;
-    *index = end;
+    *index += length;
     Ok(())
 }
 
